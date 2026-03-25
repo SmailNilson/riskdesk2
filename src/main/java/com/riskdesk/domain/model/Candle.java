@@ -1,48 +1,18 @@
 package com.riskdesk.domain.model;
 
-import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.Instant;
 
-@Entity
-@Table(
-    name = "candles",
-    uniqueConstraints = {
-        @UniqueConstraint(name = "uk_candle_instrument_tf_ts", columnNames = {"instrument", "timeframe", "timestamp"})
-    },
-    indexes = {
-        @Index(name = "idx_candle_instrument_tf", columnList = "instrument, timeframe, timestamp")
-    }
-)
 public class Candle {
 
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
     private Instrument instrument;
-
-    @Column(nullable = false)
     private String timeframe; // "1m", "5m", "10m", "1h", "4h", "1d"
-
-    @Column(nullable = false)
     private Instant timestamp;
-
-    @Column(nullable = false, precision = 12, scale = 5)
     private BigDecimal open;
-
-    @Column(nullable = false, precision = 12, scale = 5)
     private BigDecimal high;
-
-    @Column(nullable = false, precision = 12, scale = 5)
     private BigDecimal low;
-
-    @Column(nullable = false, precision = 12, scale = 5)
     private BigDecimal close;
-
-    @Column(nullable = false)
     private long volume;
 
     public Candle() {}

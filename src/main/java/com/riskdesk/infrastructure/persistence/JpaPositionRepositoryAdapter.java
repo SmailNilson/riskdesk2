@@ -23,27 +23,33 @@ public class JpaPositionRepositoryAdapter implements PositionRepositoryPort {
 
     @Override
     public Position save(Position position) {
-        return springDataRepo.save(position);
+        return PositionEntityMapper.toDomain(springDataRepo.save(PositionEntityMapper.toEntity(position)));
     }
 
     @Override
     public Optional<Position> findById(Long id) {
-        return springDataRepo.findById(id);
+        return springDataRepo.findById(id).map(PositionEntityMapper::toDomain);
     }
 
     @Override
     public List<Position> findOpenPositions() {
-        return springDataRepo.findByOpenTrue();
+        return springDataRepo.findByOpenTrue().stream()
+            .map(PositionEntityMapper::toDomain)
+            .toList();
     }
 
     @Override
     public List<Position> findOpenPositionsByInstrument(Instrument instrument) {
-        return springDataRepo.findByOpenTrueAndInstrument(instrument);
+        return springDataRepo.findByOpenTrueAndInstrument(instrument).stream()
+            .map(PositionEntityMapper::toDomain)
+            .toList();
     }
 
     @Override
     public List<Position> findClosedPositions() {
-        return springDataRepo.findByOpenFalseOrderByClosedAtDesc();
+        return springDataRepo.findByOpenFalseOrderByClosedAtDesc().stream()
+            .map(PositionEntityMapper::toDomain)
+            .toList();
     }
 
     @Override
@@ -59,5 +65,15 @@ public class JpaPositionRepositoryAdapter implements PositionRepositoryPort {
     @Override
     public long openPositionCount() {
         return springDataRepo.openPositionCount();
+    }
+
+    @Override
+    public void deleteAll() {
+        springDataRepo.deleteAll();
+    }
+
+    @Override
+    public long count() {
+        return springDataRepo.count();
     }
 }

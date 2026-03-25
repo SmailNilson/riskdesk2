@@ -1,0 +1,44 @@
+package com.riskdesk.infrastructure.persistence;
+
+import com.riskdesk.domain.model.MentorAudit;
+import com.riskdesk.infrastructure.persistence.entity.MentorAuditEntity;
+
+final class MentorAuditEntityMapper {
+
+    private MentorAuditEntityMapper() {
+    }
+
+    static MentorAuditEntity toEntity(MentorAudit audit) {
+        MentorAuditEntity entity = new MentorAuditEntity();
+        entity.setId(audit.getId());
+        entity.setCreatedAt(audit.getCreatedAt());
+        entity.setInstrument(audit.getInstrument());
+        entity.setTimeframe(audit.getTimeframe());
+        entity.setAction(audit.getAction());
+        entity.setModel(audit.getModel());
+        entity.setPayloadJson(audit.getPayloadJson());
+        entity.setResponseJson(audit.getResponseJson());
+        entity.setVerdict(audit.getVerdict());
+        entity.setSuccess(audit.isSuccess());
+        entity.setErrorMessage(audit.getErrorMessage());
+        entity.setSemanticText(audit.getSemanticText());
+        return entity;
+    }
+
+    static MentorAudit toDomain(MentorAuditEntity entity) {
+        MentorAudit audit = new MentorAudit();
+        audit.setId(entity.getId());
+        audit.setCreatedAt(entity.getCreatedAt());
+        audit.setInstrument(entity.getInstrument());
+        audit.setTimeframe(entity.getTimeframe());
+        audit.setAction(entity.getAction());
+        audit.setModel(entity.getModel());
+        audit.setPayloadJson(entity.getPayloadJson());
+        audit.setResponseJson(entity.getResponseJson());
+        audit.setVerdict(entity.getVerdict());
+        audit.setSuccess(entity.isSuccess());
+        audit.setErrorMessage(entity.getErrorMessage());
+        audit.setSemanticText(entity.getSemanticText());
+        return audit;
+    }
+}

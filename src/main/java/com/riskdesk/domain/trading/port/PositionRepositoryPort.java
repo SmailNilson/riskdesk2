@@ -28,4 +28,8 @@ public interface PositionRepositoryPort {
     BigDecimal todayRealizedPnL();
 
     long openPositionCount();
+
+    void deleteAll();
+
+    long count();
 }

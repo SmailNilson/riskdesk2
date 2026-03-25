@@ -1,11 +1,11 @@
 package com.riskdesk.infrastructure.config;
 
+import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Position;
 import com.riskdesk.domain.model.Side;
-import com.riskdesk.infrastructure.persistence.CandleRepository;
-import com.riskdesk.infrastructure.persistence.PositionRepository;
+import com.riskdesk.domain.trading.port.PositionRepositoryPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -37,8 +37,8 @@ public class DataInitializer implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(DataInitializer.class);
     private static final Instant SEED_REFERENCE_TIME = Instant.parse("2026-01-01T00:00:00Z");
 
-    private final CandleRepository   candleRepo;
-    private final PositionRepository positionRepo;
+    private final CandleRepositoryPort candleRepo;
+    private final PositionRepositoryPort positionRepo;
 
     @Value("${riskdesk.market-data.historical.enabled:false}")
     private boolean historicalEnabled;
@@ -46,7 +46,7 @@ public class DataInitializer implements ApplicationRunner {
     @Value("${riskdesk.ibkr.enabled:false}")
     private boolean ibkrEnabled;
 
-    public DataInitializer(CandleRepository candleRepo, PositionRepository positionRepo) {
+    public DataInitializer(CandleRepositoryPort candleRepo, PositionRepositoryPort positionRepo) {
         this.candleRepo = candleRepo;
         this.positionRepo = positionRepo;
     }

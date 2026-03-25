@@ -1,48 +1,20 @@
 package com.riskdesk.domain.model;
 
-import jakarta.persistence.*;
-
 import java.time.Instant;
 
-@Entity
-@Table(name = "mentor_audits")
 public class MentorAudit {
 
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-
-    @Column(nullable = false)
     private Instant createdAt;
-
-    @Column(length = 32)
     private String instrument;
-
-    @Column(length = 16)
     private String timeframe;
-
-    @Column(length = 16)
     private String action;
-
-    @Column(length = 128)
     private String model;
-
-    @Column(nullable = false, columnDefinition = "TEXT")
     private String payloadJson;
-
-    @Column(nullable = false, columnDefinition = "TEXT")
     private String responseJson;
-
-    @Column(length = 128)
     private String verdict;
-
-    @Column(nullable = false)
     private boolean success;
-
-    @Column(columnDefinition = "TEXT")
     private String errorMessage;
-
-    @Column(columnDefinition = "TEXT")
     private String semanticText;
 
     public Long getId() {

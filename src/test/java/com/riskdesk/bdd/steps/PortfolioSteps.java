@@ -3,7 +3,6 @@ package com.riskdesk.bdd.steps;
 import com.riskdesk.presentation.dto.CreatePositionRequest;
 import com.riskdesk.presentation.dto.PortfolioSummary;
 import com.riskdesk.domain.model.*;
-import com.riskdesk.infrastructure.persistence.PositionRepository;
 import com.riskdesk.application.service.PositionService;
 import io.cucumber.datatable.DataTable;
 import io.cucumber.java.en.*;
@@ -19,9 +18,6 @@ public class PortfolioSteps {
 
     @Autowired
     private PositionService positionService;
-
-    @Autowired
-    private PositionRepository positionRepository;
 
     private PortfolioSummary lastSummary;
 

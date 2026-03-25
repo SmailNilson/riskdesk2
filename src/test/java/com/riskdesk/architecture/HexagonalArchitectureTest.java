@@ -55,4 +55,21 @@ class HexagonalArchitectureTest {
             .that().resideInAPackage("..application..")
             .should().dependOnClassesThat().resideInAPackage("..presentation.controller..")
             .because("application services should not know HTTP controllers");
+
+    @ArchTest
+    static final ArchRule domain_must_not_depend_on_spring =
+        noClasses()
+            .that().resideInAPackage("..domain..")
+            .should().dependOnClassesThat().resideInAnyPackage("org.springframework..")
+            .because("domain must stay framework-agnostic");
+
+    @ArchTest
+    static final ArchRule domain_must_not_depend_on_persistence =
+        noClasses()
+            .that().resideInAPackage("..domain..")
+            .should().dependOnClassesThat().resideInAnyPackage(
+                "jakarta.persistence..",
+                "javax.persistence.."
+            )
+            .because("domain should not be coupled to persistence concerns");
 }

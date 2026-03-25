@@ -3,6 +3,8 @@ package com.riskdesk.integration;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.persistence.CandleRepository;
+import com.riskdesk.infrastructure.persistence.CandleEntityMapper;
+import com.riskdesk.infrastructure.persistence.entity.CandleEntity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,16 +36,16 @@ class CandleRepositoryIntegrationTest {
     // Helpers
     // -----------------------------------------------------------------------
 
-    private Candle createCandle(Instrument instrument, String timeframe, Instant timestamp,
-                                 double open, double high, double low, double close, long volume) {
-        return new Candle(
+    private CandleEntity createCandle(Instrument instrument, String timeframe, Instant timestamp,
+                                      double open, double high, double low, double close, long volume) {
+        return CandleEntityMapper.toEntity(new Candle(
                 instrument, timeframe, timestamp,
                 new BigDecimal(String.valueOf(open)),
                 new BigDecimal(String.valueOf(high)),
                 new BigDecimal(String.valueOf(low)),
                 new BigDecimal(String.valueOf(close)),
                 volume
-        );
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -53,12 +55,12 @@ class CandleRepositoryIntegrationTest {
     @Test
     void saveAndRetrieve_candleWorksCorrectly() {
         Instant now = Instant.now();
-        Candle candle = createCandle(Instrument.MCL, "10m", now, 62.40, 62.80, 62.10, 62.55, 500);
-        Candle saved = candleRepository.save(candle);
+        CandleEntity candle = createCandle(Instrument.MCL, "10m", now, 62.40, 62.80, 62.10, 62.55, 500);
+        CandleEntity saved = candleRepository.save(candle);
 
         assertNotNull(saved.getId(), "Saved candle should have an ID");
 
-        Optional<Candle> found = candleRepository.findById(saved.getId());
+        Optional<CandleEntity> found = candleRepository.findById(saved.getId());
         assertTrue(found.isPresent(), "Saved candle should be retrievable by ID");
         assertEquals(Instrument.MCL, found.get().getInstrument());
         assertEquals("10m", found.get().getTimeframe());
@@ -92,7 +94,7 @@ class CandleRepositoryIntegrationTest {
         candleRepository.save(createCandle(
                 Instrument.MGC, "10m", base, 2040.00, 2045.00, 2035.00, 2042.00, 300));
 
-        List<Candle> result = candleRepository
+        List<CandleEntity> result = candleRepository
                 .findByInstrumentAndTimeframeOrderByTimestampDesc(Instrument.MCL, "10m", PageRequest.of(0, 500));
 
         assertEquals(5, result.size(), "Should return all 5 MCL/10m candles");
@@ -131,7 +133,7 @@ class CandleRepositoryIntegrationTest {
 
         // Query for candles from base-20m onwards (should get 3: base-20m, base-10m, base)
         Instant fromTime = base.minus(20, ChronoUnit.MINUTES);
-        List<Candle> result = candleRepository
+        List<CandleEntity> result = candleRepository
                 .findByInstrumentAndTimeframeAndTimestampGreaterThanEqualOrderByTimestampAsc(
                         Instrument.MCL, "10m", fromTime);
 

@@ -3,8 +3,8 @@ package com.riskdesk.bdd.steps;
 import com.riskdesk.presentation.dto.CreatePositionRequest;
 import com.riskdesk.presentation.dto.ClosePositionRequest;
 import com.riskdesk.domain.model.*;
-import com.riskdesk.infrastructure.persistence.PositionRepository;
 import com.riskdesk.application.service.PositionService;
+import com.riskdesk.domain.trading.port.PositionRepositoryPort;
 import io.cucumber.java.Before;
 import io.cucumber.java.en.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,7 +19,7 @@ public class PositionSteps {
     private PositionService positionService;
 
     @Autowired
-    private PositionRepository positionRepository;
+    private PositionRepositoryPort positionRepository;
 
     private Position lastPosition;
 

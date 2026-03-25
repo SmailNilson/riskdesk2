@@ -1,9 +1,10 @@
 package com.riskdesk.integration;
 
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.domain.model.Position;
 import com.riskdesk.domain.model.Side;
 import com.riskdesk.infrastructure.persistence.PositionRepository;
+import com.riskdesk.infrastructure.persistence.PositionEntityMapper;
+import com.riskdesk.infrastructure.persistence.entity.PositionEntity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,15 +35,19 @@ class PositionRepositoryIntegrationTest {
     // Helpers
     // -----------------------------------------------------------------------
 
-    private Position openPosition(Instrument inst, Side side, int qty, double entry, double unrealizedPnL) {
-        Position p = new Position(inst, side, qty, new BigDecimal(String.valueOf(entry)));
+    private PositionEntity openPosition(Instrument inst, Side side, int qty, double entry, double unrealizedPnL) {
+        PositionEntity p = PositionEntityMapper.toEntity(
+            new com.riskdesk.domain.model.Position(inst, side, qty, new BigDecimal(String.valueOf(entry)))
+        );
         p.setUnrealizedPnL(new BigDecimal(String.valueOf(unrealizedPnL)));
         return positionRepository.save(p);
     }
 
-    private Position closedPosition(Instrument inst, Side side, int qty, double entry,
-                                     double exitPrice, double realizedPnL, Instant closedAt) {
-        Position p = new Position(inst, side, qty, new BigDecimal(String.valueOf(entry)));
+    private PositionEntity closedPosition(Instrument inst, Side side, int qty, double entry,
+                                          double exitPrice, double realizedPnL, Instant closedAt) {
+        PositionEntity p = PositionEntityMapper.toEntity(
+            new com.riskdesk.domain.model.Position(inst, side, qty, new BigDecimal(String.valueOf(entry)))
+        );
         p.setOpen(false);
         p.setClosedAt(closedAt);
         p.setRealizedPnL(new BigDecimal(String.valueOf(realizedPnL)));
@@ -57,9 +62,9 @@ class PositionRepositoryIntegrationTest {
 
     @Test
     void saveAndFindById_returnsSamePosition() {
-        Position saved = openPosition(Instrument.MCL, Side.LONG, 2, 63.50, 150.00);
+        PositionEntity saved = openPosition(Instrument.MCL, Side.LONG, 2, 63.50, 150.00);
 
-        Optional<Position> found = positionRepository.findById(saved.getId());
+        Optional<PositionEntity> found = positionRepository.findById(saved.getId());
 
         assertTrue(found.isPresent(), "Saved position should be found by ID");
         assertEquals(saved.getId(), found.get().getId());
@@ -79,10 +84,10 @@ class PositionRepositoryIntegrationTest {
         openPosition(Instrument.MGC, Side.SHORT, 2, 2040.00, -50.00);
         closedPosition(Instrument.E6, Side.LONG, 1, 1.08200, 1.08500, 375.00, Instant.now());
 
-        List<Position> openPositions = positionRepository.findByOpenTrue();
+        List<PositionEntity> openPositions = positionRepository.findByOpenTrue();
 
         assertEquals(2, openPositions.size(), "Should return only 2 open positions");
-        assertTrue(openPositions.stream().allMatch(Position::isOpen),
+        assertTrue(openPositions.stream().allMatch(PositionEntity::isOpen),
                 "All returned positions should be open");
     }
 
@@ -103,10 +108,10 @@ class PositionRepositoryIntegrationTest {
         // Also add an open position that should NOT appear
         openPosition(Instrument.MNQ, Side.LONG, 1, 18100.00, 300.00);
 
-        List<Position> closed = positionRepository.findByOpenFalseOrderByClosedAtDesc();
+        List<PositionEntity> closed = positionRepository.findByOpenFalseOrderByClosedAtDesc();
 
         assertEquals(3, closed.size(), "Should return 3 closed positions");
-        assertTrue(closed.stream().noneMatch(Position::isOpen),
+        assertTrue(closed.stream().noneMatch(PositionEntity::isOpen),
                 "All returned positions should be closed");
 
         // Verify ordering: most recent closedAt first
