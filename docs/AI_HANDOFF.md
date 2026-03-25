@@ -8,6 +8,24 @@ This file captures the current engineering state so another agent can continue s
 
 ## Important Decisions Already Made
 
+### Architecture policy
+
+The project should continue to respect:
+
+- DDD
+- TDD
+- BDD
+- Hexagonal Architecture
+
+Agents should preserve the intended layer split:
+
+- `presentation`
+- `application`
+- `domain`
+- `infrastructure`
+
+Do not collapse these boundaries for convenience.
+
 ### Market data policy
 
 External providers were intentionally removed from the active data path.
@@ -114,9 +132,10 @@ lsof -nP -iTCP:4001
 
 1. Read `AGENTS.md`
 2. Read `docs/PROJECT_CONTEXT.md`
-3. Confirm `application.properties` still points to `IB_GATEWAY`
-4. Confirm no external market data provider was reintroduced
-5. Re-run backend compile and frontend lint before deeper edits
+3. Read `docs/ARCHITECTURE_PRINCIPLES.md`
+4. Confirm `application.properties` still points to `IB_GATEWAY`
+5. Confirm no external market data provider was reintroduced
+6. Re-run backend compile and frontend lint before deeper edits
 
 ## Suggested Next Improvements
 
@@ -124,4 +143,5 @@ lsof -nP -iTCP:4001
 - add explicit health/status around IBKR live market data farm availability
 - document and automate the expected IB Gateway startup sequence
 - optionally add integration tests around source attribution for live price vs DB fallback
+- add more explicit tests around layer boundaries and use-case behavior
 

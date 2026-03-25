@@ -60,12 +60,60 @@ Do not recreate a nested Git repository inside `frontend/`.
 - Real-time transport: WebSocket/STOMP
 - Trading focus: futures risk dashboard with mentor workflow and IBKR integration
 
+## Engineering Principles
+
+The project must respect these principles:
+
+- DDD
+- TDD
+- BDD
+- Hexagonal Architecture
+
+These are not decorative labels. They should shape how changes are designed.
+
+### DDD expectations
+
+- business rules belong in `domain`
+- orchestration belongs in `application`
+- technical adapters belong in `infrastructure`
+- HTTP, WebSocket, and DTO concerns belong in `presentation`
+- avoid putting domain rules into controllers, repositories, or framework annotations
+
+### Hexagonal architecture expectations
+
+Use the following conceptual layers:
+
+- `presentation`
+- `application`
+- `domain`
+- `infrastructure`
+
+Rules:
+
+- `domain` must not depend on Spring, HTTP, database, or IBKR implementation details
+- `application` coordinates use cases and depends on domain abstractions
+- `infrastructure` implements ports declared by the domain/application layers
+- `presentation` only adapts transport input/output to use cases
+
+### TDD expectations
+
+- when changing business logic, add or update tests first when practical
+- every bug fix should come with a regression test unless the code path is purely wiring
+- prefer focused unit tests in `src/test/java` near the changed business area
+
+### BDD expectations
+
+- user-visible workflows should remain expressible in business scenarios
+- when a change affects behavior across the app, consider updating or adding Cucumber features
+- preserve the language of business outcomes, not framework internals
+
 ## Current Architecture
 
 ### Backend layers
 
+- `presentation`: controllers and DTOs, transport-only concerns
 - `application/service`: orchestration and use cases
-- `domain/*`: indicators, trading, market-data ports, alert logic
+- `domain/*`: indicators, trading, market-data ports, alert logic, business rules
 - `infrastructure/config`: wiring and runtime configuration
 - `infrastructure/marketdata/ibkr`: IBKR adapters and native gateway integration
 - `infrastructure/persistence`: JPA adapters
@@ -110,6 +158,7 @@ npm run dev
 For backend changes:
 
 - at minimum run `mvn -q -DskipTests compile`
+- when domain or application logic changes, prefer running the relevant tests or adding them first
 
 For frontend changes:
 
@@ -123,6 +172,9 @@ If touching both, run both checks.
 - Preserve the current domain-oriented package structure
 - Keep API field names stable unless you are updating both backend and frontend together
 - When changing market data behavior, preserve the ability to identify whether a value came from live IBKR or DB fallback
+- If a change crosses layers, check that responsibilities still align with `presentation -> application -> domain <- infrastructure`
+- Prefer ports/interfaces over leaking infrastructure details upward
+- Avoid “smart controllers” and “fat infrastructure services”
 
 ## Current Runtime Reality
 
@@ -136,4 +188,4 @@ If you make a significant architectural or workflow change, update:
 
 - `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/PROJECT_CONTEXT.md`
 - `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
-
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/ARCHITECTURE_PRINCIPLES.md`

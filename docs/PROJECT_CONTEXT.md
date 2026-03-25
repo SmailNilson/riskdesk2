@@ -11,6 +11,26 @@
 
 The stack is split into a Spring Boot backend and a Next.js frontend.
 
+## Architectural Standard
+
+This project should be maintained as:
+
+- DDD-oriented
+- test-first where practical
+- BDD-friendly for end-to-end business workflows
+- hexagonal in backend structure
+
+The target conceptual backend layers are:
+
+- `presentation`
+- `application`
+- `domain`
+- `infrastructure`
+
+Supporting detail lives in:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/ARCHITECTURE_PRINCIPLES.md`
+
 ## Source of Truth for Market Data
 
 The only accepted market data flow is:
@@ -60,6 +80,8 @@ These must stay out of Git.
 - `presentation/controller`
 - `presentation/dto`
 
+These should stay transport-oriented only.
+
 ### Core services
 
 - `application/service/MarketDataService.java`
@@ -67,6 +89,8 @@ These must stay out of Git.
 - `application/service/PositionService.java`
 - `application/service/MentorAnalysisService.java`
 - `application/service/MentorIntermarketService.java`
+
+These coordinate use cases and should not become infrastructure adapters.
 
 ### IBKR integration
 
@@ -79,6 +103,8 @@ These must stay out of Git.
 ### Persistence
 
 - `infrastructure/persistence/*`
+
+These are adapters, not business-rule owners.
 
 ## Frontend Map
 
@@ -139,6 +165,16 @@ curl -s http://localhost:8080/api/live-price/E6
 - avoid mixing controller logic into services
 - prefer explicit DTOs over ad-hoc maps for API contracts
 - treat IBKR timeouts and farm outages as first-class operational states
+- preserve separation between `presentation`, `application`, `domain`, and `infrastructure`
+- express external dependencies through ports/interfaces when possible
+- keep Spring and persistence details out of the domain layer
+
+### Testing approach
+
+- use TDD for business logic and bug fixes where practical
+- use unit tests for domain rules and application orchestration
+- use integration tests for adapters and controllers
+- use BDD scenarios when user workflows or acceptance behavior changes
 
 ### Frontend
 
@@ -157,4 +193,3 @@ curl -s http://localhost:8080/api/live-price/E6
 For agent-to-agent continuity, update:
 
 - `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
-
