@@ -1,6 +1,6 @@
 'use client';
 
-import { ReactNode, useEffect, useState } from 'react';
+import { ReactNode, useEffect, useRef, useState } from 'react';
 import { AlertMessage, PriceUpdate } from '@/app/hooks/useWebSocket';
 import {
   api,
@@ -59,8 +59,23 @@ export default function MentorPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MentorAnalyzeResponse | null>(null);
+  const hydratedFormKeyRef = useRef('');
 
   useEffect(() => {
+    const formSeedKey = [
+      instrument,
+      matchingPosition?.id ?? 'none',
+      matchingPosition?.side ?? 'none',
+      matchingPosition?.entryPrice ?? 'none',
+      matchingPosition?.stopLoss ?? 'none',
+      matchingPosition?.takeProfit ?? 'none',
+    ].join(':');
+
+    if (hydratedFormKeyRef.current === formSeedKey) {
+      return;
+    }
+
+    hydratedFormKeyRef.current = formSeedKey;
     setAction((matchingPosition?.side as TradeAction | undefined) ?? 'LONG');
     setEntryPrice(
       matchingPosition?.entryPrice != null
@@ -85,6 +100,8 @@ export default function MentorPanel({
     setLoading(true);
     setError(null);
     try {
+      await api.refreshMentorContext(instrument, timeframe).catch(() => null);
+
       const [livePriceView, freshSummary, freshAlerts, freshSnapshot, indicatorSeries, h1Snapshot, candles, intermarket] = await Promise.all([
         api.getLivePrice(instrument).catch(() => null),
         api.getPortfolioSummary().catch(() => summary),

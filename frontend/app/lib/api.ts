@@ -396,6 +396,8 @@ export const api = {
     post<PositionView>(`/api/positions/${id}/close`, { exitPrice }),
   analyzeMentor: (payload: unknown) =>
     post<MentorAnalyzeResponse>('/api/mentor/analyze', { payload }),
+  refreshMentorContext: (instrument: string, timeframe: string) =>
+    post<{ instrument: string; refreshed: Record<string, number> }>('/api/mentor/refresh-context', { instrument, timeframe }),
   getMentorIntermarket: () =>
     get<MentorIntermarketSnapshot>('/api/mentor/intermarket'),
   runBacktest: (params: {

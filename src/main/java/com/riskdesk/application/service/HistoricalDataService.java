@@ -14,6 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,6 +74,23 @@ public class HistoricalDataService implements ApplicationRunner {
         tryFetchAndReplace("retry");
     }
 
+    public Map<String, Integer> refreshInstrumentContext(Instrument instrument, List<String> requestedTimeframes) {
+        if (!enabled) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
+        for (String timeframe : requestedTimeframes) {
+            if (timeframe == null || timeframe.isBlank() || savedByTimeframe.containsKey(timeframe)) {
+                continue;
+            }
+
+            int saved = refreshSingleInstrumentTimeframe(instrument, timeframe, "mentor");
+            savedByTimeframe.put(timeframe, saved);
+        }
+        return savedByTimeframe;
+    }
+
     // -------------------------------------------------------------------------
 
     private void tryFetchAndReplace(String context) {
@@ -107,6 +125,29 @@ public class HistoricalDataService implements ApplicationRunner {
 
         realDataLoaded.set(true);
         log.info("HistoricalDataService [{}]: done — {} IBKR candles saved to chart.", context, totalSaved);
+    }
+
+    private int refreshSingleInstrumentTimeframe(Instrument instrument, String timeframe, String context) {
+        if (!historicalProvider.supports(instrument, timeframe)) {
+            return 0;
+        }
+
+        try {
+            int limit = candlesTargetFor(timeframe);
+            List<Candle> candles = deduplicate(historicalProvider.fetchHistory(instrument, timeframe, limit));
+            if (candles.isEmpty()) {
+                log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
+                return 0;
+            }
+
+            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+            candlePort.saveAll(candles);
+            log.info("HistoricalDataService [{}]: refreshed {} {} with {} candles.", context, instrument, timeframe, candles.size());
+            return candles.size();
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [{}]: {} {} refresh failed — {}", context, instrument, timeframe, e.getMessage());
+            return 0;
+        }
     }
 
     private int candlesTargetFor(String timeframe) {
