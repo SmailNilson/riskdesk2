@@ -2,16 +2,23 @@ package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
+import com.riskdesk.application.dto.HistoricalTradesDTO;
 import com.riskdesk.application.service.HistoricalDataService;
+import com.riskdesk.application.service.HistoricalTradeImporterService;
 import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorIntermarketService;
+import com.riskdesk.application.service.MentorMemoryService;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.presentation.dto.HistoricalTradeImportFileRequest;
+import com.riskdesk.presentation.dto.HistoricalTradeImportResponse;
 import com.riskdesk.presentation.dto.MentorAnalyzeRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -25,13 +32,19 @@ public class MentorController {
     private final MentorAnalysisService mentorAnalysisService;
     private final MentorIntermarketService mentorIntermarketService;
     private final HistoricalDataService historicalDataService;
+    private final HistoricalTradeImporterService historicalTradeImporterService;
+    private final MentorMemoryService mentorMemoryService;
 
     public MentorController(MentorAnalysisService mentorAnalysisService,
                             MentorIntermarketService mentorIntermarketService,
-                            HistoricalDataService historicalDataService) {
+                            HistoricalDataService historicalDataService,
+                            HistoricalTradeImporterService historicalTradeImporterService,
+                            MentorMemoryService mentorMemoryService) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.mentorIntermarketService = mentorIntermarketService;
         this.historicalDataService = historicalDataService;
+        this.historicalTradeImporterService = historicalTradeImporterService;
+        this.mentorMemoryService = mentorMemoryService;
     }
 
     @PostMapping("/analyze")
@@ -70,5 +83,40 @@ public class MentorController {
             "instrument", instrument.name(),
             "refreshed", refreshed
         );
+    }
+
+    @PostMapping("/import-historical-trades")
+    public HistoricalTradeImportResponse importHistoricalTrades(@Valid @RequestBody HistoricalTradesDTO payload) {
+        HistoricalTradeImporterService.ImportSummary summary = historicalTradeImporterService.importTrades(payload);
+        return new HistoricalTradeImportResponse(
+            payload.instrument(),
+            summary.imported(),
+            summary.skipped(),
+            summary.failed(),
+            mentorMemoryService.currentStorageMode(),
+            historicalTradeImporterService.currentEmbeddingModel(),
+            "request_body"
+        );
+    }
+
+    @PostMapping("/import-historical-trades/file")
+    public HistoricalTradeImportResponse importHistoricalTradesFromFile(@Valid @RequestBody HistoricalTradeImportFileRequest request) {
+        try {
+            Path path = Path.of(request.filePath());
+            HistoricalTradeImporterService.ImportSummary summary = historicalTradeImporterService.importFromFile(path);
+            return new HistoricalTradeImportResponse(
+                null,
+                summary.imported(),
+                summary.skipped(),
+                summary.failed(),
+                mentorMemoryService.currentStorageMode(),
+                historicalTradeImporterService.currentEmbeddingModel(),
+                path.toAbsolutePath().toString()
+            );
+        } catch (InvalidPathException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid filePath", e);
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
     }
 }

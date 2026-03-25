@@ -1,0 +1,204 @@
+{
+  "instrument": "MGC",
+  "trades":[
+    {
+      "trade_id": "MGC_CSV_20251224_SWING",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-24 12:07:38",
+      "session": "US Mid-Day",
+      "timeframe": null,
+      "direction": "Long",
+      "entry_price": 4508.8,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Good Trade",
+      "trade_quality": "High",
+      "confidence_score": 95,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bullish",
+        "last_event": "Swing Hold",
+        "last_event_price": null,
+        "notes": "Position held overnight into the Christmas holiday session."
+      },
+      "reasons":[
+        "Caught a strong macro upward drift going into a low-liquidity holiday session.",
+        "Exercised patience to hold a winning trade overnight rather than cutting it short."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-24, 12:07:38,2,4508.8...",
+      "dedupe_key": "MGC_CSV_20251224_L",
+      "notes": "Excellent swing trade. Closed on Dec 25 at 4558.7 for a massive ~50 point gain ($994.52 profit)."
+    },
+    {
+      "trade_id": "MGC_CSV_20251230_TOXIC_LONG",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-30 08:05:23",
+      "session": "Pre-Market US",
+      "timeframe": null,
+      "direction": "Long",
+      "entry_price": 4419.1,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Disaster",
+      "trade_quality": "Abysmal",
+      "confidence_score": 100,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bearish Breakdown",
+        "last_event": "Averaging Down",
+        "last_event_price": null,
+        "notes": "User scaled into a losing long position three separate times (4419.1, 4394.2, 4387.9) as the market plunged."
+      },
+      "reasons":[
+        "Severe violation of the playbook: Averaging down on a losing position (Bag Holding).",
+        "Fighting a heavy bearish trend without a hard stop loss.",
+        "Holding a massively underwater position overnight (from Dec 30 to Dec 31) hoping for a reversal."
+      ],
+      "outcome_if_known": "Loser",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-30, 08:05:23,2,4419.1...",
+      "dedupe_key": "MGC_CSV_20251230_L_BAGHOLD",
+      "notes": "Catastrophic risk management. The positions were finally liquidated in panic on Dec 31 at 4386, 4338, and 4337, realizing over $2,200 in losses."
+    },
+    {
+      "trade_id": "MGC_CSV_20251229_SCALP_1",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-29 09:27:32",
+      "session": "US Open",
+      "timeframe": null,
+      "direction": "Long",
+      "entry_price": 4410.9,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Neutral",
+      "trade_quality": "Average",
+      "confidence_score": 80,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Intraday Volatility",
+        "last_event": "Quick Scalp",
+        "last_event_price": null,
+        "notes": "Trade opened and closed within 1 minute and 19 seconds."
+      },
+      "reasons":[
+        "Fast momentum scalp just after the US equity open.",
+        "In and out quickly avoiding exposure to sudden reversals."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-29, 09:27:32,2,4410.9...",
+      "dedupe_key": "MGC_CSV_20251229_0927_L",
+      "notes": "Closed at 4412.2 for a small $22.52 profit."
+    },
+    {
+      "trade_id": "MGC_CSV_20251229_SCALP_2",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-29 10:22:02",
+      "session": "US Morning",
+      "timeframe": null,
+      "direction": "Long",
+      "entry_price": 4332.7,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Neutral",
+      "trade_quality": "Average",
+      "confidence_score": 80,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bottom Fishing",
+        "last_event": "Quick Bounce",
+        "last_event_price": null,
+        "notes": "Trade opened after a significant drop from the 4410 level down to the 4330s."
+      },
+      "reasons":[
+        "Attempted to catch a falling knife or a quick technical bounce at the lows.",
+        "Executed a 2-minute hit-and-run, preventing the trade from turning into a bag-hold."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-29, 10:22:02,1,4332.7...",
+      "dedupe_key": "MGC_CSV_20251229_1022_L",
+      "notes": "Closed at 4333.4 for a marginal $5.26 profit. Demonstrates nervous scalping behavior following larger market drops."
+    },
+    {
+      "trade_id": "MGC_CSV_20251223_SHORT_SCALP",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-23 02:21:42",
+      "session": "Asian / Early Europe",
+      "timeframe": null,
+      "direction": "Short",
+      "entry_price": 4517.1,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Bad Trade",
+      "trade_quality": "Poor",
+      "confidence_score": 85,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bullish Drift",
+        "last_event": "Counter-trend entry",
+        "last_event_price": null,
+        "notes": "Position opened during low liquidity hours and held for 27 minutes."
+      },
+      "reasons":[
+        "Shorted during a slow, drifting upward trend.",
+        "Forced to close at a loss when the market squeezed slightly higher."
+      ],
+      "outcome_if_known": "Loser",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-23, 02:21:42,1,4517.1...",
+      "dedupe_key": "MGC_CSV_20251223_0221_S",
+      "notes": "Closed at 4520.0 for a minor loss. Pre-cursor to the excellent long swing taken the very next day."
+    },
+    {
+      "trade_id": "MGC_CSV_20251229_PYRAMID_WIN",
+      "instrument": "MGC",
+      "symbol_detected": "MGCG6",
+      "timestamp": "2025-12-29 23:43:28",
+      "session": "Asian Session",
+      "timeframe": null,
+      "direction": "Long",
+      "entry_price": 4381.7,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": true,
+      "analysis_mode": "CSV Audit",
+      "ai_verdict": "Good Trade",
+      "trade_quality": "High",
+      "confidence_score": 90,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bullish Reversal",
+        "last_event": "Scaling In",
+        "last_event_price": null,
+        "notes": "User established a base long at 4381.7 and successfully added 2 more contracts the next morning at 4419.3."
+      },
+      "reasons":[
+        "Averaging UP (Pyramiding) into a winning position is a professional tactic.",
+        "Caught the overnight reversal and capitalized on the momentum going into the next US session."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": false,
+      "raw_context_excerpt": "Transactions,Data,Order,Contrats à terme,USD,MGCG6,2025-12-29, 23:43:28,1,4381.7...",
+      "dedupe_key": "MGC_CSV_20251229_2343_L",
+      "notes": "Sold all 3 accumulated contracts on Dec 30 at 4416 for a solid $271.78 profit. A rare instance of proper scaling before the user reverted to bad habits later that same day."
+    }
+  ]
+}

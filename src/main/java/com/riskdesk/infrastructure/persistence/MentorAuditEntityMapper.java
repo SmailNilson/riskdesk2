@@ -11,6 +11,7 @@ final class MentorAuditEntityMapper {
     static MentorAuditEntity toEntity(MentorAudit audit) {
         MentorAuditEntity entity = new MentorAuditEntity();
         entity.setId(audit.getId());
+        entity.setSourceRef(audit.getSourceRef());
         entity.setCreatedAt(audit.getCreatedAt());
         entity.setInstrument(audit.getInstrument());
         entity.setTimeframe(audit.getTimeframe());
@@ -28,6 +29,7 @@ final class MentorAuditEntityMapper {
     static MentorAudit toDomain(MentorAuditEntity entity) {
         MentorAudit audit = new MentorAudit();
         audit.setId(entity.getId());
+        audit.setSourceRef(entity.getSourceRef());
         audit.setCreatedAt(entity.getCreatedAt());
         audit.setInstrument(entity.getInstrument());
         audit.setTimeframe(entity.getTimeframe());

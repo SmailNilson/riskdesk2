@@ -30,6 +30,10 @@ public class GeminiEmbeddingClient {
     }
 
     public List<Double> embed(String text) {
+        return embed(text, properties.getEmbeddingsModel());
+    }
+
+    public List<Double> embed(String text, String modelName) {
         if (!properties.isEnabled() || !properties.isEmbeddingsEnabled()) {
             throw new IllegalStateException("Mentor embeddings are disabled.");
         }
@@ -39,7 +43,7 @@ public class GeminiEmbeddingClient {
 
         try {
             Map<String, Object> body = Map.of(
-                "model", "models/" + properties.getEmbeddingsModel(),
+                "model", "models/" + modelName,
                 "content", Map.of(
                     "parts", List.of(Map.of("text", text))
                 ),
@@ -52,7 +56,7 @@ public class GeminiEmbeddingClient {
 
             String endpoint = properties.getEndpoint()
                 + "/v1beta/models/"
-                + properties.getEmbeddingsModel()
+                + modelName
                 + ":embedContent";
 
             JsonNode root = restTemplate.exchange(

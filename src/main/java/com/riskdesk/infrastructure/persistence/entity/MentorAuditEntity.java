@@ -17,6 +17,9 @@ public class MentorAuditEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(length = 128, unique = true)
+    private String sourceRef;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -52,6 +55,8 @@ public class MentorAuditEntity {
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
+    public String getSourceRef() { return sourceRef; }
+    public void setSourceRef(String sourceRef) { this.sourceRef = sourceRef; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public String getInstrument() { return instrument; }

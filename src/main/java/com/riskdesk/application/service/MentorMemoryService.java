@@ -29,6 +29,7 @@ public class MentorMemoryService {
     private final MentorProperties properties;
     private final ObjectMapper objectMapper;
 
+    private volatile boolean schemaInitialized = false;
     private volatile boolean vectorColumnAvailable = false;
 
     public MentorMemoryService(JdbcTemplate jdbcTemplate,
@@ -43,7 +44,7 @@ public class MentorMemoryService {
 
     @EventListener(ApplicationReadyEvent.class)
     void initialize() {
-        ensureSchema();
+        ensureSchemaInitialized();
     }
 
     public List<MentorSimilarAudit> findSimilar(JsonNode payload) {
@@ -51,12 +52,15 @@ public class MentorMemoryService {
             return List.of();
         }
 
+        ensureSchemaInitialized();
+
         try {
             String semanticQuery = buildSemanticQuery(payload);
-            List<Double> embedding = embeddingClient.embed(semanticQuery);
+            String queryModel = properties.getEmbeddingsModel();
+            List<Double> embedding = embeddingClient.embed(semanticQuery, queryModel);
             return vectorColumnAvailable
-                ? findWithPgVector(embedding)
-                : findWithFallback(embedding);
+                ? findWithPgVector(embedding, queryModel)
+                : findWithFallback(embedding, queryModel);
         } catch (Exception e) {
             log.warn("Mentor memory similarity search unavailable: {}", e.getMessage());
             return List.of();
@@ -67,12 +71,30 @@ public class MentorMemoryService {
         if (!properties.isMemoryEnabled() || !properties.isEmbeddingsEnabled()) {
             return;
         }
+        ensureSchemaInitialized();
         if (audit.getId() == null || audit.getSemanticText() == null || audit.getSemanticText().isBlank()) {
             return;
         }
 
         try {
-            List<Double> embedding = embeddingClient.embed(audit.getSemanticText());
+            String embeddingModel = properties.getEmbeddingsModel();
+            List<Double> embedding = embeddingClient.embed(audit.getSemanticText(), embeddingModel);
+            indexAudit(audit, embedding, embeddingModel);
+        } catch (Exception e) {
+            log.warn("Mentor memory index skipped for audit {}: {}", audit.getId(), e.getMessage());
+        }
+    }
+
+    public void indexAudit(MentorAudit audit, List<Double> embedding, String embeddingModel) {
+        if (!properties.isMemoryEnabled() || !properties.isEmbeddingsEnabled()) {
+            return;
+        }
+        ensureSchemaInitialized();
+        if (audit.getId() == null || audit.getSemanticText() == null || audit.getSemanticText().isBlank() || embedding == null || embedding.isEmpty()) {
+            return;
+        }
+
+        try {
             String embeddingJson = objectMapper.writeValueAsString(embedding);
             jdbcTemplate.update("""
                     INSERT INTO mentor_audit_memories (
@@ -97,12 +119,12 @@ public class MentorMemoryService {
                 audit.getAction(),
                 audit.getVerdict(),
                 audit.getSemanticText(),
-                properties.getEmbeddingsModel(),
+                embeddingModel,
                 embedding.size(),
                 embeddingJson
             );
 
-            if (vectorColumnAvailable) {
+            if (vectorColumnAvailable && embedding.size() == properties.getEmbeddingDimensions()) {
                 jdbcTemplate.update(
                     "UPDATE mentor_audit_memories SET embedding = CAST(? AS vector) WHERE audit_id = ?",
                     toVectorLiteral(embedding),
@@ -114,7 +136,16 @@ public class MentorMemoryService {
         }
     }
 
-    private void ensureSchema() {
+    public String currentStorageMode() {
+        ensureSchemaInitialized();
+        return vectorColumnAvailable ? "pgvector" : "json_fallback";
+    }
+
+    private synchronized void ensureSchemaInitialized() {
+        if (schemaInitialized) {
+            return;
+        }
+
         jdbcTemplate.execute("""
             CREATE TABLE IF NOT EXISTS mentor_audit_memories (
                 audit_id BIGINT PRIMARY KEY REFERENCES mentor_audits(id) ON DELETE CASCADE,
@@ -142,9 +173,11 @@ public class MentorMemoryService {
             vectorColumnAvailable = false;
             log.warn("pgvector extension unavailable, mentor memory will use JSON fallback: {}", e.getMessage());
         }
+
+        schemaInitialized = true;
     }
 
-    private List<MentorSimilarAudit> findWithPgVector(List<Double> embedding) {
+    private List<MentorSimilarAudit> findWithPgVector(List<Double> embedding, String queryModel) {
         String vector = toVectorLiteral(embedding);
         return jdbcTemplate.query(
             """
@@ -152,13 +185,15 @@ public class MentorMemoryService {
                        1 - (embedding <=> CAST(? AS vector)) AS similarity
                 FROM mentor_audit_memories
                 WHERE embedding IS NOT NULL
+                  AND embedding_model = ?
                 ORDER BY embedding <=> CAST(? AS vector)
                 LIMIT ?
                 """,
             ps -> {
                 ps.setString(1, vector);
-                ps.setString(2, vector);
-                ps.setInt(3, properties.getMemoryTopK());
+                ps.setString(2, queryModel);
+                ps.setString(3, vector);
+                ps.setInt(4, properties.getMemoryTopK());
             },
             (rs, rowNum) -> new MentorSimilarAudit(
                 rs.getLong("audit_id"),
@@ -173,16 +208,20 @@ public class MentorMemoryService {
         );
     }
 
-    private List<MentorSimilarAudit> findWithFallback(List<Double> targetEmbedding) {
+    private List<MentorSimilarAudit> findWithFallback(List<Double> targetEmbedding, String queryModel) {
         List<MentorSimilarAudit> matches = new ArrayList<>();
         jdbcTemplate.query(
             """
                 SELECT audit_id, created_at, instrument, timeframe, action, verdict, semantic_text, embedding_json
                 FROM mentor_audit_memories
+                WHERE embedding_model = ?
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-            ps -> ps.setInt(1, properties.getMemorySearchWindow()),
+            ps -> {
+                ps.setString(1, queryModel);
+                ps.setInt(2, properties.getMemorySearchWindow());
+            },
             rs -> {
                 List<Double> candidate = parseEmbedding(rs.getString("embedding_json"));
                 double similarity = cosineSimilarity(targetEmbedding, candidate);

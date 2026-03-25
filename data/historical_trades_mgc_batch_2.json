@@ -1,0 +1,207 @@
+{
+  "instrument": "MGC",
+  "trades": [
+    {
+      "trade_id": "MGC_006_EMA_BOUNCE_SNIPER",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-21 02:13:26",
+      "session": "Asian Session",
+      "timeframe": "M1",
+      "direction": "Long",
+      "entry_price": 4839.2,
+      "stop_loss": 4835.0,
+      "take_profit": 4862.2,
+      "market_order": true,
+      "analysis_mode": "Live Action + Execution",
+      "ai_verdict": "Valid Trade",
+      "trade_quality": "High",
+      "confidence_score": 95,
+      "risk_reward": 5.4,
+      "market_structure": {
+        "trend_focus": "Bullish",
+        "last_event": "Purge / Oversold Pullback",
+        "last_event_price": 4840.0,
+        "notes": "Price fell 50 points directly onto the Blue 200 EMA with heavy red money flow indicating a high-probability bounce zone (Mean Reversion)."
+      },
+      "reasons": [
+        "Confluence of moving average support (EMA) after extreme short-term plunge.",
+        "Statistical 'elastic effect' predicting return to the rapid Red MA.",
+        "Macro sector strength keeping deep dips viable for longs."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": true,
+      "raw_context_excerpt": "Tu es dans la 'Golden Zone' pour un achat... Le prix s'écrase pile sur la Moyenne Mobile Bleue (4841)... Target: 4860.",
+      "dedupe_key": "MGC_20260121_0213_L",
+      "notes": "Verified against CSV. Entry matched the 4840-4842 call box beautifully, netting a rapid ~23 points."
+    },
+    {
+      "trade_id": "MGC_007_FUNDAMENTAL_SWING_SHORT",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-22 15:11:00",
+      "session": "Late US",
+      "timeframe": "M30",
+      "direction": "Short",
+      "entry_price": 4781.0,
+      "stop_loss": 4805.0,
+      "take_profit": 4705.0,
+      "market_order": null,
+      "analysis_mode": "Review",
+      "ai_verdict": "Valid Trade",
+      "trade_quality": "High",
+      "confidence_score": 85,
+      "risk_reward": 3.1,
+      "market_structure": {
+        "trend_focus": "Bearish (Correction)",
+        "last_event": "Distribution",
+        "last_event_price": 4781.0,
+        "notes": "Shooting star rejection on H1 timeline and capital outflow confirmed by Risk-On equity surges (MNQ)."
+      },
+      "reasons": [
+        "Fundamentally driven 'De-escalation' in Greenland crisis draining safe-haven premiums.",
+        "Direct sector liquidation logic supported by steep drop in Silver.",
+        "Huge liquidity void below waiting to be filled ('Gap Fill')."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "Tu paries sur l'effacement de la 'Prime de Peur'... Les investisseurs vendent l'Or pour acheter des Actions. C'est le flux financier classique.",
+      "dedupe_key": "MGC_20260122_1511_S",
+      "notes": "The trader shifted from pure TA scalper to Macro Swing trader effectively calling the geopolitical peak."
+    },
+    {
+      "trade_id": "MGC_008_LONDON_OPEN_BREAKOUT",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-19 03:06:00",
+      "session": "London Open",
+      "timeframe": "M5",
+      "direction": "Long",
+      "entry_price": 4674.7,
+      "stop_loss": 4668.0,
+      "take_profit": 4700.0,
+      "market_order": null,
+      "analysis_mode": "Pre-trade Setup",
+      "ai_verdict": "Valid Trade",
+      "trade_quality": "Average",
+      "confidence_score": 75,
+      "risk_reward": 3.7,
+      "market_structure": {
+        "trend_focus": "Bullish",
+        "last_event": "Ascending Triangle",
+        "last_event_price": 4674.0,
+        "notes": "Compression squeezing up against the moving averages inside the prior evening's high tight flag structure."
+      },
+      "reasons": [
+        "Anticipating London volume resolving the pre-market pennant upward.",
+        "Price grinding higher securely supported by dynamic red MA level."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "On est donc coincé dans un Triangle Ascendant. C'est une figure de continuation haussière classique. Target: 4700.",
+      "dedupe_key": "MGC_20260119_0306_L",
+      "notes": "Early sign of directional buildup capitalizing on European volume injections."
+    },
+    {
+      "trade_id": "MGC_009_TRIPLE_BOTTOM_CATCH",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-19 06:41:15",
+      "session": "Europe Pre-US",
+      "timeframe": "M5",
+      "direction": "Long",
+      "entry_price": 4665.6,
+      "stop_loss": 4660.0,
+      "take_profit": 4680.0,
+      "market_order": true,
+      "analysis_mode": "Review + Execution",
+      "ai_verdict": "Valid Trade",
+      "trade_quality": "High",
+      "confidence_score": 90,
+      "risk_reward": 2.5,
+      "market_structure": {
+        "trend_focus": "Bullish",
+        "last_event": "Range Rejection",
+        "last_event_price": 4664.0,
+        "notes": "Gold maintained floor logic across several sessions, avoiding a bearish gap fill that many anticipated."
+      },
+      "reasons": [
+        "Tested a strict horizontal range support parameter for the third time avoiding breakdowns.",
+        "Reclaim of internal short term EMA and oscillators bouncing back rapidly post selloff."
+      ],
+      "outcome_if_known": "Winner",
+      "has_screenshot": true,
+      "raw_context_excerpt": "Le scénario du 'Triple Bottom' sur 4664 s'est réalisé à la perfection. Le marché REFUSE de corriger le Gap.",
+      "dedupe_key": "MGC_20260119_0641_L",
+      "notes": "Verified per CSV logs. Purchased 4665.6 with textbook support validation strategy ending in excellent R:R setup closing at 4692.3."
+    },
+    {
+      "trade_id": "MGC_010_H1_LIQUIDITY_SWEPT",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-19 10:46:10",
+      "session": "US Cash Session",
+      "timeframe": "H1",
+      "direction": "Neutral",
+      "entry_price": 4556.8,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": null,
+      "analysis_mode": "Structural Assessment",
+      "ai_verdict": "Stay Cash",
+      "trade_quality": null,
+      "confidence_score": 85,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Breakdown Test",
+        "last_event": "Falling Knife into 200 H1 EMA",
+        "last_event_price": 4556.0,
+        "notes": "Brutal sell-off causing User to question why algorithm support limits ('bleu support') are targeted for extreme testing."
+      },
+      "reasons": [
+        "Avoid trying to stop runaway price cascades with manual limit orders (buying walls).",
+        "A macro MA functions as an institutional filter but isn't infallible during abnormal downward thrust volume.",
+        "Price action validation is paramount, closing levels confirm breakdowns not single wicks."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "C'est une prophétie auto-réalisatrice. Quand un train arrive à pleine vitesse sur un mur, il y a de fortes chances qu'il le fissure. CE N'EST PAS UN MUR EN BÉTON, C'EST UN FILET.",
+      "dedupe_key": "MGC_20260119_1046_LEARN",
+      "notes": "Not executed trade but immense mentoring value explaining mechanics behind liquidity hunting logic."
+    },
+    {
+      "trade_id": "MGC_011_OPEN_NEWS_FLUSH",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-20 08:30:00",
+      "session": "Pre-Market / News Event",
+      "timeframe": "M5",
+      "direction": "Neutral",
+      "entry_price": 4930.0,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": null,
+      "analysis_mode": "Warning",
+      "ai_verdict": "Avoid Pre-News Entry",
+      "trade_quality": null,
+      "confidence_score": 100,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Ranging into Event",
+        "last_event": "News Liquidation Vacuum",
+        "last_event_price": 4931.0,
+        "notes": "Price compression 5 mins prior to economic event logic, awaiting macro trigger rather than jumping early."
+      },
+      "reasons": [
+        "Impending high volatility 08:30 economic reporting window inherently creates 'randomized' violent candle wicks.",
+        "Advised watching closing candle trajectory instead to verify safe continuation toward ~4945.",
+        "Sidestepping pure statistical guesswork associated with immediate news reaction releases."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "RÈGLE : NE CLIQUE PAS AVANT 08H31. Laisse l'algo de news passer... Si ça casse 4938 on achète sur repli.",
+      "dedupe_key": "MGC_20260120_0830_WARNING",
+      "notes": "Displays structural discipline required before major events avoiding pure volatility wipes."
+    }
+  ]
+}

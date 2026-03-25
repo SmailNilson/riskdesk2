@@ -4,6 +4,8 @@ import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
+
 @Component
 public class JpaMentorAuditRepositoryAdapter implements MentorAuditRepositoryPort {
 
@@ -16,5 +18,10 @@ public class JpaMentorAuditRepositoryAdapter implements MentorAuditRepositoryPor
     @Override
     public MentorAudit save(MentorAudit audit) {
         return MentorAuditEntityMapper.toDomain(repository.save(MentorAuditEntityMapper.toEntity(audit)));
+    }
+
+    @Override
+    public Optional<MentorAudit> findBySourceRef(String sourceRef) {
+        return repository.findBySourceRef(sourceRef).map(MentorAuditEntityMapper::toDomain);
     }
 }

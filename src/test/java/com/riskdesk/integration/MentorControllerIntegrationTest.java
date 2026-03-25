@@ -5,7 +5,9 @@ import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.application.service.HistoricalTradeImporterService;
 import com.riskdesk.application.service.MentorAnalysisService;
+import com.riskdesk.application.service.MentorMemoryService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -36,6 +38,12 @@ class MentorControllerIntegrationTest {
 
     @MockBean
     private MentorAnalysisService mentorAnalysisService;
+
+    @MockBean
+    private HistoricalTradeImporterService historicalTradeImporterService;
+
+    @MockBean
+    private MentorMemoryService mentorMemoryService;
 
     @Test
     void analyze_validPayload_returnsStructuredResponse() throws Exception {
@@ -92,5 +100,55 @@ class MentorControllerIntegrationTest {
                     }
                     """))
             .andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
+    void importHistoricalTrades_withJsonPayload_returnsSummary() throws Exception {
+        when(historicalTradeImporterService.importTrades(any()))
+            .thenReturn(new HistoricalTradeImporterService.ImportSummary(1, 0, 0));
+        when(mentorMemoryService.currentStorageMode()).thenReturn("pgvector");
+
+        mockMvc.perform(post("/api/mentor/import-historical-trades")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "instrument": "MGC",
+                      "trades": [
+                        {
+                          "trade_id": "MGC_TEST_001",
+                          "instrument": "MGC",
+                          "timeframe": "M5",
+                          "direction": "Long",
+                          "entry_price": 4700.0,
+                          "ai_verdict": "Valid Trade"
+                        }
+                      ]
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.instrument").value("MGC"))
+            .andExpect(jsonPath("$.imported").value(1))
+            .andExpect(jsonPath("$.storage").value("pgvector"))
+            .andExpect(jsonPath("$.source").value("request_body"));
+    }
+
+    @Test
+    void importHistoricalTradesFromFile_withPath_returnsSummary() throws Exception {
+        when(historicalTradeImporterService.importFromFile(any()))
+            .thenReturn(new HistoricalTradeImporterService.ImportSummary(3, 1, 0));
+        when(mentorMemoryService.currentStorageMode()).thenReturn("pgvector");
+
+        mockMvc.perform(post("/api/mentor/import-historical-trades/file")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "filePath": "/tmp/historical_trades.json"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.imported").value(3))
+            .andExpect(jsonPath("$.skipped").value(1))
+            .andExpect(jsonPath("$.storage").value("pgvector"))
+            .andExpect(jsonPath("$.source").value("/tmp/historical_trades.json"));
     }
 }

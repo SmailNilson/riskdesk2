@@ -5,6 +5,7 @@ import java.time.Instant;
 public class MentorAudit {
 
     private Long id;
+    private String sourceRef;
     private Instant createdAt;
     private String instrument;
     private String timeframe;
@@ -23,6 +24,14 @@ public class MentorAudit {
 
     public void setId(Long id) {
         this.id = id;
+    }
+
+    public String getSourceRef() {
+        return sourceRef;
+    }
+
+    public void setSourceRef(String sourceRef) {
+        this.sourceRef = sourceRef;
     }
 
     public Instant getCreatedAt() {

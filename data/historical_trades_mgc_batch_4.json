@@ -1,0 +1,141 @@
+{
+  "instrument": "MGC",
+  "trades": [
+    {
+      "trade_id": "MGC_020_PRE_NEWS_CHOP_AVOIDANCE",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-20 08:26:29",
+      "session": "Pre-Market US (News Pending)",
+      "timeframe": "M5",
+      "direction": "Long",
+      "entry_price": 4930.0,
+      "stop_loss": 4924.0,
+      "take_profit": 4945.0,
+      "market_order": false,
+      "analysis_mode": "Pre-trade Setup",
+      "ai_verdict": "Wait for Trigger (Post-News)",
+      "trade_quality": "Average",
+      "confidence_score": 80,
+      "risk_reward": 2.5,
+      "market_structure": {
+        "trend_focus": "Ranging on Support",
+        "last_event": "Base building at 4928-4930",
+        "last_event_price": 4931.0,
+        "notes": "Price resting on a structural support zone (blue rectangle) minutes before an 08:30 data print. Gold is lagging PL and SI."
+      },
+      "reasons": [
+        "Trading directly into an 08:30 data print is gambling due to erratic algorithmic wicks.",
+        "A 'stop run' (sweep below 4930) is highly probable before any real move.",
+        "Waiting for a 1-minute close above 4930 post-news validates the institutional defense of the level."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "RÈGLE : NE CLIQUE PAS AVANT 08H31. Laisse l'algo de news passer... Si à 08h32 le prix est toujours au-dessus de 4930 : ACHAT.",
+      "dedupe_key": "MGC_PRE_NEWS_4930",
+      "notes": "Disciplined approach to high-impact economic data releases, prioritizing survival over catching the exact bottom tick."
+    },
+    {
+      "trade_id": "MGC_021_POST_NEWS_BREAKOUT",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-20 08:30:00",
+      "session": "US Open (News Release)",
+      "timeframe": "M5",
+      "direction": "Long",
+      "entry_price": 4843.0,
+      "stop_loss": null,
+      "take_profit": 4860.0,
+      "market_order": false,
+      "analysis_mode": "Pre-trade Setup",
+      "ai_verdict": "Valid Trade",
+      "trade_quality": "High",
+      "confidence_score": 85,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Breakout",
+        "last_event": "V-Shape Recovery pre-news",
+        "last_event_price": 4834.8,
+        "notes": "Price bounced sharply from the Blue MA (4819) and was pressing against resistance (4835-4838) right before the print."
+      },
+      "reasons": [
+        "If the news is 'Bad' for the US economy (Good for Gold), it acts as the catalyst to smash the immediate resistance.",
+        "A breakout above the local bounce high confirms algorithmic buying volume.",
+        "Avoiding the exact minute of the print protects against spread widening."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "Si le chiffre est mauvais pour le Dollar. L'Or va exploser à la hausse. Trigger : Cassure des 4843 (Sommet du rebond). Target : 4860.",
+      "dedupe_key": "MGC_NEWS_BREAKOUT_4843",
+      "notes": "Event-driven technical breakout strategy based on fundamental data interpretation."
+    },
+    {
+      "trade_id": "MGC_022_BEARISH_TRAP_DODGE",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-21 09:26:54",
+      "session": "US Open",
+      "timeframe": "M5",
+      "direction": "Neutral",
+      "entry_price": 4850.0,
+      "stop_loss": null,
+      "take_profit": null,
+      "market_order": null,
+      "analysis_mode": "Warning",
+      "ai_verdict": "Stay Cash",
+      "trade_quality": null,
+      "confidence_score": 90,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Ranging before Open",
+        "last_event": "Support Test",
+        "last_event_price": 4861.8,
+        "notes": "4 minutes before US Open. Price had dropped from 4890 to test support at 4850, leaving a long lower wick."
+      },
+      "reasons": [
+        "The open induces massive two-way volatility designed to hunt stops.",
+        "Price is sandwiched between confirmed support (4850) and immediate resistance (Red MA at 4865).",
+        "Awaiting confirmation of support holding (Double Bottom) or resistance breaking (4870) provides a much safer entry."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "Ne fais rien à 09h30 pile. Laisse les algos se battre. Cherche à acheter uniquement si le support des 4850 est testé et validé, ou si on casse 4870.",
+      "dedupe_key": "MGC_OPEN_CHOP_4861",
+      "notes": "Classic opening bell survival strategy: sit on hands and wait for the dust to settle before choosing a side."
+    },
+    {
+      "trade_id": "MGC_023_LUNCH_LULL_HOLD",
+      "instrument": "MGC",
+      "symbol_detected": "MGC1!",
+      "timestamp": "2026-01-21 11:48:53",
+      "session": "Lunch Lull",
+      "timeframe": "M5",
+      "direction": "Long",
+      "entry_price": 4738.0,
+      "stop_loss": 4738.0,
+      "take_profit": 4770.0,
+      "market_order": false,
+      "analysis_mode": "Position Management",
+      "ai_verdict": "Hold Position",
+      "trade_quality": "High",
+      "confidence_score": 90,
+      "risk_reward": null,
+      "market_structure": {
+        "trend_focus": "Bullish Consolidation",
+        "last_event": "Ranging near highs",
+        "last_event_price": 4751.2,
+        "notes": "Gold up +3.39% but stalling between 4750 (Red MA support) and 4756 (local ceiling) during low-volume hours."
+      },
+      "reasons": [
+        "The Red MA is actively supporting the price, maintaining the bullish structure.",
+        "Volume is dead, making breakouts unlikely until the afternoon session resumes.",
+        "Moving the stop loss to breakeven (below the Blue MA at 4738) secures the trade while allowing for a potential afternoon continuation run."
+      ],
+      "outcome_if_known": null,
+      "has_screenshot": true,
+      "raw_context_excerpt": "Si tu es déjà Long : Garde ta position. Mets ton stop sous la ligne bleue (4738). Si tu es Cash : Ne fais rien tant qu'on est entre 4750 et 4756.",
+      "dedupe_key": "MGC_LUNCH_HOLD_4751",
+      "notes": "Demonstrates proper trade management during low-liquidity periods, avoiding overtrading."
+    }
+  ]
+}
