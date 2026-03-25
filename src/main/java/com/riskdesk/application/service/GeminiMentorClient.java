@@ -9,8 +9,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
+import java.net.SocketTimeoutException;
 import java.util.List;
 import java.util.Map;
 
@@ -18,6 +20,7 @@ import java.util.Map;
 public class GeminiMentorClient implements MentorModelClient {
 
     private static final Logger log = LoggerFactory.getLogger(GeminiMentorClient.class);
+    private static final int MAX_ATTEMPTS = 2;
 
     private static final String SYSTEM_INSTRUCTION = """
         Rôle : Tu es un Mentor Expert en Trading de Futures (Day Trading & Scalping), spécialisé dans l'analyse technique (Price Action, VWAP, Order Flow) et les corrélations inter-marchés. Ton but est d'auditer mes trades sur les métaux (Or/MGC et Platine/PL) avec une rigueur professionnelle.
@@ -115,7 +118,7 @@ public class GeminiMentorClient implements MentorModelClient {
                 + properties.getModel()
                 + ":generateContent";
 
-            JsonNode root = restTemplate.exchange(endpoint, HttpMethod.POST, request, JsonNode.class).getBody();
+            JsonNode root = executeWithRetry(endpoint, request);
             String text = extractText(root);
             if (text == null || text.isBlank()) {
                 throw new IllegalStateException("Gemini returned an empty response.");
@@ -126,6 +129,22 @@ public class GeminiMentorClient implements MentorModelClient {
             log.error("Gemini mentor call failed: {}", e.getMessage(), e);
             throw new IllegalStateException("Gemini mentor call failed: " + e.getMessage(), e);
         }
+    }
+
+    private JsonNode executeWithRetry(String endpoint, HttpEntity<Map<String, Object>> request) {
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                return restTemplate.exchange(endpoint, HttpMethod.POST, request, JsonNode.class).getBody();
+            } catch (RuntimeException e) {
+                lastFailure = e;
+                if (!isTransientTimeout(e) || attempt == MAX_ATTEMPTS) {
+                    throw e;
+                }
+                log.warn("Gemini mentor call timed out on attempt {}/{}. Retrying once.", attempt, MAX_ATTEMPTS);
+            }
+        }
+        throw lastFailure == null ? new IllegalStateException("Gemini mentor call failed.") : lastFailure;
     }
 
     private RestTemplate buildRestTemplate(MentorProperties properties) {
@@ -145,6 +164,22 @@ public class GeminiMentorClient implements MentorModelClient {
             return null;
         }
         return parts.get(0).path("text").asText(null);
+    }
+
+    private boolean isTransientTimeout(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof SocketTimeoutException) {
+                return true;
+            }
+            if (current instanceof ResourceAccessException
+                && current.getMessage() != null
+                && current.getMessage().toLowerCase().contains("timed out")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private String sanitizeJsonText(String text) {

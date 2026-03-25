@@ -11,7 +11,7 @@ public class MentorProperties {
     private String apiKey = "";
     private String model = "gemini-3.1-pro-preview";
     private String endpoint = "https://generativelanguage.googleapis.com";
-    private int timeoutMs = 30000;
+    private int timeoutMs = 60000;
     private boolean persistAudits = true;
     private boolean memoryEnabled = true;
     private int memoryTopK = 3;
