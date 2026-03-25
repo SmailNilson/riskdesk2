@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: riskdesk-db
+    environment:
+      POSTGRES_DB: riskdesk
+      POSTGRES_USER: riskdesk
+      POSTGRES_PASSWORD: riskdesk_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Spring Boot API (build from source)
+  api:
+    build: .
+    container_name: riskdesk-api
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/riskdesk
+      SPRING_DATASOURCE_USERNAME: riskdesk
+      SPRING_DATASOURCE_PASSWORD: riskdesk_dev
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:

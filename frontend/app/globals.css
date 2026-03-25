@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Light theme — activated by adding class="light" to the root wrapper
+   All zinc-* dark colours are remapped to slate-* equivalents.
+   ═════════════════════════════════════════════════════════════ */
+
+/* ── Surfaces ─────────────────────────────────────────────── */
+.light .bg-zinc-950     { background-color: #f8fafc !important; }
+.light .bg-zinc-900     { background-color: #ffffff !important; }
+.light .bg-zinc-800     { background-color: #f1f5f9 !important; }
+.light .bg-zinc-700     { background-color: #e2e8f0 !important; }
+
+/* Opacity variants */
+.light .bg-zinc-900\/50 { background-color: rgb(255 255 255 / 0.5) !important; }
+.light .bg-zinc-900\/60 { background-color: rgb(255 255 255 / 0.6) !important; }
+.light .bg-zinc-800\/50 { background-color: rgb(241 245 249 / 0.5) !important; }
+.light .bg-zinc-800\/60 { background-color: rgb(241 245 249 / 0.6) !important; }
+.light .bg-zinc-800\/80 { background-color: rgb(241 245 249 / 0.8) !important; }
+
+/* ── Borders ──────────────────────────────────────────────── */
+.light .border-zinc-800     { border-color: #e2e8f0 !important; }
+.light .border-zinc-700     { border-color: #e2e8f0 !important; }
+.light .border-zinc-800\/50 { border-color: rgb(226 232 240 / 0.5) !important; }
+.light .border-zinc-800\/60 { border-color: rgb(226 232 240 / 0.6) !important; }
+
+/* ── Text ─────────────────────────────────────────────────── */
+.light .text-white  { color: #0f172a !important; }
+.light .text-zinc-200 { color: #1e293b !important; }
+.light .text-zinc-300 { color: #334155 !important; }
+.light .text-zinc-400 { color: #64748b !important; }
+.light .text-zinc-500 { color: #94a3b8 !important; }
+.light .text-zinc-600 { color: #64748b !important; }
+
+/* ── Badge backgrounds (IndicatorPanel + Chart tags) ─────── */
+.light .bg-emerald-900\/50 { background-color: rgb(209 250 229 / 0.85) !important; }
+.light .bg-emerald-900\/70 { background-color: rgb(209 250 229 / 0.90) !important; }
+.light .bg-red-900\/50     { background-color: rgb(254 226 226 / 0.85) !important; }
+.light .bg-red-900\/70     { background-color: rgb(254 226 226 / 0.90) !important; }
+.light .bg-amber-900\/50   { background-color: rgb(254 243 199 / 0.85) !important; }
+.light .bg-amber-900\/70   { background-color: rgb(254 243 199 / 0.90) !important; }
+.light .bg-blue-900\/50    { background-color: rgb(219 234 254 / 0.85) !important; }
+.light .bg-blue-900\/70    { background-color: rgb(219 234 254 / 0.90) !important; }
+.light .bg-purple-900\/70  { background-color: rgb(237 233 254 / 0.90) !important; }
+.light .bg-teal-900\/60    { background-color: rgb(204 251 241 / 0.85) !important; }
+
+/* ── Badge text colours (darkened for legibility on white) ── */
+.light .text-emerald-300 { color: #047857 !important; }
+.light .text-emerald-400 { color: #059669 !important; }
+.light .text-red-300     { color: #dc2626 !important; }
+.light .text-red-400     { color: #dc2626 !important; }
+.light .text-amber-300   { color: #b45309 !important; }
+.light .text-amber-400   { color: #d97706 !important; }
+.light .text-blue-300    { color: #1d4ed8 !important; }
+.light .text-purple-300  { color: #7c3aed !important; }
+.light .text-teal-400    { color: #0d9488 !important; }
