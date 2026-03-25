@@ -1,0 +1,160 @@
+# Project Context
+
+## What this project is
+
+`riskdesk2` is a futures trading risk dashboard combining:
+
+- portfolio and position monitoring
+- indicator computation
+- mentor-style analysis payload generation
+- IBKR account and market data integration
+
+The stack is split into a Spring Boot backend and a Next.js frontend.
+
+## Source of Truth for Market Data
+
+The only accepted market data flow is:
+
+`IBKR Gateway -> PostgreSQL -> internal services`
+
+This rule is intentional and strict.
+
+### Implications
+
+- live prices should come from the IBKR native gateway when available
+- historical candles should come from the IBKR/PostgreSQL pipeline
+- PostgreSQL fallback is acceptable when IBKR is temporarily unavailable
+- external providers must not be introduced as “temporary fixes”
+
+## Main Runtime Config
+
+See:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/resources/application.properties`
+
+Important settings today:
+
+- backend port: `8080`
+- PostgreSQL DB: `riskdesk`
+- IBKR mode: `IB_GATEWAY`
+- native host: `127.0.0.1`
+- native port: `4001`
+- native client id: `7`
+
+## Environment Variables Used
+
+The application reads these from environment when present:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL`
+- `GEMINI_EMBEDDING_MODEL`
+
+These must stay out of Git.
+
+## Backend Map
+
+### Entry points
+
+- `presentation/controller`
+- `presentation/dto`
+
+### Core services
+
+- `application/service/MarketDataService.java`
+- `application/service/HistoricalDataService.java`
+- `application/service/PositionService.java`
+- `application/service/MentorAnalysisService.java`
+- `application/service/MentorIntermarketService.java`
+
+### IBKR integration
+
+- `infrastructure/marketdata/ibkr/IbGatewayNativeClient.java`
+- `infrastructure/marketdata/ibkr/IbGatewayContractResolver.java`
+- `infrastructure/marketdata/ibkr/IbGatewayMarketDataProvider.java`
+- `infrastructure/marketdata/ibkr/IbGatewayHistoricalProvider.java`
+- `application/service/IbGatewayBrokerGateway.java`
+
+### Persistence
+
+- `infrastructure/persistence/*`
+
+## Frontend Map
+
+### High-value files
+
+- `frontend/app/page.tsx`
+- `frontend/app/components/Dashboard.tsx`
+- `frontend/app/components/MentorPanel.tsx`
+- `frontend/app/lib/api.ts`
+- `frontend/app/hooks/useWebSocket.ts`
+
+### Frontend responsibilities
+
+- display live and fallback market data
+- show mentor payload and result
+- expose positions, indicators, alerts, and IBKR portfolio state
+
+## Operational Commands
+
+### Compile backend
+
+```bash
+mvn -q -DskipTests compile
+```
+
+### Run backend
+
+```bash
+mvn -q spring-boot:run
+```
+
+or:
+
+```bash
+mvn -q -DskipTests package
+java -jar target/riskdesk-0.1.0-SNAPSHOT.jar
+```
+
+### Frontend lint
+
+```bash
+cd frontend
+npm run lint
+```
+
+### Useful API checks
+
+```bash
+curl -s http://localhost:8080/actuator/health
+curl -s http://localhost:8080/api/live-price/E6
+```
+
+## Coding Conventions
+
+### Backend
+
+- preserve existing package boundaries
+- avoid mixing controller logic into services
+- prefer explicit DTOs over ad-hoc maps for API contracts
+- treat IBKR timeouts and farm outages as first-class operational states
+
+### Frontend
+
+- keep API logic in `frontend/app/lib/api.ts`
+- keep dashboard logic in components, not in raw page-level glue
+- when changing payloads, update backend and frontend in the same task
+
+## Git Notes
+
+- the repository root is now the project root
+- `frontend/` is no longer a separate Git repository
+- a backup of the old frontend `.git` was stored under `/tmp` during first import
+
+## Where to Handoff Work
+
+For agent-to-agent continuity, update:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
+
