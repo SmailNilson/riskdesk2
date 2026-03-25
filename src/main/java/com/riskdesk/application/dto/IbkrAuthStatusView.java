@@ -1,4 +1,4 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 public record IbkrAuthStatusView(
     boolean authenticated,
@@ -7,4 +7,5 @@ public record IbkrAuthStatusView(
     boolean competing,
     String endpoint,
     String message
-) {}
+) {
+}

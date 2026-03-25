@@ -1,4 +1,4 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 import java.math.BigDecimal;
 
@@ -15,4 +15,5 @@ public record IbkrPositionView(
     BigDecimal realizedPnl,
     BigDecimal unrealizedPnl,
     String currency
-) {}
+) {
+}

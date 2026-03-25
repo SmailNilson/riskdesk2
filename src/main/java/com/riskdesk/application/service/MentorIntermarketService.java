@@ -1,6 +1,6 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.presentation.dto.MentorIntermarketSnapshot;
+import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import org.springframework.stereotype.Service;
 
 /**

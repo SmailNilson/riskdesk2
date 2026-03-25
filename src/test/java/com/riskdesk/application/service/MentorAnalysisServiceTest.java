@@ -1,11 +1,11 @@
 package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
-import com.riskdesk.presentation.dto.MentorAnalyzeResponse;
-import com.riskdesk.presentation.dto.MentorSimilarAudit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;

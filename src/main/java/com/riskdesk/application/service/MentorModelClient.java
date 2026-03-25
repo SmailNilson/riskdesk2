@@ -1,7 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.riskdesk.presentation.dto.MentorSimilarAudit;
+import com.riskdesk.application.dto.MentorSimilarAudit;
 
 import java.util.List;
 

@@ -1,9 +1,9 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrBackendMode;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
-import com.riskdesk.presentation.dto.IbkrAuthStatusView;
-import com.riskdesk.presentation.dto.IbkrPortfolioSnapshot;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;

@@ -2,12 +2,12 @@ package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.IbkrAccountView;
+import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrRestClient;
-import com.riskdesk.presentation.dto.IbkrAccountView;
-import com.riskdesk.presentation.dto.IbkrAuthStatusView;
-import com.riskdesk.presentation.dto.IbkrPortfolioSnapshot;
-import com.riskdesk.presentation.dto.IbkrPositionView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;

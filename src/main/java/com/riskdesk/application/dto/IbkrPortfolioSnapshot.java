@@ -1,4 +1,4 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -17,4 +17,5 @@ public record IbkrPortfolioSnapshot(
     String currency,
     List<IbkrPositionView> positions,
     String message
-) {}
+) {
+}

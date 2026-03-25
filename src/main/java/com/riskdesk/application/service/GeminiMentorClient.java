@@ -2,8 +2,8 @@ package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
-import com.riskdesk.presentation.dto.MentorSimilarAudit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.*;

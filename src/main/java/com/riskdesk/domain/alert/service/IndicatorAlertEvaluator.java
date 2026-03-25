@@ -1,7 +1,6 @@
 package com.riskdesk.domain.alert.service;
 
 import com.riskdesk.domain.alert.model.*;
-import com.riskdesk.presentation.dto.IndicatorSnapshot;
 import com.riskdesk.domain.model.Instrument;
 
 import java.math.BigDecimal;
@@ -14,7 +13,7 @@ import java.util.List;
  */
 public class IndicatorAlertEvaluator {
 
-    public List<Alert> evaluate(Instrument instrument, String timeframe, IndicatorSnapshot snap) {
+    public List<Alert> evaluate(Instrument instrument, String timeframe, IndicatorAlertSnapshot snap) {
         List<Alert> alerts = new ArrayList<>();
         if (snap == null) return alerts;
         String tf = instrument.name() + ":" + timeframe;

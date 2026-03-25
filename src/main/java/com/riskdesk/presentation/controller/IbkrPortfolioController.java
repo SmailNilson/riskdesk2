@@ -1,8 +1,8 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.service.IbkrPortfolioService;
-import com.riskdesk.presentation.dto.IbkrAuthStatusView;
-import com.riskdesk.presentation.dto.IbkrPortfolioSnapshot;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;

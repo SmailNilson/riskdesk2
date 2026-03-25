@@ -1,7 +1,7 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.presentation.dto.IbkrAuthStatusView;
-import com.riskdesk.presentation.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 
 public interface IbkrBrokerGateway {
 

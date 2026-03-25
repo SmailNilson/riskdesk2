@@ -28,9 +28,13 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
 
         for (Instrument instrument : Instrument.values()) {
             try {
-                fetchPrice(instrument).ifPresent(price -> prices.put(instrument, price));
+                contractResolver.resolve(instrument).ifPresent(resolved -> {
+                    nativeClient.ensureStreamingPriceSubscription(resolved.contract());
+                    nativeClient.latestStreamingPrice(resolved.contract())
+                        .ifPresent(price -> prices.put(instrument, price));
+                });
             } catch (Exception e) {
-                log.warn("IB Gateway snapshot fetch failed for {}: {}", instrument, e.getMessage());
+                log.warn("IB Gateway live fetch failed for {}: {}", instrument, e.getMessage());
             }
         }
 
@@ -41,7 +45,14 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
     public Optional<BigDecimal> fetchPrice(Instrument instrument) {
         try {
             return contractResolver.resolve(instrument)
-                .flatMap(resolved -> nativeClient.requestSnapshotPrice(resolved.contract()));
+                .flatMap(resolved -> {
+                    nativeClient.ensureStreamingPriceSubscription(resolved.contract());
+                    Optional<BigDecimal> live = nativeClient.latestStreamingPrice(resolved.contract());
+                    if (live.isPresent()) {
+                        return live;
+                    }
+                    return nativeClient.requestSnapshotPrice(resolved.contract());
+                });
         } catch (Exception e) {
             log.warn("IB Gateway single snapshot fetch failed for {}: {}", instrument, e.getMessage());
             return Optional.empty();

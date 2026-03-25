@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 public class IbGatewayNativeClient {
 
     private static final Logger log = LoggerFactory.getLogger(IbGatewayNativeClient.class);
-    private static final Set<Integer> NOISY_INFO_CODES = Set.of(2104, 2106, 2158, 2108, 2107);
+    private static final Set<Integer> NOISY_INFO_CODES = Set.of(366, 2104, 2106, 2158, 2108, 2107);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration SNAPSHOT_TIMEOUT = Duration.ofSeconds(2);
@@ -56,12 +56,14 @@ public class IbGatewayNativeClient {
     private final IbkrProperties properties;
     private final Object connectionLock = new Object();
     private final Object accountSnapshotLock = new Object();
+    private final Object streamingLock = new Object();
     private volatile ApiController controller;
     private volatile CompletableFuture<Void> connectedFuture = new CompletableFuture<>();
     private volatile CompletableFuture<List<String>> accountsFuture = new CompletableFuture<>();
     private volatile List<String> managedAccounts = List.of();
     private volatile Instant reconnectBlockedUntil = Instant.EPOCH;
     private volatile String lastConnectionFailure = "uninitialized";
+    private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
@@ -233,6 +235,34 @@ public class IbGatewayNativeClient {
         return collector.bestPrice();
     }
 
+    public void ensureStreamingPriceSubscription(Contract contract) {
+        if (contract == null || !ensureConnected()) {
+            return;
+        }
+
+        String key = subscriptionKey(contract);
+        synchronized (streamingLock) {
+            StreamingPriceSubscription existing = streamingSubscriptions.get(key);
+            if (existing != null && existing.isActive()) {
+                return;
+            }
+
+            StreamingPriceSubscription subscription = new StreamingPriceSubscription(contract);
+            controller.reqTopMktData(contract, "", false, false, subscription);
+            controller.reqRealTimeBars(contract, WhatToShow.TRADES, false, subscription);
+            streamingSubscriptions.put(key, subscription);
+            log.info("IB Gateway live stream subscribed for {}", describeContract(contract));
+        }
+    }
+
+    public Optional<BigDecimal> latestStreamingPrice(Contract contract) {
+        if (contract == null) {
+            return Optional.empty();
+        }
+        StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
+        return subscription == null ? Optional.empty() : subscription.bestPrice();
+    }
+
     public List<Bar> requestHistoricalBars(Contract contract,
                                            int duration,
                                            DurationUnit durationUnit,
@@ -305,11 +335,22 @@ public class IbGatewayNativeClient {
         controller = null;
         managedAccounts = List.of();
         if (current != null) {
+            streamingSubscriptions.values().forEach(subscription -> {
+                try {
+                    current.cancelTopMktData(subscription);
+                } catch (Exception ignored) {
+                }
+                try {
+                    current.cancelRealtimeBars(subscription);
+                } catch (Exception ignored) {
+                }
+            });
             try {
                 current.disconnect();
             } catch (Exception ignored) {
             }
         }
+        streamingSubscriptions.clear();
     }
 
     private void markReconnectCooldownLocked(String reason) {
@@ -325,7 +366,11 @@ public class IbGatewayNativeClient {
         try {
             boolean completed = latch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!completed) {
-                log.warn("IB Gateway {} request timed out.", label);
+                if ("market snapshot".equals(label)) {
+                    log.debug("IB Gateway {} request timed out.", label);
+                } else {
+                    log.warn("IB Gateway {} request timed out.", label);
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -336,12 +381,44 @@ public class IbGatewayNativeClient {
         return value -> { };
     }
 
+    private String subscriptionKey(Contract contract) {
+        int conid = contract.conid();
+        if (conid > 0) {
+            return "conid:" + conid;
+        }
+        return String.join("|",
+            nullSafe(contract.symbol()),
+            nullSafe(contract.exchange()),
+            nullSafe(contract.currency()),
+            nullSafe(contract.lastTradeDateOrContractMonth()),
+            nullSafe(contract.tradingClass()));
+    }
+
+    private String describeContract(Contract contract) {
+        if (contract == null) {
+            return "unknown-contract";
+        }
+        if (contract.conid() > 0) {
+            return contract.symbol() + " [" + contract.conid() + "]";
+        }
+        return contract.symbol() + "@" + contract.exchange();
+    }
+
+    private String nullSafe(String value) {
+        return value == null ? "" : value;
+    }
+
     private final class ConnectionHandler implements ApiController.IConnectionHandler {
         @Override
         public void connected() {
             connectedFuture.complete(null);
             reconnectBlockedUntil = Instant.EPOCH;
             lastConnectionFailure = "connected";
+            try {
+                controller.reqMktDataType(1);
+            } catch (Exception e) {
+                log.debug("Unable to request IB Gateway live market data type: {}", e.getMessage());
+            }
             log.info("IB Gateway native API connected on {}:{} with clientId={}",
                 properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId());
         }
@@ -440,6 +517,99 @@ public class IbGatewayNativeClient {
 
         private Optional<BigDecimal> bestPrice() {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+    }
+
+    private final class StreamingPriceSubscription implements ApiController.ITopMktDataHandler, ApiController.IRealTimeBarHandler {
+        private final Contract contract;
+        private volatile Double bestPrice;
+        private volatile Double bid;
+        private volatile Double ask;
+        private volatile boolean active = true;
+        private volatile boolean loggedFirstPrice = false;
+
+        private StreamingPriceSubscription(Contract contract) {
+            this.contract = contract;
+        }
+
+        @Override
+        public void tickPrice(TickType tickType, double price, TickAttrib attribs) {
+            if (price <= 0) return;
+
+            if (tickType == TickType.LAST || tickType == TickType.DELAYED_LAST) {
+                bestPrice = price;
+            } else if (tickType == TickType.BID || tickType == TickType.DELAYED_BID) {
+                bid = price;
+                if (bestPrice == null && ask != null && ask > 0) {
+                    bestPrice = (bid + ask) / 2.0;
+                }
+            } else if (tickType == TickType.ASK || tickType == TickType.DELAYED_ASK) {
+                ask = price;
+                if (bestPrice == null && bid != null && bid > 0) {
+                    bestPrice = (bid + ask) / 2.0;
+                }
+            } else if (bestPrice == null && (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE)) {
+                bestPrice = price;
+            }
+
+            if (bestPrice != null) {
+                logFirstPrice("tickPrice");
+            }
+        }
+
+        @Override
+        public void marketDataType(int marketDataType) {
+            active = true;
+            log.info("IB Gateway market data type {} for {}", marketDataType, describeContract(contract));
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            // no-op
+        }
+
+        @Override
+        public void tickString(TickType tickType, String value) {
+            // no-op
+        }
+
+        @Override
+        public void tickReqParams(int tickerId, double minTick, String bboExchange, int snapshotPermissions) {
+            // no-op
+        }
+
+        @Override
+        public void tickReqParamsProtoBuf(com.ib.client.protobuf.TickReqParamsProto.TickReqParams ignored) {
+            // no-op
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            // Streaming subscriptions should not complete, but IB may still emit this callback.
+        }
+
+        @Override
+        public void realtimeBar(com.ib.controller.Bar bar) {
+            if (bar == null || bar.close() <= 0) {
+                return;
+            }
+            bestPrice = bar.close();
+            logFirstPrice("realtimeBar");
+        }
+
+        private Optional<BigDecimal> bestPrice() {
+            return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+
+        private boolean isActive() {
+            return active;
+        }
+
+        private void logFirstPrice(String source) {
+            if (!loggedFirstPrice) {
+                loggedFirstPrice = true;
+                log.info("IB Gateway first live price for {} received via {}", describeContract(contract), source);
+            }
         }
     }
 }

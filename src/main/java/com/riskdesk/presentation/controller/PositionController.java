@@ -1,6 +1,11 @@
 package com.riskdesk.presentation.controller;
 
-import com.riskdesk.presentation.dto.*;
+import com.riskdesk.application.dto.ClosePositionCommand;
+import com.riskdesk.application.dto.CreatePositionCommand;
+import com.riskdesk.application.dto.PortfolioSummary;
+import com.riskdesk.application.dto.PositionView;
+import com.riskdesk.presentation.dto.ClosePositionRequest;
+import com.riskdesk.presentation.dto.CreatePositionRequest;
 import com.riskdesk.domain.model.Position;
 import com.riskdesk.application.service.PositionService;
 import jakarta.validation.Valid;
@@ -33,13 +38,21 @@ public class PositionController {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public PositionView openPosition(@Valid @RequestBody CreatePositionRequest request) {
-        Position pos = positionService.openPosition(request);
+        Position pos = positionService.openPosition(new CreatePositionCommand(
+            request.instrument(),
+            request.side(),
+            request.quantity(),
+            request.entryPrice(),
+            request.stopLoss(),
+            request.takeProfit(),
+            request.notes()
+        ));
         return PositionView.from(pos);
     }
 
     @PostMapping("/{id}/close")
     public PositionView closePosition(@PathVariable Long id, @Valid @RequestBody ClosePositionRequest request) {
-        Position pos = positionService.closePosition(id, request);
+        Position pos = positionService.closePosition(id, new ClosePositionCommand(request.exitPrice()));
         return PositionView.from(pos);
     }
 

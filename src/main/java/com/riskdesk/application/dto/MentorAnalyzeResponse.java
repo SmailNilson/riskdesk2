@@ -1,6 +1,8 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 import com.fasterxml.jackson.databind.JsonNode;
+
+import java.util.List;
 
 public record MentorAnalyzeResponse(
     Long auditId,
@@ -8,6 +10,6 @@ public record MentorAnalyzeResponse(
     JsonNode payload,
     MentorStructuredResponse analysis,
     String rawResponse,
-    java.util.List<MentorSimilarAudit> similarAudits
+    List<MentorSimilarAudit> similarAudits
 ) {
 }

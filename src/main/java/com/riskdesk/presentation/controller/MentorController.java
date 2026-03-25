@@ -1,10 +1,10 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorIntermarketService;
 import com.riskdesk.presentation.dto.MentorAnalyzeRequest;
-import com.riskdesk.presentation.dto.MentorAnalyzeResponse;
-import com.riskdesk.presentation.dto.MentorIntermarketSnapshot;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;

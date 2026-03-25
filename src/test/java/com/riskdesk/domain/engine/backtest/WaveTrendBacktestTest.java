@@ -1,8 +1,8 @@
 package com.riskdesk.domain.engine.backtest;
 
-import com.riskdesk.application.service.EntryFilterService;
-import com.riskdesk.application.service.HigherTimeframeLevelService;
-import com.riskdesk.application.service.MarketStructureService;
+import com.riskdesk.domain.engine.backtest.EntryFilterService;
+import com.riskdesk.domain.engine.backtest.HigherTimeframeLevelService;
+import com.riskdesk.domain.engine.backtest.MarketStructureService;
 import com.riskdesk.domain.engine.smc.MarketStructure;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;

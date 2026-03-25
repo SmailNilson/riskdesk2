@@ -113,7 +113,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 merged.putIfAbsent(candle.getTimestamp(), candle);
             }
 
-            log.info("IB Gateway historical backfill {} {} chunk {}/{} -> {} candles ({} .. {}), total={}",
+            log.debug("IB Gateway historical backfill {} {} chunk {}/{} -> {} candles ({} .. {}), total={}",
                 instrument, timeframe, chunkIndex + 1, MAX_BACKFILL_CHUNKS, candles.size(), oldest, newest, merged.size());
 
             if (previousOldest != null && !oldest.isBefore(previousOldest)) {
@@ -123,9 +123,18 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             endDateTime = oldest.minusSeconds(Math.max(stepSeconds, 1));
         }
 
-        return merged.values().stream()
+        List<Candle> mergedCandles = merged.values().stream()
             .sorted(Comparator.comparing(Candle::getTimestamp))
             .toList();
+        if (!mergedCandles.isEmpty()) {
+            log.info("IB Gateway historical backfill {} {} completed with {} candles ({} .. {})",
+                instrument,
+                timeframe,
+                mergedCandles.size(),
+                mergedCandles.get(0).getTimestamp(),
+                mergedCandles.get(mergedCandles.size() - 1).getTimestamp());
+        }
+        return mergedCandles;
     }
 
     private Candle toCandle(Instrument instrument, String timeframe, Bar bar) {

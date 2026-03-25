@@ -1,4 +1,4 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 import java.time.Instant;
 

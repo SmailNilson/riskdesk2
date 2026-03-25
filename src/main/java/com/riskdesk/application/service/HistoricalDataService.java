@@ -87,15 +87,15 @@ public class HistoricalDataService implements ApplicationRunner {
                     List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
                     candles = deduplicate(candles);
                     if (candles.isEmpty()) {
-                        log.warn("  {} {} : no candles returned (rate-limited or unavailable)", instrument, timeframe);
+                        log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
                     } else {
                         candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
                         candlePort.saveAll(candles);
                         totalSaved += candles.size();
-                        log.info("  {} {} : {} candles fetched", instrument, timeframe, candles.size());
+                        log.debug("HistoricalDataService [{}]: {} {} fetched {} candles.", context, instrument, timeframe, candles.size());
                     }
                 } catch (Exception e) {
-                    log.error("  {} {} : fetch failed — {}", instrument, timeframe, e.getMessage());
+                    log.debug("HistoricalDataService [{}]: {} {} fetch failed — {}", context, instrument, timeframe, e.getMessage());
                 }
             }
         }
@@ -130,7 +130,7 @@ public class HistoricalDataService implements ApplicationRunner {
             unique.put(key, candle);
         }
         if (unique.size() != candles.size()) {
-            log.warn("HistoricalDataService: removed {} duplicate candles before save.", candles.size() - unique.size());
+            log.debug("HistoricalDataService: removed {} duplicate candles before save.", candles.size() - unique.size());
         }
         return new ArrayList<>(unique.values());
     }

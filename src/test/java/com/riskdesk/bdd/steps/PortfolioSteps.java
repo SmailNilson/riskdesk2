@@ -1,7 +1,7 @@
 package com.riskdesk.bdd.steps;
 
-import com.riskdesk.presentation.dto.CreatePositionRequest;
-import com.riskdesk.presentation.dto.PortfolioSummary;
+import com.riskdesk.application.dto.CreatePositionCommand;
+import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.model.*;
 import com.riskdesk.application.service.PositionService;
 import io.cucumber.datatable.DataTable;
@@ -26,7 +26,7 @@ public class PortfolioSteps {
         // Cleanup is handled by PositionSteps @Before
         List<Map<String, String>> rows = dataTable.asMaps(String.class, String.class);
         for (Map<String, String> row : rows) {
-            CreatePositionRequest req = new CreatePositionRequest(
+            CreatePositionCommand req = new CreatePositionCommand(
                     Instrument.valueOf(row.get("instrument")),
                     Side.valueOf(row.get("side")),
                     Integer.parseInt(row.get("quantity")),

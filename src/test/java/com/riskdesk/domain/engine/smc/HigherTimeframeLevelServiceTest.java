@@ -1,6 +1,7 @@
 package com.riskdesk.domain.engine.smc;
 
-import com.riskdesk.application.service.HigherTimeframeLevelService;
+import com.riskdesk.domain.engine.backtest.HigherTimeframeLevelService;
+import com.riskdesk.domain.engine.backtest.MarketStructureService;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -13,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class HigherTimeframeLevelServiceTest {
 
     private final HigherTimeframeLevelService service =
-        new HigherTimeframeLevelService(new com.riskdesk.application.service.MarketStructureService());
+        new HigherTimeframeLevelService(new MarketStructureService());
 
     @Test
     void nearestSupport_prefersConfirmedLevelBelowClose() {

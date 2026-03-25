@@ -2,9 +2,9 @@ package com.riskdesk.domain.alert.service;
 
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot.OrderBlockZone;
 import com.riskdesk.domain.alert.model.AlertSeverity;
-import com.riskdesk.presentation.dto.IndicatorSnapshot;
-import com.riskdesk.presentation.dto.IndicatorSnapshot.OrderBlockView;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
 
@@ -22,49 +22,29 @@ class IndicatorAlertEvaluatorTest {
      * Helper to construct an IndicatorSnapshot with defaults for most fields.
      * Only the fields relevant to a specific test need non-null values.
      */
-    private static IndicatorSnapshot makeSnapshot(
+    private static IndicatorAlertSnapshot makeSnapshot(
             String emaCrossover,
             BigDecimal rsi, String rsiSignal,
             String macdCrossover,
             String lastBreakType,
             BigDecimal vwap,
-            List<OrderBlockView> activeOrderBlocks) {
-        return new IndicatorSnapshot(
-            "MCL", "10m",
-            // EMAs
-            null, null, null, emaCrossover,
-            // RSI
+            List<OrderBlockZone> activeOrderBlocks) {
+        return new IndicatorAlertSnapshot(
+            emaCrossover,
             rsi, rsiSignal,
-            // MACD
-            null, null, null, macdCrossover,
-            // Supertrend
-            null, false,
-            // VWAP
-            vwap, null, null,
-            // Chaikin
-            null, null,
-            // Bollinger Bands
-            null, null, null, null, null,
-            // BBTrend
-            null, false, null,
-            // Delta Flow Profile
-            null, null, null, null,
-            // WaveTrend
-            null, null, null, null, null,
-            // SMC Structure
-            null, null, null, null, null, lastBreakType,
-            // SMC timestamps
-            null, null, null, null,
-            // Order Blocks
-            activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
-            Collections.emptyList(),
-            Collections.emptyList()
+            macdCrossover,
+            lastBreakType,
+            null,
+            null,
+            null,
+            vwap,
+            activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks
         );
     }
 
     @Test
     void goldenCross_generatesEmaInfoAlert() {
-        IndicatorSnapshot snap = makeSnapshot("GOLDEN_CROSS", null, null, null, null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot("GOLDEN_CROSS", null, null, null, null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
@@ -78,7 +58,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void deathCross_generatesEmaWarningAlert() {
-        IndicatorSnapshot snap = makeSnapshot("DEATH_CROSS", null, null, null, null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot("DEATH_CROSS", null, null, null, null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
@@ -91,7 +71,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void rsiOversold_generatesRsiInfoAlert() {
-        IndicatorSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.E6, "1h", snap);
 
@@ -105,7 +85,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void rsiOverbought_generatesRsiInfoAlert() {
-        IndicatorSnapshot snap = makeSnapshot(null, new BigDecimal("78.5"), "OVERBOUGHT", null, null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("78.5"), "OVERBOUGHT", null, null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MNQ, "10m", snap);
 
@@ -118,7 +98,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void macdBullishCross_generatesMacdInfoAlert() {
-        IndicatorSnapshot snap = makeSnapshot(null, null, null, "BULLISH_CROSS", null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, "BULLISH_CROSS", null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MGC, "10m", snap);
 
@@ -131,7 +111,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void bosDetected_generatesSmcInfoAlert() {
-        IndicatorSnapshot snap = makeSnapshot(null, null, null, null, "BOS_UP", null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, null, "BOS_UP", null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
 
@@ -144,7 +124,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void chochDetected_generatesSmcWarningAlert() {
-        IndicatorSnapshot snap = makeSnapshot(null, null, null, null, "CHOCH_DOWN", null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, null, "CHOCH_DOWN", null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
@@ -164,7 +144,7 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void noSignals_returnsEmptyList() {
-        IndicatorSnapshot snap = makeSnapshot(null, null, null, null, null, null, null);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, null, null, null, null);
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
@@ -173,8 +153,8 @@ class IndicatorAlertEvaluatorTest {
 
     @Test
     void orderBlockTouch_generatesOrderBlockAlert() {
-        OrderBlockView ob = new OrderBlockView("BULLISH", new BigDecimal("62.50"), new BigDecimal("62.00"), new BigDecimal("62.25"), 0L);
-        IndicatorSnapshot snap = makeSnapshot(null, null, null, null, null, new BigDecimal("62.30"), List.of(ob));
+        OrderBlockZone ob = new OrderBlockZone("BULLISH", new BigDecimal("62.50"), new BigDecimal("62.00"));
+        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, null, null, new BigDecimal("62.30"), List.of(ob));
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 

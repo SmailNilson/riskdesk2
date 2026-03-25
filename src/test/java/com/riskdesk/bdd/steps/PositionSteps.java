@@ -1,7 +1,7 @@
 package com.riskdesk.bdd.steps;
 
-import com.riskdesk.presentation.dto.CreatePositionRequest;
-import com.riskdesk.presentation.dto.ClosePositionRequest;
+import com.riskdesk.application.dto.ClosePositionCommand;
+import com.riskdesk.application.dto.CreatePositionCommand;
 import com.riskdesk.domain.model.*;
 import com.riskdesk.application.service.PositionService;
 import com.riskdesk.domain.trading.port.PositionRepositoryPort;
@@ -30,7 +30,7 @@ public class PositionSteps {
 
     @When("I open a {word} position on {word} with {int} contract(s) at {double}")
     public void openPosition(String side, String inst, int qty, double price) {
-        CreatePositionRequest req = new CreatePositionRequest(
+        CreatePositionCommand req = new CreatePositionCommand(
                 Instrument.valueOf(inst), Side.valueOf(side), qty,
                 new BigDecimal(String.valueOf(price)), null, null, null);
         lastPosition = positionService.openPosition(req);
@@ -64,7 +64,7 @@ public class PositionSteps {
 
     @Given("an open {word} position on {word} at {double} with {int} contracts")
     public void givenOpenPosition(String side, String inst, double price, int qty) {
-        CreatePositionRequest req = new CreatePositionRequest(
+        CreatePositionCommand req = new CreatePositionCommand(
                 Instrument.valueOf(inst), Side.valueOf(side), qty,
                 new BigDecimal(String.valueOf(price)), null, null, null);
         lastPosition = positionService.openPosition(req);
@@ -73,7 +73,7 @@ public class PositionSteps {
     @When("I close the position at {double}")
     public void closePosition(double exitPrice) {
         lastPosition = positionService.closePosition(lastPosition.getId(),
-                new ClosePositionRequest(new BigDecimal(String.valueOf(exitPrice))));
+                new ClosePositionCommand(new BigDecimal(String.valueOf(exitPrice))));
     }
 
     @When("the market price updates to {double} for {word}")

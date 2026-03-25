@@ -1,10 +1,11 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
-import com.riskdesk.presentation.dto.IndicatorSnapshot;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
@@ -73,7 +74,7 @@ public class AlertService {
         for (String timeframe : List.of("10m", "1h")) {
             try {
                 IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, timeframe);
-                alerts.addAll(indicatorAlertEvaluator.evaluate(instrument, timeframe, snap));
+                alerts.addAll(indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap)));
             } catch (Exception e) {
                 log.debug("Indicator evaluation error for {} {}: {}", instrument, timeframe, e.getMessage());
             }
@@ -136,5 +137,22 @@ public class AlertService {
         map.put("instrument", alert.instrument());
         map.put("timestamp",  Instant.now().toString());
         return map;
+    }
+
+    private IndicatorAlertSnapshot toAlertSnapshot(IndicatorSnapshot snapshot) {
+        return new IndicatorAlertSnapshot(
+            snapshot.emaCrossover(),
+            snapshot.rsi(),
+            snapshot.rsiSignal(),
+            snapshot.macdCrossover(),
+            snapshot.lastBreakType(),
+            snapshot.wtWt1(),
+            snapshot.wtCrossover(),
+            snapshot.wtSignal(),
+            snapshot.vwap(),
+            snapshot.activeOrderBlocks() == null ? List.of() : snapshot.activeOrderBlocks().stream()
+                .map(block -> new IndicatorAlertSnapshot.OrderBlockZone(block.type(), block.high(), block.low()))
+                .toList()
+        );
     }
 }

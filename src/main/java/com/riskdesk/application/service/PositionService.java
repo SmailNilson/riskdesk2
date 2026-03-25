@@ -1,6 +1,10 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.presentation.dto.*;
+import com.riskdesk.application.dto.ClosePositionCommand;
+import com.riskdesk.application.dto.CreatePositionCommand;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.PortfolioSummary;
+import com.riskdesk.application.dto.PositionView;
 import com.riskdesk.domain.model.*;
 import com.riskdesk.domain.shared.vo.Money;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
@@ -37,7 +41,7 @@ public class PositionService {
     }
 
     @Transactional
-    public Position openPosition(CreatePositionRequest req) {
+    public Position openPosition(CreatePositionCommand req) {
         Position pos = new Position(req.instrument(), req.side(), req.quantity(), req.entryPrice());
         pos.setStopLoss(req.stopLoss());
         pos.setTakeProfit(req.takeProfit());
@@ -52,7 +56,7 @@ public class PositionService {
     }
 
     @Transactional
-    public Position closePosition(Long id, ClosePositionRequest req) {
+    public Position closePosition(Long id, ClosePositionCommand req) {
         Position pos = positionPort.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("Position not found: " + id));
         if (!pos.isOpen()) {

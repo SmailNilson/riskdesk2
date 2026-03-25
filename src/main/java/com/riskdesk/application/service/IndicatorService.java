@@ -1,7 +1,7 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.presentation.dto.IndicatorSnapshot;
-import com.riskdesk.presentation.dto.IndicatorSeriesSnapshot;
+import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
+import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.engine.indicators.*;
 import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;

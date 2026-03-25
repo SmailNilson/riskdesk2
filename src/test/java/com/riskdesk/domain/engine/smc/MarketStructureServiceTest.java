@@ -1,6 +1,6 @@
 package com.riskdesk.domain.engine.smc;
 
-import com.riskdesk.application.service.MarketStructureService;
+import com.riskdesk.domain.engine.backtest.MarketStructureService;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;

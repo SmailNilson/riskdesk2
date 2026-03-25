@@ -1,0 +1,62 @@
+package com.riskdesk.application.dto;
+
+import java.math.BigDecimal;
+import java.util.List;
+
+public record IndicatorSnapshot(
+    String instrument,
+    String timeframe,
+    BigDecimal ema9,
+    BigDecimal ema50,
+    BigDecimal ema200,
+    String emaCrossover,
+    BigDecimal rsi,
+    String rsiSignal,
+    BigDecimal macdLine,
+    BigDecimal macdSignal,
+    BigDecimal macdHistogram,
+    String macdCrossover,
+    BigDecimal supertrendValue,
+    boolean supertrendBullish,
+    BigDecimal vwap,
+    BigDecimal vwapUpperBand,
+    BigDecimal vwapLowerBand,
+    BigDecimal chaikinOscillator,
+    BigDecimal cmf,
+    BigDecimal bbMiddle,
+    BigDecimal bbUpper,
+    BigDecimal bbLower,
+    BigDecimal bbWidth,
+    BigDecimal bbPct,
+    BigDecimal bbTrendValue,
+    boolean bbTrendExpanding,
+    String bbTrendSignal,
+    BigDecimal deltaFlow,
+    BigDecimal cumulativeDelta,
+    BigDecimal buyRatio,
+    String deltaFlowBias,
+    BigDecimal wtWt1,
+    BigDecimal wtWt2,
+    BigDecimal wtDiff,
+    String wtCrossover,
+    String wtSignal,
+    String marketStructureTrend,
+    BigDecimal strongHigh,
+    BigDecimal strongLow,
+    BigDecimal weakHigh,
+    BigDecimal weakLow,
+    String lastBreakType,
+    Long strongHighTime,
+    Long strongLowTime,
+    Long weakHighTime,
+    Long weakLowTime,
+    List<OrderBlockView> activeOrderBlocks,
+    List<FairValueGapView> activeFairValueGaps,
+    List<StructureBreakView> recentBreaks
+) {
+    public record OrderBlockView(String type, BigDecimal high, BigDecimal low, BigDecimal mid, long startTime) {}
+
+    public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime) {}
+
+    public record StructureBreakView(String type, String trend, BigDecimal level, long barTime) {}
+}

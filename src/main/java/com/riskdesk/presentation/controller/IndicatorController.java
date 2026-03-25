@@ -2,8 +2,8 @@ package com.riskdesk.presentation.controller;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
-import com.riskdesk.presentation.dto.IndicatorSnapshot;
-import com.riskdesk.presentation.dto.IndicatorSeriesSnapshot;
+import com.riskdesk.application.dto.IndicatorSnapshot;
+import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.application.service.IndicatorService;
 import org.springframework.validation.annotation.Validated;

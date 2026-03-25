@@ -1,16 +1,16 @@
-package com.riskdesk.presentation.dto;
+package com.riskdesk.application.dto;
 
 import java.math.BigDecimal;
 import java.util.List;
 
 public record IndicatorSeriesSnapshot(
-        String instrument,
-        String timeframe,
-        List<LinePoint> ema9,
-        List<LinePoint> ema50,
-        List<LinePoint> ema200,
-        List<BollingerPoint> bollingerBands,
-        List<WaveTrendPoint> waveTrend
+    String instrument,
+    String timeframe,
+    List<LinePoint> ema9,
+    List<LinePoint> ema50,
+    List<LinePoint> ema200,
+    List<BollingerPoint> bollingerBands,
+    List<WaveTrendPoint> waveTrend
 ) {
     public record LinePoint(long time, BigDecimal value) {}
 

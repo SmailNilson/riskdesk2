@@ -1,8 +1,5 @@
 package com.riskdesk.domain.engine.backtest;
 
-import com.riskdesk.application.service.EntryFilterService;
-import com.riskdesk.application.service.HigherTimeframeLevelService;
-import com.riskdesk.application.service.MarketStructureService;
 import com.riskdesk.domain.model.Candle;
 
 import java.time.Instant;

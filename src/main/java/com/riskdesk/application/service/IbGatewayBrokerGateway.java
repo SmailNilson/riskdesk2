@@ -1,14 +1,14 @@
 package com.riskdesk.application.service;
 
 import com.ib.controller.Position;
+import com.riskdesk.application.dto.IbkrAccountView;
+import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayAccountSnapshot;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
-import com.riskdesk.presentation.dto.IbkrAuthStatusView;
-import com.riskdesk.presentation.dto.IbkrAccountView;
-import com.riskdesk.presentation.dto.IbkrPortfolioSnapshot;
-import com.riskdesk.presentation.dto.IbkrPositionView;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;

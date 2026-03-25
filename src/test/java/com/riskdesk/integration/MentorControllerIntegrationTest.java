@@ -1,11 +1,11 @@
 package com.riskdesk.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.dto.MentorSimilarAudit;
+import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.application.service.MentorAnalysisService;
-import com.riskdesk.presentation.dto.MentorAnalyzeResponse;
-import com.riskdesk.presentation.dto.MentorProposedTradePlan;
-import com.riskdesk.presentation.dto.MentorSimilarAudit;
-import com.riskdesk.presentation.dto.MentorStructuredResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;

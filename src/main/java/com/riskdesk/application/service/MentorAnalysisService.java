@@ -2,13 +2,12 @@ package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorSimilarAudit;
+import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
-import com.riskdesk.presentation.dto.MentorAnalyzeResponse;
-import com.riskdesk.presentation.dto.MentorProposedTradePlan;
-import com.riskdesk.presentation.dto.MentorSimilarAudit;
-import com.riskdesk.presentation.dto.MentorStructuredResponse;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
