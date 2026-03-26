@@ -9,6 +9,8 @@ export default function BacktestPanel() {
   const [original, setOriginal] = useState<BacktestResult | null>(null);
   const [filtered, setFiltered] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   const [showTrades, setShowTrades] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [quantity, setQuantity] = useState(2);
@@ -93,6 +95,21 @@ export default function BacktestPanel() {
     }
   };
 
+  const refreshDb = async () => {
+    setRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const res = await api.refreshDb();
+      setRefreshMsg(res.status === 'ok' ? 'DB updated' : res.message);
+    } catch (e) {
+      setRefreshMsg('Error');
+      console.error('DB refresh failed:', e);
+    } finally {
+      setRefreshing(false);
+      setTimeout(() => setRefreshMsg(null), 4000);
+    }
+  };
+
   runRef.current = run;
 
   useEffect(() => {
@@ -172,6 +189,19 @@ export default function BacktestPanel() {
             </button>
           ))}
           <span className="text-zinc-600 text-[8px]">({dataSources[dataSource].desc})</span>
+          <button
+            onClick={refreshing ? undefined : refreshDb}
+            disabled={refreshing}
+            className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-colors ml-1 ${
+              refreshing
+                ? 'bg-zinc-700 text-zinc-500 cursor-wait'
+                : refreshMsg
+                ? 'bg-emerald-700 text-emerald-100'
+                : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+            }`}
+          >
+            {refreshing ? '⟳ Updating…' : refreshMsg ?? '⟳ Update DB'}
+          </button>
         </div>
         <div className="w-px h-4 bg-zinc-700" />
         <span className="text-[9px] font-semibold text-zinc-400">MNQ <span className="text-zinc-600">($2/pt)</span></span>

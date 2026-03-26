@@ -1,5 +1,6 @@
 package com.riskdesk.domain.model;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 
 public class MentorAudit {
@@ -17,6 +18,10 @@ public class MentorAudit {
     private boolean success;
     private String errorMessage;
     private String semanticText;
+    private TradeSimulationStatus simulationStatus;
+    private Instant activationTime;
+    private Instant resolutionTime;
+    private BigDecimal maxDrawdownPoints;
 
     public Long getId() {
         return id;
@@ -121,4 +126,13 @@ public class MentorAudit {
     public void setSemanticText(String semanticText) {
         this.semanticText = semanticText;
     }
+
+    public TradeSimulationStatus getSimulationStatus() { return simulationStatus; }
+    public void setSimulationStatus(TradeSimulationStatus simulationStatus) { this.simulationStatus = simulationStatus; }
+    public Instant getActivationTime() { return activationTime; }
+    public void setActivationTime(Instant activationTime) { this.activationTime = activationTime; }
+    public Instant getResolutionTime() { return resolutionTime; }
+    public void setResolutionTime(Instant resolutionTime) { this.resolutionTime = resolutionTime; }
+    public BigDecimal getMaxDrawdownPoints() { return maxDrawdownPoints; }
+    public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) { this.maxDrawdownPoints = maxDrawdownPoints; }
 }

@@ -23,6 +23,10 @@ final class MentorAuditEntityMapper {
         entity.setSuccess(audit.isSuccess());
         entity.setErrorMessage(audit.getErrorMessage());
         entity.setSemanticText(audit.getSemanticText());
+        entity.setSimulationStatus(audit.getSimulationStatus());
+        entity.setActivationTime(audit.getActivationTime());
+        entity.setResolutionTime(audit.getResolutionTime());
+        entity.setMaxDrawdownPoints(audit.getMaxDrawdownPoints());
         return entity;
     }
 
@@ -41,6 +45,10 @@ final class MentorAuditEntityMapper {
         audit.setSuccess(entity.isSuccess());
         audit.setErrorMessage(entity.getErrorMessage());
         audit.setSemanticText(entity.getSemanticText());
+        audit.setSimulationStatus(entity.getSimulationStatus());
+        audit.setActivationTime(entity.getActivationTime());
+        audit.setResolutionTime(entity.getResolutionTime());
+        audit.setMaxDrawdownPoints(entity.getMaxDrawdownPoints());
         return audit;
     }
 }

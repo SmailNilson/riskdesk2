@@ -7,6 +7,7 @@ import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.springframework.stereotype.Service;
 
@@ -102,6 +103,7 @@ public class MentorAnalysisService {
             audit.setVerdict(structured.verdict());
             audit.setSuccess(true);
             audit.setSemanticText(buildSemanticText(payload, structured));
+            audit.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
             MentorAudit saved = mentorAuditRepository.save(audit);
             CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved));
             return saved.getId();

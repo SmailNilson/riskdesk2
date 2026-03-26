@@ -53,7 +53,11 @@ public class MentorManualReviewService {
             audit.getVerdict(),
             audit.isSuccess(),
             audit.getErrorMessage(),
-            response
+            response,
+            audit.getSimulationStatus(),
+            audit.getActivationTime() == null ? null : audit.getActivationTime().toString(),
+            audit.getResolutionTime() == null ? null : audit.getResolutionTime().toString(),
+            audit.getMaxDrawdownPoints() == null ? null : audit.getMaxDrawdownPoints().doubleValue()
         );
     }
 

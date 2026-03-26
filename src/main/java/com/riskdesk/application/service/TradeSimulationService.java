@@ -4,13 +4,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -27,15 +31,24 @@ public class TradeSimulationService {
     private static final String SIMULATION_TIMEFRAME = "1m";
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
+    private final MentorAuditRepositoryPort auditRepository;
     private final CandleRepositoryPort candleRepositoryPort;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
+    private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
+                                  MentorAuditRepositoryPort auditRepository,
                                   CandleRepositoryPort candleRepositoryPort,
-                                  ObjectMapper objectMapper) {
+                                  ObjectMapper objectMapper,
+                                  ObjectProvider<MentorSignalReviewService> reviewServiceProvider,
+                                  ObjectProvider<SimpMessagingTemplate> messagingProvider) {
         this.reviewRepository = reviewRepository;
+        this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
         this.objectMapper = objectMapper;
+        this.reviewServiceProvider = reviewServiceProvider;
+        this.messagingProvider = messagingProvider;
     }
 
     public SimulationResult evaluateTradeOutcome(MentorSignalReviewRecord review, List<Candle> subsequentCandles) {
@@ -127,10 +140,121 @@ public class TradeSimulationService {
                     review.setResolutionTime(result.resolutionTime());
                     review.setMaxDrawdownPoints(result.maxDrawdownPoints());
                     reviewRepository.save(review);
+                    pushSimulationUpdate(review);
                 }
             } catch (Exception e) {
                 log.debug("Trade simulation skipped for review {}: {}", review.getId(), e.getMessage());
             }
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
+    public void refreshPendingAuditSimulations() {
+        List<MentorAudit> candidates = auditRepository.findBySimulationStatuses(List.of(
+            TradeSimulationStatus.PENDING_ENTRY,
+            TradeSimulationStatus.ACTIVE
+        ));
+
+        for (MentorAudit audit : candidates) {
+            try {
+                if (audit.getInstrument() == null) continue;
+                Instrument instrument = Instrument.valueOf(audit.getInstrument());
+                Instant from = audit.getActivationTime() != null ? audit.getActivationTime() : audit.getCreatedAt();
+                List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
+                if (candles.isEmpty()) continue;
+
+                SimulationResult result = evaluateAuditOutcome(audit, candles);
+                if (hasAuditSimulationChanged(audit, result)) {
+                    audit.setSimulationStatus(result.status());
+                    audit.setActivationTime(result.activationTime());
+                    audit.setResolutionTime(result.resolutionTime());
+                    audit.setMaxDrawdownPoints(result.maxDrawdownPoints());
+                    auditRepository.save(audit);
+                }
+            } catch (Exception e) {
+                log.debug("Audit simulation skipped for audit {}: {}", audit.getId(), e.getMessage());
+            }
+        }
+    }
+
+    public SimulationResult evaluateAuditOutcome(MentorAudit audit, List<Candle> subsequentCandles) {
+        TradePlan plan = extractPlanFromAudit(audit);
+        if (plan == null) {
+            return new SimulationResult(
+                TradeSimulationStatus.CANCELLED,
+                audit.getActivationTime(),
+                audit.getResolutionTime(),
+                zero(audit.getMaxDrawdownPoints())
+            );
+        }
+
+        List<Candle> orderedCandles = subsequentCandles.stream()
+            .sorted(Comparator.comparing(Candle::getTimestamp))
+            .toList();
+
+        TradeSimulationStatus currentStatus = audit.getSimulationStatus() == null
+            ? TradeSimulationStatus.PENDING_ENTRY
+            : audit.getSimulationStatus();
+        Instant activationTime = audit.getActivationTime();
+        BigDecimal maxDrawdown = zero(audit.getMaxDrawdownPoints());
+        boolean active = currentStatus == TradeSimulationStatus.ACTIVE;
+
+        for (Candle candle : orderedCandles) {
+            if (!active) {
+                if (isMissed(plan, candle)) {
+                    return new SimulationResult(TradeSimulationStatus.MISSED, null, candle.getTimestamp(), maxDrawdown);
+                }
+                if (touchesEntry(plan, candle)) {
+                    active = true;
+                    activationTime = candle.getTimestamp();
+                    maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
+                    if (touchesStopAndTarget(plan, candle)) {
+                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                    }
+                    if (touchesStop(plan, candle)) {
+                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                    }
+                    if (touchesTarget(plan, candle)) {
+                        return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+                    }
+                }
+                continue;
+            }
+            maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
+            if (touchesStopAndTarget(plan, candle)) {
+                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+            }
+            if (touchesStop(plan, candle)) {
+                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+            }
+            if (touchesTarget(plan, candle)) {
+                return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+            }
+        }
+
+        return new SimulationResult(
+            active ? TradeSimulationStatus.ACTIVE : TradeSimulationStatus.PENDING_ENTRY,
+            activationTime, null, maxDrawdown
+        );
+    }
+
+    private boolean hasAuditSimulationChanged(MentorAudit audit, SimulationResult result) {
+        return audit.getSimulationStatus() != result.status()
+            || !sameInstant(audit.getActivationTime(), result.activationTime())
+            || !sameInstant(audit.getResolutionTime(), result.resolutionTime())
+            || zero(audit.getMaxDrawdownPoints()).compareTo(zero(result.maxDrawdownPoints())) != 0;
+    }
+
+    private void pushSimulationUpdate(MentorSignalReviewRecord review) {
+        try {
+            SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
+            MentorSignalReviewService reviewService = reviewServiceProvider.getIfAvailable();
+            if (messaging != null && reviewService != null) {
+                messaging.convertAndSend("/topic/mentor-alerts", reviewService.toDto(review));
+                log.debug("Pushed simulation update for review {} → {}", review.getId(), review.getSimulationStatus());
+            }
+        } catch (Exception e) {
+            log.debug("Could not push simulation update for review {}: {}", review.getId(), e.getMessage());
         }
     }
 
@@ -152,12 +276,20 @@ public class TradeSimulationService {
     }
 
     private TradePlan extractPlan(MentorSignalReviewRecord review) {
-        if (review.getAnalysisJson() == null || review.getAnalysisJson().isBlank()) {
+        return extractPlanFromJson(review.getAnalysisJson(), review.getAction());
+    }
+
+    private TradePlan extractPlanFromAudit(MentorAudit audit) {
+        return extractPlanFromJson(audit.getResponseJson(), audit.getAction());
+    }
+
+    private TradePlan extractPlanFromJson(String analysisJson, String action) {
+        if (analysisJson == null || analysisJson.isBlank()) {
             return null;
         }
 
         try {
-            MentorAnalyzeResponse response = objectMapper.readValue(review.getAnalysisJson(), MentorAnalyzeResponse.class);
+            MentorAnalyzeResponse response = objectMapper.readValue(analysisJson, MentorAnalyzeResponse.class);
             if (response.analysis() == null || response.analysis().proposedTradePlan() == null) {
                 return null;
             }
@@ -165,11 +297,11 @@ public class TradeSimulationService {
             if (proposedTradePlan.entryPrice() == null
                 || proposedTradePlan.stopLoss() == null
                 || proposedTradePlan.takeProfit() == null
-                || review.getAction() == null) {
+                || action == null) {
                 return null;
             }
             return new TradePlan(
-                "LONG".equalsIgnoreCase(review.getAction()),
+                "LONG".equalsIgnoreCase(action),
                 BigDecimal.valueOf(proposedTradePlan.entryPrice()),
                 BigDecimal.valueOf(proposedTradePlan.stopLoss()),
                 BigDecimal.valueOf(proposedTradePlan.takeProfit())

@@ -461,6 +461,7 @@ export const api = {
     get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
   toggleAutoAnalysis: () =>
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
+  refreshDb: () => post<{ status: string; message: string }>('/api/backtest/refresh-db', {}),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
     n1?: number; n2?: number; nsc?: number; nsv?: number; qty?: number; capital?: number; pointValue?: number;

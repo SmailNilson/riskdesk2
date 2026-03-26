@@ -1,5 +1,7 @@
 package com.riskdesk.application.dto;
 
+import com.riskdesk.domain.model.TradeSimulationStatus;
+
 public record MentorManualReview(
     Long auditId,
     String sourceType,
@@ -11,6 +13,10 @@ public record MentorManualReview(
     String verdict,
     boolean success,
     String errorMessage,
-    MentorAnalyzeResponse response
+    MentorAnalyzeResponse response,
+    TradeSimulationStatus simulationStatus,
+    String activationTime,
+    String resolutionTime,
+    Double maxDrawdownPoints
 ) {
 }

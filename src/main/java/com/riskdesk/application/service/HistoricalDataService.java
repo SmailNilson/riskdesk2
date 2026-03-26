@@ -101,6 +101,15 @@ public class HistoricalDataService implements ApplicationRunner {
         return savedByTimeframe;
     }
 
+    /** Trigger a manual full refresh asynchronously. Returns immediately. */
+    public Map<String, Object> refreshAll() {
+        if (!enabled) {
+            return Map.of("status", "disabled", "message", "Historical data fetch is disabled.");
+        }
+        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual"));
+        return Map.of("status", "ok", "message", "Database refresh started in background.");
+    }
+
     // -------------------------------------------------------------------------
 
     private void tryFetchAndReplace(String context) {

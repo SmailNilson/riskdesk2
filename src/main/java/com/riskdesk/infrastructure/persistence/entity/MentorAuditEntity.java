@@ -1,12 +1,16 @@
 package com.riskdesk.infrastructure.persistence.entity;
 
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 
 @Entity
@@ -53,6 +57,16 @@ public class MentorAuditEntity {
     @Column(columnDefinition = "TEXT")
     private String semanticText;
 
+    @Enumerated(EnumType.STRING)
+    @Column(length = 32)
+    private TradeSimulationStatus simulationStatus;
+
+    private Instant activationTime;
+    private Instant resolutionTime;
+
+    @Column(precision = 18, scale = 6)
+    private BigDecimal maxDrawdownPoints;
+
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getSourceRef() { return sourceRef; }
@@ -79,4 +93,12 @@ public class MentorAuditEntity {
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public String getSemanticText() { return semanticText; }
     public void setSemanticText(String semanticText) { this.semanticText = semanticText; }
+    public TradeSimulationStatus getSimulationStatus() { return simulationStatus; }
+    public void setSimulationStatus(TradeSimulationStatus simulationStatus) { this.simulationStatus = simulationStatus; }
+    public Instant getActivationTime() { return activationTime; }
+    public void setActivationTime(Instant activationTime) { this.activationTime = activationTime; }
+    public Instant getResolutionTime() { return resolutionTime; }
+    public void setResolutionTime(Instant resolutionTime) { this.resolutionTime = resolutionTime; }
+    public BigDecimal getMaxDrawdownPoints() { return maxDrawdownPoints; }
+    public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) { this.maxDrawdownPoints = maxDrawdownPoints; }
 }

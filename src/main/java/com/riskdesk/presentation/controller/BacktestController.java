@@ -2,6 +2,7 @@ package com.riskdesk.presentation.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.service.HistoricalDataService;
 import com.riskdesk.application.service.WaveTrendSignalScanner;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.engine.backtest.BacktestDataInspector;
@@ -38,14 +39,17 @@ public class BacktestController {
     private final CandleRepositoryPort candlePort;
     private final ObjectMapper objectMapper;
     private final WaveTrendSignalScanner signalScanner;
+    private final HistoricalDataService historicalDataService;
     private final MarketStructureService marketStructureService;
     private final HigherTimeframeLevelService higherTimeframeLevelService;
 
     public BacktestController(CandleRepositoryPort candlePort, ObjectMapper objectMapper,
-                              WaveTrendSignalScanner signalScanner) {
+                              WaveTrendSignalScanner signalScanner,
+                              HistoricalDataService historicalDataService) {
         this.candlePort = candlePort;
         this.objectMapper = objectMapper;
         this.signalScanner = signalScanner;
+        this.historicalDataService = historicalDataService;
         this.marketStructureService = new MarketStructureService();
         this.higherTimeframeLevelService = new HigherTimeframeLevelService(marketStructureService);
     }
@@ -54,6 +58,11 @@ public class BacktestController {
     public Map<String, String> triggerScan() {
         signalScanner.scanNow();
         return Map.of("status", "scan completed — check alerts");
+    }
+
+    @PostMapping("/refresh-db")
+    public Map<String, Object> refreshDatabase() {
+        return historicalDataService.refreshAll();
     }
 
     @GetMapping("/import-history")

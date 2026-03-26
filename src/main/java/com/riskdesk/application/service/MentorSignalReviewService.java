@@ -291,7 +291,7 @@ public class MentorSignalReviewService {
         }
     }
 
-    private MentorSignalReview toDto(MentorSignalReviewRecord review) {
+    public MentorSignalReview toDto(MentorSignalReviewRecord review) {
         MentorAnalyzeResponse analysis = null;
         if (review.getAnalysisJson() != null && !review.getAnalysisJson().isBlank()) {
             try {

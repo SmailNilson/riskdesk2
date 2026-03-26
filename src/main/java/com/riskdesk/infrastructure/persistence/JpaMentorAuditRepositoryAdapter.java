@@ -2,6 +2,7 @@ package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
@@ -30,6 +31,13 @@ public class JpaMentorAuditRepositoryAdapter implements MentorAuditRepositoryPor
     @Override
     public List<MentorAudit> findRecentBySourceRefPrefix(String prefix, int limit) {
         return repository.findBySourceRefStartingWithOrderByCreatedAtDesc(prefix, PageRequest.of(0, limit)).stream()
+            .map(MentorAuditEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
+    public List<MentorAudit> findBySimulationStatuses(List<TradeSimulationStatus> statuses) {
+        return repository.findPendingSimulations(statuses).stream()
             .map(MentorAuditEntityMapper::toDomain)
             .toList();
     }
