@@ -221,7 +221,13 @@ export default function MentorPanel({
         <div className="space-y-3 rounded border border-zinc-800 bg-zinc-950/50 p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="text-[10px] text-zinc-500">Type: Manual Mentor Review · Model: {result.model}</div>
-            <div className="text-[10px] text-zinc-500">Audit #{result.auditId ?? 'n/a'}</div>
+            <button
+              onClick={() => { setResult(null); setSelectedManualAuditId(null); }}
+              className="rounded border border-zinc-700 bg-zinc-900/60 px-2 py-1 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+              title="Fermer cet audit"
+            >
+              Audit #{result.auditId ?? 'n/a'} ✕
+            </button>
           </div>
 
           <Section title="Analyse Technique Rapide">
@@ -333,9 +339,14 @@ export default function MentorPanel({
                   <button
                     key={review.auditId}
                     onClick={() => {
-                      setSelectedManualAuditId(review.auditId);
-                      setResult(review.response);
-                      setError(null);
+                      if (selected) {
+                        setSelectedManualAuditId(null);
+                        setResult(null);
+                      } else {
+                        setSelectedManualAuditId(review.auditId);
+                        setResult(review.response);
+                        setError(null);
+                      }
                     }}
                     className={`w-full rounded border px-3 py-2 text-left transition-colors ${
                       selected

@@ -305,7 +305,8 @@ export default function MentorSignalPanel({
                     <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
                       {group.timeframe}
                     </span>
-                    <span className="ml-auto">
+                    <span className="ml-auto flex items-center gap-1">
+                      <SimulationChip status={bestReview?.simulationStatus ?? null} />
                       <StatusChip
                         status={bestReview?.status ?? 'MISSING'}
                         verdict={bestReview?.analysis?.analysis.verdict}
@@ -348,6 +349,7 @@ export default function MentorSignalPanel({
                       {cat}
                     </span>
                   ))}
+                  <SimulationChip status={latestGroupReview?.simulationStatus ?? null} />
                   <StatusChip
                     status={latestGroupReview?.status ?? 'MISSING'}
                     verdict={latestGroupReview?.analysis?.analysis.verdict}
@@ -380,6 +382,7 @@ export default function MentorSignalPanel({
                             {review.triggerType === 'INITIAL' ? 'Initial' : 'Reanalysis'}
                           </span>
                           <StatusChip status={review.status} verdict={review.analysis?.analysis.verdict} />
+                          <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone.tz })}
                           </span>
@@ -541,6 +544,34 @@ function directionClassStr(direction: string) {
   if (direction === 'LONG') return 'bg-emerald-950/70 text-emerald-300';
   if (direction === 'SHORT') return 'bg-red-950/70 text-red-300';
   return 'bg-zinc-800 text-zinc-300';
+}
+
+function SimulationChip({
+  status,
+  maxDrawdown,
+}: {
+  status: MentorSignalReview['simulationStatus'];
+  maxDrawdown?: number | null;
+}) {
+  if (!status || status === 'CANCELLED') return null;
+
+  const configs: Record<NonNullable<MentorSignalReview['simulationStatus']>, { label: string; cls: string }> = {
+    PENDING_ENTRY: { label: 'En attente entrée', cls: 'bg-amber-950/70 text-amber-300' },
+    ACTIVE:        { label: 'Trade actif',        cls: 'bg-cyan-950/70 text-cyan-300' },
+    WIN:           { label: 'WIN ✓',              cls: 'bg-emerald-950/70 text-emerald-300 font-bold' },
+    LOSS:          { label: 'LOSS ✗',             cls: 'bg-red-950/70 text-red-300 font-bold' },
+    MISSED:        { label: 'Manqué',             cls: 'bg-violet-950/70 text-violet-300' },
+    CANCELLED:     { label: '',                   cls: '' },
+  };
+
+  const { label, cls } = configs[status];
+  const showDrawdown = (status === 'ACTIVE' || status === 'LOSS') && maxDrawdown != null && maxDrawdown > 0;
+
+  return (
+    <span className={`rounded px-2 py-1 text-[10px] ${cls}`}>
+      {label}{showDrawdown ? ` −${maxDrawdown.toFixed(1)}pts` : ''}
+    </span>
+  );
 }
 
 function inferDirection(alert: AlertMessage) {
