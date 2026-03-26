@@ -20,7 +20,8 @@ public class RandomWalkPriceSimulator {
         Instrument.MCL, new BigDecimal("62.40"),
         Instrument.MGC, new BigDecimal("2038.50"),
         Instrument.E6, new BigDecimal("1.08200"),
-        Instrument.MNQ, new BigDecimal("18250.00")
+        Instrument.MNQ, new BigDecimal("18250.00"),
+        Instrument.DXY, new BigDecimal("104.500")
     );
 
     public BigDecimal simulate(Instrument instrument) {

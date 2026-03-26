@@ -56,7 +56,11 @@ class MentorAnalysisServiceTest {
                 "stopLoss": 3005.0,
                 "takeProfit": 3035.0,
                 "rewardToRiskRatio": 3.0,
-                "rationale": "Entrée sur reprise."
+                "rationale": "Entrée sur reprise.",
+                "safeDeepEntry": {
+                  "entryPrice": 3008.0,
+                  "rationale": "Entrée plus basse si le money flow reste vendeur."
+                }
               }
             }
             """;
@@ -82,6 +86,7 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().verdict()).isEqualTo("Trade Validé - Discipline Respectée");
         assertThat(response.analysis().strengths()).containsExactly("Respect de la structure");
         assertThat(response.analysis().proposedTradePlan()).isNotNull();
+        assertThat(response.analysis().proposedTradePlan().safeDeepEntry()).isNotNull();
         assertThat(response.similarAudits()).hasSize(1);
     }
 

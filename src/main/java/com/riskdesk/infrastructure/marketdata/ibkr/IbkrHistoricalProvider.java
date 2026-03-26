@@ -49,6 +49,9 @@ public class IbkrHistoricalProvider implements HistoricalDataProvider {
     @Override
     public List<Candle> fetchHistory(Instrument instrument, String timeframe, int count) {
         long   conid        = contractCache.getConid(instrument);
+        if (conid <= 0) {
+            return List.of();
+        }
         String[] barPeriod  = ibkrConfig(timeframe, count);
         String bar          = barPeriod[0];
         String period       = barPeriod[1];

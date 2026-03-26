@@ -27,7 +27,8 @@ public class IbkrContractCache {
         Instrument.MCL, 661016514L,  // Micro WTI Crude Oil  MAY26
         Instrument.MGC, 706903676L,  // Micro Gold           APR26
         Instrument.E6,  496647057L,  // EUR/USD Futures (6E) JUN26
-        Instrument.MNQ, 770561201L   // Micro E-mini Nasdaq  JUN26
+        Instrument.MNQ, 770561201L,  // Micro E-mini Nasdaq  JUN26
+        Instrument.DXY, 0L
     );
 
     // Base conids for contract search (stable across rolls)
@@ -43,7 +44,8 @@ public class IbkrContractCache {
         Instrument.MCL, "NYMEX",
         Instrument.MGC, "COMEX",
         Instrument.E6,  "CME",
-        Instrument.MNQ, "CME"
+        Instrument.MNQ, "CME",
+        Instrument.DXY, "ICEUS"
     );
 
     private final Map<Instrument, Long> conids    = new EnumMap<>(Instrument.class);
@@ -59,7 +61,7 @@ public class IbkrContractCache {
     }
 
     public long getConid(Instrument instrument) {
-        return conids.getOrDefault(instrument, DEFAULTS.get(instrument));
+        return conids.getOrDefault(instrument, DEFAULTS.getOrDefault(instrument, 0L));
     }
 
     /**
@@ -78,7 +80,7 @@ public class IbkrContractCache {
             // Step 1: search for available months
             String searchJson = restTemplate.postForObject(
                 baseUrl + "/iserver/secdef/search",
-                Map.of("symbol", inst == Instrument.E6 ? "EUR" : inst.name(), "secType", "FUT"),
+                Map.of("symbol", searchSymbol(inst), "secType", "FUT"),
                 String.class);
             if (searchJson == null) return;
 
@@ -118,5 +120,15 @@ public class IbkrContractCache {
         } catch (Exception e) {
             log.debug("IBKR {} conid refresh failed (using default): {}", inst, e.getMessage());
         }
+    }
+
+    private String searchSymbol(Instrument instrument) {
+        if (instrument == Instrument.E6) {
+            return "EUR";
+        }
+        if (instrument == Instrument.DXY) {
+            return "DX";
+        }
+        return instrument.name();
     }
 }

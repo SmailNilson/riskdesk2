@@ -344,6 +344,10 @@ export interface MentorStructuredResponse {
     takeProfit: number | null;
     rewardToRiskRatio: number | null;
     rationale: string | null;
+    safeDeepEntry: {
+      entryPrice: number | null;
+      rationale: string | null;
+    } | null;
   } | null;
 }
 
@@ -367,6 +371,7 @@ export interface MentorAnalyzeResponse {
 
 export interface MentorIntermarketSnapshot {
   dxyPctChange: number | null;
+  dxyTrend: string | null;
   silverSi1PctChange: number | null;
   goldMgc1PctChange: number | null;
   platPl1PctChange: number | null;
@@ -398,8 +403,8 @@ export const api = {
     post<MentorAnalyzeResponse>('/api/mentor/analyze', { payload }),
   refreshMentorContext: (instrument: string, timeframe: string) =>
     post<{ instrument: string; refreshed: Record<string, number> }>('/api/mentor/refresh-context', { instrument, timeframe }),
-  getMentorIntermarket: () =>
-    get<MentorIntermarketSnapshot>('/api/mentor/intermarket'),
+  getMentorIntermarket: (instrument?: string) =>
+    get<MentorIntermarketSnapshot>(`/api/mentor/intermarket${instrument ? `?instrument=${encodeURIComponent(instrument)}` : ''}`),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
     n1?: number; n2?: number; nsc?: number; nsv?: number; qty?: number; capital?: number; pointValue?: number;

@@ -56,6 +56,7 @@ export default function MentorPanel({
   const [stopLoss, setStopLoss] = useState('');
   const [takeProfit, setTakeProfit] = useState('');
   const [isMarketOrder, setIsMarketOrder] = useState(true);
+  const [includePortfolioContext, setIncludePortfolioContext] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MentorAnalyzeResponse | null>(null);
@@ -110,7 +111,7 @@ export default function MentorPanel({
         api.getIndicatorSeries(instrument, timeframe, 500),
         api.getIndicators(instrument, '1h'),
         api.getCandles(instrument, timeframe, 120),
-        api.getMentorIntermarket(),
+        api.getMentorIntermarket(instrument),
       ]);
 
       const effectiveSnapshot = freshSnapshot ?? snapshot;
@@ -145,6 +146,7 @@ export default function MentorPanel({
         intermarket,
         prices: resolvedPrices,
         alerts: freshAlerts as AlertMessage[],
+        includePortfolioContext,
         tradeIntention: {
           action,
           entryPrice: parsedEntry,
@@ -202,6 +204,22 @@ export default function MentorPanel({
         </button>
       </div>
 
+      <div className="mb-3 flex items-center justify-between gap-3 rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[10px]">
+        <div className="text-zinc-400">
+          {includePortfolioContext
+            ? 'Le mentor voit le contexte portefeuille et les alertes de risque associees.'
+            : 'Le mentor voit uniquement le contexte du trade et des indicateurs, sans etat portefeuille.'}
+        </div>
+        <button
+          onClick={() => setIncludePortfolioContext(v => !v)}
+          className={`rounded px-2 py-1 font-semibold ${
+            includePortfolioContext ? 'bg-amber-700 text-white' : 'bg-emerald-700 text-white'
+          }`}
+        >
+          {includePortfolioContext ? 'Portfolio ON' : 'Portfolio OFF'}
+        </button>
+      </div>
+
       <div className="mb-3 text-[10px] text-zinc-500">
         {hasManualPlan(entryPrice, stopLoss, takeProfit)
           ? 'Mode actuel: Trade Audit (plan renseigné)'
@@ -250,13 +268,24 @@ export default function MentorPanel({
           <Section title="Plan Proposé">
             {result.analysis.proposedTradePlan ? (
               <div className="grid grid-cols-4 gap-2 text-[11px]">
-                <PlanCell label="Entry" value={result.analysis.proposedTradePlan.entryPrice} />
+                <PlanCell label="Optimal Entry" value={result.analysis.proposedTradePlan.entryPrice} />
                 <PlanCell label="SL" value={result.analysis.proposedTradePlan.stopLoss} />
                 <PlanCell label="TP" value={result.analysis.proposedTradePlan.takeProfit} />
                 <PlanCell label="R:R" value={result.analysis.proposedTradePlan.rewardToRiskRatio} />
                 <div className="col-span-4 rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
                   {result.analysis.proposedTradePlan.rationale ?? 'Aucune justification fournie.'}
                 </div>
+                {result.analysis.proposedTradePlan.safeDeepEntry ? (
+                  <div className="col-span-4 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-2">
+                    <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-amber-300">Safe Deep Entry</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <PlanCell label="Deep Entry" value={result.analysis.proposedTradePlan.safeDeepEntry.entryPrice} />
+                      <div className="rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
+                        {result.analysis.proposedTradePlan.safeDeepEntry.rationale ?? 'Aucune justification fournie.'}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="text-[11px] text-zinc-500">Aucun plan proposé par le mentor pour ce setup.</div>
@@ -346,6 +375,7 @@ function buildMentorPayload(params: {
   intermarket: MentorIntermarketSnapshot;
   prices: Record<string, PriceUpdate>;
   alerts: AlertMessage[];
+  includePortfolioContext: boolean;
   tradeIntention: {
     action: TradeAction;
     entryPrice: number | null;
@@ -414,6 +444,7 @@ function buildMentorPayload(params: {
     },
     intermarket_correlations_the_edge: {
       dxy_pct_change: params.intermarket.dxyPctChange,
+      dxy_trend: params.intermarket.dxyTrend,
       silver_si1_pct_change: params.intermarket.silverSi1PctChange,
       gold_mgc1_pct_change: params.intermarket.goldMgc1PctChange,
       plat_pl1_pct_change: params.intermarket.platPl1PctChange,
@@ -429,9 +460,10 @@ function buildMentorPayload(params: {
       price_extension_warning: currentPrice != null ? isPriceExtended(currentPrice, params.snapshot, atr) : false,
     },
     riskdesk_context: {
-      total_unrealized_pnl: params.summary?.totalUnrealizedPnL ?? null,
-      today_realized_pnl: params.summary?.todayRealizedPnL ?? null,
-      margin_used_pct: params.summary?.marginUsedPct ?? null,
+      portfolio_state_shared: params.includePortfolioContext,
+      total_unrealized_pnl: params.includePortfolioContext ? params.summary?.totalUnrealizedPnL ?? null : null,
+      today_realized_pnl: params.includePortfolioContext ? params.summary?.todayRealizedPnL ?? null : null,
+      margin_used_pct: params.includePortfolioContext ? params.summary?.marginUsedPct ?? null : null,
       active_signals: [
         params.snapshot.rsiSignal,
         params.snapshot.macdCrossover,
@@ -439,9 +471,7 @@ function buildMentorPayload(params: {
         params.snapshot.wtCrossover,
         params.snapshot.bbTrendSignal,
       ].filter(Boolean),
-      recent_alerts: params.alerts
-        .filter(alert => alert.instrument == null || alert.instrument === params.instrument)
-        .slice(0, 8),
+      recent_alerts: selectMentorAlerts(params.alerts, params.instrument, params.includePortfolioContext),
       chart_series_summary: {
         candles_loaded: params.candles.length,
         wave_trend_points: params.indicatorSeries.waveTrend.length,
@@ -548,6 +578,20 @@ function inferMoneyFlowTrend(snapshot: IndicatorSnapshot) {
   if (snapshot.deltaFlowBias === 'BULLISH') return 'INCREASING';
   if (snapshot.deltaFlowBias === 'BEARISH') return 'DECREASING';
   return 'FLAT';
+}
+
+function selectMentorAlerts(alerts: AlertMessage[], instrument: Instrument, includePortfolioContext: boolean) {
+  return alerts
+    .filter(alert => {
+      if (alert.instrument !== instrument) {
+        return false;
+      }
+      if (!includePortfolioContext && alert.category === 'RISK') {
+        return false;
+      }
+      return true;
+    })
+    .slice(0, 8);
 }
 
 function isStructurallyProtected(

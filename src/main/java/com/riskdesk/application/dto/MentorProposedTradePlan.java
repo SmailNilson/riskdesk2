@@ -5,6 +5,7 @@ public record MentorProposedTradePlan(
     Double stopLoss,
     Double takeProfit,
     Double rewardToRiskRatio,
-    String rationale
+    String rationale,
+    MentorAlternativeEntry safeDeepEntry
 ) {
 }

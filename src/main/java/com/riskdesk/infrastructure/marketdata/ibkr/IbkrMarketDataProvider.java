@@ -46,8 +46,14 @@ public class IbkrMarketDataProvider implements MarketDataProvider {
         Map<Instrument, BigDecimal> prices = new EnumMap<>(Instrument.class);
 
         String conidParam = Arrays.stream(Instrument.values())
-            .map(i -> String.valueOf(contractCache.getConid(i)))
+            .map(contractCache::getConid)
+            .filter(conid -> conid > 0)
+            .map(String::valueOf)
             .collect(Collectors.joining(","));
+
+        if (conidParam.isBlank()) {
+            return prices;
+        }
 
         String url = baseUrl + "/iserver/marketdata/snapshot?conids=" + conidParam + "&fields=" + FIELDS;
 
@@ -71,7 +77,7 @@ public class IbkrMarketDataProvider implements MarketDataProvider {
                 if (price <= 0) continue;
 
                 for (Instrument inst : Instrument.values()) {
-                    if (contractCache.getConid(inst) == conid) {
+                    if (contractCache.getConid(inst) > 0 && contractCache.getConid(inst) == conid) {
                         prices.put(inst, BigDecimal.valueOf(price));
                         break;
                     }

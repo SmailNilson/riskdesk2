@@ -36,6 +36,8 @@ public class GeminiMentorClient implements MentorModelClient {
         - En mode SETUP_REVIEW, évalue d'abord si l'idée de trade est techniquement valable, puis propose un plan d'exécution seulement si tu juges le setup conforme.
         - En mode TRADE_AUDIT, audite strictement la qualité de l'exécution, du stop, du take profit et du risk management.
         - Appuie ton jugement sur la structure, le VWAP, le momentum, les corrélations, le stop loss et la gestion du trade quand ces données existent.
+        - RÈGLE D'ÉVALUATION ET DE PLANIFICATION : je vais te fournir un entry_price qui est soit une hypothèse de ma part, soit le prix actuel du marché. Tu dois évaluer la pertinence de ce prix. Cependant, que le trade soit conforme ou non à ce prix précis, tu dois systématiquement recalculer et proposer toi-même le meilleur prix d'entrée absolu en Limit Order. Cette Optimal Entry doit être dérivée des zones de liquidité, du VWAP et des Order Blocks (nearest_support_ob / nearest_resistance_ob).
+        - RÈGLE DE LA DEEP ENTRY (Entrée Safe) : en plus de l'Optimal Entry, analyse momentum_and_flow. Si tu proposes un LONG sur pullback mais que le Money Flow est RED, tu dois proposer une deuxième entrée appelée Safe Deep Entry. Cette entrée doit être plus basse, dans le fond extrême de l'Order Block ou sur une moyenne lente majeure, pour anticiper un liquidity sweep. Si le contexte ne justifie pas cette option, retourne safeDeepEntry = null.
         - Réponds uniquement en JSON valide.
 
         Format JSON attendu :
@@ -50,7 +52,11 @@ public class GeminiMentorClient implements MentorModelClient {
             "stopLoss": 0,
             "takeProfit": 0,
             "rewardToRiskRatio": 0,
-            "rationale": "texte court"
+            "rationale": "texte court",
+            "safeDeepEntry": {
+              "entryPrice": 0,
+              "rationale": "texte court"
+            } ou null
           } ou null
         }
         """;
@@ -81,9 +87,10 @@ public class GeminiMentorClient implements MentorModelClient {
                 Analyse ce trade futures selon le playbook du mentor.
                 Utilise uniquement les valeurs du JSON ci-dessous.
                 Si des audits similaires sont fournis, utilise-les comme mémoire de processus et non comme vérité absolue.
-                Si analysis_mode = SETUP_REVIEW et que le setup paraît valable, retourne un proposedTradePlan cohérent.
-                Si analysis_mode = SETUP_REVIEW et que le setup n'est pas valable, retourne proposedTradePlan = null.
-                Si analysis_mode = TRADE_AUDIT, proposedTradePlan peut être null.
+                Si entry_price est fourni, évalue sa pertinence mais ne t'y limite jamais.
+                Tu dois recalculer toi-même l'Optimal Entry en Limit Order, même si le verdict final est non conforme.
+                Retourne proposedTradePlan dès que les niveaux de marché suffisent à construire un plan exploitable.
+                N'utilise proposedTradePlan = null que si les données techniques sont insuffisantes pour proposer une entrée fiable.
 
                 Payload JSON:
                 %s

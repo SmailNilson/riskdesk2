@@ -2,6 +2,7 @@ package com.riskdesk.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorAlternativeEntry;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
@@ -58,7 +59,14 @@ class MentorControllerIntegrationTest {
                     List.of("No DXY context"),
                     "Trade Non-Conforme - Erreur de Processus",
                     "Wait for clearer structure.",
-                    new MentorProposedTradePlan(3012.5, 3005.0, 3035.0, 3.0, "Plan proposé")
+                    new MentorProposedTradePlan(
+                        3012.5,
+                        3005.0,
+                        3035.0,
+                        3.0,
+                        "Plan proposé",
+                        new MentorAlternativeEntry(3008.0, "Entrée safe plus profonde.")
+                    )
                 ),
                 "{\"verdict\":\"Trade Non-Conforme - Erreur de Processus\"}",
                 List.of(new MentorSimilarAudit(12L, java.time.Instant.parse("2026-03-25T01:00:00Z"), "MGC1!", "M5", "LONG", "Trade Validé - Discipline Respectée", 0.88, "MGC1! | LONG"))
@@ -81,6 +89,7 @@ class MentorControllerIntegrationTest {
             .andExpect(jsonPath("$.analysis.verdict").value("Trade Non-Conforme - Erreur de Processus"))
             .andExpect(jsonPath("$.analysis.strengths[0]").value("VWAP respected"))
             .andExpect(jsonPath("$.analysis.proposedTradePlan.entryPrice").value(3012.5))
+            .andExpect(jsonPath("$.analysis.proposedTradePlan.safeDeepEntry.entryPrice").value(3008.0))
             .andExpect(jsonPath("$.similarAudits[0].auditId").value(12));
     }
 

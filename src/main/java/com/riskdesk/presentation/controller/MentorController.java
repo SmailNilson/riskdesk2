@@ -57,8 +57,16 @@ public class MentorController {
     }
 
     @GetMapping("/intermarket")
-    public MentorIntermarketSnapshot intermarket() {
-        return mentorIntermarketService.current();
+    public MentorIntermarketSnapshot intermarket(@RequestParam(required = false) String instrument) {
+        if (instrument == null || instrument.isBlank()) {
+            return mentorIntermarketService.current(null);
+        }
+
+        try {
+            return mentorIntermarketService.current(Instrument.valueOf(instrument.toUpperCase()));
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported instrument", e);
+        }
     }
 
     @PostMapping("/refresh-context")
