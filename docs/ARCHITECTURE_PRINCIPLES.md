@@ -165,6 +165,25 @@ When extending Mentor behavior in the UI:
 - keep account-risk sharing an explicit toggle or mode, not an implicit default for new workflows
 - when an alert must trigger autonomous Mentor review, prefer backend orchestration plus WebSocket publication over client-only side effects
 - when an alert review must stay historically stable, persist the frozen payload snapshot in the backend and reopen that saved thread rather than rebuilding live market context on click
+- group alerts in the UI only when they arrive within a short time window (~90s) for the same instrument/timeframe/direction — do not merge alerts that are temporally distant
+- reconstruct virtual alerts from saved reviews so that historical reviews remain visible even after the WebSocket session ends
+
+### Alert Evaluation Rule
+
+Alert evaluation must use transition-based detection, not state-based:
+
+- alerts fire only when a condition *changes* (e.g., RSI crosses into oversold), not when it persists
+- `IndicatorAlertEvaluator` in `domain` tracks last-known state per indicator/instrument/timeframe
+- this is a domain concern and must stay in the domain layer
+- `AlertService` in `application` orchestrates publishing and mentor review batching
+- when multiple indicators fire in the same polling cycle for the same instrument/timeframe/direction, the application layer batches them into a single mentor review via `captureGroupReview`
+- individual alerts are still published to WebSocket separately for the UI
+
+Do not:
+
+- revert to state-based evaluation where alerts re-fire for persistent conditions
+- create separate mentor reviews for alerts that fire simultaneously for the same trading signal
+- move transition detection logic out of the domain layer
 
 ### Mentor Outcome Tracking Rule
 
@@ -186,3 +205,5 @@ When reviewing a change, ask:
 - did adapters stay in `infrastructure`?
 - was a regression test or scenario added where appropriate?
 - did the change preserve the IBKR/PostgreSQL-only data policy?
+- did alert evaluation remain transition-based (not state-based)?
+- are simultaneous alerts for the same signal still batched into one mentor review?

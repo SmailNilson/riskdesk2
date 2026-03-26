@@ -87,7 +87,9 @@ These should stay transport-oriented only.
 - `application/service/MarketDataService.java`
 - `application/service/HistoricalDataService.java`
 - `application/service/PositionService.java`
+- `application/service/AlertService.java`
 - `application/service/MentorAnalysisService.java`
+- `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
 
 These coordinate use cases and should not become infrastructure adapters.
@@ -113,6 +115,7 @@ These are adapters, not business-rule owners.
 - `frontend/app/page.tsx`
 - `frontend/app/components/Dashboard.tsx`
 - `frontend/app/components/MentorPanel.tsx`
+- `frontend/app/components/MentorSignalPanel.tsx`
 - `frontend/app/lib/api.ts`
 - `frontend/app/hooks/useWebSocket.ts`
 

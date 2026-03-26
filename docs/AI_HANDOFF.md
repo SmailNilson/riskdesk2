@@ -127,31 +127,6 @@ Important behavior:
 - the initial review is snapshot-based and no longer depends on click-time market state
 - manual reanalysis does rebuild current indicators/candles/live price, but also passes the original alert time/reason/price to Gemini for comparison
 
-### 6. Transition-based alert evaluation and grouped reviews
-
-Files:
-
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/alert/service/IndicatorAlertEvaluator.java`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/AlertService.java`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/MentorSignalPanel.tsx`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/Dashboard.tsx`
-
-What changed:
-
-- `IndicatorAlertEvaluator` switched from state-based to transition-based detection: alerts only fire when a condition *changes*, not when it persists across polling cycles
-- uses a `ConcurrentHashMap<String, String>` to track last-known state per indicator/instrument/timeframe
-- `AlertService` now publishes individual alerts to WebSocket but batches Mentor reviews by direction for alerts that fire in the same polling cycle
-- `MentorSignalReviewService.captureGroupReview()` groups alerts by direction and creates one combined review per group
-- `MentorSignalPanel` groups alerts in the UI by instrument+timeframe+direction within a 90-second time window
-- added instrument filter dropdown to `MentorSignalPanel`
-- removed AI JSON export button and bottom `AlertsFeed` ticker from `Dashboard`
-
-Why:
-
-- persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
-- multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
-
 ### 5. Mentor trade outcome tracker
 
 Files:
@@ -182,6 +157,31 @@ Operational note:
 
 - this uses the existing internal candle repository only
 - no external replay feed or provider is involved
+
+### 6. Transition-based alert evaluation and grouped reviews
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/alert/service/IndicatorAlertEvaluator.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/AlertService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/MentorSignalPanel.tsx`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/Dashboard.tsx`
+
+What changed:
+
+- `IndicatorAlertEvaluator` switched from state-based to transition-based detection: alerts only fire when a condition *changes*, not when it persists across polling cycles
+- uses a `ConcurrentHashMap<String, String>` to track last-known state per indicator/instrument/timeframe
+- `AlertService` now publishes individual alerts to WebSocket but batches Mentor reviews by direction for alerts that fire in the same polling cycle
+- `MentorSignalReviewService.captureGroupReview()` groups alerts by direction and creates one combined review per group
+- `MentorSignalPanel` groups alerts in the UI by instrument+timeframe+direction within a 90-second time window
+- added instrument filter dropdown to `MentorSignalPanel`
+- removed AI JSON export button and bottom `AlertsFeed` ticker from `Dashboard`
+
+Why:
+
+- persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
+- multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
 
 ## Known Runtime Behavior
 
