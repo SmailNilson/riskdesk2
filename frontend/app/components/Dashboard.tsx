@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, PortfolioSummary, IndicatorSnapshot } from '@/app/lib/api';
-import { AlertMessage, PriceUpdate, useWebSocket } from '@/app/hooks/useWebSocket';
+import { useWebSocket } from '@/app/hooks/useWebSocket';
 import MetricsBar from './MetricsBar';
 import Chart from './Chart';
 import IndicatorPanel from './IndicatorPanel';

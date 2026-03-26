@@ -22,6 +22,7 @@ export interface AlertMessage {
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8080/ws';
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const MENTOR_REVIEW_HISTORY_LIMIT = 1000;
 
 export function useWebSocket() {
   const clientRef = useRef<Client | null>(null);
@@ -49,10 +50,10 @@ export function useWebSocket() {
           })
           .catch(() => {});
 
-        fetch(`${API_URL}/api/mentor/auto-alerts/recent`)
+        fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
           .then(r => r.ok ? r.json() : [])
           .then((recent: MentorSignalReview[]) => {
-            setMentorSignalReviews(recent.slice(0, 200));
+            setMentorSignalReviews(recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT));
           })
           .catch(() => {});
 
@@ -70,7 +71,7 @@ export function useWebSocket() {
           const review: MentorSignalReview = JSON.parse(msg.body);
           setMentorSignalReviews(prev => {
             const filtered = prev.filter(item => item.id !== review.id);
-            return [review, ...filtered].slice(0, 200);
+            return [review, ...filtered].slice(0, MENTOR_REVIEW_HISTORY_LIMIT);
           });
         });
       },

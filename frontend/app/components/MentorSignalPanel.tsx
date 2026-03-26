@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, MentorSignalReview } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
@@ -14,6 +14,8 @@ type AlertGroup = {
   alerts: AlertMessage[];
   timestamp: string;
 };
+
+type GroupStatusFilter = 'ALL' | 'TRADE_OK' | 'TRADE_NON_CONFORME' | 'PENDING_ENTRY' | 'NO_REVIEW';
 
 export default function MentorSignalPanel({
   timezone,
@@ -96,21 +98,55 @@ export default function MentorSignalPanel({
   }, [allAlerts]);
 
   const [filterInstrument, setFilterInstrument] = useState<string>('ALL');
+  const [filterStatus, setFilterStatus] = useState<GroupStatusFilter>('ALL');
   const availableInstruments = useMemo(() => {
     const set = new Set(groups.map(g => g.instrument));
     return Array.from(set).sort();
   }, [groups]);
-
-  const filteredGroups = useMemo(() => {
-    if (filterInstrument === 'ALL') return groups;
-    return groups.filter(g => g.instrument === filterInstrument);
-  }, [groups, filterInstrument]);
 
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [loadingGroupKey, setLoadingGroupKey] = useState<string | null>(null);
   const [reanalyzingAlertKey, setReanalyzingAlertKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threadsByAlertKey, setThreadsByAlertKey] = useState<Record<string, MentorSignalReview[]>>({});
+
+  const groupLatestReview = useCallback((group: AlertGroup) => {
+    let latestReview: MentorSignalReview | null = null;
+    for (const alert of group.alerts) {
+      const alertKey = buildMentorAlertKey(alert);
+      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+      const latest = thread.length > 0 ? thread[thread.length - 1] : null;
+      if (!latest) continue;
+      if (!latestReview || new Date(latest.createdAt).getTime() > new Date(latestReview.createdAt).getTime()) {
+        latestReview = latest;
+      }
+    }
+    return latestReview;
+  }, [threadsByAlertKey, reviews]);
+
+  const groupPreferredReview = useCallback((group: AlertGroup) => {
+    const allThreads: MentorSignalReview[] = [];
+    for (const alert of group.alerts) {
+      const alertKey = buildMentorAlertKey(alert);
+      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+      allThreads.push(...thread);
+    }
+    return pickPreferredReview(allThreads);
+  }, [threadsByAlertKey, reviews]);
+
+  const filteredGroups = useMemo(() => {
+    const instrumentFiltered = filterInstrument === 'ALL'
+      ? groups
+      : groups.filter(group => group.instrument === filterInstrument);
+
+    const withoutErrors = instrumentFiltered.filter(group => groupLatestReview(group)?.status !== 'ERROR');
+
+    if (filterStatus === 'ALL') {
+      return withoutErrors;
+    }
+
+    return withoutErrors.filter(group => matchesGroupStatusFilter(group, filterStatus, groupPreferredReview(group)));
+  }, [groups, filterInstrument, filterStatus, groupLatestReview, groupPreferredReview]);
 
   useEffect(() => {
     if (!selectedGroupKey && filteredGroups[0]) {
@@ -149,21 +185,7 @@ export default function MentorSignalPanel({
     return sortReviews(allThreads);
   }, [selectedGroup, threadsByAlertKey, reviews]);
 
-  const latestGroupReview = selectedGroupThreads.length > 0 ? selectedGroupThreads[selectedGroupThreads.length - 1] : null;
-
-  // Best verdict across all alerts in a group
-  const groupVerdict = (group: AlertGroup) => {
-    let bestReview: MentorSignalReview | null = null;
-    for (const alert of group.alerts) {
-      const alertKey = buildMentorAlertKey(alert);
-      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-      const latest = thread.length > 0 ? thread[thread.length - 1] : null;
-      if (latest && (!bestReview || latest.status === 'DONE')) {
-        bestReview = latest;
-      }
-    }
-    return bestReview;
-  };
+  const preferredSelectedGroupReview = pickPreferredReview(selectedGroupThreads);
 
   const groupReviewCount = (group: AlertGroup) => {
     let count = 0;
@@ -264,6 +286,17 @@ export default function MentorSignalPanel({
               <option key={inst} value={inst}>{inst}</option>
             ))}
           </select>
+          <select
+            value={filterStatus}
+            onChange={e => setFilterStatus(e.target.value as GroupStatusFilter)}
+            className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-zinc-400 outline-none cursor-pointer hover:border-zinc-600 transition-colors"
+          >
+            <option value="ALL">Tous statuts</option>
+            <option value="TRADE_OK">Trade OK</option>
+            <option value="TRADE_NON_CONFORME">Trade Non-Conforme</option>
+            <option value="PENDING_ENTRY">En attente</option>
+            <option value="NO_REVIEW">No Review</option>
+          </select>
           <span className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-zinc-400">
             {filteredGroups.length} groupe{filteredGroups.length > 1 ? 's' : ''}
           </span>
@@ -275,13 +308,13 @@ export default function MentorSignalPanel({
 
       {filteredGroups.length === 0 ? (
         <div className="rounded border border-dashed border-zinc-800 bg-zinc-950/40 px-3 py-4 text-[11px] text-zinc-500">
-          Aucune alerte qualifiee disponible pour l'instant.
+          Aucune alerte qualifiee disponible pour l&apos;instant.
         </div>
       ) : (
         <div className="grid gap-3 xl:grid-cols-[0.95fr_1.45fr]">
           <div className="max-h-[500px] space-y-2 overflow-y-auto pr-1">
-            {filteredGroups.slice(0, 30).map(group => {
-              const bestReview = groupVerdict(group);
+            {filteredGroups.map(group => {
+              const bestReview = groupPreferredReview(group);
               const reviewCount = groupReviewCount(group);
               const selected = group.groupKey === selectedGroupKey;
 
@@ -309,7 +342,7 @@ export default function MentorSignalPanel({
                       <SimulationChip status={bestReview?.simulationStatus ?? null} />
                       <StatusChip
                         status={bestReview?.status ?? 'MISSING'}
-                        verdict={bestReview?.analysis?.analysis.verdict}
+                        verdict={bestReview?.analysis?.analysis?.verdict}
                       />
                     </span>
                   </div>
@@ -349,10 +382,10 @@ export default function MentorSignalPanel({
                       {cat}
                     </span>
                   ))}
-                  <SimulationChip status={latestGroupReview?.simulationStatus ?? null} />
+                  <SimulationChip status={preferredSelectedGroupReview?.simulationStatus ?? null} />
                   <StatusChip
-                    status={latestGroupReview?.status ?? 'MISSING'}
-                    verdict={latestGroupReview?.analysis?.analysis.verdict}
+                    status={preferredSelectedGroupReview?.status ?? 'MISSING'}
+                    verdict={preferredSelectedGroupReview?.analysis?.analysis?.verdict}
                   />
                 </div>
 
@@ -381,7 +414,7 @@ export default function MentorSignalPanel({
                           <span className={`rounded px-2 py-1 text-[10px] ${review.triggerType === 'INITIAL' ? 'bg-cyan-950/60 text-cyan-300' : 'bg-amber-950/60 text-amber-300'}`}>
                             {review.triggerType === 'INITIAL' ? 'Initial' : 'Reanalysis'}
                           </span>
-                          <StatusChip status={review.status} verdict={review.analysis?.analysis.verdict} />
+                          <StatusChip status={review.status} verdict={review.analysis?.analysis?.verdict} />
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone.tz })}
@@ -400,7 +433,7 @@ export default function MentorSignalPanel({
                           </div>
                         ) : null}
 
-                        {review.status === 'DONE' && review.analysis ? (
+                        {review.status === 'DONE' && review.analysis?.analysis ? (
                           <div className="grid gap-3 xl:grid-cols-[1.4fr_0.8fr]">
                             <div className="space-y-2">
                               <Section label="Verdict" value={review.analysis.analysis.verdict} />
@@ -425,6 +458,12 @@ export default function MentorSignalPanel({
                                 </div>
                               ) : null}
                             </div>
+                          </div>
+                        ) : null}
+
+                        {review.status === 'DONE' && review.analysis && !review.analysis.analysis ? (
+                          <div className="rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px] text-amber-200">
+                            Analyse structuree indisponible pour cette review sauvegardee.
                           </div>
                         ) : null}
                       </div>
@@ -490,6 +529,54 @@ function StatusChip({ status, verdict }: { status: MentorSignalReview['status'] 
   }
 
   return <span className="rounded bg-red-950/70 px-2 py-1 text-[10px] font-semibold text-red-300">Error</span>;
+}
+
+function pickPreferredReview(reviews: MentorSignalReview[]) {
+  if (reviews.length === 0) {
+    return null;
+  }
+
+  const sorted = sortReviews(reviews);
+  const latestValid = [...sorted]
+    .reverse()
+    .find(review => review.status === 'DONE' && review.analysis?.analysis?.verdict?.includes('Valid'));
+
+  if (latestValid) {
+    return latestValid;
+  }
+
+  return sorted[sorted.length - 1] ?? null;
+}
+
+function matchesGroupStatusFilter(
+  group: AlertGroup,
+  filter: GroupStatusFilter,
+  preferredReview: MentorSignalReview | null,
+) {
+  if (filter === 'NO_REVIEW') {
+    return preferredReview == null && group.alerts.length > 0;
+  }
+
+  if (!preferredReview) {
+    return false;
+  }
+
+  if (filter === 'PENDING_ENTRY') {
+    return preferredReview.simulationStatus === 'PENDING_ENTRY';
+  }
+
+  const verdict = preferredReview.analysis?.analysis?.verdict ?? '';
+  const valid = preferredReview.status === 'DONE' && verdict.includes('Valid');
+
+  if (filter === 'TRADE_OK') {
+    return valid;
+  }
+
+  if (filter === 'TRADE_NON_CONFORME') {
+    return preferredReview.status === 'DONE' && !valid;
+  }
+
+  return true;
 }
 
 function PlanRow({ label, value }: { label: string; value: number | null | undefined }) {

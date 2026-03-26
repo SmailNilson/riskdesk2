@@ -53,6 +53,13 @@ export default function MentorPanel({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [selectedManualAuditId, setSelectedManualAuditId] = useState<number | null>(null);
   const hydratedFormKeyRef = useRef('');
+  const resultReview = result?.auditId != null
+    ? manualReviews.find(review => review.auditId === result.auditId) ?? null
+    : null;
+  const selectedManualReview = manualReviews.find(review => review.auditId === selectedManualAuditId) ?? null;
+  const structuredAnalysis = result?.analysis ?? null;
+  const resultError = resultReview?.errorMessage
+    ?? (!structuredAnalysis && result ? 'Analyse indisponible pour cette review sauvegardee.' : null);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,58 +237,71 @@ export default function MentorPanel({
             </button>
           </div>
 
-          <Section title="Analyse Technique Rapide">
-            <p className="text-[11px] text-zinc-200">{result.analysis.technicalQuickAnalysis}</p>
-          </Section>
+          {structuredAnalysis ? (
+            <>
+              <Section title="Analyse Technique Rapide">
+                <p className="text-[11px] text-zinc-200">{structuredAnalysis.technicalQuickAnalysis}</p>
+              </Section>
 
-          <Section title="Points Forts">
-            <BulletList items={result.analysis.strengths} emptyLabel="Aucun point fort explicite." color="text-emerald-300" />
-          </Section>
+              <Section title="Points Forts">
+                <BulletList items={structuredAnalysis.strengths} emptyLabel="Aucun point fort explicite." color="text-emerald-300" />
+              </Section>
 
-          <Section title="Erreurs / Violations">
-            <BulletList items={result.analysis.errors} emptyLabel="Aucune violation explicite." color="text-red-300" />
-          </Section>
+              <Section title="Erreurs / Violations">
+                <BulletList items={structuredAnalysis.errors} emptyLabel="Aucune violation explicite." color="text-red-300" />
+              </Section>
 
-          <Section title="Verdict Final">
-            <div className={`inline-flex rounded px-2 py-1 text-[11px] font-semibold ${
-              result.analysis.verdict?.includes('Validé')
-                ? 'bg-emerald-950/70 text-emerald-300'
-                : 'bg-red-950/70 text-red-300'
-            }`}>
-              {result.analysis.verdict}
-            </div>
-          </Section>
-
-          <Section title="Conseil d'Amélioration">
-            <p className="text-[11px] text-zinc-200">{result.analysis.improvementTip}</p>
-          </Section>
-
-          <Section title="Plan Proposé">
-            {result.analysis.proposedTradePlan ? (
-              <div className="grid grid-cols-4 gap-2 text-[11px]">
-                <PlanCell label="Optimal Entry" value={result.analysis.proposedTradePlan.entryPrice} />
-                <PlanCell label="SL" value={result.analysis.proposedTradePlan.stopLoss} />
-                <PlanCell label="TP" value={result.analysis.proposedTradePlan.takeProfit} />
-                <PlanCell label="R:R" value={result.analysis.proposedTradePlan.rewardToRiskRatio} />
-                <div className="col-span-4 rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
-                  {result.analysis.proposedTradePlan.rationale ?? 'Aucune justification fournie.'}
+              <Section title="Verdict Final">
+                <div className={`inline-flex rounded px-2 py-1 text-[11px] font-semibold ${
+                  structuredAnalysis.verdict?.includes('Validé')
+                    ? 'bg-emerald-950/70 text-emerald-300'
+                    : 'bg-red-950/70 text-red-300'
+                }`}>
+                  {structuredAnalysis.verdict}
                 </div>
-                {result.analysis.proposedTradePlan.safeDeepEntry ? (
-                  <div className="col-span-4 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-2">
-                    <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-amber-300">Safe Deep Entry</div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <PlanCell label="Deep Entry" value={result.analysis.proposedTradePlan.safeDeepEntry.entryPrice} />
-                      <div className="rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
-                        {result.analysis.proposedTradePlan.safeDeepEntry.rationale ?? 'Aucune justification fournie.'}
-                      </div>
+              </Section>
+
+              <Section title="Conseil d'Amélioration">
+                <p className="text-[11px] text-zinc-200">{structuredAnalysis.improvementTip}</p>
+              </Section>
+
+              <Section title="Plan Proposé">
+                {structuredAnalysis.proposedTradePlan ? (
+                  <div className="grid grid-cols-4 gap-2 text-[11px]">
+                    <PlanCell label="Optimal Entry" value={structuredAnalysis.proposedTradePlan.entryPrice} />
+                    <PlanCell label="SL" value={structuredAnalysis.proposedTradePlan.stopLoss} />
+                    <PlanCell label="TP" value={structuredAnalysis.proposedTradePlan.takeProfit} />
+                    <PlanCell label="R:R" value={structuredAnalysis.proposedTradePlan.rewardToRiskRatio} />
+                    <div className="col-span-4 rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
+                      {structuredAnalysis.proposedTradePlan.rationale ?? 'Aucune justification fournie.'}
                     </div>
+                    {structuredAnalysis.proposedTradePlan.safeDeepEntry ? (
+                      <div className="col-span-4 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-2">
+                        <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-amber-300">Safe Deep Entry</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <PlanCell label="Deep Entry" value={structuredAnalysis.proposedTradePlan.safeDeepEntry.entryPrice} />
+                          <div className="rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-zinc-300">
+                            {structuredAnalysis.proposedTradePlan.safeDeepEntry.rationale ?? 'Aucune justification fournie.'}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+                ) : (
+                  <div className="text-[11px] text-zinc-500">Aucun plan proposé par le mentor pour ce setup.</div>
+                )}
+              </Section>
+            </>
+          ) : (
+            <div className="rounded border border-amber-900/50 bg-amber-950/20 px-3 py-3 text-[11px] text-amber-200">
+              <div className="font-semibold">
+                {resultReview?.verdict ?? 'Mentor unavailable'}
               </div>
-            ) : (
-              <div className="text-[11px] text-zinc-500">Aucun plan proposé par le mentor pour ce setup.</div>
-            )}
-          </Section>
+              <div className="mt-1">
+                {resultError ?? 'Le backend a sauvegarde la payload, mais aucune analyse structuree n’est disponible pour cette review.'}
+              </div>
+            </div>
+          )}
 
           <Section title="Mémoire Similaire">
             {result.similarAudits?.length ? (
@@ -332,7 +352,7 @@ export default function MentorPanel({
           <div className="text-[11px] text-zinc-500">Aucune review manuelle sauvegardee pour l’instant.</div>
         ) : (
           <div className="grid gap-2 xl:grid-cols-[0.92fr_1.08fr]">
-            <div className="space-y-2">
+            <div className="max-h-[500px] space-y-2 overflow-y-auto pr-1">
               {manualReviews.map(review => {
                 const selected = review.auditId === selectedManualAuditId;
                 return (
@@ -341,10 +361,8 @@ export default function MentorPanel({
                     onClick={() => {
                       if (selected) {
                         setSelectedManualAuditId(null);
-                        setResult(null);
                       } else {
                         setSelectedManualAuditId(review.auditId);
-                        setResult(review.response);
                         setError(null);
                       }
                     }}
@@ -362,11 +380,17 @@ export default function MentorPanel({
                         MANUAL
                       </span>
                       <span className={`ml-auto rounded px-2 py-1 text-[10px] font-semibold ${
-                        review.success && review.verdict?.includes('Validé')
-                          ? 'bg-emerald-950/70 text-emerald-300'
-                          : 'bg-red-950/70 text-red-300'
+                        !review.success || !review.response.analysis
+                          ? 'bg-amber-950/70 text-amber-300'
+                          : review.verdict?.includes('Validé')
+                            ? 'bg-emerald-950/70 text-emerald-300'
+                            : 'bg-red-950/70 text-red-300'
                       }`}>
-                        {review.success && review.verdict?.includes('Validé') ? 'Trade OK' : 'Trade Non-Conforme'}
+                        {!review.success || !review.response.analysis
+                          ? 'Mentor indisponible'
+                          : review.verdict?.includes('Validé')
+                            ? 'Trade OK'
+                            : 'Trade Non-Conforme'}
                       </span>
                     </div>
                     <div className="text-[11px] text-zinc-200">
@@ -383,13 +407,11 @@ export default function MentorPanel({
               })}
             </div>
 
-            <div className="rounded border border-zinc-800 bg-zinc-950/40 px-3 py-3">
+            <div className="max-h-[500px] overflow-y-auto rounded border border-zinc-800 bg-zinc-950/40 px-3 py-3">
               {selectedManualAuditId == null ? (
                 <div className="text-[11px] text-zinc-500">Selectionne une review manuelle pour la reouvrir ici.</div>
               ) : (
-                <div className="text-[11px] text-zinc-400">
-                  La review manuelle selectionnee est affichee dans le bloc principal au-dessus.
-                </div>
+                <ManualReviewDetail review={selectedManualReview} timezone={timezone.tz} />
               )}
             </div>
           </div>
@@ -417,6 +439,156 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
     <div>
       <div className="mb-1 text-[10px] font-bold uppercase tracking-widest text-zinc-500">{title}</div>
       {children}
+    </div>
+  );
+}
+
+function ManualReviewDetail({
+  review,
+  timezone,
+}: {
+  review: MentorManualReview | null;
+  timezone: string;
+}) {
+  if (!review) {
+    return <div className="text-[11px] text-zinc-500">Review introuvable.</div>;
+  }
+
+  const analysis = review.response.analysis;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
+          #{review.auditId}
+        </span>
+        <span className="rounded bg-cyan-950/70 px-2 py-1 text-[10px] text-cyan-300">
+          MANUAL
+        </span>
+        <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
+          {review.instrument ?? 'n/a'}
+        </span>
+        <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
+          {review.timeframe ?? 'n/a'}
+        </span>
+        <span className={`rounded px-2 py-1 text-[10px] font-semibold ${
+          !review.success || !analysis
+            ? 'bg-amber-950/70 text-amber-300'
+            : review.verdict?.includes('Validé')
+              ? 'bg-emerald-950/70 text-emerald-300'
+              : 'bg-red-950/70 text-red-300'
+        }`}>
+          {!review.success || !analysis
+            ? 'Mentor indisponible'
+            : review.verdict?.includes('Validé')
+              ? 'Trade OK'
+              : 'Trade Non-Conforme'}
+        </span>
+        <span className="ml-auto text-[10px] text-zinc-600">
+          {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone })}
+        </span>
+      </div>
+
+      <div className="text-[10px] text-zinc-500">
+        {review.instrument ?? 'n/a'} · {review.action ?? 'n/a'} · {review.timeframe ?? 'n/a'}
+      </div>
+
+      {!analysis ? (
+        <div className="rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px] text-amber-200">
+          {review.errorMessage ?? 'Le backend a sauvegarde la payload, mais aucune analyse structuree n’est disponible pour cette review.'}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid gap-3 xl:grid-cols-[1.35fr_0.85fr]">
+            <div className="space-y-2">
+              <Section title="Verdict Final">
+                <div className={`inline-flex rounded px-2 py-1 text-[11px] font-semibold ${
+                  analysis.verdict?.includes('Validé')
+                    ? 'bg-emerald-950/70 text-emerald-300'
+                    : 'bg-red-950/70 text-red-300'
+                }`}>
+                  {analysis.verdict}
+                </div>
+              </Section>
+
+              <Section title="Analyse Technique Rapide">
+                <p className="text-[11px] text-zinc-200">{analysis.technicalQuickAnalysis}</p>
+              </Section>
+
+              <Section title="Conseil d'Amélioration">
+                <p className="text-[11px] text-zinc-200">{analysis.improvementTip}</p>
+              </Section>
+
+              <Section title="Points Forts">
+                <BulletList items={analysis.strengths} emptyLabel="Aucun point fort explicite." color="text-emerald-300" />
+              </Section>
+
+              <Section title="Erreurs / Violations">
+                <BulletList items={analysis.errors} emptyLabel="Aucune violation explicite." color="text-red-300" />
+              </Section>
+            </div>
+
+            <div className="space-y-2">
+              <Section title="Plan Proposé">
+                {analysis.proposedTradePlan ? (
+                  <div className="grid gap-2">
+                    <PlanCell label="Optimal Entry" value={analysis.proposedTradePlan.entryPrice} />
+                    <PlanCell label="SL" value={analysis.proposedTradePlan.stopLoss} />
+                    <PlanCell label="TP" value={analysis.proposedTradePlan.takeProfit} />
+                    <PlanCell label="R:R" value={analysis.proposedTradePlan.rewardToRiskRatio} />
+                    <div className="rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2 text-[11px] text-zinc-300">
+                      {analysis.proposedTradePlan.rationale ?? 'Aucune justification fournie.'}
+                    </div>
+                    {analysis.proposedTradePlan.safeDeepEntry ? (
+                      <div className="rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px]">
+                        <div className="mb-1 text-[10px] font-bold uppercase tracking-widest text-amber-300">Safe Deep Entry</div>
+                        <div className="text-amber-200">
+                          {analysis.proposedTradePlan.safeDeepEntry.entryPrice ?? 'n/a'}
+                        </div>
+                        <div className="mt-1 text-amber-100/80">
+                          {analysis.proposedTradePlan.safeDeepEntry.rationale ?? 'Aucune justification fournie.'}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-zinc-500">Aucun plan proposé par le mentor pour ce setup.</div>
+                )}
+              </Section>
+            </div>
+          </div>
+
+          <Section title="Mémoire Similaire">
+            {review.response.similarAudits?.length ? (
+              <div className="space-y-2">
+                {review.response.similarAudits.map(match => (
+                  <div key={match.auditId} className="rounded border border-zinc-800 bg-zinc-950/40 p-2 text-[10px] text-zinc-300">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="font-semibold text-zinc-200">
+                        Audit #{match.auditId} · {match.instrument} · {match.action} · {match.timeframe}
+                      </span>
+                      <span className="text-cyan-300">{Math.round(match.similarity * 100)}% similaire</span>
+                    </div>
+                    <div className="mb-1 text-zinc-500">{new Date(match.createdAt).toLocaleString()}</div>
+                    <div className="mb-1 text-zinc-400">{match.summary}</div>
+                    <div className={match.verdict?.includes('Validé') ? 'text-emerald-300' : 'text-red-300'}>
+                      {match.verdict}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[11px] text-zinc-500">Aucun audit similaire mémorisé pour l’instant.</div>
+            )}
+          </Section>
+
+          <Section title="Payload Envoyé">
+            <pre className="max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950/40 p-2 text-[10px] text-zinc-400">
+              {JSON.stringify(review.response.payload, null, 2)}
+            </pre>
+          </Section>
+        </div>
+      )}
     </div>
   );
 }

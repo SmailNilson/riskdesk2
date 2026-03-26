@@ -34,7 +34,8 @@ import java.util.stream.Stream;
 @Service
 public class MentorSignalReviewService {
 
-    private static final int MAX_RECENT_REVIEWS = 200;
+    private static final int DEFAULT_RECENT_REVIEWS = 500;
+    private static final int MAX_RECENT_REVIEWS = 1000;
     private static final String STATUS_ANALYZING = "ANALYZING";
     private static final String STATUS_DONE = "DONE";
     private static final String STATUS_ERROR = "ERROR";
@@ -213,7 +214,12 @@ public class MentorSignalReviewService {
     }
 
     public List<MentorSignalReview> getRecentReviews() {
-        return reviewRepository.findRecent(MAX_RECENT_REVIEWS).stream()
+        return getRecentReviews(DEFAULT_RECENT_REVIEWS);
+    }
+
+    public List<MentorSignalReview> getRecentReviews(int requestedLimit) {
+        int safeLimit = Math.max(1, Math.min(requestedLimit, MAX_RECENT_REVIEWS));
+        return reviewRepository.findRecent(safeLimit).stream()
             .map(this::toDto)
             .toList();
     }

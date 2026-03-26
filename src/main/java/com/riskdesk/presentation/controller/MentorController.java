@@ -90,8 +90,8 @@ public class MentorController {
     }
 
     @GetMapping("/auto-alerts/recent")
-    public List<MentorSignalReview> recentAutoAlerts() {
-        return mentorSignalReviewService.getRecentReviews();
+    public List<MentorSignalReview> recentAutoAlerts(@RequestParam(defaultValue = "500") int limit) {
+        return mentorSignalReviewService.getRecentReviews(limit);
     }
 
     @PostMapping("/auto-alerts/thread")

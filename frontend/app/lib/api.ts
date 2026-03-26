@@ -355,7 +355,7 @@ export interface MentorAnalyzeResponse {
   auditId: number | null;
   model: string;
   payload: unknown;
-  analysis: MentorStructuredResponse;
+  analysis: MentorStructuredResponse | null;
   rawResponse: string;
   similarAudits: {
     auditId: number;
