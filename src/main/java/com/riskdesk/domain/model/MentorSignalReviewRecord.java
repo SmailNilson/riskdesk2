@@ -22,6 +22,10 @@ public class MentorSignalReviewRecord {
     private String analysisJson;
     private String verdict;
     private String errorMessage;
+    private TradeSimulationStatus simulationStatus;
+    private Instant activationTime;
+    private Instant resolutionTime;
+    private java.math.BigDecimal maxDrawdownPoints;
 
     public Long getId() {
         return id;
@@ -165,5 +169,37 @@ public class MentorSignalReviewRecord {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public TradeSimulationStatus getSimulationStatus() {
+        return simulationStatus;
+    }
+
+    public void setSimulationStatus(TradeSimulationStatus simulationStatus) {
+        this.simulationStatus = simulationStatus;
+    }
+
+    public Instant getActivationTime() {
+        return activationTime;
+    }
+
+    public void setActivationTime(Instant activationTime) {
+        this.activationTime = activationTime;
+    }
+
+    public Instant getResolutionTime() {
+        return resolutionTime;
+    }
+
+    public void setResolutionTime(Instant resolutionTime) {
+        this.resolutionTime = resolutionTime;
+    }
+
+    public java.math.BigDecimal getMaxDrawdownPoints() {
+        return maxDrawdownPoints;
+    }
+
+    public void setMaxDrawdownPoints(java.math.BigDecimal maxDrawdownPoints) {
+        this.maxDrawdownPoints = maxDrawdownPoints;
     }
 }

@@ -1,5 +1,7 @@
 package com.riskdesk.application.dto;
 
+import com.riskdesk.domain.model.TradeSimulationStatus;
+
 public record MentorSignalReview(
     Long id,
     String alertKey,
@@ -14,6 +16,10 @@ public record MentorSignalReview(
     String action,
     String timestamp,
     String createdAt,
+    TradeSimulationStatus simulationStatus,
+    String activationTime,
+    String resolutionTime,
+    Double maxDrawdownPoints,
     MentorAnalyzeResponse analysis,
     String errorMessage
 ) {

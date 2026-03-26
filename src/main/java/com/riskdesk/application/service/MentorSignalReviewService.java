@@ -13,6 +13,7 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -27,7 +28,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 
@@ -212,6 +212,7 @@ public class MentorSignalReviewService {
                 review.setAnalysisJson(writeJson(analysis));
                 review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
                 review.setErrorMessage(null);
+                initializeSimulationState(review, analysis);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
                 publish(updated);
             });
@@ -225,6 +226,7 @@ public class MentorSignalReviewService {
             review.setStatus(STATUS_ERROR);
             review.setCompletedAt(Instant.now());
             review.setErrorMessage(message);
+            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
             MentorSignalReviewRecord updated = reviewRepository.save(review);
             publish(updated);
         });
@@ -262,9 +264,36 @@ public class MentorSignalReviewService {
             review.getAction(),
             review.getAlertTimestamp() == null ? null : review.getAlertTimestamp().toString(),
             review.getCreatedAt() == null ? null : review.getCreatedAt().toString(),
+            review.getSimulationStatus(),
+            review.getActivationTime() == null ? null : review.getActivationTime().toString(),
+            review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
+            review.getMaxDrawdownPoints() == null ? null : review.getMaxDrawdownPoints().doubleValue(),
             analysis,
             review.getErrorMessage()
         );
+    }
+
+    private void initializeSimulationState(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
+        if (shouldTrackOutcome(review, analysis)) {
+            review.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
+        } else {
+            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+        }
+        review.setActivationTime(null);
+        review.setResolutionTime(null);
+        review.setMaxDrawdownPoints(BigDecimal.ZERO);
+    }
+
+    private boolean shouldTrackOutcome(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
+        if (analysis == null || analysis.analysis() == null || analysis.analysis().proposedTradePlan() == null) {
+            return false;
+        }
+        if (review.getVerdict() == null || !review.getVerdict().contains("Validé")) {
+            return false;
+        }
+        return analysis.analysis().proposedTradePlan().entryPrice() != null
+            && analysis.analysis().proposedTradePlan().stopLoss() != null
+            && analysis.analysis().proposedTradePlan().takeProfit() != null;
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate,

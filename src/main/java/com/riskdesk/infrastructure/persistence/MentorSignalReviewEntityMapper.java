@@ -28,6 +28,10 @@ final class MentorSignalReviewEntityMapper {
         entity.setAnalysisJson(review.getAnalysisJson());
         entity.setVerdict(review.getVerdict());
         entity.setErrorMessage(review.getErrorMessage());
+        entity.setSimulationStatus(review.getSimulationStatus());
+        entity.setActivationTime(review.getActivationTime());
+        entity.setResolutionTime(review.getResolutionTime());
+        entity.setMaxDrawdownPoints(review.getMaxDrawdownPoints());
         return entity;
     }
 
@@ -51,6 +55,10 @@ final class MentorSignalReviewEntityMapper {
         review.setAnalysisJson(entity.getAnalysisJson());
         review.setVerdict(entity.getVerdict());
         review.setErrorMessage(entity.getErrorMessage());
+        review.setSimulationStatus(entity.getSimulationStatus());
+        review.setActivationTime(entity.getActivationTime());
+        review.setResolutionTime(entity.getResolutionTime());
+        review.setMaxDrawdownPoints(entity.getMaxDrawdownPoints());
         return review;
     }
 }

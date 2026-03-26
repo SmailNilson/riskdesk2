@@ -166,6 +166,16 @@ When extending Mentor behavior in the UI:
 - when an alert must trigger autonomous Mentor review, prefer backend orchestration plus WebSocket publication over client-only side effects
 - when an alert review must stay historically stable, persist the frozen payload snapshot in the backend and reopen that saved thread rather than rebuilding live market context on click
 
+### Mentor Outcome Tracking Rule
+
+When evaluating whether a saved Mentor trade plan was correct:
+
+- keep the replay/simulation orchestration in `application`
+- keep the simulation state as part of the persisted review model or a closely related persistence model
+- source candles only from the internal PostgreSQL-backed candle repository
+- do not recompute the original Mentor review payload during outcome evaluation
+- use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
+
 ## Review Checklist
 
 When reviewing a change, ask:

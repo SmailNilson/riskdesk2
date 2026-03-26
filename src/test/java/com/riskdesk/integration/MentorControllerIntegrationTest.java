@@ -179,6 +179,10 @@ class MentorControllerIntegrationTest {
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
                 null,
+                null,
+                null,
+                null,
+                null,
                 null
             )
         ));
@@ -208,6 +212,10 @@ class MentorControllerIntegrationTest {
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
                 null,
+                null,
+                null,
+                null,
+                null,
                 null
             ),
             new MentorSignalReview(
@@ -224,6 +232,10 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:31:10Z",
+                null,
+                null,
+                null,
+                null,
                 null,
                 null
             )
@@ -262,6 +274,10 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:32:00Z",
+                null,
+                null,
+                null,
+                null,
                 null,
                 null
             )

@@ -127,6 +127,37 @@ Important behavior:
 - the initial review is snapshot-based and no longer depends on click-time market state
 - manual reanalysis does rebuild current indicators/candles/live price, but also passes the original alert time/reason/price to Gemini for comparison
 
+### 5. Mentor trade outcome tracker
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/TradeSimulationService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/model/TradeSimulationStatus.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/persistence/entity/MentorSignalReviewEntity.java`
+
+What changed:
+
+- saved alert reviews now carry simulation fields for post-trade outcome tracking
+- valid reviews with a complete `Entry / SL / TP` plan are initialized as `PENDING_ENTRY`
+- invalid or incomplete plans are initialized as `CANCELLED`
+- a scheduled backend service replays subsequent `1m` candles from PostgreSQL and updates the review outcome asynchronously
+
+Simulation rules:
+
+- before entry:
+  - if `TP` is touched before the limit `Entry`, the result becomes `MISSED`
+  - if the limit `Entry` is touched, the trade becomes `ACTIVE`
+- after entry:
+  - `SL` resolves to `LOSS`
+  - `TP` resolves to `WIN`
+- if one candle crosses both `SL` and `TP`, the result is recorded as `LOSS` pessimistically
+- `maxDrawdownPoints` records the worst adverse excursion before resolution
+
+Operational note:
+
+- this uses the existing internal candle repository only
+- no external replay feed or provider is involved
+
 ## Known Runtime Behavior
 
 ### Current good news
@@ -180,3 +211,4 @@ lsof -nP -iTCP:4001
 - document and automate the expected IB Gateway startup sequence
 - optionally add integration tests around source attribution for live price vs DB fallback
 - add more explicit tests around layer boundaries and use-case behavior
+- expose the simulation outcome in the UI once the product design is ready

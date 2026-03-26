@@ -1,7 +1,10 @@
 package com.riskdesk.infrastructure.persistence.entity;
 
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -10,6 +13,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
 import java.time.Instant;
+import java.math.BigDecimal;
 
 @Entity
 @Table(
@@ -78,6 +82,19 @@ public class MentorSignalReviewEntity {
 
     @Column(columnDefinition = "TEXT")
     private String errorMessage;
+
+    @Enumerated(EnumType.STRING)
+    @Column(length = 32)
+    private TradeSimulationStatus simulationStatus;
+
+    @Column
+    private Instant activationTime;
+
+    @Column
+    private Instant resolutionTime;
+
+    @Column(precision = 19, scale = 6)
+    private BigDecimal maxDrawdownPoints;
 
     public Long getId() {
         return id;
@@ -221,5 +238,37 @@ public class MentorSignalReviewEntity {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public TradeSimulationStatus getSimulationStatus() {
+        return simulationStatus;
+    }
+
+    public void setSimulationStatus(TradeSimulationStatus simulationStatus) {
+        this.simulationStatus = simulationStatus;
+    }
+
+    public Instant getActivationTime() {
+        return activationTime;
+    }
+
+    public void setActivationTime(Instant activationTime) {
+        this.activationTime = activationTime;
+    }
+
+    public Instant getResolutionTime() {
+        return resolutionTime;
+    }
+
+    public void setResolutionTime(Instant resolutionTime) {
+        this.resolutionTime = resolutionTime;
+    }
+
+    public BigDecimal getMaxDrawdownPoints() {
+        return maxDrawdownPoints;
+    }
+
+    public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) {
+        this.maxDrawdownPoints = maxDrawdownPoints;
     }
 }

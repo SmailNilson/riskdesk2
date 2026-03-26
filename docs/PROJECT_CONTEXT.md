@@ -150,6 +150,30 @@ Current behavior:
 - Mentor review updates still flow through `/topic/mentor-alerts`
 - manual `Ask Mentor` analyses are stored separately in `mentor_audits` with a dedicated `manual-mentor:` source reference and exposed through `/api/mentor/manual-reviews/recent`
 
+### Mentor Outcome Tracker
+
+Qualified alert reviews can now also be tracked after the fact as simulated trade outcomes.
+
+Current behavior:
+
+- when a saved `MentorSignalReview` finishes with a valid trade plan, the backend initializes a trade simulation state
+- tracked fields live on the saved review:
+  - `simulationStatus`
+  - `activationTime`
+  - `resolutionTime`
+  - `maxDrawdownPoints`
+- the simulation uses internal `1m` candles from PostgreSQL only
+- the scheduler polls reviews in `PENDING_ENTRY` or `ACTIVE`
+- trigger logic respects limit-order semantics:
+  - if price reaches `TP` before `Entry`, the result becomes `MISSED`
+  - once `Entry` is touched, the review becomes `ACTIVE`
+  - if `SL` and `TP` are both crossed in one candle, the result is `LOSS` pessimistically
+- terminal states are:
+  - `WIN`
+  - `LOSS`
+  - `MISSED`
+  - `CANCELLED`
+
 ## Operational Commands
 
 ### Compile backend

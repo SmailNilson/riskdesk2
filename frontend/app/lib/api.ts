@@ -397,6 +397,10 @@ export interface MentorSignalReview {
   action: 'LONG' | 'SHORT';
   timestamp: string;
   createdAt: string;
+  simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | null;
+  activationTime: string | null;
+  resolutionTime: string | null;
+  maxDrawdownPoints: number | null;
   analysis: MentorAnalyzeResponse | null;
   errorMessage: string | null;
 }
