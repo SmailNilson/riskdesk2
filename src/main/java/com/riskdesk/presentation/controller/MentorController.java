@@ -103,6 +103,18 @@ public class MentorController {
         }
     }
 
+    @GetMapping("/auto-analysis/status")
+    public Map<String, Object> autoAnalysisStatus() {
+        return Map.of("enabled", mentorSignalReviewService.isAutoAnalysisEnabled());
+    }
+
+    @PostMapping("/auto-analysis/toggle")
+    public Map<String, Object> toggleAutoAnalysis() {
+        boolean next = !mentorSignalReviewService.isAutoAnalysisEnabled();
+        mentorSignalReviewService.setAutoAnalysisEnabled(next);
+        return Map.of("enabled", next);
+    }
+
     @PostMapping("/auto-alerts/reanalyze")
     public MentorSignalReview reanalyzeExistingAlert(@Valid @RequestBody MentorAlertReviewRequest request) {
         try {

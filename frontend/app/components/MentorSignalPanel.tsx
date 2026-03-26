@@ -196,6 +196,23 @@ export default function MentorSignalPanel({
     }
   };
 
+  const [autoAnalysis, setAutoAnalysis] = useState<boolean>(false);
+  const [togglingAuto, setTogglingAuto] = useState(false);
+
+  useEffect(() => {
+    api.getAutoAnalysisStatus().then(r => setAutoAnalysis(r.enabled)).catch(() => {});
+  }, []);
+
+  const toggleAutoAnalysis = async () => {
+    setTogglingAuto(true);
+    try {
+      const r = await api.toggleAutoAnalysis();
+      setAutoAnalysis(r.enabled);
+    } finally {
+      setTogglingAuto(false);
+    }
+  };
+
   const reanalyzeAlert = async (alert: AlertMessage) => {
     const alertKey = buildMentorAlertKey(alert);
     setError(null);
@@ -224,6 +241,19 @@ export default function MentorSignalPanel({
           </div>
         </div>
         <div className="flex items-center gap-2 text-[10px]">
+          <button
+            onClick={() => void toggleAutoAnalysis()}
+            disabled={togglingAuto}
+            title={autoAnalysis ? 'Auto-analyse activée — cliquer pour désactiver' : 'Auto-analyse désactivée — cliquer pour activer'}
+            className={`flex items-center gap-1.5 rounded border px-2 py-1 font-semibold transition-colors disabled:cursor-not-allowed ${
+              autoAnalysis
+                ? 'border-emerald-700 bg-emerald-950/60 text-emerald-300 hover:border-emerald-500'
+                : 'border-zinc-700 bg-zinc-900/60 text-zinc-500 hover:border-zinc-500 hover:text-zinc-400'
+            }`}
+          >
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${autoAnalysis ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+            AUTO {autoAnalysis ? 'ON' : 'OFF'}
+          </button>
           <select
             value={filterInstrument}
             onChange={e => setFilterInstrument(e.target.value)}
@@ -401,21 +431,23 @@ export default function MentorSignalPanel({
 
                 {selectedGroup.alerts.length > 0 ? (
                   <div className="mt-3 flex flex-wrap justify-end gap-2">
-                    {selectedGroup.alerts.map(alert => {
-                      const alertKey = buildMentorAlertKey(alert);
-                      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-                      const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
-                      return (
-                        <button
-                          key={alertKey}
-                          onClick={() => void reanalyzeAlert(alert)}
-                          disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
-                          className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
-                        >
-                          {reanalyzingAlertKey === alertKey ? 'Relance...' : `Reanalyse ${alert.category}`}
-                        </button>
-                      );
-                    })}
+                    {selectedGroup.alerts
+                      .filter((alert, idx, arr) => arr.findIndex(a => a.category === alert.category) === idx)
+                      .map(alert => {
+                        const alertKey = buildMentorAlertKey(alert);
+                        const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+                        const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
+                        return (
+                          <button
+                            key={alert.category}
+                            onClick={() => void reanalyzeAlert(alert)}
+                            disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
+                            className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                          >
+                            {reanalyzingAlertKey === alertKey ? 'Relance...' : `Reanalyse ${alert.category}`}
+                          </button>
+                        );
+                      })}
                   </div>
                 ) : null}
               </>

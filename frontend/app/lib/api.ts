@@ -457,6 +457,10 @@ export const api = {
     post<MentorSignalReview[]>('/api/mentor/auto-alerts/thread', request),
   reanalyzeMentorAlert: (request: MentorAlertReviewRequest) =>
     post<MentorSignalReview>('/api/mentor/auto-alerts/reanalyze', request),
+  getAutoAnalysisStatus: () =>
+    get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
+  toggleAutoAnalysis: () =>
+    post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
     n1?: number; n2?: number; nsc?: number; nsv?: number; qty?: number; capital?: number; pointValue?: number;

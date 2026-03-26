@@ -5,8 +5,10 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
+import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.vo.Timeframe;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,13 +32,14 @@ public class AlertService {
 
     private static final int MAX_RECENT_ALERTS = 50;
 
-    private final PositionService         positionService;
-    private final IndicatorService        indicatorService;
-    private final RiskAlertEvaluator      riskAlertEvaluator;
-    private final IndicatorAlertEvaluator indicatorAlertEvaluator;
-    private final AlertDeduplicator       deduplicator;
+    private final PositionService           positionService;
+    private final IndicatorService          indicatorService;
+    private final RiskAlertEvaluator        riskAlertEvaluator;
+    private final IndicatorAlertEvaluator   indicatorAlertEvaluator;
+    private final AlertDeduplicator         deduplicator;
+    private final SignalPreFilterService    signalPreFilterService;
     private final MentorSignalReviewService mentorSignalReviewService;
-    private final SimpMessagingTemplate   messagingTemplate;
+    private final SimpMessagingTemplate     messagingTemplate;
 
     // Recent alerts buffer (last 50) for REST endpoint
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
@@ -46,15 +49,17 @@ public class AlertService {
                         RiskAlertEvaluator riskAlertEvaluator,
                         IndicatorAlertEvaluator indicatorAlertEvaluator,
                         AlertDeduplicator deduplicator,
+                        SignalPreFilterService signalPreFilterService,
                         MentorSignalReviewService mentorSignalReviewService,
                         SimpMessagingTemplate messagingTemplate) {
-        this.positionService         = positionService;
-        this.indicatorService        = indicatorService;
-        this.riskAlertEvaluator      = riskAlertEvaluator;
-        this.indicatorAlertEvaluator = indicatorAlertEvaluator;
-        this.deduplicator            = deduplicator;
+        this.positionService           = positionService;
+        this.indicatorService          = indicatorService;
+        this.riskAlertEvaluator        = riskAlertEvaluator;
+        this.indicatorAlertEvaluator   = indicatorAlertEvaluator;
+        this.deduplicator              = deduplicator;
+        this.signalPreFilterService    = signalPreFilterService;
         this.mentorSignalReviewService = mentorSignalReviewService;
-        this.messagingTemplate       = messagingTemplate;
+        this.messagingTemplate         = messagingTemplate;
     }
 
     /**
@@ -72,18 +77,39 @@ public class AlertService {
             log.debug("Risk evaluation error: {}", e.getMessage());
         }
 
+        // Compute H1 snapshot first — used both for the H1 evaluation cycle and as the
+        // Higher Timeframe reference for the HTF trend filter on 10m signals (Rule 1).
+        IndicatorSnapshot h1Snap = null;
+        String h1Trend = "UNDEFINED";
+        try {
+            h1Snap = indicatorService.computeSnapshot(instrument, "1h");
+            if (h1Snap != null) h1Trend = h1Snap.marketStructureTrend();
+        } catch (Exception e) {
+            log.debug("H1 snapshot error for {}: {}", instrument, e.getMessage());
+        }
+
         // Indicator evaluation via domain service (both timeframes)
         for (String timeframe : List.of("10m", "1h")) {
             try {
-                IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, timeframe);
+                // Reuse already-computed H1 snapshot; compute fresh snapshot for 10m
+                IndicatorSnapshot snap = "1h".equals(timeframe) ? h1Snap
+                        : indicatorService.computeSnapshot(instrument, timeframe);
+                if (snap == null) continue;
+
                 List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
                 alerts.addAll(indicatorAlerts);
 
-                // Publish each alert individually to WebSocket, but batch mentor reviews
-                // by direction so indicators that fire at the same time get ONE combined review
+                // Record all candidate signals for anti-chop detection BEFORE filtering
+                signalPreFilterService.recordSignals(indicatorAlerts, timeframe);
+
+                // Apply Rules 1 (HTF alignment) and 3 (anti-chop)
+                List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, h1Trend);
+
+                // Publish with Rule 2: dynamic cooldown proportional to timeframe
+                long cooldownSeconds = Timeframe.fromLabel(timeframe).periodSeconds();
                 List<Alert> publishedAlerts = new ArrayList<>();
-                for (Alert alert : indicatorAlerts) {
-                    if (publishAlertWithoutMentor(alert)) {
+                for (Alert alert : filteredAlerts) {
+                    if (publishAlertWithoutMentor(alert, cooldownSeconds)) {
                         publishedAlerts.add(alert);
                     }
                 }
@@ -149,16 +175,18 @@ public class AlertService {
             snapshot.vwap(),
             snapshot.activeOrderBlocks() == null ? List.of() : snapshot.activeOrderBlocks().stream()
                 .map(block -> new IndicatorAlertSnapshot.OrderBlockZone(block.type(), block.high(), block.low()))
-                .toList()
+                .toList(),
+            snapshot.lastCandleTimestamp()
         );
     }
 
     /**
      * Publish alert to WebSocket without triggering mentor review.
+     * Uses a timeframe-aware cooldown (Rule 2) instead of the global default.
      * Returns true if the alert passed dedup and was actually published.
      */
-    private boolean publishAlertWithoutMentor(Alert alert) {
-        if (!deduplicator.shouldFire(alert)) {
+    private boolean publishAlertWithoutMentor(Alert alert, long cooldownSeconds) {
+        if (!deduplicator.shouldFire(alert, cooldownSeconds)) {
             return false;
         }
         log.info("ALERT [{}] {}", alert.severity(), alert.message());

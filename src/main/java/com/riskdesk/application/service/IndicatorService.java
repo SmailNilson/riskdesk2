@@ -10,6 +10,7 @@ import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.*;
 
 @Service
@@ -136,6 +137,8 @@ public class IndicatorService {
                         f.bias(), f.top(), f.bottom(), f.startBarTime()))
                 .toList();
 
+        Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
+
         return new IndicatorSnapshot(
                 instrument.name(), timeframe,
                 last(ema9v), last(ema50v), last(ema200v), emaCross,
@@ -174,7 +177,8 @@ public class IndicatorService {
                 strongHighTime, strongLowTime, weakHighTime, weakLowTime,
                 obViews,
                 fvgViews,
-                recentBreaks
+                recentBreaks,
+                lastCandleTimestamp
         );
     }
 
@@ -309,7 +313,8 @@ public class IndicatorService {
                 null, null, null, null,
                 Collections.emptyList(),
                 Collections.emptyList(),
-                Collections.emptyList()
+                Collections.emptyList(),
+                null
         );
     }
 }

@@ -50,6 +50,12 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
 
+    /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. Default OFF. */
+    private volatile boolean autoAnalysisEnabled = false;
+
+    public boolean isAutoAnalysisEnabled() { return autoAnalysisEnabled; }
+    public void setAutoAnalysisEnabled(boolean enabled) { autoAnalysisEnabled = enabled; }
+
     public MentorSignalReviewService(MentorAnalysisService mentorAnalysisService,
                                      IndicatorService indicatorService,
                                      MentorIntermarketService mentorIntermarketService,
@@ -75,8 +81,10 @@ public class MentorSignalReviewService {
     /**
      * Batch-capture: groups alerts by direction and creates ONE combined review
      * per direction instead of one per indicator.
+     * No-op when auto-analysis is disabled.
      */
     public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
+        if (!autoAnalysisEnabled) return;
         // Group by direction (LONG/SHORT)
         Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
         for (Alert alert : alerts) {
@@ -115,6 +123,7 @@ public class MentorSignalReviewService {
     }
 
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
+        if (!autoAnalysisEnabled) return;
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {
             return;

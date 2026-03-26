@@ -4,6 +4,7 @@ import com.riskdesk.domain.alert.model.*;
 import com.riskdesk.domain.model.Instrument;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,27 @@ public class IndicatorAlertEvaluator {
      * Key format: "INDICATOR:INSTRUMENT:TIMEFRAME" → last signal value.
      */
     private final Map<String, String> lastState = new ConcurrentHashMap<>();
+
+    /**
+     * Rule 4 — Candle Close Guard.
+     * Tracks the last candle timestamp on which each SMC / WaveTrend signal fired.
+     * Prevents re-firing on the same open candle due to intra-bar repainting.
+     * Key format: same as lastState. Value: candle open timestamp.
+     */
+    private final Map<String, Instant> lastFiredCandle = new ConcurrentHashMap<>();
+
+    /**
+     * Rule 4: Returns true if this is a new candle (different from the last candle on which this
+     * signal fired), and records the current candle timestamp. Returns true if no timestamp is
+     * available (fail-open). Used for SMC and WaveTrend to prevent intra-bar repainting noise.
+     */
+    private boolean canFireOnCandle(String candleKey, Instant lastCandleTimestamp) {
+        if (lastCandleTimestamp == null) return true;
+        Instant prev = lastFiredCandle.get(candleKey);
+        if (lastCandleTimestamp.equals(prev)) return false;
+        lastFiredCandle.put(candleKey, lastCandleTimestamp);
+        return true;
+    }
 
     /**
      * Returns true if the signal is new (different from last known state)
@@ -84,9 +106,11 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // SMC — only on transition
+        // SMC — only on transition AND on a new candle (Rule 4: candle close guard)
         String smcKey = "smc:" + tf;
-        if (isTransition(smcKey, snap.lastBreakType())) {
+        if (isTransition(smcKey, snap.lastBreakType())
+                && snap.lastBreakType() != null
+                && canFireOnCandle(smcKey + ":candle", snap.lastCandleTimestamp())) {
             if (snap.lastBreakType().startsWith("CHOCH")) {
                 alerts.add(new Alert("smc:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — CHoCH detected: " + snap.lastBreakType(),
@@ -98,10 +122,12 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // WaveTrend signal — only on transition
+        // WaveTrend signal — only on transition AND on a new candle (Rule 4: candle close guard)
         if (snap.wtWt1() != null) {
             String wtSignalKey = "wt:signal:" + tf;
-            if (isTransition(wtSignalKey, snap.wtSignal())) {
+            if (isTransition(wtSignalKey, snap.wtSignal())
+                    && snap.wtSignal() != null
+                    && canFireOnCandle(wtSignalKey + ":candle", snap.lastCandleTimestamp())) {
                 if ("OVERBOUGHT".equals(snap.wtSignal())) {
                     alerts.add(new Alert("wt:overbought:" + tf, AlertSeverity.WARNING,
                         String.format("%s [%s] — WaveTrend overbought (WT1=%.1f)",
@@ -115,9 +141,11 @@ public class IndicatorAlertEvaluator {
                 }
             }
 
-            // WaveTrend crossover — only on transition
+            // WaveTrend crossover — only on transition AND on a new candle (Rule 4)
             String wtCrossKey = "wt:cross:" + tf;
-            if (isTransition(wtCrossKey, snap.wtCrossover())) {
+            if (isTransition(wtCrossKey, snap.wtCrossover())
+                    && snap.wtCrossover() != null
+                    && canFireOnCandle(wtCrossKey + ":candle", snap.lastCandleTimestamp())) {
                 if ("BULLISH_CROSS".equals(snap.wtCrossover())) {
                     alerts.add(new Alert("wt:bull:" + tf, AlertSeverity.INFO,
                         instrument.getDisplayName() + " [" + timeframe + "] — WaveTrend Bullish Cross",

@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.config;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
+import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.trading.service.RiskSpecification;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -36,5 +37,10 @@ public class AlertConfig {
     @Bean
     public AlertDeduplicator alertDeduplicator() {
         return new AlertDeduplicator(DEDUP_COOLDOWN_SECONDS);
+    }
+
+    @Bean
+    public SignalPreFilterService signalPreFilterService() {
+        return new SignalPreFilterService();
     }
 }

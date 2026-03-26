@@ -32,7 +32,8 @@ public class IndicatorSignalSteps {
                 null,
                 null, null, null,
                 null,
-                Collections.emptyList()
+                Collections.emptyList(),
+                null
         );
     }
 
@@ -47,7 +48,8 @@ public class IndicatorSignalSteps {
                 null,
                 null, null, null,
                 null,
-                Collections.emptyList()
+                Collections.emptyList(),
+                null
         );
     }
 
@@ -62,7 +64,8 @@ public class IndicatorSignalSteps {
                 null,
                 null, null, null,
                 null,
-                Collections.emptyList()
+                Collections.emptyList(),
+                null
         );
     }
 
@@ -77,7 +80,8 @@ public class IndicatorSignalSteps {
                 breakType,
                 null, null, null,
                 null,
-                Collections.emptyList()
+                Collections.emptyList(),
+                null
         );
     }
 
