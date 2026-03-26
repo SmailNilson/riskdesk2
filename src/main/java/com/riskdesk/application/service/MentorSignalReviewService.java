@@ -72,6 +72,48 @@ public class MentorSignalReviewService {
         captureInitialReview(alert, null);
     }
 
+    /**
+     * Batch-capture: groups alerts by direction and creates ONE combined review
+     * per direction instead of one per indicator.
+     */
+    public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
+        // Group by direction (LONG/SHORT)
+        Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
+        for (Alert alert : alerts) {
+            String action = inferAction(alert.message());
+            if (action == null) continue;
+            byDirection.computeIfAbsent(action, k -> new ArrayList<>()).add(alert);
+        }
+
+        for (Map.Entry<String, List<Alert>> entry : byDirection.entrySet()) {
+            List<Alert> group = entry.getValue();
+            // Use the first alert as the "primary" for the review record,
+            // but include all indicator categories in the message
+            Alert primary = group.get(0);
+            List<String> categories = group.stream()
+                .map(a -> a.category().name())
+                .distinct()
+                .toList();
+
+            String combinedMessage = primary.message();
+            if (categories.size() > 1) {
+                // Enrich message with all firing indicators
+                combinedMessage = primary.message() + " [+" + String.join(", ",
+                    categories.subList(1, categories.size())) + "]";
+            }
+
+            // Build a combined alert with enriched message
+            Alert combinedAlert = new Alert(
+                primary.key(),
+                primary.severity(),
+                combinedMessage,
+                primary.category(),
+                primary.instrument()
+            );
+            captureInitialReview(combinedAlert, focusSnapshot);
+        }
+    }
+
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {

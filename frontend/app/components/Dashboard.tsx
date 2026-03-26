@@ -1,14 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, IndicatorSeriesSnapshot, PortfolioSummary, IndicatorSnapshot } from '@/app/lib/api';
+import { api, PortfolioSummary, IndicatorSnapshot } from '@/app/lib/api';
 import { AlertMessage, PriceUpdate, useWebSocket } from '@/app/hooks/useWebSocket';
 import MetricsBar from './MetricsBar';
 import Chart from './Chart';
 import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
 import MentorSignalPanel from './MentorSignalPanel';
-import AlertsFeed from './AlertsFeed';
 import PositionForm from './PositionForm';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -28,100 +27,6 @@ const TIMEZONES = [
 ] as const;
 type TzEntry = typeof TIMEZONES[number];
 
-function buildTradingAiStudioPayload(params: {
-  instrument: Instrument;
-  timeframe: Timeframe;
-  timezone: TzEntry;
-  connected: boolean;
-  summary: PortfolioSummary | null;
-  snapshot: IndicatorSnapshot | null;
-  indicatorSeries: IndicatorSeriesSnapshot;
-  prices: Record<string, PriceUpdate>;
-  alerts: AlertMessage[];
-}) {
-  const currentPrice = params.prices[params.instrument]?.price ?? null;
-  const importantSignals = [
-    params.snapshot?.rsiSignal,
-    params.snapshot?.macdCrossover,
-    params.snapshot?.wtSignal,
-    params.snapshot?.wtCrossover,
-    params.snapshot?.bbTrendSignal,
-    params.snapshot?.lastBreakType,
-  ].filter(signal => signal && signal !== 'NEUTRAL');
-
-  const relevantAlerts = params.alerts
-    .filter(alert => alert.instrument == null || alert.instrument === params.instrument)
-    .slice(0, 12);
-
-  return {
-    exportType: 'riskdesk-trading-ai-studio',
-    generatedAt: new Date().toISOString(),
-    analysisRequest: {
-      objective: 'Provide trading and risk recommendations from the current dashboard state.',
-      instructions: [
-        'Use only the supplied data.',
-        'Identify trend, momentum, risk concentration, and possible setups.',
-        'Give a directional bias, key support/resistance, and invalidation levels when possible.',
-        'If data is insufficient or mixed, say so clearly instead of guessing.',
-      ],
-    },
-    dashboardContext: {
-      selectedInstrument: params.instrument,
-      selectedTimeframe: params.timeframe,
-      selectedTimezone: params.timezone.tz,
-      connectionStatus: params.connected ? 'LIVE' : 'DISCONNECTED',
-    },
-    marketContext: {
-      instrument: params.instrument,
-      timeframe: params.timeframe,
-      currentPrice,
-      priceTimestamp: params.prices[params.instrument]?.timestamp ?? null,
-      indicatorSnapshot: params.snapshot,
-      chartSeries: params.indicatorSeries,
-    },
-    riskSummary: params.summary ? {
-      totalUnrealizedPnL: params.summary.totalUnrealizedPnL,
-      todayRealizedPnL: params.summary.todayRealizedPnL,
-      totalPnL: params.summary.totalPnL,
-      openPositionCount: params.summary.openPositionCount,
-      totalExposure: params.summary.totalExposure,
-      marginUsedPct: params.summary.marginUsedPct,
-    } : null,
-    importantElements: {
-      activeSignals: importantSignals,
-      marketStructureTrend: params.snapshot?.marketStructureTrend ?? null,
-      keyLevels: params.snapshot ? {
-        ema9: params.snapshot.ema9,
-        ema50: params.snapshot.ema50,
-        ema200: params.snapshot.ema200,
-        vwap: params.snapshot.vwap,
-        supertrendValue: params.snapshot.supertrendValue,
-        bbUpper: params.snapshot.bbUpper,
-        bbLower: params.snapshot.bbLower,
-        strongHigh: params.snapshot.strongHigh,
-        strongLow: params.snapshot.strongLow,
-        weakHigh: params.snapshot.weakHigh,
-        weakLow: params.snapshot.weakLow,
-      } : null,
-      activeOrderBlocks: params.snapshot?.activeOrderBlocks ?? [],
-      activeFairValueGaps: params.snapshot?.activeFairValueGaps ?? [],
-      recentBreaks: params.snapshot?.recentBreaks ?? [],
-      recentAlerts: relevantAlerts,
-    },
-  };
-}
-
-function downloadJson(filename: string, content: string) {
-  const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
 
 export default function Dashboard() {
   const [instrument, setInstrument] = useState<Instrument>('MCL');
@@ -130,7 +35,6 @@ export default function Dashboard() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
-  const [aiExportStatus, setAiExportStatus] = useState<string | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
 
   const { prices, alerts, mentorSignalReviews, connected } = useWebSocket();
@@ -158,33 +62,6 @@ export default function Dashboard() {
     const id = setInterval(loadSnapshot, 30_000);
     return () => clearInterval(id);
   }, [loadSnapshot]);
-
-  const exportTradingAiJson = useCallback(async () => {
-    const indicatorSeries = await api.getIndicatorSeries(instrument, timeframe, 500);
-    const payload = buildTradingAiStudioPayload({
-      instrument,
-      timeframe,
-      timezone,
-      connected,
-      summary,
-      snapshot,
-      indicatorSeries,
-      prices,
-      alerts,
-    });
-    const json = JSON.stringify(payload, null, 2);
-    const fileName = `riskdesk-ai-${instrument}-${timeframe}.json`;
-
-    try {
-      await navigator.clipboard.writeText(json);
-      setAiExportStatus('JSON copied');
-    } catch {
-      downloadJson(fileName, json);
-      setAiExportStatus('JSON downloaded');
-    }
-
-    window.setTimeout(() => setAiExportStatus(null), 2500);
-  }, [alerts, connected, instrument, prices, snapshot, summary, timeframe, timezone]);
 
   return (
     <div className={`min-h-screen bg-zinc-950 text-white flex flex-col ${theme === 'light' ? 'light' : ''}`}>
@@ -253,17 +130,6 @@ export default function Dashboard() {
 
           <PositionForm onCreated={loadSummary} />
 
-          <button
-            onClick={exportTradingAiJson}
-            className="px-2.5 py-1.5 rounded-lg border border-cyan-800 bg-cyan-950/60 text-xs text-cyan-300 hover:bg-cyan-900/70 hover:border-cyan-600 transition-colors"
-            title="Generate a JSON payload for Trading AI Studio"
-          >
-            AI JSON
-          </button>
-
-          {aiExportStatus && (
-            <span className="text-[10px] text-cyan-400">{aiExportStatus}</span>
-          )}
         </div>
       </header>
 
@@ -326,9 +192,6 @@ export default function Dashboard() {
           reviews={mentorSignalReviews}
         />
       </div>
-
-      {/* Fixed bottom alerts bar */}
-      <AlertsFeed alerts={alerts} />
     </div>
   );
 }

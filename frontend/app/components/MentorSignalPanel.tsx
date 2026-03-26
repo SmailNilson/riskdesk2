@@ -5,6 +5,16 @@ import { api, MentorSignalReview } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
 
+type AlertGroup = {
+  groupKey: string;
+  direction: string;
+  instrument: string;
+  timeframe: string;
+  categories: string[];
+  alerts: AlertMessage[];
+  timestamp: string;
+};
+
 export default function MentorSignalPanel({
   timezone,
   alerts,
@@ -14,30 +24,108 @@ export default function MentorSignalPanel({
   alerts: AlertMessage[];
   reviews: MentorSignalReview[];
 }) {
-  const eligibleAlerts = useMemo(() => alerts.filter(isMentorEligibleAlert), [alerts]);
-  const [selectedAlertKey, setSelectedAlertKey] = useState<string | null>(null);
-  const [loadingThreadKey, setLoadingThreadKey] = useState<string | null>(null);
+  const liveEligibleAlerts = useMemo(() => alerts.filter(isMentorEligibleAlert), [alerts]);
+
+  // Reconstruct alerts from saved reviews that have no matching live alert
+  const allAlerts = useMemo(() => {
+    const liveKeys = new Set(liveEligibleAlerts.map(buildMentorAlertKey));
+    const seenKeys = new Set<string>(liveKeys);
+    const fromReviews: AlertMessage[] = [];
+
+    for (const review of reviews) {
+      if (!seenKeys.has(review.alertKey) && review.instrument) {
+        seenKeys.add(review.alertKey);
+        fromReviews.push({
+          severity: review.severity,
+          category: review.category,
+          message: review.message,
+          instrument: review.instrument,
+          timestamp: review.timestamp,
+        });
+      }
+    }
+
+    const combined = [...liveEligibleAlerts, ...fromReviews];
+    const reviewKeys = new Set(reviews.map(r => r.alertKey));
+    combined.sort((a, b) => {
+      const aHasReview = reviewKeys.has(buildMentorAlertKey(a)) ? 1 : 0;
+      const bHasReview = reviewKeys.has(buildMentorAlertKey(b)) ? 1 : 0;
+      if (aHasReview !== bHasReview) return bHasReview - aHasReview;
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    });
+    return combined;
+  }, [liveEligibleAlerts, reviews]);
+
+  // Group alerts by instrument + timeframe + direction, but only if timestamps are within 90s
+  const GROUP_WINDOW_MS = 90_000;
+  const groups = useMemo(() => {
+    const result: AlertGroup[] = [];
+    for (const alert of allAlerts) {
+      const direction = inferDirection(alert) ?? 'REVIEW';
+      const tf = parseTimeframe(alert.message);
+      const instrument = alert.instrument ?? 'GLOBAL';
+      const alertTime = new Date(alert.timestamp).getTime();
+
+      // Find an existing group with same instrument+tf+direction AND within time window
+      const match = result.find(g =>
+        g.instrument === instrument &&
+        g.timeframe === tf &&
+        g.direction === direction &&
+        Math.abs(alertTime - new Date(g.timestamp).getTime()) <= GROUP_WINDOW_MS
+      );
+
+      if (match) {
+        match.alerts.push(alert);
+        if (!match.categories.includes(alert.category)) {
+          match.categories.push(alert.category);
+        }
+      } else {
+        const groupKey = `${instrument}:${tf}:${direction}:${alert.timestamp}`;
+        result.push({
+          groupKey,
+          direction,
+          instrument,
+          timeframe: tf,
+          categories: [alert.category],
+          alerts: [alert],
+          timestamp: alert.timestamp,
+        });
+      }
+    }
+    return result;
+  }, [allAlerts]);
+
+  const [filterInstrument, setFilterInstrument] = useState<string>('ALL');
+  const availableInstruments = useMemo(() => {
+    const set = new Set(groups.map(g => g.instrument));
+    return Array.from(set).sort();
+  }, [groups]);
+
+  const filteredGroups = useMemo(() => {
+    if (filterInstrument === 'ALL') return groups;
+    return groups.filter(g => g.instrument === filterInstrument);
+  }, [groups, filterInstrument]);
+
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [loadingGroupKey, setLoadingGroupKey] = useState<string | null>(null);
   const [reanalyzingAlertKey, setReanalyzingAlertKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threadsByAlertKey, setThreadsByAlertKey] = useState<Record<string, MentorSignalReview[]>>({});
 
   useEffect(() => {
-    if (!selectedAlertKey && eligibleAlerts[0]) {
-      setSelectedAlertKey(buildMentorAlertKey(eligibleAlerts[0]));
+    if (!selectedGroupKey && filteredGroups[0]) {
+      setSelectedGroupKey(filteredGroups[0].groupKey);
     }
-  }, [eligibleAlerts, selectedAlertKey]);
+  }, [filteredGroups, selectedGroupKey]);
 
   useEffect(() => {
-    if (selectedAlertKey && !eligibleAlerts.some(alert => buildMentorAlertKey(alert) === selectedAlertKey)) {
-      setSelectedAlertKey(eligibleAlerts[0] ? buildMentorAlertKey(eligibleAlerts[0]) : null);
+    if (selectedGroupKey && !filteredGroups.some(g => g.groupKey === selectedGroupKey)) {
+      setSelectedGroupKey(filteredGroups[0]?.groupKey ?? null);
     }
-  }, [eligibleAlerts, selectedAlertKey]);
+  }, [filteredGroups, selectedGroupKey]);
 
   useEffect(() => {
-    if (reviews.length === 0) {
-      return;
-    }
-
+    if (reviews.length === 0) return;
     setThreadsByAlertKey(prev => {
       const next = { ...prev };
       for (const review of reviews) {
@@ -47,42 +135,74 @@ export default function MentorSignalPanel({
     });
   }, [reviews]);
 
-  const selectedAlert = eligibleAlerts.find(alert => buildMentorAlertKey(alert) === selectedAlertKey) ?? null;
-  const selectedThread = selectedAlert
-    ? threadsByAlertKey[buildMentorAlertKey(selectedAlert)] ?? reviewsForAlert(reviews, selectedAlert)
-    : [];
-  const latestSelectedReview = selectedThread.length > 0 ? selectedThread[selectedThread.length - 1] : null;
+  const selectedGroup = groups.find(g => g.groupKey === selectedGroupKey) ?? null;
 
-  const openAlert = async (alert: AlertMessage) => {
-    const alertKey = buildMentorAlertKey(alert);
-    setSelectedAlertKey(alertKey);
+  // Collect all reviews for all alerts in the selected group
+  const selectedGroupThreads = useMemo(() => {
+    if (!selectedGroup) return [];
+    const allThreads: MentorSignalReview[] = [];
+    for (const alert of selectedGroup.alerts) {
+      const alertKey = buildMentorAlertKey(alert);
+      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+      allThreads.push(...thread);
+    }
+    return sortReviews(allThreads);
+  }, [selectedGroup, threadsByAlertKey, reviews]);
+
+  const latestGroupReview = selectedGroupThreads.length > 0 ? selectedGroupThreads[selectedGroupThreads.length - 1] : null;
+
+  // Best verdict across all alerts in a group
+  const groupVerdict = (group: AlertGroup) => {
+    let bestReview: MentorSignalReview | null = null;
+    for (const alert of group.alerts) {
+      const alertKey = buildMentorAlertKey(alert);
+      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+      const latest = thread.length > 0 ? thread[thread.length - 1] : null;
+      if (latest && (!bestReview || latest.status === 'DONE')) {
+        bestReview = latest;
+      }
+    }
+    return bestReview;
+  };
+
+  const groupReviewCount = (group: AlertGroup) => {
+    let count = 0;
+    for (const alert of group.alerts) {
+      const alertKey = buildMentorAlertKey(alert);
+      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+      count += thread.length;
+    }
+    return count;
+  };
+
+  const openGroup = async (group: AlertGroup) => {
+    setSelectedGroupKey(group.groupKey);
     setError(null);
-    setLoadingThreadKey(alertKey);
+    setLoadingGroupKey(group.groupKey);
 
     try {
-      const thread = await api.getMentorAlertThread(toRequest(alert));
-      setThreadsByAlertKey(prev => ({
-        ...prev,
-        [alertKey]: mergeReviews(prev[alertKey] ?? [], thread),
-      }));
+      for (const alert of group.alerts) {
+        const alertKey = buildMentorAlertKey(alert);
+        const thread = await api.getMentorAlertThread(toRequest(alert));
+        setThreadsByAlertKey(prev => ({
+          ...prev,
+          [alertKey]: mergeReviews(prev[alertKey] ?? [], thread),
+        }));
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to load saved mentor reviews.');
     } finally {
-      setLoadingThreadKey(current => (current === alertKey ? null : current));
+      setLoadingGroupKey(current => (current === group.groupKey ? null : current));
     }
   };
 
-  const reanalyzeAlert = async () => {
-    if (!selectedAlert) {
-      return;
-    }
-
-    const alertKey = buildMentorAlertKey(selectedAlert);
+  const reanalyzeAlert = async (alert: AlertMessage) => {
+    const alertKey = buildMentorAlertKey(alert);
     setError(null);
     setReanalyzingAlertKey(alertKey);
 
     try {
-      const review = await api.reanalyzeMentorAlert(toRequest(selectedAlert));
+      const review = await api.reanalyzeMentorAlert(toRequest(alert));
       setThreadsByAlertKey(prev => ({
         ...prev,
         [alertKey]: mergeReviews(prev[alertKey] ?? [], [review]),
@@ -100,36 +220,45 @@ export default function MentorSignalPanel({
         <div>
           <div className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">Mentor Alert Review</div>
           <div className="text-[10px] text-zinc-500">
-            Chaque alerte qualifiee fige son snapshot, cree sa review initiale, puis conserve l’historique des relances Mentor.
+            Alertes groupees quand elles arrivent en meme temps (~90s) sur le meme instrument/timeframe/direction.
           </div>
         </div>
         <div className="flex items-center gap-2 text-[10px]">
+          <select
+            value={filterInstrument}
+            onChange={e => setFilterInstrument(e.target.value)}
+            className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-zinc-400 outline-none cursor-pointer hover:border-zinc-600 transition-colors"
+          >
+            <option value="ALL">Tous</option>
+            {availableInstruments.map(inst => (
+              <option key={inst} value={inst}>{inst}</option>
+            ))}
+          </select>
           <span className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-zinc-400">
-            Eligible alerts: {eligibleAlerts.length}
+            {filteredGroups.length} groupe{filteredGroups.length > 1 ? 's' : ''}
           </span>
           <span className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-zinc-400">
-            Saved reviews: {reviews.length}
+            {reviews.length} review{reviews.length > 1 ? 's' : ''}
           </span>
         </div>
       </div>
 
-      {eligibleAlerts.length === 0 ? (
+      {filteredGroups.length === 0 ? (
         <div className="rounded border border-dashed border-zinc-800 bg-zinc-950/40 px-3 py-4 text-[11px] text-zinc-500">
-          Aucune alerte qualifiee disponible pour l’instant.
+          Aucune alerte qualifiee disponible pour l'instant.
         </div>
       ) : (
         <div className="grid gap-3 xl:grid-cols-[0.95fr_1.45fr]">
-          <div className="space-y-2">
-            {eligibleAlerts.slice(0, 12).map(alert => {
-              const alertKey = buildMentorAlertKey(alert);
-              const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-              const latestReview = thread.length > 0 ? thread[thread.length - 1] : null;
-              const selected = alertKey === selectedAlertKey;
+          <div className="max-h-[500px] space-y-2 overflow-y-auto pr-1">
+            {filteredGroups.slice(0, 30).map(group => {
+              const bestReview = groupVerdict(group);
+              const reviewCount = groupReviewCount(group);
+              const selected = group.groupKey === selectedGroupKey;
 
               return (
                 <button
-                  key={alertKey}
-                  onClick={() => void openAlert(alert)}
+                  key={group.groupKey}
+                  onClick={() => void openGroup(group)}
                   className={`w-full rounded border px-3 py-2 text-left transition-colors ${
                     selected
                       ? 'border-cyan-600 bg-cyan-950/20'
@@ -137,54 +266,63 @@ export default function MentorSignalPanel({
                   }`}
                 >
                   <div className="mb-2 flex items-center gap-2">
-                    <span className={`rounded px-2 py-1 text-[10px] font-semibold ${directionClass(alert)}`}>
-                      {directionLabel(alert)}
+                    <span className={`rounded px-2 py-1 text-[10px] font-semibold ${directionClassStr(group.direction)}`}>
+                      {group.direction}
                     </span>
                     <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
-                      {alert.instrument ?? 'GLOBAL'}
+                      {group.instrument}
                     </span>
                     <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
-                      {alert.category}
+                      {group.timeframe}
                     </span>
                     <span className="ml-auto">
                       <StatusChip
-                        status={latestReview?.status ?? 'MISSING'}
-                        verdict={latestReview?.analysis?.analysis.verdict}
+                        status={bestReview?.status ?? 'MISSING'}
+                        verdict={bestReview?.analysis?.analysis.verdict}
                       />
                     </span>
                   </div>
-                  <div className="line-clamp-2 text-[11px] text-zinc-300">{alert.message}</div>
-                  <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-600">
-                    <span>{new Date(alert.timestamp).toLocaleTimeString(undefined, { timeZone: timezone.tz })}</span>
-                    <span>{thread.length} review{thread.length > 1 ? 's' : ''}</span>
+                  <div className="mb-1.5 flex flex-wrap gap-1">
+                    {group.categories.map(cat => (
+                      <span key={cat} className="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[9px] text-zinc-400">
+                        {cat}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-zinc-600">
+                    <span>{new Date(group.timestamp).toLocaleTimeString(undefined, { timeZone: timezone.tz })}</span>
+                    <span>{reviewCount} review{reviewCount > 1 ? 's' : ''} · {group.alerts.length} signal{group.alerts.length > 1 ? 's' : ''}</span>
                   </div>
                 </button>
               );
             })}
           </div>
 
-          <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
-            {!selectedAlert ? (
-              <div className="text-[11px] text-zinc-500">Selectionne une alerte pour ouvrir sa review Mentor sauvegardee.</div>
+          <div className="max-h-[500px] overflow-y-auto rounded border border-zinc-800 bg-zinc-950/40 p-3">
+            {!selectedGroup ? (
+              <div className="text-[11px] text-zinc-500">Selectionne un groupe pour ouvrir les reviews Mentor.</div>
             ) : (
               <>
                 <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <span className={`rounded px-2 py-1 text-[10px] font-semibold ${directionClass(selectedAlert)}`}>
-                    {directionLabel(selectedAlert)}
+                  <span className={`rounded px-2 py-1 text-[10px] font-semibold ${directionClassStr(selectedGroup.direction)}`}>
+                    {selectedGroup.direction}
                   </span>
                   <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
-                    {selectedAlert.instrument ?? 'GLOBAL'}
+                    {selectedGroup.instrument}
                   </span>
                   <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
-                    {selectedAlert.category}
+                    {selectedGroup.timeframe}
                   </span>
+                  {selectedGroup.categories.map(cat => (
+                    <span key={cat} className="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[9px] text-zinc-400">
+                      {cat}
+                    </span>
+                  ))}
                   <StatusChip
-                    status={latestSelectedReview?.status ?? 'MISSING'}
-                    verdict={latestSelectedReview?.analysis?.analysis.verdict}
+                    status={latestGroupReview?.status ?? 'MISSING'}
+                    verdict={latestGroupReview?.analysis?.analysis.verdict}
                   />
                 </div>
-
-                <div className="mb-3 text-[11px] text-zinc-300">{selectedAlert.message}</div>
 
                 {error ? (
                   <div className="mb-3 rounded border border-red-900/40 bg-red-950/30 px-3 py-2 text-[11px] text-red-300">
@@ -192,24 +330,24 @@ export default function MentorSignalPanel({
                   </div>
                 ) : null}
 
-                {loadingThreadKey === buildMentorAlertKey(selectedAlert) ? (
-                  <div className="mb-3 text-[11px] text-zinc-500">Chargement du fil Mentor sauvegarde...</div>
+                {loadingGroupKey === selectedGroup.groupKey ? (
+                  <div className="mb-3 text-[11px] text-zinc-500">Chargement des reviews...</div>
                 ) : null}
 
-                {selectedThread.length === 0 ? (
+                {selectedGroupThreads.length === 0 ? (
                   <div className="rounded border border-dashed border-zinc-800 px-3 py-4 text-[11px] text-zinc-500">
-                    Aucune review sauvegardee pour cette alerte. Les nouvelles alertes generent automatiquement leur review initiale au moment du trigger.
+                    Aucune review sauvegardee pour ce groupe.
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {selectedThread.map(review => (
+                    {selectedGroupThreads.map(review => (
                       <div key={review.id} className="rounded border border-zinc-800 bg-zinc-950/50 p-3">
                         <div className="mb-3 flex flex-wrap items-center gap-2">
                           <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
-                            Review #{review.revision}
+                            {review.category}
                           </span>
                           <span className={`rounded px-2 py-1 text-[10px] ${review.triggerType === 'INITIAL' ? 'bg-cyan-950/60 text-cyan-300' : 'bg-amber-950/60 text-amber-300'}`}>
-                            {review.triggerType === 'INITIAL' ? 'Initial Snapshot' : 'Manual Reanalysis'}
+                            {review.triggerType === 'INITIAL' ? 'Initial' : 'Reanalysis'}
                           </span>
                           <StatusChip status={review.status} verdict={review.analysis?.analysis.verdict} />
                           <span className="ml-auto text-[10px] text-zinc-600">
@@ -217,8 +355,10 @@ export default function MentorSignalPanel({
                           </span>
                         </div>
 
+                        <div className="mb-2 text-[10px] text-zinc-500">{review.message}</div>
+
                         {review.status === 'ANALYZING' ? (
-                          <div className="text-[11px] text-zinc-500">Analyse Mentor en cours sur le snapshot sauvegarde...</div>
+                          <div className="text-[11px] text-zinc-500">Analyse Mentor en cours...</div>
                         ) : null}
 
                         {review.status === 'ERROR' ? (
@@ -259,15 +399,25 @@ export default function MentorSignalPanel({
                   </div>
                 )}
 
-                <div className="mt-3 flex justify-end">
-                  <button
-                    onClick={() => void reanalyzeAlert()}
-                    disabled={!selectedAlert || selectedThread.length === 0 || reanalyzingAlertKey === buildMentorAlertKey(selectedAlert) || latestSelectedReview?.status === 'ANALYZING'}
-                    className="rounded border border-cyan-800 bg-cyan-950/60 px-3 py-2 text-[11px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
-                  >
-                    {reanalyzingAlertKey === buildMentorAlertKey(selectedAlert) ? "Relance Mentor..." : "Refaire l'analyse Mentor"}
-                  </button>
-                </div>
+                {selectedGroup.alerts.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap justify-end gap-2">
+                    {selectedGroup.alerts.map(alert => {
+                      const alertKey = buildMentorAlertKey(alert);
+                      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+                      const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
+                      return (
+                        <button
+                          key={alertKey}
+                          onClick={() => void reanalyzeAlert(alert)}
+                          disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
+                          className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                        >
+                          {reanalyzingAlertKey === alertKey ? 'Relance...' : `Reanalyse ${alert.category}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </>
             )}
           </div>
@@ -350,28 +500,20 @@ function sortReviews(reviews: MentorSignalReview[]) {
   });
 }
 
-function directionLabel(alert: AlertMessage) {
-  return inferDirection(alert) ?? 'REVIEW';
+function parseTimeframe(message: string): string {
+  const match = message.match(/\[(5m|10m|1h|1d)\]/i);
+  return match ? match[1].toLowerCase() : '10m';
 }
 
-function directionClass(alert: AlertMessage) {
-  const direction = inferDirection(alert);
-  if (direction === 'LONG') {
-    return 'bg-emerald-950/70 text-emerald-300';
-  }
-  if (direction === 'SHORT') {
-    return 'bg-red-950/70 text-red-300';
-  }
+function directionClassStr(direction: string) {
+  if (direction === 'LONG') return 'bg-emerald-950/70 text-emerald-300';
+  if (direction === 'SHORT') return 'bg-red-950/70 text-red-300';
   return 'bg-zinc-800 text-zinc-300';
 }
 
 function inferDirection(alert: AlertMessage) {
   const normalized = `${alert.category} ${alert.message}`.toUpperCase();
-  if (normalized.includes('BULLISH') || normalized.includes('OVERSOLD')) {
-    return 'LONG';
-  }
-  if (normalized.includes('BEARISH') || normalized.includes('OVERBOUGHT')) {
-    return 'SHORT';
-  }
+  if (normalized.includes('BULLISH') || normalized.includes('OVERSOLD')) return 'LONG';
+  if (normalized.includes('BEARISH') || normalized.includes('OVERBOUGHT')) return 'SHORT';
   return null;
 }

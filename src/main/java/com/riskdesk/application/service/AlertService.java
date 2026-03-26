@@ -78,7 +78,18 @@ public class AlertService {
                 IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, timeframe);
                 List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
                 alerts.addAll(indicatorAlerts);
-                indicatorAlerts.forEach(alert -> publishAlert(alert, snap));
+
+                // Publish each alert individually to WebSocket, but batch mentor reviews
+                // by direction so indicators that fire at the same time get ONE combined review
+                List<Alert> publishedAlerts = new ArrayList<>();
+                for (Alert alert : indicatorAlerts) {
+                    if (publishAlertWithoutMentor(alert)) {
+                        publishedAlerts.add(alert);
+                    }
+                }
+                if (!publishedAlerts.isEmpty()) {
+                    mentorSignalReviewService.captureGroupReview(publishedAlerts, snap);
+                }
             } catch (Exception e) {
                 log.debug("Indicator evaluation error for {} {}: {}", instrument, timeframe, e.getMessage());
             }
@@ -140,6 +151,30 @@ public class AlertService {
                 .map(block -> new IndicatorAlertSnapshot.OrderBlockZone(block.type(), block.high(), block.low()))
                 .toList()
         );
+    }
+
+    /**
+     * Publish alert to WebSocket without triggering mentor review.
+     * Returns true if the alert passed dedup and was actually published.
+     */
+    private boolean publishAlertWithoutMentor(Alert alert) {
+        if (!deduplicator.shouldFire(alert)) {
+            return false;
+        }
+        log.info("ALERT [{}] {}", alert.severity(), alert.message());
+        Map<String, Object> payload = toPayload(alert);
+        synchronized (recentAlerts) {
+            recentAlerts.addFirst(payload);
+            while (recentAlerts.size() > MAX_RECENT_ALERTS) {
+                recentAlerts.removeLast();
+            }
+        }
+        try {
+            messagingTemplate.convertAndSend("/topic/alerts", payload);
+        } catch (Exception e) {
+            log.debug("WebSocket alert send failed: {}", e.getMessage());
+        }
+        return true;
     }
 
     private void publishAlert(Alert alert, IndicatorSnapshot snapshot) {
