@@ -34,4 +34,16 @@ public class AlertDeduplicator {
         markFired(alert);
         return true;
     }
+
+    /**
+     * Rule 2 — Dynamic Cooldown: uses the provided cooldown instead of the default.
+     * Call with {@code Timeframe.fromLabel(tf).periodSeconds()} so that a 10m alert
+     * is blocked for 10 minutes and an H1 alert for 60 minutes.
+     */
+    public boolean shouldFire(Alert alert, long cooldownSeconds) {
+        Instant last = lastFired.get(alert.key());
+        if (last != null && Instant.now().isBefore(last.plusSeconds(cooldownSeconds))) return false;
+        lastFired.put(alert.key(), Instant.now());
+        return true;
+    }
 }

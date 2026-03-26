@@ -1,6 +1,7 @@
 package com.riskdesk.application.dto;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 
 public record IndicatorSnapshot(
@@ -52,7 +53,9 @@ public record IndicatorSnapshot(
     Long weakLowTime,
     List<OrderBlockView> activeOrderBlocks,
     List<FairValueGapView> activeFairValueGaps,
-    List<StructureBreakView> recentBreaks
+    List<StructureBreakView> recentBreaks,
+    /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
+    Instant lastCandleTimestamp
 ) {
     public record OrderBlockView(String type, BigDecimal high, BigDecimal low, BigDecimal mid, long startTime) {}
 

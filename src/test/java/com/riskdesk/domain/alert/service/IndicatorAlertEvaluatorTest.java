@@ -38,7 +38,8 @@ class IndicatorAlertEvaluatorTest {
             null,
             null,
             vwap,
-            activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks
+            activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
+            null
         );
     }
 

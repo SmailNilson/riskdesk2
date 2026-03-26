@@ -266,7 +266,8 @@ class MentorSignalReviewServiceTest {
                 new IndicatorSnapshot.OrderBlockView("BULLISH", new BigDecimal("24405.00"), new BigDecimal("24380.00"), new BigDecimal("24392.50"), 2L)
             ),
             List.of(),
-            List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L))
+            List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L)),
+            null
         );
     }
 
