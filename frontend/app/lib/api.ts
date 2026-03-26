@@ -411,6 +411,9 @@ export interface MentorAlertReviewRequest {
   message: string;
   instrument: string | null;
   timestamp: string;
+  entryPrice?: number;
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 export interface MentorIntermarketSnapshot {

@@ -118,7 +118,12 @@ public class MentorController {
     @PostMapping("/auto-alerts/reanalyze")
     public MentorSignalReview reanalyzeExistingAlert(@Valid @RequestBody MentorAlertReviewRequest request) {
         try {
-            return mentorSignalReviewService.reanalyzeAlert(buildAlert(request));
+            return mentorSignalReviewService.reanalyzeAlert(
+                buildAlert(request),
+                request.entryPrice(),
+                request.stopLoss(),
+                request.takeProfit()
+            );
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         }

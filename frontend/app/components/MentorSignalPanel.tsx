@@ -16,6 +16,13 @@ type AlertGroup = {
 };
 
 type GroupStatusFilter = 'ALL' | 'TRADE_OK' | 'TRADE_NON_CONFORME' | 'PENDING_ENTRY' | 'NO_REVIEW';
+type ReanalysisDraft = {
+  alertKey: string;
+  category: string;
+  entryPrice: string;
+  stopLoss: string;
+  takeProfit: string;
+};
 
 export default function MentorSignalPanel({
   timezone,
@@ -107,6 +114,7 @@ export default function MentorSignalPanel({
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [loadingGroupKey, setLoadingGroupKey] = useState<string | null>(null);
   const [reanalyzingAlertKey, setReanalyzingAlertKey] = useState<string | null>(null);
+  const [reanalysisDraft, setReanalysisDraft] = useState<ReanalysisDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threadsByAlertKey, setThreadsByAlertKey] = useState<Record<string, MentorSignalReview[]>>({});
 
@@ -159,6 +167,10 @@ export default function MentorSignalPanel({
       setSelectedGroupKey(filteredGroups[0]?.groupKey ?? null);
     }
   }, [filteredGroups, selectedGroupKey]);
+
+  useEffect(() => {
+    setReanalysisDraft(null);
+  }, [selectedGroupKey]);
 
   useEffect(() => {
     if (reviews.length === 0) return;
@@ -235,17 +247,41 @@ export default function MentorSignalPanel({
     }
   };
 
-  const reanalyzeAlert = async (alert: AlertMessage) => {
+  const openReanalysisDraft = (alert: AlertMessage) => {
+    const alertKey = buildMentorAlertKey(alert);
+    const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+    const latestPlan = latestReviewPlan(thread);
+    setError(null);
+    setReanalysisDraft(current =>
+      current?.alertKey === alertKey
+        ? null
+        : {
+            alertKey,
+            category: alert.category,
+            entryPrice: formatPlanField(latestPlan?.entryPrice),
+            stopLoss: formatPlanField(latestPlan?.stopLoss),
+            takeProfit: formatPlanField(latestPlan?.takeProfit),
+          }
+    );
+  };
+
+  const submitReanalysis = async (alert: AlertMessage) => {
     const alertKey = buildMentorAlertKey(alert);
     setError(null);
     setReanalyzingAlertKey(alertKey);
 
     try {
-      const review = await api.reanalyzeMentorAlert(toRequest(alert));
+      const review = await api.reanalyzeMentorAlert({
+        ...toRequest(alert),
+        entryPrice: parsePlanField(reanalysisDraft?.entryPrice),
+        stopLoss: parsePlanField(reanalysisDraft?.stopLoss),
+        takeProfit: parsePlanField(reanalysisDraft?.takeProfit),
+      });
       setThreadsByAlertKey(prev => ({
         ...prev,
         [alertKey]: mergeReviews(prev[alertKey] ?? [], [review]),
       }));
+      setReanalysisDraft(current => (current?.alertKey === alertKey ? null : current));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Mentor reanalysis failed.');
     } finally {
@@ -472,25 +508,81 @@ export default function MentorSignalPanel({
                 )}
 
                 {selectedGroup.alerts.length > 0 ? (
-                  <div className="mt-3 flex flex-wrap justify-end gap-2">
-                    {selectedGroup.alerts
-                      .filter((alert, idx, arr) => arr.findIndex(a => a.category === alert.category) === idx)
-                      .map(alert => {
-                        const alertKey = buildMentorAlertKey(alert);
-                        const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-                        const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
-                        return (
+                  <>
+                    <div className="mt-3 flex flex-wrap justify-end gap-2">
+                      {selectedGroup.alerts
+                        .filter((alert, idx, arr) => arr.findIndex(a => a.category === alert.category) === idx)
+                        .map(alert => {
+                          const alertKey = buildMentorAlertKey(alert);
+                          const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+                          const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
+                          return (
+                            <button
+                              key={alert.category}
+                              onClick={() => openReanalysisDraft(alert)}
+                              disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
+                              className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                            >
+                              {reanalysisDraft?.alertKey === alertKey ? 'Fermer reanalyse' : `Reanalyse ${alert.category}`}
+                            </button>
+                          );
+                        })}
+                    </div>
+
+                    {reanalysisDraft ? (
+                      <div className="mt-3 rounded border border-cyan-900/40 bg-cyan-950/10 p-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">
+                              Reanalyse {reanalysisDraft.category}
+                            </div>
+                            <div className="text-[10px] text-zinc-500">
+                              Si un plan precedent existe, `Optimal Entry`, `SL` et `TP` sont pre-remplis et modifiables.
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-2 md:grid-cols-3">
+                          <EditablePlanField
+                            label="Optimal Entry"
+                            value={reanalysisDraft.entryPrice}
+                            onChange={value => setReanalysisDraft(current => current ? { ...current, entryPrice: value } : current)}
+                          />
+                          <EditablePlanField
+                            label="SL"
+                            value={reanalysisDraft.stopLoss}
+                            onChange={value => setReanalysisDraft(current => current ? { ...current, stopLoss: value } : current)}
+                          />
+                          <EditablePlanField
+                            label="TP"
+                            value={reanalysisDraft.takeProfit}
+                            onChange={value => setReanalysisDraft(current => current ? { ...current, takeProfit: value } : current)}
+                          />
+                        </div>
+
+                        <div className="mt-3 flex justify-end gap-2">
                           <button
-                            key={alert.category}
-                            onClick={() => void reanalyzeAlert(alert)}
-                            disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
+                            onClick={() => setReanalysisDraft(null)}
+                            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-semibold text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
+                          >
+                            Annuler
+                          </button>
+                          <button
+                            onClick={() => {
+                              const alert = selectedGroup.alerts.find(candidate => buildMentorAlertKey(candidate) === reanalysisDraft.alertKey);
+                              if (alert) {
+                                void submitReanalysis(alert);
+                              }
+                            }}
+                            disabled={reanalyzingAlertKey === reanalysisDraft.alertKey}
                             className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
                           >
-                            {reanalyzingAlertKey === alertKey ? 'Relance...' : `Reanalyse ${alert.category}`}
+                            {reanalyzingAlertKey === reanalysisDraft.alertKey ? 'Relance...' : 'Lancer reanalyse'}
                           </button>
-                        );
-                      })}
-                  </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
               </>
             )}
@@ -588,6 +680,30 @@ function PlanRow({ label, value }: { label: string; value: number | null | undef
   );
 }
 
+function EditablePlanField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+      <div className="mb-1 text-[9px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <input
+        type="number"
+        step="any"
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        className="w-full bg-transparent text-[11px] font-semibold text-zinc-200 outline-none"
+        placeholder="n/a"
+      />
+    </label>
+  );
+}
+
 function toRequest(alert: AlertMessage) {
   return {
     severity: alert.severity,
@@ -596,6 +712,28 @@ function toRequest(alert: AlertMessage) {
     instrument: alert.instrument,
     timestamp: alert.timestamp,
   } as const;
+}
+
+function latestReviewPlan(reviews: MentorSignalReview[]) {
+  for (let index = reviews.length - 1; index >= 0; index -= 1) {
+    const plan = reviews[index]?.analysis?.analysis?.proposedTradePlan;
+    if (plan?.entryPrice != null || plan?.stopLoss != null || plan?.takeProfit != null) {
+      return plan;
+    }
+  }
+  return null;
+}
+
+function formatPlanField(value: number | null | undefined) {
+  return value == null ? '' : String(value);
+}
+
+function parsePlanField(value: string | undefined) {
+  if (!value || value.trim() === '') {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function reviewsForAlert(reviews: MentorSignalReview[], alert: AlertMessage) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorManualReview;
+import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
@@ -17,11 +18,14 @@ public class MentorManualReviewService {
     private static final int DEFAULT_LIMIT = 30;
 
     private final MentorAuditRepositoryPort mentorAuditRepository;
+    private final MentorMemoryService mentorMemoryService;
     private final ObjectMapper objectMapper;
 
     public MentorManualReviewService(MentorAuditRepositoryPort mentorAuditRepository,
+                                     MentorMemoryService mentorMemoryService,
                                      ObjectMapper objectMapper) {
         this.mentorAuditRepository = mentorAuditRepository;
+        this.mentorMemoryService = mentorMemoryService;
         this.objectMapper = objectMapper;
     }
 
@@ -34,13 +38,16 @@ public class MentorManualReviewService {
     private MentorManualReview toDto(MentorAudit audit) {
         JsonNode payload = parseJson(audit.getPayloadJson());
         MentorStructuredResponse structured = parseStructured(audit.getResponseJson());
+        List<MentorSimilarAudit> similarAudits = mentorMemoryService.findSimilar(payload).stream()
+            .filter(match -> !match.auditId().equals(audit.getId()))
+            .toList();
         MentorAnalyzeResponse response = new MentorAnalyzeResponse(
             audit.getId(),
             audit.getModel(),
             payload,
             structured,
             audit.getResponseJson(),
-            List.of()
+            similarAudits
         );
         return new MentorManualReview(
             audit.getId(),

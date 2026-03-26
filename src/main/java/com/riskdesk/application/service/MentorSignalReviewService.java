@@ -171,6 +171,13 @@ public class MentorSignalReviewService {
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert) {
+        return reanalyzeAlert(alert, null, null, null);
+    }
+
+    public MentorSignalReview reanalyzeAlert(Alert alert,
+                                             BigDecimal entryPrice,
+                                             BigDecimal stopLoss,
+                                             BigDecimal takeProfit) {
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {
             throw new IllegalArgumentException("unsupported alert for mentor review");
@@ -183,6 +190,12 @@ public class MentorSignalReviewService {
         }
 
         MentorSignalReviewRecord baseReview = thread.get(0);
+        TradePlanValues previousPlan = resolveLatestTradePlan(thread);
+        TradePlanValues requestedPlan = new TradePlanValues(
+            firstNonNull(entryPrice, previousPlan.entryPrice()),
+            firstNonNull(stopLoss, previousPlan.stopLoss()),
+            firstNonNull(takeProfit, previousPlan.takeProfit())
+        );
         Instant createdAt = Instant.now();
         MentorSignalReviewRecord pending = newReviewRecord(
             alertKey,
@@ -196,7 +209,7 @@ public class MentorSignalReviewService {
         );
         MentorSignalReviewRecord saved;
         try {
-            JsonNode payload = buildPayload(candidate, alert, null, TRIGGER_MANUAL_REANALYSIS, baseReview);
+            JsonNode payload = buildPayload(candidate, alert, null, TRIGGER_MANUAL_REANALYSIS, baseReview, requestedPlan);
             pending.setSnapshotJson(writeJson(payload));
             saved = reviewRepository.save(pending);
             publish(saved);
@@ -357,7 +370,8 @@ public class MentorSignalReviewService {
                                   Alert alert,
                                   IndicatorSnapshot precomputedFocusSnapshot,
                                   String triggerType,
-                                  MentorSignalReviewRecord originalReview) {
+                                  MentorSignalReviewRecord originalReview,
+                                  TradePlanValues requestedPlan) {
         IndicatorSnapshot focusSnapshot = precomputedFocusSnapshot != null
             ? precomputedFocusSnapshot
             : indicatorService.computeSnapshot(candidate.instrument(), candidate.timeframe());
@@ -371,9 +385,16 @@ public class MentorSignalReviewService {
         MarketDataService.StoredPrice livePrice = livePrice(candidate.instrument());
         Instant contextTimestamp = liveTimestamp(livePrice, candles);
         BigDecimal currentPrice = currentPrice(livePrice, candles);
-        BigDecimal effectiveEntry = currentPrice;
+        BigDecimal effectiveEntry = firstNonNull(
+            requestedPlan == null ? null : requestedPlan.entryPrice(),
+            currentPrice
+        );
+        BigDecimal effectiveStopLoss = requestedPlan == null ? null : requestedPlan.stopLoss();
+        BigDecimal effectiveTakeProfit = requestedPlan == null ? null : requestedPlan.takeProfit();
         BigDecimal atr = computeAtr(candles, 14, candidate.instrument());
         BigDecimal referencePrice = firstNonNull(currentPrice, focusSnapshot.vwap(), focusSnapshot.ema50(), BigDecimal.ZERO);
+        BigDecimal stopLossSizePoints = computeDistancePoints(effectiveEntry, effectiveStopLoss, candidate.instrument());
+        BigDecimal rewardToRiskRatio = computeRewardToRiskRatio(effectiveEntry, effectiveStopLoss, effectiveTakeProfit, candidate.action(), candidate.instrument());
         Map<String, Object> nearestSupport = findNearestOrderBlock(focusSnapshot, referencePrice, "BULLISH");
         Map<String, Object> nearestResistance = findNearestOrderBlock(focusSnapshot, referencePrice, "BEARISH");
         Map<String, Object> originalAlertContext = manualReanalysis
@@ -395,8 +416,8 @@ public class MentorSignalReviewService {
             "analysis_mode", "SETUP_REVIEW",
             "review_type", triggerType,
             "entry_price", roundNullable(effectiveEntry, candidate.instrument()),
-            "stop_loss", null,
-            "take_profit", null,
+            "stop_loss", roundNullable(effectiveStopLoss, candidate.instrument()),
+            "take_profit", roundNullable(effectiveTakeProfit, candidate.instrument()),
             "time_to_candle_close_seconds", timeToCandleCloseSeconds(candidate.timeframe(), contextTimestamp),
             "is_market_order", !"ORDER_BLOCK".equals(alert.category().name()),
             "mentor_should_propose_plan", true
@@ -439,8 +460,8 @@ public class MentorSignalReviewService {
         ));
         payload.put("risk_and_emotional_check", linkedMap(
             "current_atr_focus", atr,
-            "stop_loss_size_points", null,
-            "reward_to_risk_ratio", null,
+            "stop_loss_size_points", roundNullable(stopLossSizePoints, candidate.instrument()),
+            "reward_to_risk_ratio", rewardToRiskRatio,
             "is_sl_structurally_protected", null,
             "price_extension_warning", isPriceExtended(currentPrice, focusSnapshot, atr)
         ));
@@ -466,7 +487,7 @@ public class MentorSignalReviewService {
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate, Alert alert, IndicatorSnapshot precomputedFocusSnapshot) {
-        return buildPayload(candidate, alert, precomputedFocusSnapshot, TRIGGER_INITIAL, null);
+        return buildPayload(candidate, alert, precomputedFocusSnapshot, TRIGGER_INITIAL, null, null);
     }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
@@ -718,6 +739,37 @@ public class MentorSignalReviewService {
         return round(left.subtract(right).abs(), instrument);
     }
 
+    private BigDecimal computeDistancePoints(BigDecimal entryPrice, BigDecimal stopLoss, Instrument instrument) {
+        if (entryPrice == null || stopLoss == null) {
+            return null;
+        }
+        return round(entryPrice.subtract(stopLoss).abs(), instrument);
+    }
+
+    private BigDecimal computeRewardToRiskRatio(BigDecimal entryPrice,
+                                                BigDecimal stopLoss,
+                                                BigDecimal takeProfit,
+                                                String action,
+                                                Instrument instrument) {
+        if (entryPrice == null || stopLoss == null || takeProfit == null || action == null) {
+            return null;
+        }
+
+        BigDecimal risk = entryPrice.subtract(stopLoss).abs();
+        if (risk.compareTo(BigDecimal.ZERO) == 0) {
+            return null;
+        }
+
+        BigDecimal reward = "SHORT".equalsIgnoreCase(action)
+            ? entryPrice.subtract(takeProfit)
+            : takeProfit.subtract(entryPrice);
+        if (reward.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
+
+        return reward.divide(risk, 2, RoundingMode.HALF_UP);
+    }
+
     private BigDecimal nearestPsychologicalLevel(BigDecimal price, Instrument instrument) {
         if (price == null) {
             return null;
@@ -815,6 +867,35 @@ public class MentorSignalReviewService {
         }
     }
 
+    private TradePlanValues resolveLatestTradePlan(List<MentorSignalReviewRecord> thread) {
+        for (int index = thread.size() - 1; index >= 0; index -= 1) {
+            TradePlanValues candidate = extractTradePlan(thread.get(index));
+            if (candidate != null && (candidate.entryPrice() != null || candidate.stopLoss() != null || candidate.takeProfit() != null)) {
+                return candidate;
+            }
+        }
+        return new TradePlanValues(null, null, null);
+    }
+
+    private TradePlanValues extractTradePlan(MentorSignalReviewRecord review) {
+        if (review == null || review.getAnalysisJson() == null || review.getAnalysisJson().isBlank()) {
+            return null;
+        }
+        try {
+            MentorAnalyzeResponse analysis = objectMapper.readValue(review.getAnalysisJson(), MentorAnalyzeResponse.class);
+            if (analysis == null || analysis.analysis() == null || analysis.analysis().proposedTradePlan() == null) {
+                return null;
+            }
+            return new TradePlanValues(
+                decimalValue(analysis.analysis().proposedTradePlan().entryPrice()),
+                decimalValue(analysis.analysis().proposedTradePlan().stopLoss()),
+                decimalValue(analysis.analysis().proposedTradePlan().takeProfit())
+            );
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private String writeJson(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -833,6 +914,10 @@ public class MentorSignalReviewService {
             : e.getMessage();
     }
 
+    private BigDecimal decimalValue(Double value) {
+        return value == null ? null : BigDecimal.valueOf(value);
+    }
+
     private Map<String, Object> linkedMap(Object... values) {
         Map<String, Object> map = new LinkedHashMap<>();
         for (int i = 0; i < values.length; i += 2) {
@@ -842,5 +927,8 @@ public class MentorSignalReviewService {
     }
 
     private record AlertReviewCandidate(Instrument instrument, String timeframe, String action) {
+    }
+
+    private record TradePlanValues(BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {
     }
 }
