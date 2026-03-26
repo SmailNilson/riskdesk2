@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
+import { MentorSignalReview } from '@/app/lib/api';
 
 export interface PriceUpdate {
   instrument: string;
@@ -26,6 +27,7 @@ export function useWebSocket() {
   const clientRef = useRef<Client | null>(null);
   const [prices, setPrices] = useState<Record<string, PriceUpdate>>({});
   const [alerts, setAlerts] = useState<AlertMessage[]>([]);
+  const [mentorSignalReviews, setMentorSignalReviews] = useState<MentorSignalReview[]>([]);
   const [connected, setConnected] = useState(false);
 
   const connect = useCallback(() => {
@@ -47,6 +49,13 @@ export function useWebSocket() {
           })
           .catch(() => {});
 
+        fetch(`${API_URL}/api/mentor/auto-alerts/recent`)
+          .then(r => r.ok ? r.json() : [])
+          .then((recent: MentorSignalReview[]) => {
+            setMentorSignalReviews(recent.slice(0, 200));
+          })
+          .catch(() => {});
+
         client.subscribe('/topic/prices', (msg: IMessage) => {
           const update: PriceUpdate = JSON.parse(msg.body);
           setPrices(prev => ({ ...prev, [update.instrument]: update }));
@@ -55,6 +64,14 @@ export function useWebSocket() {
         client.subscribe('/topic/alerts', (msg: IMessage) => {
           const alert: AlertMessage = JSON.parse(msg.body);
           setAlerts(prev => [alert, ...prev].slice(0, 50)); // keep last 50
+        });
+
+        client.subscribe('/topic/mentor-alerts', (msg: IMessage) => {
+          const review: MentorSignalReview = JSON.parse(msg.body);
+          setMentorSignalReviews(prev => {
+            const filtered = prev.filter(item => item.id !== review.id);
+            return [review, ...filtered].slice(0, 200);
+          });
         });
       },
       onDisconnect: () => setConnected(false),
@@ -72,5 +89,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { prices, alerts, connected };
+  return { prices, alerts, mentorSignalReviews, connected };
 }

@@ -156,6 +156,16 @@ If a change touches several layers:
 - avoid shortcutting directly from `presentation` to `infrastructure`
 - prefer domain/application ports where the dependency direction matters
 
+### Frontend Workflow Rule
+
+When extending Mentor behavior in the UI:
+
+- keep raw transport alerts separate from AI-reviewed trading alerts
+- reuse shared Mentor payload-building helpers instead of duplicating payload logic across components
+- keep account-risk sharing an explicit toggle or mode, not an implicit default for new workflows
+- when an alert must trigger autonomous Mentor review, prefer backend orchestration plus WebSocket publication over client-only side effects
+- when an alert review must stay historically stable, persist the frozen payload snapshot in the backend and reopen that saved thread rather than rebuilding live market context on click
+
 ## Review Checklist
 
 When reviewing a change, ask:

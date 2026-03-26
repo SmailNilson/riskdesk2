@@ -1,6 +1,6 @@
 # AI Handoff
 
-Last updated: 2026-03-25
+Last updated: 2026-03-26
 
 ## Goal of this file
 
@@ -91,6 +91,42 @@ Why:
 
 - when IBKR itself is unhealthy, rediscovery only adds noise and timeouts
 
+### 4. Mentor persisted review threads for qualified alerts
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/MentorSignalPanel.tsx`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/lib/mentor.ts`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/MentorPanel.tsx`
+
+What changed:
+
+- selected trading alerts now capture a frozen Mentor payload snapshot at alert time on the backend
+- the first Mentor review for that alert is saved in PostgreSQL and broadcast to the UI
+- each alert now owns a persisted review thread keyed by the exact alert occurrence
+- opening an alert in the panel reads the saved thread only; it does not recompute current market context
+- manual reanalysis is explicit through `Refaire l'analyse Mentor`, which appends a new saved revision to the same thread
+- `/api/mentor/auto-alerts/recent` exposes persisted recent reviews
+- `/api/mentor/auto-alerts/thread` returns the saved thread for one alert
+- `/api/mentor/auto-alerts/reanalyze` appends a new review revision using a fresh live payload plus `original_alert_context`
+- `/topic/mentor-alerts` pushes thread updates to the frontend
+- manual `Ask Mentor` runs are intentionally separate from alert reviews and can be listed via `/api/mentor/manual-reviews/recent`
+
+Qualified alert families:
+
+- `SMC` with `BOS` or `CHoCH`
+- `MACD` bullish/bearish cross
+- `WAVETREND` bullish/bearish cross and overbought/oversold
+- `RSI` overbought/oversold
+- `ORDER_BLOCK` when VWAP is inside the block
+
+Important behavior:
+
+- the auto-review flow keeps portfolio context disabled
+- the panel is intended for trade-conformance review, not account-risk judgment
+- the initial review is snapshot-based and no longer depends on click-time market state
+- manual reanalysis does rebuild current indicators/candles/live price, but also passes the original alert time/reason/price to Gemini for comparison
+
 ## Known Runtime Behavior
 
 ### Current good news
@@ -144,4 +180,3 @@ lsof -nP -iTCP:4001
 - document and automate the expected IB Gateway startup sequence
 - optionally add integration tests around source attribution for live price vs DB fallback
 - add more explicit tests around layer boundaries and use-case behavior
-

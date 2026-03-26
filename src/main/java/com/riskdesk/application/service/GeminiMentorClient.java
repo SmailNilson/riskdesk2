@@ -38,6 +38,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - Appuie ton jugement sur la structure, le VWAP, le momentum, les corrélations, le stop loss et la gestion du trade quand ces données existent.
         - RÈGLE D'ÉVALUATION ET DE PLANIFICATION : je vais te fournir un entry_price qui est soit une hypothèse de ma part, soit le prix actuel du marché. Tu dois évaluer la pertinence de ce prix. Cependant, que le trade soit conforme ou non à ce prix précis, tu dois systématiquement recalculer et proposer toi-même le meilleur prix d'entrée absolu en Limit Order. Cette Optimal Entry doit être dérivée des zones de liquidité, du VWAP et des Order Blocks (nearest_support_ob / nearest_resistance_ob).
         - RÈGLE DE LA DEEP ENTRY (Entrée Safe) : en plus de l'Optimal Entry, analyse momentum_and_flow. Si tu proposes un LONG sur pullback mais que le Money Flow est RED, tu dois proposer une deuxième entrée appelée Safe Deep Entry. Cette entrée doit être plus basse, dans le fond extrême de l'Order Block ou sur une moyenne lente majeure, pour anticiper un liquidity sweep. Si le contexte ne justifie pas cette option, retourne safeDeepEntry = null.
+        - RÈGLE DE RÉ-ÉVALUATION : si trade_intention.review_type = MANUAL_REANALYSIS, alors ceci est une ré-évaluation d'une alerte passée. Le bloc original_alert_context décrit quand et pourquoi l'alerte initiale a sonné. Les autres données JSON représentent le contexte de marché en temps réel au moment de la relance. Dans ce cas, ton but est de juger si le setup d'origine est toujours valide maintenant, si l'entrée actuelle est encore exploitable, si le trade est déjà parti (late entry / FOMO), ou si la structure a été invalidée depuis l'alerte initiale.
         - Réponds uniquement en JSON valide.
 
         Format JSON attendu :
@@ -83,6 +84,7 @@ public class GeminiMentorClient implements MentorModelClient {
         try {
             String payloadJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
             String similarAuditsJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(similarAudits);
+            String reanalysisInstruction = buildReanalysisInstruction(payload);
             String prompt = """
                 Analyse ce trade futures selon le playbook du mentor.
                 Utilise uniquement les valeurs du JSON ci-dessous.
@@ -91,13 +93,15 @@ public class GeminiMentorClient implements MentorModelClient {
                 Tu dois recalculer toi-même l'Optimal Entry en Limit Order, même si le verdict final est non conforme.
                 Retourne proposedTradePlan dès que les niveaux de marché suffisent à construire un plan exploitable.
                 N'utilise proposedTradePlan = null que si les données techniques sont insuffisantes pour proposer une entrée fiable.
+                Si trade_intention.review_type = MANUAL_REANALYSIS, traite original_alert_context comme le contexte historique de départ, mais fonde ton verdict principal sur les données live que tu reçois maintenant.
+                %s
 
                 Payload JSON:
                 %s
 
                 Audits similaires:
                 %s
-                """.formatted(payloadJson, similarAuditsJson);
+                """.formatted(reanalysisInstruction, payloadJson, similarAuditsJson);
 
             Map<String, Object> body = Map.of(
                 "system_instruction", Map.of(
@@ -197,5 +201,21 @@ public class GeminiMentorClient implements MentorModelClient {
             trimmed = trimmed.replaceFirst("\\s*```$", "");
         }
         return trimmed.trim();
+    }
+
+    private String buildReanalysisInstruction(JsonNode payload) {
+        if (!"MANUAL_REANALYSIS".equals(payload.path("trade_intention").path("review_type").asText(null))) {
+            return "";
+        }
+
+        String originalAlertTime = payload.path("original_alert_context").path("original_alert_time").asText("inconnue");
+        String originalAlertPrice = payload.path("original_alert_context").path("original_alert_price").isNumber()
+            ? payload.path("original_alert_context").path("original_alert_price").decimalValue().toPlainString()
+            : "inconnu";
+        return """
+            ATTENTION : Ceci est une RÉ-ÉVALUATION d'une alerte passée. L'alerte initiale a sonné à %s au prix de %s.
+            Les données JSON que tu reçois maintenant sont les données EN TEMPS RÉEL.
+            Ton but est de me dire : le setup d'origine est-il toujours valide ? Sommes-nous au bon prix pour entrer maintenant, le trade est-il déjà parti (Late entry/FOMO), ou la structure a-t-elle été invalidée entre-temps ?
+            """.formatted(originalAlertTime, originalAlertPrice);
     }
 }

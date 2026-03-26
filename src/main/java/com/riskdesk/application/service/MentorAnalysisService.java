@@ -19,6 +19,8 @@ import java.util.concurrent.TimeUnit;
 public class MentorAnalysisService {
 
     private static final long SIMILAR_AUDITS_TIMEOUT_MS = 2500L;
+    public static final String MANUAL_SOURCE_PREFIX = "manual-mentor:";
+    public static final String ALERT_SOURCE_PREFIX = "alert-review:";
 
     private final MentorModelClient mentorModelClient;
     private final MentorMemoryService mentorMemoryService;
@@ -39,15 +41,19 @@ public class MentorAnalysisService {
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload) {
+        return analyze(payload, MANUAL_SOURCE_PREFIX + Instant.now().toEpochMilli());
+    }
+
+    public MentorAnalyzeResponse analyze(JsonNode payload, String sourceRef) {
         List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(payload);
         try {
             MentorModelClient.MentorModelResult raw = mentorModelClient.analyze(payload, similarAudits);
             MentorStructuredResponse structured = parseStructuredResponse(raw.rawText());
-            Long auditId = mentorProperties.isPersistAudits() ? persistSuccess(payload, raw, structured) : null;
+            Long auditId = mentorProperties.isPersistAudits() ? persistSuccess(payload, raw, structured, sourceRef) : null;
             return new MentorAnalyzeResponse(auditId, raw.model(), payload, structured, raw.rawText(), similarAudits);
         } catch (IllegalStateException e) {
             if (mentorProperties.isPersistAudits()) {
-                persistFailure(payload, e);
+                persistFailure(payload, e, sourceRef);
             }
             throw e;
         }
@@ -81,9 +87,11 @@ public class MentorAnalysisService {
 
     private Long persistSuccess(JsonNode payload,
                                 MentorModelClient.MentorModelResult raw,
-                                MentorStructuredResponse structured) {
+                                MentorStructuredResponse structured,
+                                String sourceRef) {
         try {
             MentorAudit audit = new MentorAudit();
+            audit.setSourceRef(sourceRef);
             audit.setCreatedAt(Instant.now());
             audit.setInstrument(payload.path("metadata").path("asset").asText(null));
             audit.setTimeframe(payload.path("metadata").path("timeframe_focus").asText(null));
@@ -102,9 +110,10 @@ public class MentorAnalysisService {
         }
     }
 
-    private void persistFailure(JsonNode payload, IllegalStateException e) {
+    private void persistFailure(JsonNode payload, IllegalStateException e, String sourceRef) {
         try {
             MentorAudit audit = new MentorAudit();
+            audit.setSourceRef(sourceRef);
             audit.setCreatedAt(Instant.now());
             audit.setInstrument(payload.path("metadata").path("asset").asText(null));
             audit.setTimeframe(payload.path("metadata").path("timeframe_focus").asText(null));

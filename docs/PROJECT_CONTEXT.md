@@ -121,6 +121,34 @@ These are adapters, not business-rule owners.
 - display live and fallback market data
 - show mentor payload and result
 - expose positions, indicators, alerts, and IBKR portfolio state
+- auto-route selected trading alerts into a dedicated Mentor review panel
+
+### Mentor Alert Workflow
+
+The dashboard now has two alert surfaces with different purposes:
+
+- the fixed bottom alerts bar remains the raw alert ticker
+- a dedicated Mentor review panel sits under the IBKR connection panel and above the manual Mentor panel
+- the manual `Mentor AI` panel now has its own saved-history list for reviews launched with `Ask Mentor`
+
+Only these alert families are escalated into Mentor review:
+
+- structure: `BOS`, `CHoCH`
+- momentum: `MACD Bullish/Bearish Cross`, `WaveTrend Bullish/Bearish Cross`
+- extremes: `RSI oversold/overbought`, `WaveTrend oversold/overbought`
+- structure/price: `VWAP inside BULLISH/BEARISH Order Block`
+
+Current behavior:
+
+- when a qualified alert is published, the backend captures a frozen Mentor payload snapshot immediately
+- that first review is created from the frozen snapshot and saved in PostgreSQL
+- the review thread is keyed by the exact alert occurrence (`timestamp + instrument + category + message`)
+- clicking an alert in the Mentor review panel reads the saved thread only; it does not trigger a fresh Gemini call
+- the button `Refaire l'analyse Mentor` creates a new saved review revision under the same alert thread using LIVE market data at click time
+- a re-review payload mixes live indicators with `original_alert_context` so Gemini can judge whether the old setup is still valid now
+- raw alerts still flow through `/topic/alerts`
+- Mentor review updates still flow through `/topic/mentor-alerts`
+- manual `Ask Mentor` analyses are stored separately in `mentor_audits` with a dedicated `manual-mentor:` source reference and exposed through `/api/mentor/manual-reviews/recent`
 
 ## Operational Commands
 

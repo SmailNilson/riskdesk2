@@ -369,6 +369,46 @@ export interface MentorAnalyzeResponse {
   }[];
 }
 
+export interface MentorManualReview {
+  auditId: number;
+  sourceType: 'MANUAL_MENTOR';
+  createdAt: string;
+  instrument: string | null;
+  timeframe: string | null;
+  action: string | null;
+  model: string | null;
+  verdict: string | null;
+  success: boolean;
+  errorMessage: string | null;
+  response: MentorAnalyzeResponse;
+}
+
+export interface MentorSignalReview {
+  id: number;
+  alertKey: string;
+  revision: number;
+  triggerType: 'INITIAL' | 'MANUAL_REANALYSIS';
+  status: 'ANALYZING' | 'DONE' | 'ERROR';
+  severity: 'INFO' | 'WARNING' | 'DANGER';
+  category: string;
+  message: string;
+  instrument: string;
+  timeframe: string;
+  action: 'LONG' | 'SHORT';
+  timestamp: string;
+  createdAt: string;
+  analysis: MentorAnalyzeResponse | null;
+  errorMessage: string | null;
+}
+
+export interface MentorAlertReviewRequest {
+  severity: 'INFO' | 'WARNING' | 'DANGER';
+  category: string;
+  message: string;
+  instrument: string | null;
+  timestamp: string;
+}
+
 export interface MentorIntermarketSnapshot {
   dxyPctChange: number | null;
   dxyTrend: string | null;
@@ -405,6 +445,14 @@ export const api = {
     post<{ instrument: string; refreshed: Record<string, number> }>('/api/mentor/refresh-context', { instrument, timeframe }),
   getMentorIntermarket: (instrument?: string) =>
     get<MentorIntermarketSnapshot>(`/api/mentor/intermarket${instrument ? `?instrument=${encodeURIComponent(instrument)}` : ''}`),
+  getRecentManualMentorReviews: () =>
+    get<MentorManualReview[]>('/api/mentor/manual-reviews/recent'),
+  getRecentMentorSignalReviews: () =>
+    get<MentorSignalReview[]>('/api/mentor/auto-alerts/recent'),
+  getMentorAlertThread: (request: MentorAlertReviewRequest) =>
+    post<MentorSignalReview[]>('/api/mentor/auto-alerts/thread', request),
+  reanalyzeMentorAlert: (request: MentorAlertReviewRequest) =>
+    post<MentorSignalReview>('/api/mentor/auto-alerts/reanalyze', request),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
     n1?: number; n2?: number; nsc?: number; nsv?: number; qty?: number; capital?: number; pointValue?: number;

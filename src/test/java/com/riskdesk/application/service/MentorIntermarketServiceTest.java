@@ -5,11 +5,11 @@ import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -20,13 +20,16 @@ class MentorIntermarketServiceTest {
     @Test
     void current_includesDxyChangeForDollarSensitiveInstrument() {
         MarketDataService marketDataService = mock(MarketDataService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
         CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(Optional.of(marketDataService), candleRepositoryPort);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
 
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of(
             candle("2026-03-26T00:00:00Z", "104.000"),
             candle("2026-03-25T23:50:00Z", "103.500")
         ));
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
         when(marketDataService.currentPrice(Instrument.DXY)).thenReturn(
             new MarketDataService.StoredPrice(new BigDecimal("104.250"), Instant.parse("2026-03-26T00:06:00Z"), "LIVE_PROVIDER")
         );
@@ -41,11 +44,14 @@ class MentorIntermarketServiceTest {
     @Test
     void current_returnsUnavailableWhenNoDxyDataExists() {
         MarketDataService marketDataService = mock(MarketDataService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
         CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(Optional.of(marketDataService), candleRepositoryPort);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
 
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of());
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "1h", 2)).thenReturn(List.of());
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
 
         MentorIntermarketSnapshot snapshot = service.current(Instrument.MNQ);
 

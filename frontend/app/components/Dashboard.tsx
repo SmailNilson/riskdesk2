@@ -7,6 +7,7 @@ import MetricsBar from './MetricsBar';
 import Chart from './Chart';
 import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
+import MentorSignalPanel from './MentorSignalPanel';
 import AlertsFeed from './AlertsFeed';
 import PositionForm from './PositionForm';
 import BacktestPanel from './BacktestPanel';
@@ -132,7 +133,7 @@ export default function Dashboard() {
   const [aiExportStatus, setAiExportStatus] = useState<string | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
 
-  const { prices, alerts, connected } = useWebSocket();
+  const { prices, alerts, mentorSignalReviews, connected } = useWebSocket();
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
@@ -317,6 +318,12 @@ export default function Dashboard() {
           selectedAccountId={selectedIbkrAccountId}
           onAccountChange={setSelectedIbkrAccountId}
           onRefreshRequested={loadSummary}
+        />
+
+        <MentorSignalPanel
+          timezone={timezone}
+          alerts={alerts}
+          reviews={mentorSignalReviews}
         />
       </div>
 

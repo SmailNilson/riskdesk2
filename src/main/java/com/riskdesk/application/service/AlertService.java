@@ -13,7 +13,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -36,6 +35,7 @@ public class AlertService {
     private final RiskAlertEvaluator      riskAlertEvaluator;
     private final IndicatorAlertEvaluator indicatorAlertEvaluator;
     private final AlertDeduplicator       deduplicator;
+    private final MentorSignalReviewService mentorSignalReviewService;
     private final SimpMessagingTemplate   messagingTemplate;
 
     // Recent alerts buffer (last 50) for REST endpoint
@@ -46,12 +46,14 @@ public class AlertService {
                         RiskAlertEvaluator riskAlertEvaluator,
                         IndicatorAlertEvaluator indicatorAlertEvaluator,
                         AlertDeduplicator deduplicator,
+                        MentorSignalReviewService mentorSignalReviewService,
                         SimpMessagingTemplate messagingTemplate) {
         this.positionService         = positionService;
         this.indicatorService        = indicatorService;
         this.riskAlertEvaluator      = riskAlertEvaluator;
         this.indicatorAlertEvaluator = indicatorAlertEvaluator;
         this.deduplicator            = deduplicator;
+        this.mentorSignalReviewService = mentorSignalReviewService;
         this.messagingTemplate       = messagingTemplate;
     }
 
@@ -74,27 +76,23 @@ public class AlertService {
         for (String timeframe : List.of("10m", "1h")) {
             try {
                 IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, timeframe);
-                alerts.addAll(indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap)));
+                List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
+                alerts.addAll(indicatorAlerts);
+                indicatorAlerts.forEach(alert -> publishAlert(alert, snap));
             } catch (Exception e) {
                 log.debug("Indicator evaluation error for {} {}: {}", instrument, timeframe, e.getMessage());
             }
         }
 
-        // Deduplicate, buffer, and publish
         for (Alert alert : alerts) {
-            if (!deduplicator.shouldFire(alert)) continue;
-
-            log.info("ALERT [{}] {}", alert.severity(), alert.message());
-            Map<String, Object> payload = toPayload(alert);
-            synchronized (recentAlerts) {
-                recentAlerts.addFirst(payload);
-                while (recentAlerts.size() > MAX_RECENT_ALERTS) recentAlerts.removeLast();
+            if (alert.category().name().equals("MACD")
+                || alert.category().name().equals("WAVETREND")
+                || alert.category().name().equals("RSI")
+                || alert.category().name().equals("SMC")
+                || alert.category().name().equals("ORDER_BLOCK")) {
+                continue;
             }
-            try {
-                messagingTemplate.convertAndSend("/topic/alerts", payload);
-            } catch (Exception e) {
-                log.debug("WebSocket alert send failed: {}", e.getMessage());
-            }
+            publishAlert(alert, null);
         }
     }
 
@@ -103,19 +101,7 @@ public class AlertService {
      * Applies deduplication, buffers, and broadcasts via WebSocket.
      */
     public void publish(Alert alert) {
-        if (!deduplicator.shouldFire(alert)) return;
-
-        log.info("ALERT [{}] {}", alert.severity(), alert.message());
-        Map<String, Object> payload = toPayload(alert);
-        synchronized (recentAlerts) {
-            recentAlerts.addFirst(payload);
-            while (recentAlerts.size() > MAX_RECENT_ALERTS) recentAlerts.removeLast();
-        }
-        try {
-            messagingTemplate.convertAndSend("/topic/alerts", payload);
-        } catch (Exception e) {
-            log.debug("WebSocket alert send failed: {}", e.getMessage());
-        }
+        publishAlert(alert, null);
     }
 
     /**
@@ -135,7 +121,7 @@ public class AlertService {
         map.put("category",   alert.category().name());
         map.put("message",    alert.message());
         map.put("instrument", alert.instrument());
-        map.put("timestamp",  Instant.now().toString());
+        map.put("timestamp",  alert.timestamp().toString());
         return map;
     }
 
@@ -154,5 +140,31 @@ public class AlertService {
                 .map(block -> new IndicatorAlertSnapshot.OrderBlockZone(block.type(), block.high(), block.low()))
                 .toList()
         );
+    }
+
+    private void publishAlert(Alert alert, IndicatorSnapshot snapshot) {
+        if (!deduplicator.shouldFire(alert)) {
+            return;
+        }
+
+        log.info("ALERT [{}] {}", alert.severity(), alert.message());
+        Map<String, Object> payload = toPayload(alert);
+        synchronized (recentAlerts) {
+            recentAlerts.addFirst(payload);
+            while (recentAlerts.size() > MAX_RECENT_ALERTS) {
+                recentAlerts.removeLast();
+            }
+        }
+        try {
+            messagingTemplate.convertAndSend("/topic/alerts", payload);
+        } catch (Exception e) {
+            log.debug("WebSocket alert send failed: {}", e.getMessage());
+        }
+
+        if (snapshot != null) {
+            mentorSignalReviewService.captureInitialReview(alert, snapshot);
+        } else {
+            mentorSignalReviewService.captureInitialReview(alert);
+        }
     }
 }

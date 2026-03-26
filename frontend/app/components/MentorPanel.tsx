@@ -3,31 +3,20 @@
 import { ReactNode, useEffect, useRef, useState } from 'react';
 import { AlertMessage, PriceUpdate } from '@/app/hooks/useWebSocket';
 import {
-  api,
-  CandleBar,
-  IndicatorSeriesSnapshot,
   IndicatorSnapshot,
+  MentorManualReview,
   MentorAnalyzeResponse,
-  MentorIntermarketSnapshot,
   PortfolioSummary,
+  api,
 } from '@/app/lib/api';
-
-type Instrument = 'MCL' | 'MGC' | 'E6' | 'MNQ';
-type Timeframe = '5m' | '10m' | '1h' | '1d';
-
-type TzEntry = {
-  label: string;
-  tz: string;
-};
-
-type TradeAction = 'LONG' | 'SHORT';
-
-const ASSET_ALIAS: Record<Instrument, string> = {
-  MCL: 'CL1!',
-  MGC: 'MGC1!',
-  E6: '6E1!',
-  MNQ: 'MNQ1!',
-};
+import {
+  Instrument,
+  MentorTradeIntention,
+  runMentorAnalysis,
+  Timeframe,
+  TradeAction,
+  TzEntry,
+} from '@/app/lib/mentor';
 
 export default function MentorPanel({
   instrument,
@@ -60,7 +49,33 @@ export default function MentorPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MentorAnalyzeResponse | null>(null);
+  const [manualReviews, setManualReviews] = useState<MentorManualReview[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [selectedManualAuditId, setSelectedManualAuditId] = useState<number | null>(null);
   const hydratedFormKeyRef = useRef('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setHistoryLoading(true);
+    api.getRecentManualMentorReviews()
+      .then(reviews => {
+        if (cancelled) return;
+        setManualReviews(reviews);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setManualReviews([]);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const formSeedKey = [
@@ -101,62 +116,32 @@ export default function MentorPanel({
     setLoading(true);
     setError(null);
     try {
-      await api.refreshMentorContext(instrument, timeframe).catch(() => null);
+      const tradeIntention: MentorTradeIntention = {
+        action,
+        entryPrice: parsedEntry,
+        stopLoss: parsedStop,
+        takeProfit: parsedTakeProfit,
+        isMarketOrder,
+      };
 
-      const [livePriceView, freshSummary, freshAlerts, freshSnapshot, indicatorSeries, h1Snapshot, candles, intermarket] = await Promise.all([
-        api.getLivePrice(instrument).catch(() => null),
-        api.getPortfolioSummary().catch(() => summary),
-        api.getRecentAlerts().catch(() => alerts),
-        api.getIndicators(instrument, timeframe),
-        api.getIndicatorSeries(instrument, timeframe, 500),
-        api.getIndicators(instrument, '1h'),
-        api.getCandles(instrument, timeframe, 120),
-        api.getMentorIntermarket(instrument),
-      ]);
-
-      const effectiveSnapshot = freshSnapshot ?? snapshot;
-      if (!effectiveSnapshot) {
-        setError('Fresh indicators are not available yet.');
-        setLoading(false);
-        return;
-      }
-
-      const resolvedPrices =
-        livePriceView && shouldUseLivePriceView(livePriceView, prices[instrument])
-          ? {
-              [instrument]: {
-                instrument,
-                displayName: instrument,
-                price: livePriceView.price,
-                timestamp: livePriceView.timestamp,
-              },
-            }
-          : prices;
-
-      const payload = buildMentorPayload({
+      const { response } = await runMentorAnalysis({
         instrument,
         timeframe,
         timezone,
         connected,
-        summary: freshSummary,
-        snapshot: effectiveSnapshot,
-        h1Snapshot,
-        indicatorSeries,
-        candles,
-        intermarket,
-        prices: resolvedPrices,
-        alerts: freshAlerts as AlertMessage[],
+        summary,
+        snapshot,
+        prices,
+        alerts,
         includePortfolioContext,
-        tradeIntention: {
-          action,
-          entryPrice: parsedEntry,
-          stopLoss: parsedStop,
-          takeProfit: parsedTakeProfit,
-          isMarketOrder,
-        },
+        tradeIntention,
       });
-
-      setResult(await api.analyzeMentor(payload));
+      setResult(response);
+      setSelectedManualAuditId(response.auditId ?? null);
+      const reviews = await api.getRecentManualMentorReviews().catch(() => null);
+      if (reviews) {
+        setManualReviews(reviews);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Mentor analysis failed.');
     } finally {
@@ -169,7 +154,7 @@ export default function MentorPanel({
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <div className="text-[11px] font-bold uppercase tracking-widest text-zinc-400">Mentor AI</div>
-          <div className="text-[10px] text-zinc-600">Audit de setup ou de trade avec payload réel RiskDesk</div>
+          <div className="text-[10px] text-zinc-600">Analyses manuelles lancees depuis Ask Mentor, separees des reviews d&apos;alertes.</div>
         </div>
         <button
           onClick={analyze}
@@ -235,7 +220,7 @@ export default function MentorPanel({
       {result && (
         <div className="space-y-3 rounded border border-zinc-800 bg-zinc-950/50 p-3">
           <div className="flex items-center justify-between gap-2">
-            <div className="text-[10px] text-zinc-500">Model: {result.model}</div>
+            <div className="text-[10px] text-zinc-500">Type: Manual Mentor Review · Model: {result.model}</div>
             <div className="text-[10px] text-zinc-500">Audit #{result.auditId ?? 'n/a'}</div>
           </div>
 
@@ -323,6 +308,82 @@ export default function MentorPanel({
           </Section>
         </div>
       )}
+
+      <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/30 p-3">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Manual Mentor Reviews</div>
+            <div className="text-[10px] text-zinc-600">Historique des analyses lancees depuis ce panneau, sans les reviews issues des alertes.</div>
+          </div>
+          <div className="rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-[10px] text-zinc-500">
+            {manualReviews.length} saved
+          </div>
+        </div>
+
+        {historyLoading ? (
+          <div className="text-[11px] text-zinc-500">Chargement des reviews manuelles...</div>
+        ) : manualReviews.length === 0 ? (
+          <div className="text-[11px] text-zinc-500">Aucune review manuelle sauvegardee pour l’instant.</div>
+        ) : (
+          <div className="grid gap-2 xl:grid-cols-[0.92fr_1.08fr]">
+            <div className="space-y-2">
+              {manualReviews.map(review => {
+                const selected = review.auditId === selectedManualAuditId;
+                return (
+                  <button
+                    key={review.auditId}
+                    onClick={() => {
+                      setSelectedManualAuditId(review.auditId);
+                      setResult(review.response);
+                      setError(null);
+                    }}
+                    className={`w-full rounded border px-3 py-2 text-left transition-colors ${
+                      selected
+                        ? 'border-cyan-600 bg-cyan-950/20'
+                        : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-900'
+                    }`}
+                  >
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
+                        #{review.auditId}
+                      </span>
+                      <span className="rounded bg-cyan-950/70 px-2 py-1 text-[10px] text-cyan-300">
+                        MANUAL
+                      </span>
+                      <span className={`ml-auto rounded px-2 py-1 text-[10px] font-semibold ${
+                        review.success && review.verdict?.includes('Validé')
+                          ? 'bg-emerald-950/70 text-emerald-300'
+                          : 'bg-red-950/70 text-red-300'
+                      }`}>
+                        {review.success && review.verdict?.includes('Validé') ? 'Trade OK' : 'Trade Non-Conforme'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-200">
+                      {review.instrument ?? instrument} · {review.action ?? action} · {review.timeframe ?? timeframe}
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-[10px] text-zinc-500">
+                      {review.verdict ?? review.errorMessage ?? 'No verdict saved.'}
+                    </div>
+                    <div className="mt-2 text-[10px] text-zinc-600">
+                      {new Date(review.createdAt).toLocaleString()}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="rounded border border-zinc-800 bg-zinc-950/40 px-3 py-3">
+              {selectedManualAuditId == null ? (
+                <div className="text-[11px] text-zinc-500">Selectionne une review manuelle pour la reouvrir ici.</div>
+              ) : (
+                <div className="text-[11px] text-zinc-400">
+                  La review manuelle selectionnee est affichee dans le bloc principal au-dessus.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -362,124 +423,6 @@ function BulletList({ items, emptyLabel, color }: { items: string[]; emptyLabel:
   );
 }
 
-function buildMentorPayload(params: {
-  instrument: Instrument;
-  timeframe: Timeframe;
-  timezone: TzEntry;
-  connected: boolean;
-  summary: PortfolioSummary | null;
-  snapshot: IndicatorSnapshot;
-  h1Snapshot: IndicatorSnapshot;
-  indicatorSeries: IndicatorSeriesSnapshot;
-  candles: CandleBar[];
-  intermarket: MentorIntermarketSnapshot;
-  prices: Record<string, PriceUpdate>;
-  alerts: AlertMessage[];
-  includePortfolioContext: boolean;
-  tradeIntention: {
-    action: TradeAction;
-    entryPrice: number | null;
-    stopLoss: number | null;
-    takeProfit: number | null;
-    isMarketOrder: boolean;
-  };
-}) {
-  const lastClose = params.candles.length > 0 ? params.candles[params.candles.length - 1]?.close ?? null : null;
-  const currentPrice = params.prices[params.instrument]?.price ?? lastClose ?? params.tradeIntention.entryPrice ?? null;
-  const effectiveEntryPrice = params.tradeIntention.entryPrice ?? currentPrice;
-  const timestamp = params.prices[params.instrument]?.timestamp ?? new Date().toISOString();
-  const atr = computeAtr(params.candles, 14, params.instrument);
-  const referencePrice = currentPrice ?? params.snapshot.vwap ?? params.snapshot.ema50 ?? 0;
-  const nearestSupport = findNearestOrderBlock(params.snapshot, referencePrice, 'BULLISH');
-  const nearestResistance = findNearestOrderBlock(params.snapshot, referencePrice, 'BEARISH');
-  const hasPlan = effectiveEntryPrice != null && params.tradeIntention.stopLoss != null && params.tradeIntention.takeProfit != null;
-  const stopLossSize = hasPlan ? Math.abs(effectiveEntryPrice! - params.tradeIntention.stopLoss!) : null;
-  const reward = hasPlan ? Math.abs(params.tradeIntention.takeProfit! - effectiveEntryPrice!) : null;
-  const risk = stopLossSize && stopLossSize > 0 ? stopLossSize : null;
-
-  return {
-    metadata: {
-      timestamp,
-      asset: ASSET_ALIAS[params.instrument],
-      current_price: currentPrice != null ? round(currentPrice, params.instrument) : null,
-      timeframe_focus: toMentorTimeframe(params.timeframe),
-      market_session: inferMarketSession(timestamp),
-      dashboard_connection_status: params.connected ? 'LIVE' : 'DISCONNECTED',
-      selected_timezone: params.timezone.tz,
-    },
-    trade_intention: {
-      action: params.tradeIntention.action,
-      analysis_mode: hasPlan ? 'TRADE_AUDIT' : 'SETUP_REVIEW',
-      entry_price: effectiveEntryPrice != null ? round(effectiveEntryPrice, params.instrument) : null,
-      stop_loss: params.tradeIntention.stopLoss != null ? round(params.tradeIntention.stopLoss, params.instrument) : null,
-      take_profit: params.tradeIntention.takeProfit != null ? round(params.tradeIntention.takeProfit, params.instrument) : null,
-      time_to_candle_close_seconds: timeToCandleCloseSeconds(params.timeframe, timestamp),
-      is_market_order: params.tradeIntention.isMarketOrder,
-      mentor_should_propose_plan: !hasPlan,
-    },
-    market_structure_the_king: {
-      trend_H1: params.h1Snapshot.marketStructureTrend,
-      trend_focus: params.snapshot.marketStructureTrend,
-      focus_timeframe: toMentorTimeframe(params.timeframe),
-      last_event: params.snapshot.lastBreakType,
-      last_event_price: params.snapshot.recentBreaks[0]?.level ?? null,
-      nearest_support_ob: nearestSupport,
-      nearest_resistance_ob: nearestResistance,
-      key_psychological_level_proximity: nearestPsychologicalLevel(currentPrice, params.instrument),
-    },
-    dynamic_levels_and_vwap: {
-      vwap_value: params.snapshot.vwap,
-      distance_to_vwap_points: currentPrice != null && params.snapshot.vwap != null ? round(Math.abs(currentPrice - params.snapshot.vwap), params.instrument) : null,
-      ma_fast_red_value: params.snapshot.ema50,
-      ma_slow_blue_value: params.snapshot.ema200,
-      distance_to_ma_slow_points: currentPrice != null && params.snapshot.ema200 != null ? round(Math.abs(currentPrice - params.snapshot.ema200), params.instrument) : null,
-    },
-    momentum_and_flow_the_trigger: {
-      money_flow_state: inferMoneyFlowState(params.snapshot),
-      money_flow_trend: inferMoneyFlowTrend(params.snapshot),
-      oscillator_value: params.snapshot.rsi,
-      oscillator_signal: params.snapshot.rsiSignal,
-      divergence_detected: false,
-      divergence_type: null,
-    },
-    intermarket_correlations_the_edge: {
-      dxy_pct_change: params.intermarket.dxyPctChange,
-      dxy_trend: params.intermarket.dxyTrend,
-      silver_si1_pct_change: params.intermarket.silverSi1PctChange,
-      gold_mgc1_pct_change: params.intermarket.goldMgc1PctChange,
-      plat_pl1_pct_change: params.intermarket.platPl1PctChange,
-      metals_convergence_status: params.intermarket.metalsConvergenceStatus,
-    },
-    risk_and_emotional_check: {
-      current_atr_focus: atr,
-      stop_loss_size_points: stopLossSize != null ? round(stopLossSize, params.instrument) : null,
-      reward_to_risk_ratio: risk && reward != null ? round(reward / risk, params.instrument) : null,
-      is_sl_structurally_protected: params.tradeIntention.stopLoss != null
-        ? isStructurallyProtected(params.tradeIntention.action, params.tradeIntention.stopLoss, nearestSupport, nearestResistance, params.snapshot)
-        : null,
-      price_extension_warning: currentPrice != null ? isPriceExtended(currentPrice, params.snapshot, atr) : false,
-    },
-    riskdesk_context: {
-      portfolio_state_shared: params.includePortfolioContext,
-      total_unrealized_pnl: params.includePortfolioContext ? params.summary?.totalUnrealizedPnL ?? null : null,
-      today_realized_pnl: params.includePortfolioContext ? params.summary?.todayRealizedPnL ?? null : null,
-      margin_used_pct: params.includePortfolioContext ? params.summary?.marginUsedPct ?? null : null,
-      active_signals: [
-        params.snapshot.rsiSignal,
-        params.snapshot.macdCrossover,
-        params.snapshot.wtSignal,
-        params.snapshot.wtCrossover,
-        params.snapshot.bbTrendSignal,
-      ].filter(Boolean),
-      recent_alerts: selectMentorAlerts(params.alerts, params.instrument, params.includePortfolioContext),
-      chart_series_summary: {
-        candles_loaded: params.candles.length,
-        wave_trend_points: params.indicatorSeries.waveTrend.length,
-      },
-    },
-  };
-}
-
 function hasManualPlan(entryPrice: string, stopLoss: string, takeProfit: string) {
   return parseOptionalNumber(entryPrice) != null
     && parseOptionalNumber(stopLoss) != null
@@ -493,78 +436,6 @@ function parseOptionalNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function findNearestOrderBlock(snapshot: IndicatorSnapshot, currentPrice: number, bias: 'BULLISH' | 'BEARISH') {
-  const filtered = snapshot.activeOrderBlocks.filter(block =>
-    bias === 'BULLISH' ? block.mid <= currentPrice : block.mid >= currentPrice
-  );
-  if (filtered.length > 0) {
-    const nearest = filtered.sort((a, b) => Math.abs(a.mid - currentPrice) - Math.abs(b.mid - currentPrice))[0];
-    return {
-      type: bias === 'BULLISH' ? 'DEMAND' : 'SUPPLY',
-      price_top: nearest.high,
-      price_bottom: nearest.low,
-      is_tested: false,
-    };
-  }
-
-  const structuralLevel = bias === 'BULLISH'
-    ? pickNearestLevel(currentPrice, [snapshot.weakLow, snapshot.strongLow], 'below')
-    : pickNearestLevel(currentPrice, [snapshot.weakHigh, snapshot.strongHigh], 'above');
-  if (structuralLevel == null) {
-    return null;
-  }
-  const zonePadding = Math.max(Math.abs(currentPrice) * 0.0005, 0.0005);
-  return {
-    type: bias === 'BULLISH' ? 'DEMAND_SWING' : 'SUPPLY_SWING',
-    price_top: bias === 'BULLISH' ? structuralLevel + zonePadding : structuralLevel,
-    price_bottom: bias === 'BULLISH' ? structuralLevel : structuralLevel - zonePadding,
-    is_tested: false,
-  };
-}
-
-function pickNearestLevel(currentPrice: number, levels: Array<number | null>, direction: 'below' | 'above') {
-  const filtered = levels.filter((level): level is number =>
-    level != null && (direction === 'below' ? level <= currentPrice : level >= currentPrice)
-  );
-  if (filtered.length === 0) {
-    return null;
-  }
-  return filtered.sort((a, b) => Math.abs(a - currentPrice) - Math.abs(b - currentPrice))[0];
-}
-
-function computeAtr(candles: CandleBar[], period: number, instrument: Instrument) {
-  if (candles.length < period + 1) {
-    return null;
-  }
-  const trs: number[] = [];
-  for (let i = 1; i < candles.length; i += 1) {
-    const current = candles[i];
-    const previous = candles[i - 1];
-    const tr = Math.max(
-      current.high - current.low,
-      Math.abs(current.high - previous.close),
-      Math.abs(current.low - previous.close)
-    );
-    trs.push(tr);
-  }
-  const last = trs.slice(-period);
-  const avg = last.reduce((sum, value) => sum + value, 0) / last.length;
-  return avg > 0 ? round(avg, instrument) : null;
-}
-
-function inferMoneyFlowState(snapshot: IndicatorSnapshot) {
-  if (snapshot.cmf == null && snapshot.buyRatio == null) {
-    return 'UNAVAILABLE';
-  }
-  if ((snapshot.cmf ?? 0) > 0 || (snapshot.buyRatio ?? 0) >= 0.5) {
-    return 'GREEN';
-  }
-  if ((snapshot.cmf ?? 0) < 0 || (snapshot.buyRatio ?? 0) < 0.5) {
-    return 'RED';
-  }
-  return 'NEUTRAL';
-}
-
 function PlanCell({ label, value }: { label: string; value: number | null }) {
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/40 px-2 py-2">
@@ -572,102 +443,6 @@ function PlanCell({ label, value }: { label: string; value: number | null }) {
       <div className="text-[11px] font-semibold text-zinc-200">{value ?? 'n/a'}</div>
     </div>
   );
-}
-
-function inferMoneyFlowTrend(snapshot: IndicatorSnapshot) {
-  if (snapshot.deltaFlowBias === 'BULLISH') return 'INCREASING';
-  if (snapshot.deltaFlowBias === 'BEARISH') return 'DECREASING';
-  return 'FLAT';
-}
-
-function selectMentorAlerts(alerts: AlertMessage[], instrument: Instrument, includePortfolioContext: boolean) {
-  return alerts
-    .filter(alert => {
-      if (alert.instrument !== instrument) {
-        return false;
-      }
-      if (!includePortfolioContext && alert.category === 'RISK') {
-        return false;
-      }
-      return true;
-    })
-    .slice(0, 8);
-}
-
-function isStructurallyProtected(
-  action: TradeAction,
-  stopLoss: number,
-  nearestSupport: { price_bottom: number } | null,
-  nearestResistance: { price_top: number } | null,
-  snapshot: IndicatorSnapshot
-) {
-  if (action === 'LONG') {
-    return (
-      (nearestSupport != null && stopLoss <= nearestSupport.price_bottom) ||
-      (snapshot.weakLow != null && stopLoss <= snapshot.weakLow)
-    );
-  }
-  return (
-    (nearestResistance != null && stopLoss >= nearestResistance.price_top) ||
-    (snapshot.weakHigh != null && stopLoss >= snapshot.weakHigh)
-  );
-}
-
-function isPriceExtended(currentPrice: number, snapshot: IndicatorSnapshot, atr: number | null) {
-  if (snapshot.vwap == null || atr == null) {
-    return false;
-  }
-  return Math.abs(currentPrice - snapshot.vwap) > atr * 1.5;
-}
-
-function shouldUseLivePriceView(
-  livePriceView: { source: string; timestamp: string },
-  websocketPrice?: PriceUpdate
-) {
-  if (livePriceView.source !== 'FALLBACK_DB') {
-    return true;
-  }
-
-  if (!websocketPrice?.price) {
-    return true;
-  }
-
-  const liveTs = Date.parse(livePriceView.timestamp);
-  const wsTs = Date.parse(websocketPrice.timestamp);
-  if (Number.isNaN(liveTs) || Number.isNaN(wsTs)) {
-    return false;
-  }
-
-  return liveTs >= wsTs;
-}
-
-function nearestPsychologicalLevel(price: number, instrument: Instrument) {
-  const step = instrument === 'E6' ? 0.005 : instrument === 'MNQ' ? 100 : instrument === 'MCL' ? 5 : 10;
-  return round(Math.round(price / step) * step, instrument);
-}
-
-function timeToCandleCloseSeconds(timeframe: Timeframe, timestamp: string) {
-  const date = new Date(timestamp);
-  const minutes = timeframe === '5m' ? 5 : timeframe === '10m' ? 10 : timeframe === '1h' ? 60 : 1440;
-  const ms = date.getTime();
-  const bucket = minutes * 60 * 1000;
-  const nextClose = Math.ceil(ms / bucket) * bucket;
-  return Math.max(0, Math.round((nextClose - ms) / 1000));
-}
-
-function inferMarketSession(timestamp: string) {
-  const hour = new Date(timestamp).getUTCHours();
-  if (hour >= 22 || hour < 6) return 'ASIAN_OPEN';
-  if (hour >= 6 && hour < 12) return 'LONDON';
-  if (hour >= 12 && hour < 20) return 'NEW_YORK';
-  return 'OFF_HOURS';
-}
-
-function toMentorTimeframe(timeframe: Timeframe) {
-  if (timeframe === '5m') return 'M5';
-  if (timeframe === '10m') return 'M10';
-  if (timeframe === '1h') return 'H1';
-  return 'D1';
 }
 
 function round(value: number, instrument: Instrument | 'MGC') {

@@ -4,12 +4,12 @@ import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Intermarket values must come from the internal IBKR -> PostgreSQL pipeline only.
@@ -17,12 +17,12 @@ import java.util.Optional;
 @Service
 public class MentorIntermarketService {
 
-    private final Optional<MarketDataService> marketDataService;
+    private final ObjectProvider<MarketDataService> marketDataServiceProvider;
     private final CandleRepositoryPort candleRepositoryPort;
 
-    public MentorIntermarketService(Optional<MarketDataService> marketDataService,
+    public MentorIntermarketService(ObjectProvider<MarketDataService> marketDataServiceProvider,
                                     CandleRepositoryPort candleRepositoryPort) {
-        this.marketDataService = marketDataService;
+        this.marketDataServiceProvider = marketDataServiceProvider;
         this.candleRepositoryPort = candleRepositoryPort;
     }
 
@@ -61,9 +61,9 @@ public class MentorIntermarketService {
             return DxySignal.unavailable();
         }
 
-        MarketDataService.StoredPrice liveOrCached = marketDataService
-            .map(service -> service.currentPrice(Instrument.DXY))
-            .orElse(null);
+        MarketDataService.StoredPrice liveOrCached = marketDataServiceProvider.getIfAvailable() != null
+            ? marketDataServiceProvider.getIfAvailable().currentPrice(Instrument.DXY)
+            : null;
         BigDecimal current = liveOrCached != null && liveOrCached.price() != null
             ? liveOrCached.price()
             : latestKnownClose;
