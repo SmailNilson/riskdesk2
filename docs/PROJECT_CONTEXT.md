@@ -87,7 +87,9 @@ These should stay transport-oriented only.
 - `application/service/MarketDataService.java`
 - `application/service/HistoricalDataService.java`
 - `application/service/PositionService.java`
+- `application/service/AlertService.java`
 - `application/service/MentorAnalysisService.java`
+- `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
 
 These coordinate use cases and should not become infrastructure adapters.
@@ -113,6 +115,7 @@ These are adapters, not business-rule owners.
 - `frontend/app/page.tsx`
 - `frontend/app/components/Dashboard.tsx`
 - `frontend/app/components/MentorPanel.tsx`
+- `frontend/app/components/MentorSignalPanel.tsx`
 - `frontend/app/lib/api.ts`
 - `frontend/app/hooks/useWebSocket.ts`
 
@@ -125,11 +128,7 @@ These are adapters, not business-rule owners.
 
 ### Mentor Alert Workflow
 
-The dashboard now has two alert surfaces with different purposes:
-
-- the fixed bottom alerts bar remains the raw alert ticker
-- a dedicated Mentor review panel sits under the IBKR connection panel and above the manual Mentor panel
-- the manual `Mentor AI` panel now has its own saved-history list for reviews launched with `Ask Mentor`
+The dashboard has a dedicated Mentor review panel under the IBKR connection panel. The bottom alerts ticker bar has been removed.
 
 Only these alert families are escalated into Mentor review:
 
@@ -138,13 +137,25 @@ Only these alert families are escalated into Mentor review:
 - extremes: `RSI oversold/overbought`, `WaveTrend oversold/overbought`
 - structure/price: `VWAP inside BULLISH/BEARISH Order Block`
 
+#### Alert evaluation
+
+Alerts use transition-based detection: an alert fires only when a condition *changes* (e.g., RSI crosses into oversold), not when it persists across polling cycles. The `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe using a `ConcurrentHashMap`.
+
+#### Grouped reviews
+
+When multiple indicators fire simultaneously for the same instrument, timeframe, and direction (e.g., SMC + WAVETREND both signal LONG on MCL 10m), the backend batches them into a single combined Mentor review via `captureGroupReview`. Individual alerts are still published to WebSocket for the UI.
+
+#### UI grouping
+
+The `MentorSignalPanel` groups alerts by instrument + timeframe + direction within a 90-second time window. Groups show indicator category badges and a combined review count. An instrument filter dropdown allows filtering by specific instrument.
+
 Current behavior:
 
 - when a qualified alert is published, the backend captures a frozen Mentor payload snapshot immediately
 - that first review is created from the frozen snapshot and saved in PostgreSQL
 - the review thread is keyed by the exact alert occurrence (`timestamp + instrument + category + message`)
 - clicking an alert in the Mentor review panel reads the saved thread only; it does not trigger a fresh Gemini call
-- the button `Refaire l'analyse Mentor` creates a new saved review revision under the same alert thread using LIVE market data at click time
+- the button `Reanalyse` creates a new saved review revision under the same alert thread using LIVE market data at click time
 - a re-review payload mixes live indicators with `original_alert_context` so Gemini can judge whether the old setup is still valid now
 - raw alerts still flow through `/topic/alerts`
 - Mentor review updates still flow through `/topic/mentor-alerts`

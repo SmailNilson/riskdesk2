@@ -105,7 +105,7 @@ What changed:
 - the first Mentor review for that alert is saved in PostgreSQL and broadcast to the UI
 - each alert now owns a persisted review thread keyed by the exact alert occurrence
 - opening an alert in the panel reads the saved thread only; it does not recompute current market context
-- manual reanalysis is explicit through `Refaire l'analyse Mentor`, which appends a new saved revision to the same thread
+- manual reanalysis is explicit through `Reanalyse`, which appends a new saved revision to the same thread
 - `/api/mentor/auto-alerts/recent` exposes persisted recent reviews
 - `/api/mentor/auto-alerts/thread` returns the saved thread for one alert
 - `/api/mentor/auto-alerts/reanalyze` appends a new review revision using a fresh live payload plus `original_alert_context`
@@ -157,6 +157,31 @@ Operational note:
 
 - this uses the existing internal candle repository only
 - no external replay feed or provider is involved
+
+### 6. Transition-based alert evaluation and grouped reviews
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/alert/service/IndicatorAlertEvaluator.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/AlertService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/MentorSignalPanel.tsx`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/Dashboard.tsx`
+
+What changed:
+
+- `IndicatorAlertEvaluator` switched from state-based to transition-based detection: alerts only fire when a condition *changes*, not when it persists across polling cycles
+- uses a `ConcurrentHashMap<String, String>` to track last-known state per indicator/instrument/timeframe
+- `AlertService` now publishes individual alerts to WebSocket but batches Mentor reviews by direction for alerts that fire in the same polling cycle
+- `MentorSignalReviewService.captureGroupReview()` groups alerts by direction and creates one combined review per group
+- `MentorSignalPanel` groups alerts in the UI by instrument+timeframe+direction within a 90-second time window
+- added instrument filter dropdown to `MentorSignalPanel`
+- removed AI JSON export button and bottom `AlertsFeed` ticker from `Dashboard`
+
+Why:
+
+- persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
+- multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
 
 ## Known Runtime Behavior
 
@@ -212,3 +237,5 @@ lsof -nP -iTCP:4001
 - optionally add integration tests around source attribution for live price vs DB fallback
 - add more explicit tests around layer boundaries and use-case behavior
 - expose the simulation outcome in the UI once the product design is ready
+- add tests for transition-based alert evaluation edge cases
+- add tests for grouped review batching logic
