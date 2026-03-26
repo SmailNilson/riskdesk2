@@ -12,9 +12,13 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class MentorAnalysisService {
+
+    private static final long SIMILAR_AUDITS_TIMEOUT_MS = 2500L;
 
     private final MentorModelClient mentorModelClient;
     private final MentorMemoryService mentorMemoryService;
@@ -35,7 +39,7 @@ public class MentorAnalysisService {
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload) {
-        List<MentorSimilarAudit> similarAudits = mentorMemoryService.findSimilar(payload);
+        List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(payload);
         try {
             MentorModelClient.MentorModelResult raw = mentorModelClient.analyze(payload, similarAudits);
             MentorStructuredResponse structured = parseStructuredResponse(raw.rawText());
@@ -46,6 +50,17 @@ public class MentorAnalysisService {
                 persistFailure(payload, e);
             }
             throw e;
+        }
+    }
+
+    private List<MentorSimilarAudit> findSimilarAuditsBounded(JsonNode payload) {
+        try {
+            return CompletableFuture
+                .supplyAsync(() -> mentorMemoryService.findSimilar(payload))
+                .completeOnTimeout(List.of(), SIMILAR_AUDITS_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .join();
+        } catch (Exception ignored) {
+            return List.of();
         }
     }
 
@@ -80,7 +95,7 @@ public class MentorAnalysisService {
             audit.setSuccess(true);
             audit.setSemanticText(buildSemanticText(payload, structured));
             MentorAudit saved = mentorAuditRepository.save(audit);
-            mentorMemoryService.indexAudit(saved);
+            CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved));
             return saved.getId();
         } catch (Exception ignored) {
             return null;

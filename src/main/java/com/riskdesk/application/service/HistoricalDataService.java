@@ -18,6 +18,9 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -48,8 +51,15 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.backfill-days-1h:365}")
     private int backfillDays1h;
 
+    @Value("${riskdesk.market-data.historical.mentor-refresh-timeout-ms:2500}")
+    private long mentorRefreshTimeoutMs;
+
+    @Value("${riskdesk.market-data.historical.mentor-refresh-cooldown-ms:60000}")
+    private long mentorRefreshCooldownMs;
+
     /** Set to true once real candles have been successfully loaded. */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
+    private final Map<String, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
 
     public HistoricalDataService(HistoricalDataProvider historicalProvider,
                                  CandleRepositoryPort candlePort) {
@@ -85,7 +95,7 @@ public class HistoricalDataService implements ApplicationRunner {
                 continue;
             }
 
-            int saved = refreshSingleInstrumentTimeframe(instrument, timeframe, "mentor");
+            int saved = refreshSingleInstrumentTimeframeBounded(instrument, timeframe, "mentor");
             savedByTimeframe.put(timeframe, saved);
         }
         return savedByTimeframe;
@@ -146,6 +156,28 @@ public class HistoricalDataService implements ApplicationRunner {
             return candles.size();
         } catch (Exception e) {
             log.warn("HistoricalDataService [{}]: {} {} refresh failed — {}", context, instrument, timeframe, e.getMessage());
+            return 0;
+        }
+    }
+
+    private int refreshSingleInstrumentTimeframeBounded(Instrument instrument, String timeframe, String context) {
+        String refreshKey = instrument.name() + ":" + timeframe;
+        long now = System.currentTimeMillis();
+        Long lastRefreshAt = mentorRefreshTimestamps.get(refreshKey);
+        if (lastRefreshAt != null && now - lastRefreshAt < mentorRefreshCooldownMs) {
+            log.debug("HistoricalDataService [{}]: skipping {} {} refresh during cooldown window.", context, instrument, timeframe);
+            return 0;
+        }
+
+        mentorRefreshTimestamps.put(refreshKey, now);
+
+        try {
+            return CompletableFuture
+                .supplyAsync(() -> refreshSingleInstrumentTimeframe(instrument, timeframe, context))
+                .completeOnTimeout(0, mentorRefreshTimeoutMs, TimeUnit.MILLISECONDS)
+                .join();
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [{}]: {} {} bounded refresh failed — {}", context, instrument, timeframe, e.getMessage());
             return 0;
         }
     }
