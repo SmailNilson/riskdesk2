@@ -6,7 +6,6 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.application.service.IndicatorService;
-import com.riskdesk.application.service.WatchlistDashboardService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,12 +16,9 @@ import org.springframework.web.bind.annotation.*;
 public class IndicatorController {
 
     private final IndicatorService indicatorService;
-    private final WatchlistDashboardService watchlistDashboardService;
 
-    public IndicatorController(IndicatorService indicatorService,
-                               WatchlistDashboardService watchlistDashboardService) {
+    public IndicatorController(IndicatorService indicatorService) {
         this.indicatorService = indicatorService;
-        this.watchlistDashboardService = watchlistDashboardService;
     }
 
     /**
@@ -31,13 +27,9 @@ public class IndicatorController {
      */
     @GetMapping("/{instrument}/{timeframe}")
     public IndicatorSnapshot getIndicators(
-            @PathVariable String instrument,
+            @PathVariable Instrument instrument,
             @PathVariable String timeframe) {
-        try {
-            return indicatorService.computeSnapshot(Instrument.valueOf(instrument.toUpperCase()), timeframe);
-        } catch (IllegalArgumentException ignored) {
-            return watchlistDashboardService.computeSnapshot(instrument, timeframe);
-        }
+        return indicatorService.computeSnapshot(instrument, timeframe);
     }
 
     /**
@@ -46,13 +38,9 @@ public class IndicatorController {
      */
     @GetMapping("/{instrument}/{timeframe}/series")
     public IndicatorSeriesSnapshot getIndicatorSeries(
-            @PathVariable String instrument,
+            @PathVariable Instrument instrument,
             @PathVariable String timeframe,
             @RequestParam(defaultValue = "500") @Min(1) @Max(1000) int limit) {
-        try {
-            return indicatorService.computeSeries(Instrument.valueOf(instrument.toUpperCase()), timeframe, limit);
-        } catch (IllegalArgumentException ignored) {
-            return watchlistDashboardService.computeSeries(instrument, timeframe, limit);
-        }
+        return indicatorService.computeSeries(instrument, timeframe, limit);
     }
 }
