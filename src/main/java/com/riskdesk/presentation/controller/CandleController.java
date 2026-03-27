@@ -3,8 +3,6 @@ package com.riskdesk.presentation.controller;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.domain.model.WatchlistCandle;
-import com.riskdesk.application.service.WatchlistDashboardService;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.http.ResponseEntity;
@@ -29,12 +27,9 @@ import java.util.Map;
 public class CandleController {
 
     private final CandleRepositoryPort candlePort;
-    private final WatchlistDashboardService watchlistDashboardService;
 
-    public CandleController(CandleRepositoryPort candlePort,
-                            WatchlistDashboardService watchlistDashboardService) {
+    public CandleController(CandleRepositoryPort candlePort) {
         this.candlePort = candlePort;
-        this.watchlistDashboardService = watchlistDashboardService;
     }
 
     @GetMapping("/{instrument}/{timeframe}")
@@ -43,37 +38,28 @@ public class CandleController {
             @PathVariable String timeframe,
             @RequestParam(defaultValue = "300") @Min(1) @Max(1000) int limit) {
 
+        Instrument inst;
         try {
-            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
-            List<Candle> candles = candlePort.findRecentCandles(inst, timeframe, limit);
-            List<Candle> ordered = new java.util.ArrayList<>(candles);
-            Collections.reverse(ordered);
-            return ResponseEntity.ok(ordered.stream().map(this::toMap).toList());
-        } catch (IllegalArgumentException ignored) {
-            List<WatchlistCandle> candles = watchlistDashboardService.recentCandles(instrument, timeframe, limit);
-            return ResponseEntity.ok(candles.stream().map(this::toMap).toList());
+            inst = Instrument.valueOf(instrument.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
         }
-    }
 
-    private Map<String, Object> toMap(Candle candle) {
-        return Map.of(
-            "time", candle.getTimestamp().getEpochSecond(),
-            "open", candle.getOpen().doubleValue(),
-            "high", candle.getHigh().doubleValue(),
-            "low", candle.getLow().doubleValue(),
-            "close", candle.getClose().doubleValue(),
-            "volume", candle.getVolume()
-        );
-    }
+        // Fetch most recent `limit` candles (desc), then reverse to oldest→newest
+        List<Candle> candles = candlePort.findRecentCandles(inst, timeframe, limit);
 
-    private Map<String, Object> toMap(WatchlistCandle candle) {
-        return Map.of(
-            "time", candle.getTimestamp().getEpochSecond(),
-            "open", candle.getOpen().doubleValue(),
-            "high", candle.getHigh().doubleValue(),
-            "low", candle.getLow().doubleValue(),
-            "close", candle.getClose().doubleValue(),
-            "volume", candle.getVolume()
-        );
+        List<Candle> ordered = new java.util.ArrayList<>(candles);
+        Collections.reverse(ordered);
+
+        List<Map<String, Object>> result = ordered.stream().map(c -> Map.<String, Object>of(
+            "time",  c.getTimestamp().getEpochSecond(),
+            "open",  c.getOpen().doubleValue(),
+            "high",  c.getHigh().doubleValue(),
+            "low",   c.getLow().doubleValue(),
+            "close", c.getClose().doubleValue(),
+            "volume", c.getVolume()
+        )).toList();
+
+        return ResponseEntity.ok(result);
     }
 }

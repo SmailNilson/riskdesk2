@@ -79,23 +79,6 @@ export interface IbkrAuthStatus {
   message: string;
 }
 
-export interface IbkrWatchlistInstrumentView {
-  conid: number;
-  symbol: string | null;
-  localSymbol: string | null;
-  name: string | null;
-  assetClass: string | null;
-  instrumentCode: string | null;
-}
-
-export interface IbkrWatchlistView {
-  id: string;
-  name: string;
-  readOnly: boolean;
-  importedAt: string;
-  instruments: IbkrWatchlistInstrumentView[];
-}
-
 export interface OrderBlockView {
   type: 'BULLISH' | 'BEARISH';
   high: number;
@@ -452,16 +435,14 @@ export const api = {
     get<IbkrPortfolioSnapshot>(`/api/ibkr/portfolio${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
   getIbkrAuthStatus: () => get<IbkrAuthStatus>('/api/ibkr/connection/status'),
   refreshIbkrAuth: () => post<IbkrAuthStatus>('/api/ibkr/connection/refresh', {}),
-  getIbkrWatchlists: () => get<IbkrWatchlistView[]>('/api/ibkr/watchlists'),
-  importIbkrWatchlists: () => post<IbkrWatchlistView[]>('/api/ibkr/watchlists/import', {}),
   getIndicators: (instrument: string, timeframe: string) =>
-    get<IndicatorSnapshot>(`/api/indicators/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}`),
+    get<IndicatorSnapshot>(`/api/indicators/${instrument}/${timeframe}`),
   getIndicatorSeries: (instrument: string, timeframe: string, limit = 500) =>
-    get<IndicatorSeriesSnapshot>(`/api/indicators/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}/series?limit=${limit}`),
+    get<IndicatorSeriesSnapshot>(`/api/indicators/${instrument}/${timeframe}/series?limit=${limit}`),
   getCandles: (instrument: string, timeframe: string, limit = 300) =>
-    get<CandleBar[]>(`/api/candles/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}?limit=${limit}`),
+    get<CandleBar[]>(`/api/candles/${instrument}/${timeframe}?limit=${limit}`),
   getRecentAlerts: () => get<AlertPayload[]>('/api/alerts/recent'),
-  getLivePrice: (instrument: string) => get<LivePriceView>(`/api/live-price/${encodeURIComponent(instrument)}`),
+  getLivePrice: (instrument: string) => get<LivePriceView>(`/api/live-price/${instrument}`),
   openPosition: (req: CreatePositionRequest) => post<PositionView>('/api/positions', req),
   closePosition: (id: number, exitPrice: number) =>
     post<PositionView>(`/api/positions/${id}/close`, { exitPrice }),
