@@ -99,6 +99,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersApiRef  = useRef<any>(null);                        // createSeriesMarkers handle
   const livePriceRef = useRef<PriceUpdate | undefined>(livePrice);
+  const chartTokenRef = useRef(0);
 
   // ── Indicator visibility toggles ────────────────────────────────────────────
   const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
@@ -117,6 +118,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   }, [livePrice]);
 
   const reloadSeries = useCallback(async (fitContent = false) => {
+    const token = chartTokenRef.current;
     const candleSeries = candleRef.current;
     const ema9Series = ema9Ref.current;
     const ema50Series = ema50Ref.current;
@@ -142,6 +144,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         api.getCandles(instrument, timeframe, 500),
         api.getIndicatorSeries(instrument, timeframe, 500),
       ]);
+
+      if (token !== chartTokenRef.current) {
+        return;
+      }
 
       if (candles.length === 0) return;
 
@@ -179,7 +185,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         color: p.diff >= 0 ? '#22c55e60' : '#ef444460',
       })));
 
-      if (fitContent) {
+      if (fitContent && token === chartTokenRef.current) {
         priceChart.timeScale().fitContent();
         wtChart.timeScale().fitContent();
       }
@@ -209,6 +215,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // ── Mount / destroy charts ──────────────────────────────────────────────────
   useEffect(() => {
     if (!priceContainerRef.current || !wtContainerRef.current) return;
+    chartTokenRef.current += 1;
 
     // Theme palette for canvas rendering
     const C = dark
@@ -331,6 +338,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     observer.observe(priceContainerRef.current);
 
     return () => {
+      chartTokenRef.current += 1;
       observer.disconnect();
       priceChart.remove();
       wtChart.remove();
@@ -353,8 +361,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // ── Re-apply timezone formatter when timezone prop changes ─────────────────
   useEffect(() => {
     const fmt = { timeFormatter: makeTimeFormatter(timezone) };
-    chartRef.current?.applyOptions({ localization: fmt });
-    wtChartRef.current?.applyOptions({ localization: fmt });
+    try {
+      chartRef.current?.applyOptions({ localization: fmt });
+      wtChartRef.current?.applyOptions({ localization: fmt });
+    } catch {}
   }, [timezone]);
 
   // ── SMC overlays — re-render whenever snapshot or SMC visibility changes ─────
@@ -485,7 +495,9 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     const updated = mergeLivePrice(lastCandleRef.current, livePrice, timeframe);
     lastCandleRef.current = updated;
     setLastBarTime(updated.time);
-    candleRef.current.update(updated);
+    try {
+      candleRef.current.update(updated);
+    } catch {}
   }, [livePrice, timeframe, reloadSeries]);
 
   return (

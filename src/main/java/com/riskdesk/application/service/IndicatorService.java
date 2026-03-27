@@ -53,8 +53,12 @@ public class IndicatorService {
 
     public IndicatorSnapshot computeSnapshot(Instrument instrument, String timeframe) {
         List<Candle> candles = loadCandles(instrument, timeframe, SERIES_LIMIT);
+        return computeSnapshot(instrument.name(), timeframe, candles);
+    }
+
+    public IndicatorSnapshot computeSnapshot(String instrumentCode, String timeframe, List<Candle> candles) {
         if (candles.isEmpty()) {
-            return emptySnapshot(instrument, timeframe);
+            return emptySnapshot(instrumentCode, timeframe);
         }
 
         // EMAs
@@ -140,7 +144,7 @@ public class IndicatorService {
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
         return new IndicatorSnapshot(
-                instrument.name(), timeframe,
+                instrumentCode, timeframe,
                 last(ema9v), last(ema50v), last(ema200v), emaCross,
                 rsiValue, rsiSignal,
                 macdCurrent != null ? macdCurrent.macdLine()   : null,
@@ -184,9 +188,13 @@ public class IndicatorService {
 
     public IndicatorSeriesSnapshot computeSeries(Instrument instrument, String timeframe, int limit) {
         List<Candle> candles = loadCandles(instrument, timeframe, limit);
+        return computeSeries(instrument.name(), timeframe, candles);
+    }
+
+    public IndicatorSeriesSnapshot computeSeries(String instrumentCode, String timeframe, List<Candle> candles) {
         if (candles.isEmpty()) {
             return new IndicatorSeriesSnapshot(
-                    instrument.name(),
+                    instrumentCode,
                     timeframe,
                     Collections.emptyList(),
                     Collections.emptyList(),
@@ -204,7 +212,7 @@ public class IndicatorService {
         List<IndicatorSeriesSnapshot.WaveTrendPoint> waveTrendSeries = mapWaveTrendPoints(candles, WT_SIGNAL_PERIOD - 1, waveTrend.calculate(candles));
 
         return new IndicatorSeriesSnapshot(
-                instrument.name(),
+                instrumentCode,
                 timeframe,
                 ema9Series,
                 ema50Series,
@@ -296,9 +304,9 @@ public class IndicatorService {
                 .orElse(null);
     }
 
-    private IndicatorSnapshot emptySnapshot(Instrument instrument, String timeframe) {
+    private IndicatorSnapshot emptySnapshot(String instrumentCode, String timeframe) {
         return new IndicatorSnapshot(
-                instrument.name(), timeframe,
+                instrumentCode, timeframe,
                 null, null, null, null,
                 null, null,
                 null, null, null, null,

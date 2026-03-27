@@ -168,6 +168,21 @@ When extending Mentor behavior in the UI:
 - group alerts in the UI only when they arrive within a short time window (~90s) for the same instrument/timeframe/direction — do not merge alerts that are temporally distant
 - reconstruct virtual alerts from saved reviews so that historical reviews remain visible even after the WebSocket session ends
 
+When extending IBKR-connected dashboard metadata:
+
+- treat watchlists as user metadata, not as market data
+- import Client Portal watchlists into PostgreSQL, then serve them through backend endpoints
+- do not bind dashboard instrument selection directly to live Client Portal calls on every page load
+
+When extending dashboard compatibility to non-enum instruments:
+
+- keep the watchlist import as metadata only
+- source actual candles and live prices from IB Gateway, not Client Portal
+- persist dynamic symbol candles into PostgreSQL before serving chart/indicator responses
+- prefer a separate persistence path such as `watchlist_candles` over forcing arbitrary symbols into the legacy enum-backed `candles` table
+- keep fallback logic in `application` services, with IB Gateway calls and JPA details in `infrastructure`
+- when multiple watchlist rows share the same root symbol, resolve and cache them by exact contract selector (`conid` first, then exact `localSymbol` / `symbol`) rather than collapsing them into one root-code key
+
 ### Alert Evaluation Rule
 
 Alert evaluation must use transition-based detection, not state-based:
