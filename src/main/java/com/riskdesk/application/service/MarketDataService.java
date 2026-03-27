@@ -179,7 +179,7 @@ public class MarketDataService {
     public StoredPrice currentPrice(Instrument instrument) {
         StoredPrice cached = latestPrice(instrument);
         if (cached != null
-            && "CACHE".equals(cached.source())
+            && !"FALLBACK_DB".equals(cached.source())
             && cached.timestamp() != null
             && cached.timestamp().isAfter(Instant.now().minusSeconds(FRESH_CACHE_SECONDS))) {
             return cached;
@@ -193,6 +193,7 @@ public class MarketDataService {
                 Instant now = Instant.now();
                 lastPrice.put(instrument, instant);
                 lastTimestamp.put(instrument, now);
+                lastSource.put(instrument, "LIVE_PROVIDER");
                 return new StoredPrice(instant, now, "LIVE_PROVIDER");
             }
         } catch (Exception e) {
@@ -215,23 +216,28 @@ public class MarketDataService {
         long    periodMins    = TIMEFRAMES.get(timeframe);
         Instant periodStart   = truncateToPeriod(now, periodMins);
 
-        CandleAccumulator acc = accumulators.get(key);
-
-        if (acc == null) {
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
-            return;
-        }
-
-        if (acc.periodStart.isBefore(periodStart)) {
-            Candle closed = acc.build();
-            candlePort.save(closed);
-            log.debug("Saved candle {} {} {} O={} H={} L={} C={}",
-                instrument, timeframe, contractMonth,
-                closed.getOpen(), closed.getHigh(), closed.getLow(), closed.getClose());
-            eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
-        } else {
+        // Phase 1: atomically swap accumulator; capture closed period for side-effects.
+        // DB save and event publish happen in Phase 2, outside the map lock.
+        CandleAccumulator[] closed = {null};
+        accumulators.compute(key, (k, acc) -> {
+            if (acc == null) {
+                return new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price);
+            }
+            if (acc.periodStart.isBefore(periodStart)) {
+                closed[0] = acc;
+                return new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price);
+            }
             acc.update(price);
+            return acc;
+        });
+
+        // Phase 2: persist and publish outside the map lock.
+        if (closed[0] != null) {
+            Candle candle = closed[0].build();
+            candlePort.save(candle);
+            log.debug("Saved candle {} {} {} O={} H={} L={} C={}",
+                instrument, timeframe, contractMonth, candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose());
+            eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
         }
     }
 

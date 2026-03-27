@@ -11,6 +11,7 @@ import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -46,6 +47,7 @@ public class WaveTrendSignalScanner {
         this.contractRegistry = contractRegistry;
     }
 
+    @Async
     @EventListener
     public void onCandleClosed(CandleClosed event) {
         // Only scan MNQ on 1h timeframe
