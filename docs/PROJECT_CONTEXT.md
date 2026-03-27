@@ -124,7 +124,38 @@ These are adapters, not business-rule owners.
 - display live and fallback market data
 - show mentor payload and result
 - expose positions, indicators, alerts, and IBKR portfolio state
+- expose imported IBKR Client Portal watchlists persisted in PostgreSQL for dashboard instrument selection
+- let the dashboard open non-core watchlist instruments through a dynamic fallback path backed by IB Gateway + PostgreSQL
 - auto-route selected trading alerts into a dedicated Mentor review panel
+
+### Dynamic watchlist instrument path
+
+The dashboard is no longer limited to the legacy hardcoded futures list for chart selection.
+
+Current behavior:
+
+- watchlists are still imported once from IBKR Client Portal and stored in PostgreSQL
+- if the selected symbol matches the legacy `Instrument` enum, the existing market-data path is used
+- if the selected symbol does not match the legacy enum, the backend falls back to a dynamic watchlist path:
+  - resolve the watchlist instrument from PostgreSQL metadata
+  - resolve exact contracts using a stable selector, preferring imported `conid` and falling back to exact `localSymbol` / `symbol`
+  - fetch candles and snapshot price from IB Gateway for that exact contract
+  - persist candles into `watchlist_candles`
+  - serve chart candles and indicator snapshots from that PostgreSQL-backed cache
+
+Current scope:
+
+- chart candles
+- indicator snapshot
+- indicator series
+- REST live price fallback used by the frontend ticker for dynamic symbols
+- exact contract selection from the watchlist panel, including multiple expiries for the same root symbol
+
+Still legacy-only for now:
+
+- mentor flow
+- backtest
+- manual position entry
 
 ### Mentor Alert Workflow
 

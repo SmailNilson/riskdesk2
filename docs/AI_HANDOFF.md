@@ -183,6 +183,61 @@ Why:
 - persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
 - multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
 
+### 7. IBKR Client Portal watchlist import persisted in PostgreSQL
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/IbkrWatchlistService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/ClientPortalIbkrWatchlistSource.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/IbkrPortfolioController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/Dashboard.tsx`
+
+What changed:
+
+- RiskDesk can now import user watchlists from IBKR Client Portal on demand
+- imported watchlists are stored in PostgreSQL and exposed through `/api/ibkr/watchlists`
+- import is triggered through `POST /api/ibkr/watchlists/import`
+- the dashboard can use imported watchlists to populate the instrument selector with a local fallback to `MCL/MGC/E6/MNQ`
+
+Why:
+
+- the header instrument list should no longer depend only on hardcoded values
+- watchlist metadata is allowed to come from Client Portal as a one-shot import, while market data remains on the native `IBKR Gateway -> PostgreSQL -> internal services` path
+
+### 8. Dynamic dashboard fallback for non-enum watchlist instruments
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/WatchlistDashboardService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayWatchlistMarketDataAdapter.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/CandleController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/IndicatorController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/LivePriceController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/Dashboard.tsx`
+
+What changed:
+
+- the dashboard instrument selector is now driven by imported watchlist instruments, not a fixed frontend list
+- non-enum symbols can now hit the existing dashboard endpoints:
+  - `/api/candles/{instrument}/{timeframe}`
+  - `/api/indicators/{instrument}/{timeframe}`
+  - `/api/indicators/{instrument}/{timeframe}/series`
+  - `/api/live-price/{instrument}`
+- a new PostgreSQL-backed cache table `watchlist_candles` stores candles for dynamic symbols
+- the backend resolves watchlist instruments from imported metadata and fetches candles/live snapshot from IB Gateway using `conid`
+- frontend ticker now polls REST live prices for symbols that are not fed by the core WebSocket stream
+- exact contract selection now uses a stable selector:
+  - `conid:<id>` when IBKR provides a contract id
+  - `local:<LOCAL_SYMBOL>` as fallback for rows without conid
+  - `symbol:<SYMBOL>` / `code:<CODE>` only as weaker fallbacks
+- this prevents different expiries of the same root symbol from collapsing onto one dashboard selection
+
+Important scope boundary:
+
+- this makes the dashboard chart and indicator panels work for arbitrary imported watchlist symbols
+- for duplicate root symbols such as multiple `MGC` expiries, the watchlist panel now targets the exact contract rather than the root code
+- it does **not** yet migrate mentor, backtest, or manual position entry away from the legacy `Instrument` enum
+
 ## Known Runtime Behavior
 
 ### Current good news

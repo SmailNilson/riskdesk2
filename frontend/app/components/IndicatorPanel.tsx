@@ -38,7 +38,7 @@ function signalColor(signal: string | null): 'green' | 'red' | 'amber' | 'gray' 
 export default function IndicatorPanel({ snapshot: s }: Props) {
   if (!s) return (
     <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 text-zinc-500 text-sm">
-      Loading indicators…
+      Indicators unavailable for this instrument or still loading…
     </div>
   );
 
