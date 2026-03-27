@@ -31,6 +31,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @Service
@@ -42,6 +44,8 @@ public class IbGatewayNativeClient {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration SNAPSHOT_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration RECONNECT_COOLDOWN = Duration.ofSeconds(5);
+    /** Subscriptions that produce no price tick for this long are considered stale. */
+    private static final long STALE_PRICE_SECONDS = 60L;
     private static final DateTimeFormatter IB_END_DATE_TIME =
         DateTimeFormatter.ofPattern("yyyyMMdd-HH:mm:ss").withZone(ZoneOffset.UTC);
     private static final AccountSummaryTag[] ACCOUNT_SUMMARY_TAGS = {
@@ -52,6 +56,16 @@ public class IbGatewayNativeClient {
         AccountSummaryTag.GrossPositionValue,
         AccountSummaryTag.TotalCashValue
     };
+
+    /**
+     * Single-threaded executor used to cancel IBKR subscriptions and disconnect the controller
+     * OUTSIDE the connectionLock, preventing long I/O holds under the lock.
+     */
+    private static final ExecutorService CLEANUP_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ibkr-cleanup");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final IbkrProperties properties;
     private final Object connectionLock = new Object();
@@ -68,6 +82,10 @@ public class IbGatewayNativeClient {
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
     }
+
+    // -------------------------------------------------------------------------
+    // Connection management
+    // -------------------------------------------------------------------------
 
     public boolean ensureConnected() {
         CompletableFuture<Void> localConnectedFuture;
@@ -97,22 +115,28 @@ public class IbGatewayNativeClient {
             return isConnected() && !managedAccounts.isEmpty();
         } catch (Exception e) {
             log.warn("IB Gateway native connect failed: {}", e.getMessage());
+            DisconnectContext ctx = null;
             synchronized (connectionLock) {
                 if (connectedFuture == localConnectedFuture) {
                     markReconnectCooldownLocked(e.getMessage());
-                    disconnectLocked();
+                    ctx = clearStateLocked();
                 }
+            }
+            if (ctx != null) {
+                submitCleanup(ctx, false);
             }
             return false;
         }
     }
 
     public void disconnect() {
+        DisconnectContext ctx;
         synchronized (connectionLock) {
-            disconnectLocked();
+            ctx = clearStateLocked();
             reconnectBlockedUntil = Instant.EPOCH;
             lastConnectionFailure = "manual disconnect";
         }
+        submitCleanup(ctx, true);
     }
 
     public boolean isConnected() {
@@ -126,6 +150,10 @@ public class IbGatewayNativeClient {
         }
         return managedAccounts;
     }
+
+    // -------------------------------------------------------------------------
+    // Account & position data
+    // -------------------------------------------------------------------------
 
     public Optional<IbGatewayAccountSnapshot> requestAccountSnapshot(String requestedAccountId) {
         if (!ensureConnected()) {
@@ -203,6 +231,10 @@ public class IbGatewayNativeClient {
             .orElseGet(List::of);
     }
 
+    // -------------------------------------------------------------------------
+    // Contract details
+    // -------------------------------------------------------------------------
+
     public List<ContractDetails> requestContractDetails(Contract contract) {
         if (!ensureConnected()) {
             return List.of();
@@ -220,6 +252,10 @@ public class IbGatewayNativeClient {
         return List.copyOf(result);
     }
 
+    // -------------------------------------------------------------------------
+    // Market data: snapshot
+    // -------------------------------------------------------------------------
+
     public Optional<BigDecimal> requestSnapshotPrice(Contract contract) {
         if (!ensureConnected()) {
             return Optional.empty();
@@ -235,6 +271,15 @@ public class IbGatewayNativeClient {
         return collector.bestPrice();
     }
 
+    // -------------------------------------------------------------------------
+    // Market data: streaming subscriptions
+    // -------------------------------------------------------------------------
+
+    /**
+     * Ensures a live streaming subscription exists for the given contract.
+     * If an existing subscription has gone stale (no price tick for {@value STALE_PRICE_SECONDS}s),
+     * the old handler is cancelled and a fresh subscription is created.
+     */
     public void ensureStreamingPriceSubscription(Contract contract) {
         if (contract == null || !ensureConnected()) {
             return;
@@ -245,6 +290,16 @@ public class IbGatewayNativeClient {
             StreamingPriceSubscription existing = streamingSubscriptions.get(key);
             if (existing != null && existing.isActive()) {
                 return;
+            }
+
+            // Cancel stale/dead subscription before creating a fresh one.
+            if (existing != null) {
+                ApiController ctrl = controller;
+                if (ctrl != null) {
+                    try { ctrl.cancelTopMktData(existing); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(existing); } catch (Exception ignored) {}
+                }
+                log.warn("IB Gateway detected stale stream for {} — re-subscribing", describeContract(contract));
             }
 
             StreamingPriceSubscription subscription = new StreamingPriceSubscription(contract);
@@ -262,6 +317,10 @@ public class IbGatewayNativeClient {
         StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
         return subscription == null ? Optional.empty() : subscription.bestPrice();
     }
+
+    // -------------------------------------------------------------------------
+    // Historical data
+    // -------------------------------------------------------------------------
 
     public List<Bar> requestHistoricalBars(Contract contract,
                                            int duration,
@@ -314,6 +373,10 @@ public class IbGatewayNativeClient {
         return List.copyOf(bars);
     }
 
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
     private String resolveAccountId(String requestedAccountId) {
         if (requestedAccountId != null && !requestedAccountId.isBlank() && managedAccounts.contains(requestedAccountId)) {
             return requestedAccountId;
@@ -330,27 +393,38 @@ public class IbGatewayNativeClient {
         controller.connect(properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId(), "");
     }
 
-    private void disconnectLocked() {
-        ApiController current = controller;
+    /**
+     * Nulls out connection state atomically while holding {@code connectionLock}.
+     * Returns a snapshot of what was cleared so the caller can clean up OUTSIDE the lock.
+     */
+    private DisconnectContext clearStateLocked() {
+        ApiController prev = controller;
+        List<StreamingPriceSubscription> subs = List.copyOf(streamingSubscriptions.values());
         controller = null;
         managedAccounts = List.of();
-        if (current != null) {
-            streamingSubscriptions.values().forEach(subscription -> {
-                try {
-                    current.cancelTopMktData(subscription);
-                } catch (Exception ignored) {
-                }
-                try {
-                    current.cancelRealtimeBars(subscription);
-                } catch (Exception ignored) {
-                }
-            });
-            try {
-                current.disconnect();
-            } catch (Exception ignored) {
-            }
-        }
         streamingSubscriptions.clear();
+        return new DisconnectContext(prev, subs);
+    }
+
+    /**
+     * Submits cancellation of streaming subscriptions and controller disconnect
+     * to the single-threaded cleanup executor, keeping that I/O off the connectionLock.
+     *
+     * @param ctx              resources to clean up
+     * @param cancelSubs       true for a clean shutdown (active session), false when IBKR
+     *                         already dropped the connection (callbacks are meaningless)
+     */
+    private void submitCleanup(DisconnectContext ctx, boolean cancelSubs) {
+        CLEANUP_EXECUTOR.submit(() -> {
+            if (ctx.controller() == null) return;
+            if (cancelSubs) {
+                for (StreamingPriceSubscription sub : ctx.subscriptions()) {
+                    try { ctx.controller().cancelTopMktData(sub); } catch (Exception ignored) {}
+                    try { ctx.controller().cancelRealtimeBars(sub); } catch (Exception ignored) {}
+                }
+            }
+            try { ctx.controller().disconnect(); } catch (Exception ignored) {}
+        });
     }
 
     private void markReconnectCooldownLocked(String reason) {
@@ -408,6 +482,16 @@ public class IbGatewayNativeClient {
         return value == null ? "" : value;
     }
 
+    // -------------------------------------------------------------------------
+    // Internal record: cleanup context
+    // -------------------------------------------------------------------------
+
+    private record DisconnectContext(ApiController controller, List<StreamingPriceSubscription> subscriptions) {}
+
+    // -------------------------------------------------------------------------
+    // IBKR connection callback handler
+    // -------------------------------------------------------------------------
+
     private final class ConnectionHandler implements ApiController.IConnectionHandler {
         @Override
         public void connected() {
@@ -426,6 +510,7 @@ public class IbGatewayNativeClient {
         @Override
         public void disconnected() {
             log.warn("IB Gateway native API disconnected.");
+            DisconnectContext ctx;
             synchronized (connectionLock) {
                 managedAccounts = List.of();
                 markReconnectCooldownLocked("IB Gateway disconnected");
@@ -435,8 +520,10 @@ public class IbGatewayNativeClient {
                 if (!accountsFuture.isDone()) {
                     accountsFuture.completeExceptionally(new IllegalStateException("IB Gateway disconnected"));
                 }
-                controller = null;
+                ctx = clearStateLocked();
             }
+            // IBKR session is gone — no point cancelling subscriptions, just disconnect cleanly.
+            submitCleanup(ctx, false);
         }
 
         @Override
@@ -463,13 +550,16 @@ public class IbGatewayNativeClient {
                 return;
             }
             if (errorCode == 326 || errorCode == 502 || errorCode == 504) {
+                DisconnectContext ctx;
                 synchronized (connectionLock) {
                     if (!connectedFuture.isDone()) {
                         connectedFuture.completeExceptionally(new IllegalStateException(errorMsg));
                     }
                     markReconnectCooldownLocked(errorMsg);
-                    disconnectLocked();
+                    ctx = clearStateLocked();
                 }
+                // Connection never completed — nothing active to cancel.
+                submitCleanup(ctx, false);
             }
             log.warn("IB Gateway message id={} code={} msg={}", id, errorCode, errorMsg);
         }
@@ -479,6 +569,10 @@ public class IbGatewayNativeClient {
             log.debug("IB Gateway show: {}", string);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Snapshot price collector (one-shot)
+    // -------------------------------------------------------------------------
 
     private static final class PriceCollector extends ApiController.TopMktDataAdapter {
         private final CountDownLatch latch;
@@ -520,6 +614,10 @@ public class IbGatewayNativeClient {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Live streaming subscription handler
+    // -------------------------------------------------------------------------
+
     private final class StreamingPriceSubscription implements ApiController.ITopMktDataHandler, ApiController.IRealTimeBarHandler {
         private final Contract contract;
         private volatile Double bestPrice;
@@ -527,6 +625,12 @@ public class IbGatewayNativeClient {
         private volatile Double ask;
         private volatile boolean active = true;
         private volatile boolean loggedFirstPrice = false;
+        /**
+         * Timestamp of the most recent price tick received from IBKR.
+         * Null means the subscription is new and has not yet received any data.
+         * Used by {@link #isActive()} to detect zombie subscriptions.
+         */
+        private volatile Instant lastPriceAt = null;
 
         private StreamingPriceSubscription(Contract contract) {
             this.contract = contract;
@@ -553,6 +657,7 @@ public class IbGatewayNativeClient {
             }
 
             if (bestPrice != null) {
+                lastPriceAt = Instant.now();
                 logFirstPrice("tickPrice");
             }
         }
@@ -594,6 +699,7 @@ public class IbGatewayNativeClient {
                 return;
             }
             bestPrice = bar.close();
+            lastPriceAt = Instant.now();
             logFirstPrice("realtimeBar");
         }
 
@@ -601,8 +707,21 @@ public class IbGatewayNativeClient {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
         }
 
+        /**
+         * Returns true if this subscription is considered alive.
+         * A subscription is stale — and should be replaced — if it has previously received
+         * at least one price tick but then went silent for more than {@value STALE_PRICE_SECONDS}
+         * seconds. New subscriptions (lastPriceAt == null) are given an unlimited grace period
+         * until the first tick arrives.
+         */
         private boolean isActive() {
-            return active;
+            if (!active) return false;
+            Instant last = lastPriceAt;
+            if (last == null) {
+                // Not yet received any data; still warming up.
+                return true;
+            }
+            return last.isAfter(Instant.now().minusSeconds(STALE_PRICE_SECONDS));
         }
 
         private void logFirstPrice(String source) {
