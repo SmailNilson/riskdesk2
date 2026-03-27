@@ -423,7 +423,82 @@ export default function MentorSignalPanel({
                     status={preferredSelectedGroupReview?.status ?? 'MISSING'}
                     verdict={preferredSelectedGroupReview?.analysis?.analysis?.verdict}
                   />
+                  {selectedGroup.alerts.length > 0 ? (
+                    <span className="ml-auto flex flex-wrap justify-end gap-2">
+                      {selectedGroup.alerts
+                        .filter((alert, idx, arr) => arr.findIndex(a => a.category === alert.category) === idx)
+                        .map(alert => {
+                          const alertKey = buildMentorAlertKey(alert);
+                          const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
+                          const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
+                          return (
+                            <button
+                              key={alert.category}
+                              onClick={() => openReanalysisDraft(alert)}
+                              disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
+                              className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                            >
+                              {reanalysisDraft?.alertKey === alertKey ? 'Fermer reanalyse' : `Reanalyse ${alert.category}`}
+                            </button>
+                          );
+                        })}
+                    </span>
+                  ) : null}
                 </div>
+
+                {reanalysisDraft ? (
+                  <div className="mb-3 rounded border border-cyan-900/40 bg-cyan-950/10 p-3">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">
+                          Reanalyse {reanalysisDraft.category}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">
+                          Si un plan precedent existe, `Optimal Entry`, `SL` et `TP` sont pre-remplis et modifiables.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 md:grid-cols-3">
+                      <EditablePlanField
+                        label="Optimal Entry"
+                        value={reanalysisDraft.entryPrice}
+                        onChange={value => setReanalysisDraft(current => current ? { ...current, entryPrice: value } : current)}
+                      />
+                      <EditablePlanField
+                        label="SL"
+                        value={reanalysisDraft.stopLoss}
+                        onChange={value => setReanalysisDraft(current => current ? { ...current, stopLoss: value } : current)}
+                      />
+                      <EditablePlanField
+                        label="TP"
+                        value={reanalysisDraft.takeProfit}
+                        onChange={value => setReanalysisDraft(current => current ? { ...current, takeProfit: value } : current)}
+                      />
+                    </div>
+
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        onClick={() => setReanalysisDraft(null)}
+                        className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-semibold text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
+                      >
+                        Annuler
+                      </button>
+                      <button
+                        onClick={() => {
+                          const alert = selectedGroup.alerts.find(candidate => buildMentorAlertKey(candidate) === reanalysisDraft.alertKey);
+                          if (alert) {
+                            void submitReanalysis(alert);
+                          }
+                        }}
+                        disabled={reanalyzingAlertKey === reanalysisDraft.alertKey}
+                        className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                      >
+                        {reanalyzingAlertKey === reanalysisDraft.alertKey ? 'Relance...' : 'Lancer reanalyse'}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
 
                 {error ? (
                   <div className="mb-3 rounded border border-red-900/40 bg-red-950/30 px-3 py-2 text-[11px] text-red-300">
@@ -507,83 +582,6 @@ export default function MentorSignalPanel({
                   </div>
                 )}
 
-                {selectedGroup.alerts.length > 0 ? (
-                  <>
-                    <div className="mt-3 flex flex-wrap justify-end gap-2">
-                      {selectedGroup.alerts
-                        .filter((alert, idx, arr) => arr.findIndex(a => a.category === alert.category) === idx)
-                        .map(alert => {
-                          const alertKey = buildMentorAlertKey(alert);
-                          const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-                          const canReanalyze = thread.length > 0 && thread[thread.length - 1]?.status !== 'ANALYZING';
-                          return (
-                            <button
-                              key={alert.category}
-                              onClick={() => openReanalysisDraft(alert)}
-                              disabled={!canReanalyze || reanalyzingAlertKey === alertKey}
-                              className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
-                            >
-                              {reanalysisDraft?.alertKey === alertKey ? 'Fermer reanalyse' : `Reanalyse ${alert.category}`}
-                            </button>
-                          );
-                        })}
-                    </div>
-
-                    {reanalysisDraft ? (
-                      <div className="mt-3 rounded border border-cyan-900/40 bg-cyan-950/10 p-3">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <div className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">
-                              Reanalyse {reanalysisDraft.category}
-                            </div>
-                            <div className="text-[10px] text-zinc-500">
-                              Si un plan precedent existe, `Optimal Entry`, `SL` et `TP` sont pre-remplis et modifiables.
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="grid gap-2 md:grid-cols-3">
-                          <EditablePlanField
-                            label="Optimal Entry"
-                            value={reanalysisDraft.entryPrice}
-                            onChange={value => setReanalysisDraft(current => current ? { ...current, entryPrice: value } : current)}
-                          />
-                          <EditablePlanField
-                            label="SL"
-                            value={reanalysisDraft.stopLoss}
-                            onChange={value => setReanalysisDraft(current => current ? { ...current, stopLoss: value } : current)}
-                          />
-                          <EditablePlanField
-                            label="TP"
-                            value={reanalysisDraft.takeProfit}
-                            onChange={value => setReanalysisDraft(current => current ? { ...current, takeProfit: value } : current)}
-                          />
-                        </div>
-
-                        <div className="mt-3 flex justify-end gap-2">
-                          <button
-                            onClick={() => setReanalysisDraft(null)}
-                            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] font-semibold text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
-                          >
-                            Annuler
-                          </button>
-                          <button
-                            onClick={() => {
-                              const alert = selectedGroup.alerts.find(candidate => buildMentorAlertKey(candidate) === reanalysisDraft.alertKey);
-                              if (alert) {
-                                void submitReanalysis(alert);
-                              }
-                            }}
-                            disabled={reanalyzingAlertKey === reanalysisDraft.alertKey}
-                            className="rounded border border-cyan-800 bg-cyan-950/60 px-2 py-1.5 text-[10px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/70 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
-                          >
-                            {reanalyzingAlertKey === reanalysisDraft.alertKey ? 'Relance...' : 'Lancer reanalyse'}
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </>
-                ) : null}
               </>
             )}
           </div>

@@ -25,6 +25,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -150,7 +151,11 @@ class MentorControllerIntegrationTest {
                     ),
                     "{\"verdict\":\"Trade Validé - Discipline Respectée\"}",
                     List.of()
-                )
+                ),
+                null,
+                null,
+                null,
+                null
             )
         ));
 
@@ -163,7 +168,7 @@ class MentorControllerIntegrationTest {
 
     @Test
     void recentAutoAlerts_returnsSavedReviews() throws Exception {
-        when(mentorSignalReviewService.getRecentReviews()).thenReturn(List.of(
+        when(mentorSignalReviewService.getRecentReviews(anyInt())).thenReturn(List.of(
             new MentorSignalReview(
                 5L,
                 "2026-03-26T02:30:39Z:MNQ:SMC:Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
@@ -259,7 +264,7 @@ class MentorControllerIntegrationTest {
 
     @Test
     void reanalyzeExistingAlert_returnsPendingReview() throws Exception {
-        when(mentorSignalReviewService.reanalyzeAlert(any())).thenReturn(
+        when(mentorSignalReviewService.reanalyzeAlert(any(), any(), any(), any())).thenReturn(
             new MentorSignalReview(
                 13L,
                 "2026-03-26T02:30:39Z:MNQ:SMC:Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",

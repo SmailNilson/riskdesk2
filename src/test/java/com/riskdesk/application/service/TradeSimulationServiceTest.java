@@ -5,6 +5,7 @@ import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -31,13 +34,29 @@ class TradeSimulationServiceTest {
     @Mock
     private CandleRepositoryPort candleRepositoryPort;
 
+    @Mock
+    private MentorAuditRepositoryPort auditRepository;
+
+    @Mock
+    private ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
+
+    @Mock
+    private ObjectProvider<SimpMessagingTemplate> messagingProvider;
+
     private TradeSimulationService service;
     private ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        service = new TradeSimulationService(reviewRepository, candleRepositoryPort, objectMapper);
+        service = new TradeSimulationService(
+            reviewRepository,
+            auditRepository,
+            candleRepositoryPort,
+            objectMapper,
+            reviewServiceProvider,
+            messagingProvider
+        );
     }
 
     @Test
