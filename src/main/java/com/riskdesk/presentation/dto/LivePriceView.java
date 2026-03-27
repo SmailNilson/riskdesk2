@@ -7,6 +7,10 @@ public record LivePriceView(
     String instrument,
     BigDecimal price,
     Instant timestamp,
-    String source
+    String source,
+    String asset,
+    String contractMonth,
+    String contractSymbol,
+    String selectionReason
 ) {
 }

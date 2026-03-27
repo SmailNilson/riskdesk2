@@ -248,6 +248,10 @@ export interface LivePriceView {
   price: number;
   timestamp: string;
   source: string;
+  asset: string;
+  contractMonth: string | null;
+  contractSymbol: string | null;
+  selectionReason: string | null;
 }
 
 export interface BacktestTrade {
@@ -374,6 +378,9 @@ export interface MentorManualReview {
   sourceType: 'MANUAL_MENTOR';
   createdAt: string;
   instrument: string | null;
+  asset: string | null;
+  contractMonth: string | null;
+  contractSymbol: string | null;
   timeframe: string | null;
   action: string | null;
   model: string | null;
@@ -393,6 +400,9 @@ export interface MentorSignalReview {
   category: string;
   message: string;
   instrument: string;
+  asset: string | null;
+  contractMonth: string | null;
+  contractSymbol: string | null;
   timeframe: string;
   action: 'LONG' | 'SHORT';
   timestamp: string;

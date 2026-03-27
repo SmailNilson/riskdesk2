@@ -7,7 +7,6 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorSignalReview;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.model.Candle;
@@ -45,8 +44,9 @@ public class MentorSignalReviewService {
     private final MentorAnalysisService mentorAnalysisService;
     private final IndicatorService indicatorService;
     private final MentorIntermarketService mentorIntermarketService;
+    private final ActiveContractService activeContractService;
+    private final ActiveContractCandleService activeContractCandleService;
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
-    private final CandleRepositoryPort candleRepositoryPort;
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
@@ -60,16 +60,18 @@ public class MentorSignalReviewService {
     public MentorSignalReviewService(MentorAnalysisService mentorAnalysisService,
                                      IndicatorService indicatorService,
                                      MentorIntermarketService mentorIntermarketService,
+                                     ActiveContractService activeContractService,
+                                     ActiveContractCandleService activeContractCandleService,
                                      ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                     CandleRepositoryPort candleRepositoryPort,
                                      MentorSignalReviewRepositoryPort reviewRepository,
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
         this.mentorIntermarketService = mentorIntermarketService;
+        this.activeContractService = activeContractService;
+        this.activeContractCandleService = activeContractCandleService;
         this.marketDataServiceProvider = marketDataServiceProvider;
-        this.candleRepositoryPort = candleRepositoryPort;
         this.reviewRepository = reviewRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
@@ -319,6 +321,8 @@ public class MentorSignalReviewService {
                 // best effort only
             }
         }
+        JsonNode snapshot = parseSnapshot(review.getSnapshotJson());
+        ContractMetadata contractMetadata = extractContractMetadata(snapshot);
 
         return new MentorSignalReview(
             review.getId(),
@@ -330,6 +334,9 @@ public class MentorSignalReviewService {
             review.getCategory(),
             review.getMessage(),
             review.getInstrument(),
+            contractMetadata.asset(),
+            contractMetadata.contractMonth(),
+            contractMetadata.contractSymbol(),
             review.getTimeframe(),
             review.getAction(),
             review.getAlertTimestamp() == null ? null : review.getAlertTimestamp().toString(),
@@ -341,6 +348,23 @@ public class MentorSignalReviewService {
             analysis,
             review.getErrorMessage()
         );
+    }
+
+    private ContractMetadata extractContractMetadata(JsonNode payload) {
+        if (payload == null) {
+            return new ContractMetadata(null, null, null);
+        }
+        JsonNode metadata = payload.path("metadata");
+        return new ContractMetadata(
+            textOrNull(metadata, "asset"),
+            textOrNull(metadata, "active_contract_month"),
+            textOrNull(metadata, "active_contract_symbol")
+        );
+    }
+
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText(null);
     }
 
     private void initializeSimulationState(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
@@ -400,11 +424,17 @@ public class MentorSignalReviewService {
         Map<String, Object> originalAlertContext = manualReanalysis
             ? buildOriginalAlertContext(alert, originalReview)
             : null;
+        ActiveContractService.ActiveContractDescriptor activeContract = activeContractService.describe(candidate.instrument());
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("metadata", linkedMap(
             "timestamp", contextTimestamp.toString(),
-            "asset", assetAlias(candidate.instrument()),
+            "asset", activeContract.asset(),
+            "root_instrument", activeContract.rootInstrument(),
+            "active_contract_month", activeContract.contractMonth(),
+            "active_contract_symbol", activeContract.contractSymbol(),
+            "active_contract_local_symbol", activeContract.localSymbol(),
+            "active_contract_reason", activeContract.selectionReason(),
             "current_price", roundNullable(currentPrice, candidate.instrument()),
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
@@ -491,7 +521,7 @@ public class MentorSignalReviewService {
     }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
-        List<Candle> candles = new ArrayList<>(candleRepositoryPort.findRecentCandles(instrument, timeframe, limit));
+        List<Candle> candles = new ArrayList<>(activeContractCandleService.findRecentCandles(instrument, timeframe, limit));
         candles.sort(Comparator.comparing(Candle::getTimestamp));
         return candles;
     }
@@ -784,16 +814,6 @@ public class MentorSignalReviewService {
         return round(rounded, instrument);
     }
 
-    private String assetAlias(Instrument instrument) {
-        return switch (instrument) {
-            case MCL -> "CL1!";
-            case MGC -> "MGC1!";
-            case E6 -> "6E1!";
-            case MNQ -> "MNQ1!";
-            case DXY -> "DX1!";
-        };
-    }
-
     private String toMentorTimeframe(String timeframe) {
         return switch (timeframe) {
             case "5m" -> "M5";
@@ -927,6 +947,9 @@ public class MentorSignalReviewService {
     }
 
     private record AlertReviewCandidate(Instrument instrument, String timeframe, String action) {
+    }
+
+    private record ContractMetadata(String asset, String contractMonth, String contractSymbol) {
     }
 
     private record TradePlanValues(BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {

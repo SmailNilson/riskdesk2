@@ -423,6 +423,16 @@ export default function MentorSignalPanel({
                     status={preferredSelectedGroupReview?.status ?? 'MISSING'}
                     verdict={preferredSelectedGroupReview?.analysis?.analysis?.verdict}
                   />
+                  {preferredSelectedGroupReview?.asset ? (
+                    <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
+                      {preferredSelectedGroupReview.asset}
+                    </span>
+                  ) : null}
+                  {preferredSelectedGroupReview?.contractSymbol ? (
+                    <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] font-mono text-cyan-300">
+                      {preferredSelectedGroupReview.contractSymbol}
+                    </span>
+                  ) : null}
                   {selectedGroup.alerts.length > 0 ? (
                     <span className="ml-auto flex flex-wrap justify-end gap-2">
                       {selectedGroup.alerts
@@ -522,6 +532,16 @@ export default function MentorSignalPanel({
                           <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
                             {review.category}
                           </span>
+                          {review.asset ? (
+                            <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
+                              {review.asset}
+                            </span>
+                          ) : null}
+                          {review.contractSymbol ? (
+                            <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] font-mono text-cyan-300">
+                              {review.contractSymbol}
+                            </span>
+                          ) : null}
                           <span className={`rounded px-2 py-1 text-[10px] ${review.triggerType === 'INITIAL' ? 'bg-cyan-950/60 text-cyan-300' : 'bg-amber-950/60 text-amber-300'}`}>
                             {review.triggerType === 'INITIAL' ? 'Initial' : 'Reanalysis'}
                           </span>

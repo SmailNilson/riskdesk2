@@ -38,6 +38,9 @@ public class CandleEntity {
     @Column(nullable = false)
     private String timeframe;
 
+    @Column(length = 6)
+    private String contractMonth;
+
     @Column(nullable = false)
     private Instant timestamp;
 
@@ -62,6 +65,8 @@ public class CandleEntity {
     public void setInstrument(Instrument instrument) { this.instrument = instrument; }
     public String getTimeframe() { return timeframe; }
     public void setTimeframe(String timeframe) { this.timeframe = timeframe; }
+    public String getContractMonth() { return contractMonth; }
+    public void setContractMonth(String contractMonth) { this.contractMonth = contractMonth; }
     public Instant getTimestamp() { return timestamp; }
     public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
     public BigDecimal getOpen() { return open; }

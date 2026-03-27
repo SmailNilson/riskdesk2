@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,6 +50,7 @@ public class MarketDataService {
     private final CandleRepositoryPort    candlePort;
     private final SimpMessagingTemplate   messagingTemplate;
     private final ApplicationEventPublisher eventPublisher;
+    private final ActiveContractService   activeContractService;
 
     private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
@@ -61,13 +63,15 @@ public class MarketDataService {
                              AlertService alertService,
                              CandleRepositoryPort candlePort,
                              SimpMessagingTemplate messagingTemplate,
-                             ApplicationEventPublisher eventPublisher) {
+                             ApplicationEventPublisher eventPublisher,
+                             ActiveContractService activeContractService) {
         this.marketDataProvider = marketDataProvider;
         this.positionService    = positionService;
         this.alertService       = alertService;
         this.candlePort         = candlePort;
         this.messagingTemplate  = messagingTemplate;
         this.eventPublisher     = eventPublisher;
+        this.activeContractService = activeContractService;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
@@ -80,9 +84,10 @@ public class MarketDataService {
             BigDecimal price = prices.get(instrument);
             Instant timestamp = now;
             boolean fallbackPrice = false;
+            ActiveContractService.ActiveContractDescriptor activeContract = describeActiveContract(instrument);
 
             if (price == null) {
-                StoredPrice storedPrice = loadStoredPrice(instrument);
+                StoredPrice storedPrice = loadStoredPrice(instrument, activeContract.contractMonth());
                 if (storedPrice == null) continue;
                 price = storedPrice.price();
                 timestamp = storedPrice.timestamp();
@@ -99,12 +104,12 @@ public class MarketDataService {
             lastSource.put(instrument, fallbackPrice ? "FALLBACK_DB" : "LIVE_PROVIDER");
 
             positionService.updateMarketPrice(instrument, price);
-            sendPriceUpdate(instrument, price, timestamp);
+            sendPriceUpdate(instrument, price, timestamp, activeContract);
             eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
 
             if (!fallbackPrice) {
                 for (String tf : TIMEFRAMES.keySet()) {
-                    accumulate(instrument, tf, price, now);
+                    accumulate(instrument, tf, price, now, activeContract.contractMonth());
                 }
 
                 alertService.evaluate(instrument);
@@ -124,25 +129,36 @@ public class MarketDataService {
     // WebSocket push
     // -------------------------------------------------------------------------
 
-    private void sendPriceUpdate(Instrument instrument, BigDecimal price, Instant now) {
+    private void sendPriceUpdate(Instrument instrument,
+                                 BigDecimal price,
+                                 Instant now,
+                                 ActiveContractService.ActiveContractDescriptor activeContract) {
         try {
-            Map<String, Object> payload = Map.of(
-                "instrument",  instrument.name(),
-                "displayName", instrument.getDisplayName(),
-                "price",       price,
-                "timestamp",   now.toString()
-            );
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("instrument", instrument.name());
+            payload.put("displayName", instrument.getDisplayName());
+            payload.put("price", price);
+            payload.put("timestamp", now.toString());
+            payload.put("asset", activeContract.asset());
+            payload.put("contractMonth", activeContract.contractMonth());
+            payload.put("contractSymbol", activeContract.contractSymbol());
+            payload.put("selectionReason", activeContract.selectionReason());
             messagingTemplate.convertAndSend("/topic/prices", payload);
         } catch (Exception e) {
             log.debug("WebSocket send failed for {}: {}", instrument, e.getMessage());
         }
     }
 
-    private StoredPrice loadStoredPrice(Instrument instrument) {
+    private StoredPrice loadStoredPrice(Instrument instrument, String contractMonth) {
         Candle latest = null;
 
         for (String timeframe : FALLBACK_TIMEFRAMES) {
-            java.util.List<Candle> candles = candlePort.findRecentCandles(instrument, timeframe, 1);
+            java.util.List<Candle> candles = contractMonth == null || contractMonth.isBlank()
+                ? candlePort.findRecentCandles(instrument, timeframe, 1)
+                : candlePort.findRecentCandles(instrument, timeframe, contractMonth, 1);
+            if (candles.isEmpty() && contractMonth != null && !contractMonth.isBlank()) {
+                candles = candlePort.findRecentCandles(instrument, timeframe, 1);
+            }
             if (candles.isEmpty()) continue;
 
             Candle candidate = candles.get(0);
@@ -165,11 +181,25 @@ public class MarketDataService {
         if (live != null && liveTimestamp != null) {
             return new StoredPrice(live, liveTimestamp, source != null ? source : "CACHE");
         }
-        StoredPrice fallback = loadStoredPrice(instrument);
+        StoredPrice fallback = loadStoredPrice(instrument, describeActiveContract(instrument).contractMonth());
         if (fallback == null) {
             return null;
         }
         return new StoredPrice(fallback.price(), fallback.timestamp(), "FALLBACK_DB");
+    }
+
+    private ActiveContractService.ActiveContractDescriptor describeActiveContract(Instrument instrument) {
+        ActiveContractService.ActiveContractDescriptor descriptor = activeContractService.describe(instrument);
+        return descriptor != null
+            ? descriptor
+            : new ActiveContractService.ActiveContractDescriptor(
+                instrument.name(),
+                instrument.name(),
+                null,
+                null,
+                null,
+                "active contract unavailable"
+            );
     }
 
     public StoredPrice currentPrice(Instrument instrument) {
@@ -205,15 +235,15 @@ public class MarketDataService {
     // Candle accumulation
     // -------------------------------------------------------------------------
 
-    private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
-        String  key        = instrument.name() + ":" + timeframe;
+    private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now, String contractMonth) {
+        String  key        = instrument.name() + ":" + timeframe + ":" + (contractMonth == null ? "ROOT" : contractMonth);
         long    periodMins = TIMEFRAMES.get(timeframe);
         Instant periodStart = truncateToPeriod(now, periodMins);
 
         CandleAccumulator acc = accumulators.get(key);
 
         if (acc == null) {
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, periodStart, price));
+            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
             return;
         }
 
@@ -223,7 +253,7 @@ public class MarketDataService {
             log.debug("Saved candle {} {} O={} H={} L={} C={}",
                 instrument, timeframe, closed.getOpen(), closed.getHigh(), closed.getLow(), closed.getClose());
             eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, periodStart, price));
+            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
         } else {
             acc.update(price);
         }
@@ -242,6 +272,7 @@ public class MarketDataService {
     private static class CandleAccumulator {
         final Instrument instrument;
         final String     timeframe;
+        final String     contractMonth;
         final Instant    periodStart;
         final BigDecimal open;
         BigDecimal high;
@@ -249,9 +280,10 @@ public class MarketDataService {
         BigDecimal close;
         long volume = 1;
 
-        CandleAccumulator(Instrument instrument, String timeframe, Instant periodStart, BigDecimal firstPrice) {
+        CandleAccumulator(Instrument instrument, String timeframe, String contractMonth, Instant periodStart, BigDecimal firstPrice) {
             this.instrument  = instrument;
             this.timeframe   = timeframe;
+            this.contractMonth = contractMonth;
             this.periodStart = periodStart;
             this.open  = firstPrice;
             this.high  = firstPrice;
@@ -267,7 +299,7 @@ public class MarketDataService {
         }
 
         Candle build() {
-            return new Candle(instrument, timeframe, periodStart, open, high, low, close, volume);
+            return new Candle(instrument, timeframe, contractMonth, periodStart, open, high, low, close, volume);
         }
     }
 

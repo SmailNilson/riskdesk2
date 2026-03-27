@@ -195,6 +195,42 @@ When evaluating whether a saved Mentor trade plan was correct:
 - do not recompute the original Mentor review payload during outcome evaluation
 - use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
 
+### Futures Contract Resolution Rule
+
+When selecting a futures contract for live prices or IBKR historical requests:
+
+- treat `MGC`, `MCL`, `E6`, `MNQ`, and `DXY` as root instruments with a discoverable contract chain
+- do not hard-wire business flows to a permanent front-month conid
+- keep the IBKR chain discovery and snapshot probing in `infrastructure`
+- keep the selection policy explicit and testable
+- prefer a tradable month over the chronologically nearest month when the front month is inside an IBKR close-out or delivery window
+- for liquidity-aware instruments, allow a later month to win when bid/ask/volume data is materially better
+
+Do not:
+
+- assume `sorted by expiry -> first item` is sufficient for every futures family
+- hide the selection reason inside unrelated controllers or UI code
+- reintroduce external data to compensate for poor IBKR contract selection
+
+When a user-facing or AI-facing payload needs an instrument label:
+
+- derive it from the resolved active contract, not from a hard-coded continuous alias
+- keep the normalization logic in a reusable application service so manual Mentor flows and automatic alert reviews stay aligned
+
+### Active Candle Series Rule
+
+When a workflow needs candles that must match the currently tradable futures contract:
+
+- store `contractMonth` as candle metadata when the source provides it
+- keep active-contract candle selection in an application service, not in controllers or raw repository calls
+- use `ActiveContractCandleService` for indicator, mentor, chart, backtest, and simulation reads that must remain aligned with the active contract
+
+Do not:
+
+- assume `instrument + timeframe` alone identifies a unique futures series
+- mix contract-resolution logic into presentation or persistence adapters
+- rely on payload labels alone while reading an unqualified candle series underneath
+
 ## Review Checklist
 
 When reviewing a change, ask:

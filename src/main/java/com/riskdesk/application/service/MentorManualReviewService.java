@@ -37,6 +37,7 @@ public class MentorManualReviewService {
 
     private MentorManualReview toDto(MentorAudit audit) {
         JsonNode payload = parseJson(audit.getPayloadJson());
+        ContractMetadata contractMetadata = extractContractMetadata(payload);
         MentorStructuredResponse structured = parseStructured(audit.getResponseJson());
         List<MentorSimilarAudit> similarAudits = mentorMemoryService.findSimilar(payload).stream()
             .filter(match -> !match.auditId().equals(audit.getId()))
@@ -54,6 +55,9 @@ public class MentorManualReviewService {
             "MANUAL_MENTOR",
             audit.getCreatedAt() == null ? null : audit.getCreatedAt().toString(),
             audit.getInstrument(),
+            contractMetadata.asset(),
+            contractMetadata.contractMonth(),
+            contractMetadata.contractSymbol(),
             audit.getTimeframe(),
             audit.getAction(),
             audit.getModel(),
@@ -66,6 +70,20 @@ public class MentorManualReviewService {
             audit.getResolutionTime() == null ? null : audit.getResolutionTime().toString(),
             audit.getMaxDrawdownPoints() == null ? null : audit.getMaxDrawdownPoints().doubleValue()
         );
+    }
+
+    private ContractMetadata extractContractMetadata(JsonNode payload) {
+        JsonNode metadata = payload.path("metadata");
+        return new ContractMetadata(
+            textOrNull(metadata, "asset"),
+            textOrNull(metadata, "active_contract_month"),
+            textOrNull(metadata, "active_contract_symbol")
+        );
+    }
+
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText(null);
     }
 
     private JsonNode parseJson(String rawJson) {
@@ -93,5 +111,12 @@ public class MentorManualReviewService {
                 null
             );
         }
+    }
+
+    private record ContractMetadata(
+        String asset,
+        String contractMonth,
+        String contractSymbol
+    ) {
     }
 }

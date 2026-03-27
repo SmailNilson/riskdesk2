@@ -3,7 +3,6 @@ package com.riskdesk.application.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.Candle;
@@ -32,20 +31,20 @@ public class TradeSimulationService {
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final MentorAuditRepositoryPort auditRepository;
-    private final CandleRepositoryPort candleRepositoryPort;
+    private final ActiveContractCandleService activeContractCandleService;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
-                                  CandleRepositoryPort candleRepositoryPort,
+                                  ActiveContractCandleService activeContractCandleService,
                                   ObjectMapper objectMapper,
                                   ObjectProvider<MentorSignalReviewService> reviewServiceProvider,
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
-        this.candleRepositoryPort = candleRepositoryPort;
+        this.activeContractCandleService = activeContractCandleService;
         this.objectMapper = objectMapper;
         this.reviewServiceProvider = reviewServiceProvider;
         this.messagingProvider = messagingProvider;
@@ -128,7 +127,7 @@ public class TradeSimulationService {
             try {
                 Instrument instrument = Instrument.valueOf(review.getInstrument());
                 Instant from = review.getActivationTime() != null ? review.getActivationTime() : review.getCreatedAt();
-                List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
+                List<Candle> candles = activeContractCandleService.findCandles(instrument, SIMULATION_TIMEFRAME, from);
                 if (candles.isEmpty()) {
                     continue;
                 }
@@ -160,7 +159,7 @@ public class TradeSimulationService {
                 if (audit.getInstrument() == null) continue;
                 Instrument instrument = Instrument.valueOf(audit.getInstrument());
                 Instant from = audit.getActivationTime() != null ? audit.getActivationTime() : audit.getCreatedAt();
-                List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
+                List<Candle> candles = activeContractCandleService.findCandles(instrument, SIMULATION_TIMEFRAME, from);
                 if (candles.isEmpty()) continue;
 
                 SimulationResult result = evaluateAuditOutcome(audit, candles);

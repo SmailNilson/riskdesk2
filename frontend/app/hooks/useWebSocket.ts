@@ -10,6 +10,10 @@ export interface PriceUpdate {
   displayName: string;
   price: number;
   timestamp: string;
+  asset?: string | null;
+  contractMonth?: string | null;
+  contractSymbol?: string | null;
+  selectionReason?: string | null;
 }
 
 export interface AlertMessage {

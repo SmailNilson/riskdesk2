@@ -1,7 +1,6 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.beans.factory.ObjectProvider;
@@ -18,12 +17,12 @@ import java.util.List;
 public class MentorIntermarketService {
 
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
-    private final CandleRepositoryPort candleRepositoryPort;
+    private final ActiveContractCandleService activeContractCandleService;
 
     public MentorIntermarketService(ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                    CandleRepositoryPort candleRepositoryPort) {
+                                    ActiveContractCandleService activeContractCandleService) {
         this.marketDataServiceProvider = marketDataServiceProvider;
-        this.candleRepositoryPort = candleRepositoryPort;
+        this.activeContractCandleService = activeContractCandleService;
     }
 
     public MentorIntermarketSnapshot current(Instrument focusInstrument) {
@@ -84,11 +83,11 @@ public class MentorIntermarketService {
     }
 
     private List<Candle> recentDxyCandles() {
-        List<Candle> recent10m = candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2);
+        List<Candle> recent10m = activeContractCandleService.findRecentCandles(Instrument.DXY, "10m", 2);
         if (!recent10m.isEmpty()) {
             return recent10m;
         }
-        return candleRepositoryPort.findRecentCandles(Instrument.DXY, "1h", 2);
+        return activeContractCandleService.findRecentCandles(Instrument.DXY, "1h", 2);
     }
 
     private String trendFor(int comparison) {

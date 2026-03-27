@@ -1,7 +1,6 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
@@ -22,10 +21,10 @@ class MentorIntermarketServiceTest {
         MarketDataService marketDataService = mock(MarketDataService.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
-        CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
+        ActiveContractCandleService activeContractCandleService = mock(ActiveContractCandleService.class);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, activeContractCandleService);
 
-        when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of(
+        when(activeContractCandleService.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of(
             candle("2026-03-26T00:00:00Z", "104.000"),
             candle("2026-03-25T23:50:00Z", "103.500")
         ));
@@ -46,11 +45,11 @@ class MentorIntermarketServiceTest {
         MarketDataService marketDataService = mock(MarketDataService.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
-        CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
+        ActiveContractCandleService activeContractCandleService = mock(ActiveContractCandleService.class);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, activeContractCandleService);
 
-        when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of());
-        when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "1h", 2)).thenReturn(List.of());
+        when(activeContractCandleService.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of());
+        when(activeContractCandleService.findRecentCandles(Instrument.DXY, "1h", 2)).thenReturn(List.of());
         when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
 
         MentorIntermarketSnapshot snapshot = service.current(Instrument.MNQ);

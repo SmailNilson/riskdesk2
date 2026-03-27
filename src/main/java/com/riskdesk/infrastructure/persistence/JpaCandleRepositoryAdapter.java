@@ -31,10 +31,26 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     }
 
     @Override
+    public List<Candle> findCandles(Instrument instrument, String timeframe, String contractMonth, Instant from) {
+        return springDataRepo.findByInstrumentAndTimeframeAndContractMonthAndTimestampGreaterThanEqualOrderByTimestampAsc(
+                instrument, timeframe, contractMonth, from).stream()
+            .map(CandleEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     public List<Candle> findRecentCandles(Instrument instrument, String timeframe, int limit) {
         // Use Pageable to push the LIMIT to the database — avoids fetching up to 500 rows in-memory
         return springDataRepo.findByInstrumentAndTimeframeOrderByTimestampDesc(
                 instrument, timeframe, PageRequest.of(0, limit)).stream()
+            .map(CandleEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
+    public List<Candle> findRecentCandles(Instrument instrument, String timeframe, String contractMonth, int limit) {
+        return springDataRepo.findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
+                instrument, timeframe, contractMonth, PageRequest.of(0, limit)).stream()
             .map(CandleEntityMapper::toDomain)
             .toList();
     }

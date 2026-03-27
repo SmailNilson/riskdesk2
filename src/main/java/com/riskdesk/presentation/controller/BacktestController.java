@@ -2,6 +2,7 @@ package com.riskdesk.presentation.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.service.ActiveContractCandleService;
 import com.riskdesk.application.service.HistoricalDataService;
 import com.riskdesk.application.service.WaveTrendSignalScanner;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
@@ -37,6 +38,7 @@ public class BacktestController {
     private static final Logger log = LoggerFactory.getLogger(BacktestController.class);
 
     private final CandleRepositoryPort candlePort;
+    private final ActiveContractCandleService activeContractCandleService;
     private final ObjectMapper objectMapper;
     private final WaveTrendSignalScanner signalScanner;
     private final HistoricalDataService historicalDataService;
@@ -45,11 +47,13 @@ public class BacktestController {
 
     public BacktestController(CandleRepositoryPort candlePort, ObjectMapper objectMapper,
                               WaveTrendSignalScanner signalScanner,
-                              HistoricalDataService historicalDataService) {
+                              HistoricalDataService historicalDataService,
+                              ActiveContractCandleService activeContractCandleService) {
         this.candlePort = candlePort;
         this.objectMapper = objectMapper;
         this.signalScanner = signalScanner;
         this.historicalDataService = historicalDataService;
+        this.activeContractCandleService = activeContractCandleService;
         this.marketStructureService = new MarketStructureService();
         this.higherTimeframeLevelService = new HigherTimeframeLevelService(marketStructureService);
     }
@@ -227,7 +231,7 @@ public class BacktestController {
             ? Instant.now().minus(365 * 3, ChronoUnit.DAYS)
             : requestedStart.minus(BacktestDataInspector.parseTimeframe(timeframe).multipliedBy(requestedWarmupBars));
 
-        List<Candle> candles = candlePort.findCandles(inst, timeframe, fetchFrom);
+        List<Candle> candles = activeContractCandleService.findCandles(inst, timeframe, fetchFrom);
 
         if (continuous && "MNQ".equals(instrument.toUpperCase())) {
             log.info("Continuous MNQ backtest now uses the candles stored in the local database / native IB Gateway history.");

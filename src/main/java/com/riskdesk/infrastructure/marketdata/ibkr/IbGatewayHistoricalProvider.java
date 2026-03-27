@@ -43,7 +43,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         return contractResolver.resolve(instrument)
             .map(resolved -> {
                 if (supportsDeepBackfill(timeframe)) {
-                    return fetchDeepHistory(instrument, timeframe, count, resolved.contract());
+                    return fetchDeepHistory(instrument, timeframe, count, resolved.contract(), resolved.contractMonth());
                 }
 
                 HistoricalQuery query = queryFor(timeframe, count);
@@ -57,7 +57,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 );
 
                 return bars.stream()
-                    .map(bar -> toCandle(instrument, timeframe, bar))
+                    .map(bar -> toCandle(instrument, timeframe, resolved.contractMonth(), bar))
                     .sorted(Comparator.comparing(Candle::getTimestamp))
                     .toList();
             })
@@ -75,7 +75,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         };
     }
 
-    private List<Candle> fetchDeepHistory(Instrument instrument, String timeframe, int targetCount, com.ib.client.Contract contract) {
+    private List<Candle> fetchDeepHistory(Instrument instrument, String timeframe, int targetCount, com.ib.client.Contract contract, String contractMonth) {
         HistoricalQuery chunkQuery = chunkQueryFor(timeframe);
         long stepSeconds = timeframeSeconds(timeframe);
         Instant endDateTime = null;
@@ -98,7 +98,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             }
 
             List<Candle> candles = bars.stream()
-                .map(bar -> toCandle(instrument, timeframe, bar))
+                .map(bar -> toCandle(instrument, timeframe, contractMonth, bar))
                 .sorted(Comparator.comparing(Candle::getTimestamp))
                 .toList();
 
@@ -137,13 +137,14 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         return mergedCandles;
     }
 
-    private Candle toCandle(Instrument instrument, String timeframe, Bar bar) {
+    private Candle toCandle(Instrument instrument, String timeframe, String contractMonth, Bar bar) {
         long epochSeconds = parseBarTime(bar);
         long volume = bar.volume() != null && bar.volume().isValid() ? bar.volume().longValue() : 0L;
 
         return new Candle(
             instrument,
             timeframe,
+            contractMonth,
             Instant.ofEpochSecond(epochSeconds),
             round(bar.open(), instrument),
             round(bar.high(), instrument),

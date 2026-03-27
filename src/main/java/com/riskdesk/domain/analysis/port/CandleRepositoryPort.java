@@ -14,7 +14,11 @@ public interface CandleRepositoryPort {
 
     List<Candle> findCandles(Instrument instrument, String timeframe, Instant from);
 
+    List<Candle> findCandles(Instrument instrument, String timeframe, String contractMonth, Instant from);
+
     List<Candle> findRecentCandles(Instrument instrument, String timeframe, int limit);
+
+    List<Candle> findRecentCandles(Instrument instrument, String timeframe, String contractMonth, int limit);
 
     Candle save(Candle candle);
 

@@ -1,6 +1,6 @@
 package com.riskdesk.presentation.controller;
 
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.application.service.ActiveContractCandleService;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import jakarta.validation.constraints.Max;
@@ -26,10 +26,10 @@ import java.util.Map;
 @org.springframework.web.bind.annotation.CrossOrigin
 public class CandleController {
 
-    private final CandleRepositoryPort candlePort;
+    private final ActiveContractCandleService activeContractCandleService;
 
-    public CandleController(CandleRepositoryPort candlePort) {
-        this.candlePort = candlePort;
+    public CandleController(ActiveContractCandleService activeContractCandleService) {
+        this.activeContractCandleService = activeContractCandleService;
     }
 
     @GetMapping("/{instrument}/{timeframe}")
@@ -46,7 +46,7 @@ public class CandleController {
         }
 
         // Fetch most recent `limit` candles (desc), then reverse to oldest→newest
-        List<Candle> candles = candlePort.findRecentCandles(inst, timeframe, limit);
+        List<Candle> candles = activeContractCandleService.findRecentCandles(inst, timeframe, limit);
 
         List<Candle> ordered = new java.util.ArrayList<>(candles);
         Collections.reverse(ordered);

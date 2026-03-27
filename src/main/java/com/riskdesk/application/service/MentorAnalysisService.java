@@ -10,6 +10,8 @@ import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.springframework.stereotype.Service;
+import com.riskdesk.domain.model.Instrument;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.time.Instant;
 import java.util.List;
@@ -28,17 +30,20 @@ public class MentorAnalysisService {
     private final MentorAuditRepositoryPort mentorAuditRepository;
     private final MentorProperties mentorProperties;
     private final ObjectMapper objectMapper;
+    private final ActiveContractService activeContractService;
 
     public MentorAnalysisService(MentorModelClient mentorModelClient,
                                  MentorMemoryService mentorMemoryService,
                                  MentorAuditRepositoryPort mentorAuditRepository,
                                  MentorProperties mentorProperties,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 ActiveContractService activeContractService) {
         this.mentorModelClient = mentorModelClient;
         this.mentorMemoryService = mentorMemoryService;
         this.mentorAuditRepository = mentorAuditRepository;
         this.mentorProperties = mentorProperties;
         this.objectMapper = objectMapper;
+        this.activeContractService = activeContractService;
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload) {
@@ -46,17 +51,72 @@ public class MentorAnalysisService {
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload, String sourceRef) {
-        List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(payload);
+        JsonNode normalizedPayload = normalizePayload(payload);
+        List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(normalizedPayload);
         try {
-            MentorModelClient.MentorModelResult raw = mentorModelClient.analyze(payload, similarAudits);
+            MentorModelClient.MentorModelResult raw = mentorModelClient.analyze(normalizedPayload, similarAudits);
             MentorStructuredResponse structured = parseStructuredResponse(raw.rawText());
-            Long auditId = mentorProperties.isPersistAudits() ? persistSuccess(payload, raw, structured, sourceRef) : null;
-            return new MentorAnalyzeResponse(auditId, raw.model(), payload, structured, raw.rawText(), similarAudits);
+            Long auditId = mentorProperties.isPersistAudits() ? persistSuccess(normalizedPayload, raw, structured, sourceRef) : null;
+            return new MentorAnalyzeResponse(auditId, raw.model(), normalizedPayload, structured, raw.rawText(), similarAudits);
         } catch (IllegalStateException e) {
             if (mentorProperties.isPersistAudits()) {
-                persistFailure(payload, e, sourceRef);
+                persistFailure(normalizedPayload, e, sourceRef);
             }
             throw e;
+        }
+    }
+
+    private JsonNode normalizePayload(JsonNode payload) {
+        if (!(payload instanceof ObjectNode payloadObject)) {
+            return payload;
+        }
+
+        ObjectNode normalized = payloadObject.deepCopy();
+        ObjectNode metadata = normalized.with("metadata");
+        Instrument instrument = inferInstrument(metadata);
+        if (instrument == null) {
+            return normalized;
+        }
+
+        ActiveContractService.ActiveContractDescriptor activeContract = activeContractService.describe(instrument);
+        metadata.put("asset", activeContract.asset());
+        metadata.put("root_instrument", activeContract.rootInstrument());
+        putNullable(metadata, "active_contract_month", activeContract.contractMonth());
+        putNullable(metadata, "active_contract_symbol", activeContract.contractSymbol());
+        putNullable(metadata, "active_contract_local_symbol", activeContract.localSymbol());
+        putNullable(metadata, "active_contract_reason", activeContract.selectionReason());
+        return normalized;
+    }
+
+    private Instrument inferInstrument(ObjectNode metadata) {
+        String rootInstrument = metadata.path("root_instrument").asText(null);
+        if (rootInstrument != null && !rootInstrument.isBlank()) {
+            try {
+                return Instrument.valueOf(rootInstrument.toUpperCase());
+            } catch (IllegalArgumentException ignored) {
+                // fall through
+            }
+        }
+
+        String asset = metadata.path("asset").asText(null);
+        if (asset == null || asset.isBlank()) {
+            return null;
+        }
+
+        String normalized = asset.trim().toUpperCase();
+        if (normalized.startsWith("MGC")) return Instrument.MGC;
+        if (normalized.startsWith("MCL") || normalized.startsWith("CL1!")) return Instrument.MCL;
+        if (normalized.startsWith("MNQ")) return Instrument.MNQ;
+        if (normalized.startsWith("E6") || normalized.startsWith("6E1!")) return Instrument.E6;
+        if (normalized.startsWith("DXY") || normalized.startsWith("DX1!") || normalized.startsWith("DX ")) return Instrument.DXY;
+        return null;
+    }
+
+    private void putNullable(ObjectNode objectNode, String field, String value) {
+        if (value == null) {
+            objectNode.putNull(field);
+        } else {
+            objectNode.put(field, value);
         }
     }
 

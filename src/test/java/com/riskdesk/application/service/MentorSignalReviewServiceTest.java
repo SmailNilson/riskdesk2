@@ -8,7 +8,6 @@ import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
@@ -49,13 +48,16 @@ class MentorSignalReviewServiceTest {
     private MentorIntermarketService mentorIntermarketService;
 
     @Mock
+    private ActiveContractService activeContractService;
+
+    @Mock
     private ObjectProvider<MarketDataService> marketDataServiceProvider;
 
     @Mock
     private MarketDataService marketDataService;
 
     @Mock
-    private CandleRepositoryPort candleRepositoryPort;
+    private ActiveContractCandleService activeContractCandleService;
 
     @Mock
     private MentorSignalReviewRepositoryPort reviewRepository;
@@ -71,8 +73,9 @@ class MentorSignalReviewServiceTest {
             mentorAnalysisService,
             indicatorService,
             mentorIntermarketService,
+            activeContractService,
+            activeContractCandleService,
             marketDataServiceProvider,
-            candleRepositoryPort,
             reviewRepository,
             messagingTemplate,
             objectMapper
@@ -145,6 +148,9 @@ class MentorSignalReviewServiceTest {
         });
         when(reviewRepository.findById(12L)).thenReturn(Optional.of(pendingReview));
         when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
+        when(activeContractService.describe(Instrument.MNQ)).thenReturn(
+            new ActiveContractService.ActiveContractDescriptor("MNQ", "MNQ 202609", "202609", "MNQU6", "MNQU6", "selected 202609 for stronger live liquidity")
+        );
         when(marketDataService.currentPrice(Instrument.MNQ)).thenReturn(
             new MarketDataService.StoredPrice(new BigDecimal("24430.75"), Instant.parse("2026-03-26T02:31:05Z"), "LIVE_PROVIDER")
         );
@@ -159,7 +165,7 @@ class MentorSignalReviewServiceTest {
             List.of(),
             List.of()
         ));
-        when(candleRepositoryPort.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
+        when(activeContractCandleService.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
             candle("2026-03-26T02:20:00Z", "24418.25", "24422.00", "24410.00", "24415.00"),
             candle("2026-03-26T02:30:00Z", "24415.00", "24428.00", "24412.00", "24424.25")
         ));
@@ -197,7 +203,10 @@ class MentorSignalReviewServiceTest {
 
         ArgumentCaptor<JsonNode> payloadCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(mentorAnalysisService, timeout(1000)).analyze(payloadCaptor.capture(), startsWith(MentorAnalysisService.ALERT_SOURCE_PREFIX));
-        assertThat(payloadCaptor.getValue().path("metadata").path("asset").asText()).isEqualTo("MNQ1!");
+        assertThat(payloadCaptor.getValue().path("metadata").path("asset").asText()).isEqualTo("MNQ 202609");
+        assertThat(payloadCaptor.getValue().path("metadata").path("root_instrument").asText()).isEqualTo("MNQ");
+        assertThat(payloadCaptor.getValue().path("metadata").path("active_contract_month").asText()).isEqualTo("202609");
+        assertThat(payloadCaptor.getValue().path("metadata").path("active_contract_symbol").asText()).isEqualTo("MNQU6");
         assertThat(payloadCaptor.getValue().path("metadata").path("timestamp").asText()).isEqualTo("2026-03-26T02:31:05Z");
         assertThat(payloadCaptor.getValue().path("metadata").path("current_price").decimalValue()).isEqualByComparingTo("24430.75");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("action").asText()).isEqualTo("SHORT");
@@ -220,8 +229,9 @@ class MentorSignalReviewServiceTest {
             mentorAnalysisService,
             indicatorService,
             mentorIntermarketService,
+            activeContractService,
+            activeContractCandleService,
             marketDataServiceProvider,
-            candleRepositoryPort,
             reviewRepository,
             messagingTemplate,
             objectMapper
@@ -333,6 +343,9 @@ class MentorSignalReviewServiceTest {
         });
         when(reviewRepository.findById(13L)).thenReturn(Optional.of(pendingReview));
         when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
+        when(activeContractService.describe(Instrument.MNQ)).thenReturn(
+            new ActiveContractService.ActiveContractDescriptor("MNQ", "MNQ 202609", "202609", "MNQU6", "MNQU6", "selected 202609 for stronger live liquidity")
+        );
         when(marketDataService.currentPrice(Instrument.MNQ)).thenReturn(
             new MarketDataService.StoredPrice(new BigDecimal("24430.75"), Instant.parse("2026-03-26T02:41:05Z"), "LIVE_PROVIDER")
         );
@@ -347,7 +360,7 @@ class MentorSignalReviewServiceTest {
             List.of(),
             List.of()
         ));
-        when(candleRepositoryPort.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
+        when(activeContractCandleService.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
             candle("2026-03-26T02:20:00Z", "24418.25", "24422.00", "24410.00", "24415.00"),
             candle("2026-03-26T02:30:00Z", "24415.00", "24428.00", "24412.00", "24424.25")
         ));
@@ -365,6 +378,8 @@ class MentorSignalReviewServiceTest {
 
         ArgumentCaptor<JsonNode> payloadCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(mentorAnalysisService, timeout(1000)).analyze(payloadCaptor.capture(), startsWith(MentorAnalysisService.ALERT_SOURCE_PREFIX));
+        assertThat(payloadCaptor.getValue().path("metadata").path("asset").asText()).isEqualTo("MNQ 202609");
+        assertThat(payloadCaptor.getValue().path("metadata").path("active_contract_symbol").asText()).isEqualTo("MNQU6");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("entry_price").decimalValue()).isEqualByComparingTo("24390.25");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("stop_loss").decimalValue()).isEqualByComparingTo("24445.25");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("take_profit").decimalValue()).isEqualByComparingTo("24280.25");

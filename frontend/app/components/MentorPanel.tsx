@@ -60,6 +60,7 @@ export default function MentorPanel({
   const structuredAnalysis = result?.analysis ?? null;
   const resultError = resultReview?.errorMessage
     ?? (!structuredAnalysis && result ? 'Analyse indisponible pour cette review sauvegardee.' : null);
+  const resultContract = extractContractMetadata(result?.payload);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,6 +238,22 @@ export default function MentorPanel({
             </button>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            <span className="rounded bg-zinc-800 px-2 py-1 text-zinc-300">
+              {resultContract.asset ?? instrument}
+            </span>
+            {resultContract.contractSymbol ? (
+              <span className="rounded bg-zinc-800 px-2 py-1 font-mono text-cyan-300">
+                {resultContract.contractSymbol}
+              </span>
+            ) : null}
+            {resultContract.contractMonth ? (
+              <span className="rounded bg-zinc-800 px-2 py-1 text-zinc-500">
+                {resultContract.contractMonth}
+              </span>
+            ) : null}
+          </div>
+
           {structuredAnalysis ? (
             <>
               <Section title="Analyse Technique Rapide">
@@ -394,8 +411,13 @@ export default function MentorPanel({
                       </span>
                     </div>
                     <div className="text-[11px] text-zinc-200">
-                      {review.instrument ?? instrument} · {review.action ?? action} · {review.timeframe ?? timeframe}
+                      {review.asset ?? review.instrument ?? instrument} · {review.action ?? action} · {review.timeframe ?? timeframe}
                     </div>
+                    {review.contractSymbol ? (
+                      <div className="mt-1 text-[10px] font-mono text-cyan-300">
+                        {review.contractSymbol}
+                      </div>
+                    ) : null}
                     <div className="mt-1 line-clamp-2 text-[10px] text-zinc-500">
                       {review.verdict ?? review.errorMessage ?? 'No verdict saved.'}
                     </div>
@@ -466,8 +488,13 @@ function ManualReviewDetail({
           MANUAL
         </span>
         <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
-          {review.instrument ?? 'n/a'}
+          {review.asset ?? review.instrument ?? 'n/a'}
         </span>
+        {review.contractSymbol ? (
+          <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] font-mono text-cyan-300">
+            {review.contractSymbol}
+          </span>
+        ) : null}
         <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
           {review.timeframe ?? 'n/a'}
         </span>
@@ -490,7 +517,7 @@ function ManualReviewDetail({
       </div>
 
       <div className="text-[10px] text-zinc-500">
-        {review.instrument ?? 'n/a'} · {review.action ?? 'n/a'} · {review.timeframe ?? 'n/a'}
+        {review.asset ?? review.instrument ?? 'n/a'} · {review.action ?? 'n/a'} · {review.timeframe ?? 'n/a'}
       </div>
 
       {!analysis ? (
@@ -631,4 +658,21 @@ function PlanCell({ label, value }: { label: string; value: number | null }) {
 function round(value: number, instrument: Instrument | 'MGC') {
   const digits = instrument === 'E6' ? 5 : 2;
   return Number(value.toFixed(digits));
+}
+
+function extractContractMetadata(payload: unknown) {
+  const metadata = asRecord(asRecord(payload)?.metadata);
+  return {
+    asset: asString(metadata?.asset),
+    contractMonth: asString(metadata?.active_contract_month),
+    contractSymbol: asString(metadata?.active_contract_symbol),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
 }

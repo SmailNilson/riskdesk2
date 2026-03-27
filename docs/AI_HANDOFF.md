@@ -183,6 +183,59 @@ Why:
 - persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
 - multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
 
+### 7. Dynamic active futures contract resolution
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayContractResolver.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayNativeClient.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/test/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayContractResolverTest.java`
+
+What changed:
+
+- native IBKR contract resolution no longer returns a preconfigured or nearest-expiry month first
+- the resolver now discovers the available contract chain, applies an instrument-specific close-out buffer, and then selects a contract using either:
+  - nearest tradable month for delivery-sensitive contracts like `MGC` and `MCL`
+  - liquidity-aware ranking for `E6`, `MNQ`, and `DXY`
+- market snapshots can now include bid/ask/volume metadata for ranking purposes
+- resolved contracts now carry `contractMonth` and `selectionReason`
+- cached resolutions expire after a short TTL instead of staying pinned forever
+
+Why:
+
+- `MGC` front-month selection could remain stuck on a contract that IBKR had already pushed into delivery/close-out restrictions
+- the SaaS needs to choose a contract that is actually tradable, not just the chronologically nearest one
+
+Operational note:
+
+- the `MGC` close-out buffer is intentionally conservative (`35` days) to reflect the observed IBKR restriction window
+- if live discovery fails, the resolver still falls back to the old preconfigured month so the application can degrade gracefully
+
+### 8. Mentor payload normalization to active contracts
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/ActiveContractService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorAnalysisService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/LivePriceController.java`
+
+What changed:
+
+- a shared `ActiveContractService` now formats the resolved active contract into a single label and metadata bundle
+- manual Mentor payloads are normalized on the backend before similarity lookup, model call, and audit persistence
+- auto-alert Mentor reviews use the same resolved active contract label
+- `/api/live-price/{instrument}` now exposes:
+  - `asset`
+  - `contractMonth`
+  - `selectionReason`
+- the frontend manual Mentor payload builder now uses the backend-provided `asset` instead of hard-coded aliases like `MGC1!`
+
+Why:
+
+- the resolver had been updated, but Mentor still produced stale labels tied to old continuous aliases
+- the backend now acts as the single source of truth for the active contract shown to Mentor and persisted in reviews
+
 ## Known Runtime Behavior
 
 ### Current good news
@@ -239,3 +292,29 @@ lsof -nP -iTCP:4001
 - expose the simulation outcome in the UI once the product design is ready
 - add tests for transition-based alert evaluation edge cases
 - add tests for grouped review batching logic
+
+## Latest Change: Contract-Aligned Candles
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/model/Candle.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/ActiveContractCandleService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/IndicatorService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorIntermarketService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/TradeSimulationService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/MarketDataService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayHistoricalProvider.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/CandleController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/BacktestController.java`
+
+What changed:
+
+- candles now persist `contractMonth` when data comes from the resolved IBKR active contract
+- a new `ActiveContractCandleService` loads candle series for the current active contract month and falls back to legacy rows only when contract-specific rows are absent
+- indicators, mentor review payload building, DXY intermarket context, chart candles, backtests, and trade simulation now read through that aligned service
+- IBKR historical fetches and live candle accumulation now tag candles with the resolved `contractMonth`
+
+Current limitation:
+
+- `HistoricalDataService` still purges by `instrument + timeframe`, so the app stays aligned on the current active contract, but it is not yet a full continuous-contract storage model with multiple months preserved side by side

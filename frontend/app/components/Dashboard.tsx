@@ -141,11 +141,16 @@ export default function Dashboard() {
         {INSTRUMENTS.map(inst => {
           const p = prices[inst];
           return (
-            <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
-              <span className="text-[10px] text-zinc-500">{inst}</span>
-              <span className="text-xs font-mono text-white">
-                {p ? p.price.toFixed(inst === 'E6' ? 5 : 2) : '—'}
-              </span>
+            <div key={inst} className="flex min-w-[110px] flex-shrink-0 flex-col gap-0.5 rounded border border-zinc-800/50 bg-zinc-950/30 px-2 py-1">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-zinc-500">{inst}</span>
+                <span className="text-xs font-mono text-white">
+                  {p ? p.price.toFixed(inst === 'E6' ? 5 : 2) : '—'}
+                </span>
+              </div>
+              <div className="text-[9px] text-zinc-600">
+                {p?.contractSymbol ?? p?.asset ?? 'active contract pending'}
+              </div>
             </div>
           );
         })}

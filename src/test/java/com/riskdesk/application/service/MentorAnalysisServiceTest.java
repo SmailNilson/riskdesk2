@@ -16,6 +16,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +32,9 @@ class MentorAnalysisServiceTest {
     @Mock
     private MentorMemoryService mentorMemoryService;
 
+    @Mock
+    private ActiveContractService activeContractService;
+
     private final MentorProperties mentorProperties = new MentorProperties();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -42,7 +46,11 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            activeContractService
+        );
+        when(activeContractService.describe(com.riskdesk.domain.model.Instrument.MGC)).thenReturn(
+            new ActiveContractService.ActiveContractDescriptor("MGC", "MGC 202606", "202606", "MGCM6", "MGCM6", "selected nearest tradable month 202606")
         );
 
         String rawJson = """
@@ -77,7 +85,7 @@ class MentorAnalysisServiceTest {
 
         MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
             {
-              "metadata": {"asset": "MGC1!", "timeframe_focus": "M5"},
+              "metadata": {"asset": "MGC1!", "root_instrument": "MGC", "timeframe_focus": "M5"},
               "trade_intention": {"action": "LONG"}
             }
             """));
@@ -89,6 +97,13 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().proposedTradePlan()).isNotNull();
         assertThat(response.analysis().proposedTradePlan().safeDeepEntry()).isNotNull();
         assertThat(response.similarAudits()).hasSize(1);
+        assertThat(response.payload().path("metadata").path("asset").asText()).isEqualTo("MGC 202606");
+        assertThat(response.payload().path("metadata").path("active_contract_month").asText()).isEqualTo("202606");
+        assertThat(response.payload().path("metadata").path("active_contract_symbol").asText()).isEqualTo("MGCM6");
+        verify(mentorModelClient).analyze(argThat(payload ->
+            "MGC 202606".equals(payload.path("metadata").path("asset").asText())
+                && "MGC".equals(payload.path("metadata").path("root_instrument").asText())
+        ), any());
         verify(mentorAuditRepository).save(any());
     }
 
@@ -100,17 +115,23 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            activeContractService
+        );
+        when(activeContractService.describe(com.riskdesk.domain.model.Instrument.MGC)).thenReturn(
+            new ActiveContractService.ActiveContractDescriptor("MGC", "MGC 202606", "202606", "MGCM6", "MGCM6", "selected nearest tradable month 202606")
         );
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
         when(mentorModelClient.analyze(any(), any())).thenReturn(new MentorModelClient.MentorModelResult("gemini-test", "plain text answer"));
 
         MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
-            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "SHORT"}}
+            {"metadata": {"asset": "MGC1!", "root_instrument": "MGC"}, "trade_intention": {"action": "SHORT"}}
             """));
 
         assertThat(response.auditId()).isNull();
+        assertThat(response.payload().path("metadata").path("asset").asText()).isEqualTo("MGC 202606");
+        assertThat(response.payload().path("metadata").path("active_contract_symbol").asText()).isEqualTo("MGCM6");
         assertThat(response.analysis().technicalQuickAnalysis()).isEqualTo("plain text answer");
         assertThat(response.analysis().errors()).contains("La réponse du modèle n'était pas un JSON strictement exploitable.");
     }

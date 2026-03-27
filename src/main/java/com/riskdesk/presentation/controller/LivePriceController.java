@@ -1,6 +1,7 @@
 package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.MarketDataService;
+import com.riskdesk.application.service.ActiveContractService;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.presentation.dto.LivePriceView;
 import org.springframework.http.ResponseEntity;
@@ -18,9 +19,12 @@ import org.springframework.web.bind.annotation.RestController;
 public class LivePriceController {
 
     private final MarketDataService marketDataService;
+    private final ActiveContractService activeContractService;
 
-    public LivePriceController(MarketDataService marketDataService) {
+    public LivePriceController(MarketDataService marketDataService,
+                               ActiveContractService activeContractService) {
         this.marketDataService = marketDataService;
+        this.activeContractService = activeContractService;
     }
 
     @GetMapping("/{instrument}")
@@ -37,6 +41,16 @@ public class LivePriceController {
             return ResponseEntity.notFound().build();
         }
 
-        return ResponseEntity.ok(new LivePriceView(parsed.name(), stored.price(), stored.timestamp(), stored.source()));
+        ActiveContractService.ActiveContractDescriptor activeContract = activeContractService.describe(parsed);
+        return ResponseEntity.ok(new LivePriceView(
+            parsed.name(),
+            stored.price(),
+            stored.timestamp(),
+            stored.source(),
+            activeContract.asset(),
+            activeContract.contractMonth(),
+            activeContract.contractSymbol(),
+            activeContract.selectionReason()
+        ));
     }
 }

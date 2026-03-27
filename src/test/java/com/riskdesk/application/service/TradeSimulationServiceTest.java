@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
-import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.Candle;
@@ -32,7 +31,7 @@ class TradeSimulationServiceTest {
     private MentorSignalReviewRepositoryPort reviewRepository;
 
     @Mock
-    private CandleRepositoryPort candleRepositoryPort;
+    private ActiveContractCandleService activeContractCandleService;
 
     @Mock
     private MentorAuditRepositoryPort auditRepository;
@@ -52,7 +51,7 @@ class TradeSimulationServiceTest {
         service = new TradeSimulationService(
             reviewRepository,
             auditRepository,
-            candleRepositoryPort,
+            activeContractCandleService,
             objectMapper,
             reviewServiceProvider,
             messagingProvider

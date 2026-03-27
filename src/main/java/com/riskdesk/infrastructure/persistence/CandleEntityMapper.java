@@ -13,6 +13,7 @@ public final class CandleEntityMapper {
         entity.setId(candle.getId());
         entity.setInstrument(candle.getInstrument());
         entity.setTimeframe(candle.getTimeframe());
+        entity.setContractMonth(candle.getContractMonth());
         entity.setTimestamp(candle.getTimestamp());
         entity.setOpen(candle.getOpen());
         entity.setHigh(candle.getHigh());
@@ -27,6 +28,7 @@ public final class CandleEntityMapper {
         candle.setId(entity.getId());
         candle.setInstrument(entity.getInstrument());
         candle.setTimeframe(entity.getTimeframe());
+        candle.setContractMonth(entity.getContractMonth());
         candle.setTimestamp(entity.getTimestamp());
         candle.setOpen(entity.getOpen());
         candle.setHigh(entity.getHigh());

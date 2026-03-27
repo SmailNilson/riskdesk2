@@ -102,6 +102,23 @@ These coordinate use cases and should not become infrastructure adapters.
 - `infrastructure/marketdata/ibkr/IbGatewayHistoricalProvider.java`
 - `application/service/IbGatewayBrokerGateway.java`
 
+### Active futures contract selection
+
+The backend must treat futures symbols such as `MGC`, `MCL`, `E6`, `MNQ`, and `DXY` as root instruments, not as permanently fixed front-month conids.
+
+Current native IBKR behavior:
+
+- `IbGatewayContractResolver` discovers the available contract chain from IBKR
+- contracts are filtered through an instrument-specific close-out buffer
+- delivery-sensitive products such as `MGC` and `MCL` avoid near-expiry contracts earlier than index/FX products
+- for liquidity-aware products such as `E6`, `MNQ`, and `DXY`, the resolver can prefer a later month when IBKR snapshot data shows materially better live liquidity
+- if discovery fails, the resolver falls back to the existing preconfigured contract as a last resort
+
+Implication:
+
+- live prices and historical IBKR fetches should use the resolver output, not assume that the nearest expiry is always tradable
+- Mentor payloads and persisted Mentor audits should use the resolved active contract label (for example `MGC 202606`), not legacy continuous aliases such as `MGC1!`
+
 ### Persistence
 
 - `infrastructure/persistence/*`
@@ -256,3 +273,10 @@ curl -s http://localhost:8080/api/live-price/E6
 For agent-to-agent continuity, update:
 
 - `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
+
+## Active Contract Candle Alignment
+
+- candles can now carry `contractMonth` metadata for the resolved IBKR futures contract
+- reads that must follow the currently tradable contract should go through `ActiveContractCandleService`
+- this aligned read path is now used by indicators, mentor context, chart candles, backtests, and trade simulation
+- historical refresh still replaces the stored series per `instrument + timeframe`, so the system is aligned on the current active contract but does not yet preserve parallel multi-month contract history

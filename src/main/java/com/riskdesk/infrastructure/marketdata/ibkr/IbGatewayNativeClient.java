@@ -221,6 +221,12 @@ public class IbGatewayNativeClient {
     }
 
     public Optional<BigDecimal> requestSnapshotPrice(Contract contract) {
+        return requestContractMarketSnapshot(contract).flatMap(snapshot ->
+            snapshot.hasPrice() ? Optional.of(snapshot.bestPrice()) : Optional.empty()
+        );
+    }
+
+    public Optional<IbGatewayContractMarketSnapshot> requestContractMarketSnapshot(Contract contract) {
         if (!ensureConnected()) {
             return Optional.empty();
         }
@@ -232,7 +238,7 @@ public class IbGatewayNativeClient {
         awaitLatch(latch, "market snapshot", SNAPSHOT_TIMEOUT);
         controller.cancelTopMktData(collector);
 
-        return collector.bestPrice();
+        return collector.snapshot();
     }
 
     public void ensureStreamingPriceSubscription(Contract contract) {
@@ -485,6 +491,7 @@ public class IbGatewayNativeClient {
         private volatile Double bestPrice;
         private volatile Double bid;
         private volatile Double ask;
+        private volatile Long volume;
 
         private PriceCollector(CountDownLatch latch) {
             this.latch = latch;
@@ -515,8 +522,28 @@ public class IbGatewayNativeClient {
             latch.countDown();
         }
 
-        private Optional<BigDecimal> bestPrice() {
-            return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            if (size == null || !size.isValid()) {
+                return;
+            }
+            long longValue = size.longValue();
+            if (longValue <= 0) {
+                return;
+            }
+            if (tickType == TickType.VOLUME || tickType == TickType.DELAYED_VOLUME) {
+                volume = longValue;
+            }
+        }
+
+        private Optional<IbGatewayContractMarketSnapshot> snapshot() {
+            BigDecimal best = bestPrice == null ? null : BigDecimal.valueOf(bestPrice);
+            BigDecimal bestBid = bid == null ? null : BigDecimal.valueOf(bid);
+            BigDecimal bestAsk = ask == null ? null : BigDecimal.valueOf(ask);
+            if (best == null && bestBid == null && bestAsk == null && volume == null) {
+                return Optional.empty();
+            }
+            return Optional.of(new IbGatewayContractMarketSnapshot(best, bestBid, bestAsk, volume));
         }
     }
 

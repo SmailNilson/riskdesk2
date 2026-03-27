@@ -33,13 +33,6 @@ export type MentorSignalCandidate = {
   timeframe: Timeframe;
 };
 
-const ASSET_ALIAS: Record<Instrument, string> = {
-  MCL: 'CL1!',
-  MGC: 'MGC1!',
-  E6: '6E1!',
-  MNQ: 'MNQ1!',
-};
-
 export async function runMentorAnalysis(params: {
   instrument: Instrument;
   timeframe: Timeframe;
@@ -96,6 +89,10 @@ export async function runMentorAnalysis(params: {
     candles,
     intermarket,
     prices: resolvedPrices,
+    activeAsset: livePriceView?.asset ?? params.instrument,
+    activeContractMonth: livePriceView?.contractMonth ?? null,
+    activeContractSymbol: livePriceView?.contractSymbol ?? null,
+    activeContractReason: livePriceView?.selectionReason ?? null,
     alerts: freshAlerts as AlertMessage[],
     includePortfolioContext: params.includePortfolioContext,
     tradeIntention: params.tradeIntention,
@@ -161,6 +158,10 @@ export function buildMentorPayload(params: {
   candles: CandleBar[];
   intermarket: MentorIntermarketSnapshot;
   prices: Record<string, PriceUpdate>;
+  activeAsset: string;
+  activeContractMonth: string | null;
+  activeContractSymbol: string | null;
+  activeContractReason: string | null;
   alerts: AlertMessage[];
   includePortfolioContext: boolean;
   tradeIntention: MentorTradeIntention;
@@ -181,7 +182,11 @@ export function buildMentorPayload(params: {
   return {
     metadata: {
       timestamp,
-      asset: ASSET_ALIAS[params.instrument],
+      asset: params.activeAsset,
+      root_instrument: params.instrument,
+      active_contract_month: params.activeContractMonth,
+      active_contract_symbol: params.activeContractSymbol,
+      active_contract_reason: params.activeContractReason,
       current_price: currentPrice != null ? round(currentPrice, params.instrument) : null,
       timeframe_focus: toMentorTimeframe(params.timeframe),
       market_session: inferMarketSession(timestamp),

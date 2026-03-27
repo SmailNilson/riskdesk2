@@ -7,5 +7,7 @@ import com.riskdesk.domain.model.Instrument;
 public record IbGatewayResolvedContract(
     Instrument instrument,
     Contract contract,
-    ContractDetails details
+    ContractDetails details,
+    String contractMonth,
+    String selectionReason
 ) {}

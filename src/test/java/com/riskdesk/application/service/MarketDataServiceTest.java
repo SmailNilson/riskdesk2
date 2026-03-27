@@ -28,13 +28,20 @@ class MarketDataServiceTest {
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
         ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        ActiveContractService activeContractService = mock(ActiveContractService.class);
 
         Candle older10m = candle(Instrument.MCL, "10m", "2026-03-23T10:00:00Z", "101.25");
         Candle newer5m = candle(Instrument.MCL, "5m", "2026-03-23T10:05:00Z", "101.75");
 
         when(candlePort.findRecentCandles(any(), anyString(), eq(1))).thenReturn(List.of());
+        when(candlePort.findRecentCandles(any(), anyString(), anyString(), eq(1))).thenReturn(List.of());
         when(candlePort.findRecentCandles(Instrument.MCL, "10m", 1)).thenReturn(List.of(older10m));
         when(candlePort.findRecentCandles(Instrument.MCL, "5m", 1)).thenReturn(List.of(newer5m));
+        when(candlePort.findRecentCandles(Instrument.MCL, "10m", "202605", 1)).thenReturn(List.of(older10m));
+        when(candlePort.findRecentCandles(Instrument.MCL, "5m", "202605", 1)).thenReturn(List.of(newer5m));
+        when(activeContractService.describe(Instrument.MCL)).thenReturn(
+            new ActiveContractService.ActiveContractDescriptor("MCL", "MCL 202605", "202605", "MCLK6", "MCLK6", "selected nearest tradable month 202605")
+        );
 
         MarketDataService service = new MarketDataService(
             marketDataProvider,
@@ -42,7 +49,8 @@ class MarketDataServiceTest {
             alertService,
             candlePort,
             messagingTemplate,
-            eventPublisher
+            eventPublisher,
+            activeContractService
         );
 
         service.pollPrices();
@@ -54,7 +62,9 @@ class MarketDataServiceTest {
             if (!(payload instanceof Map<?, ?> map)) return false;
             return "MCL".equals(map.get("instrument"))
                 && new BigDecimal("101.75").compareTo(new BigDecimal(String.valueOf(map.get("price")))) == 0
-                && "2026-03-23T10:05:00Z".equals(String.valueOf(map.get("timestamp")));
+                && "2026-03-23T10:05:00Z".equals(String.valueOf(map.get("timestamp")))
+                && "MCL 202605".equals(String.valueOf(map.get("asset")))
+                && "MCLK6".equals(String.valueOf(map.get("contractSymbol")));
         }));
     }
 
