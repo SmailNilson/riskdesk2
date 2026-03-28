@@ -384,6 +384,7 @@ public class IbGatewayNativeClient {
         throw new IllegalStateException("IBKR order submission did not yield a confirmed status.");
     }
 
+
     // -------------------------------------------------------------------------
     // Contract details
     // -------------------------------------------------------------------------
@@ -722,6 +723,7 @@ public class IbGatewayNativeClient {
         return Optional.ofNullable(found.get());
     }
 
+
     // -------------------------------------------------------------------------
     // Internal record: cleanup context
     // -------------------------------------------------------------------------
@@ -731,6 +733,7 @@ public class IbGatewayNativeClient {
     public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
 
     public record NativeOrderSubmission(Long orderId, String status, String orderRef, Instant submittedAt) {}
+
 
     // -------------------------------------------------------------------------
     // IBKR connection callback handler
