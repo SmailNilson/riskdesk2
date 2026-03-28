@@ -123,7 +123,7 @@ export function isMentorEligibleAlert(alert: AlertMessage) {
     return alert.message.includes('oversold') || alert.message.includes('overbought');
   }
   if (alert.category === 'ORDER_BLOCK') {
-    return alert.message.includes('VWAP inside');
+    return alert.message.includes('mitigated') || alert.message.includes('invalidated');
   }
   return false;
 }

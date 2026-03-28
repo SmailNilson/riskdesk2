@@ -4,6 +4,7 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot.OrderBlockZone;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot.OrderBlockEvent;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
@@ -19,8 +20,7 @@ class IndicatorAlertEvaluatorTest {
     private final IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator();
 
     /**
-     * Helper to construct an IndicatorSnapshot with defaults for most fields.
-     * Only the fields relevant to a specific test need non-null values.
+     * Helper to construct a snapshot with defaults. Only pass what the test actually needs.
      */
     private static IndicatorAlertSnapshot makeSnapshot(
             String emaCrossover,
@@ -29,6 +29,18 @@ class IndicatorAlertEvaluatorTest {
             String lastBreakType,
             BigDecimal vwap,
             List<OrderBlockZone> activeOrderBlocks) {
+        return makeSnapshotWithEvents(emaCrossover, rsi, rsiSignal, macdCrossover,
+                lastBreakType, vwap, activeOrderBlocks, Collections.emptyList());
+    }
+
+    private static IndicatorAlertSnapshot makeSnapshotWithEvents(
+            String emaCrossover,
+            BigDecimal rsi, String rsiSignal,
+            String macdCrossover,
+            String lastBreakType,
+            BigDecimal vwap,
+            List<OrderBlockZone> activeOrderBlocks,
+            List<OrderBlockEvent> obEvents) {
         return new IndicatorAlertSnapshot(
             emaCrossover,
             rsi, rsiSignal,
@@ -41,6 +53,7 @@ class IndicatorAlertEvaluatorTest {
             null,
             vwap,
             activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
+            obEvents == null ? Collections.emptyList() : obEvents,
             null
         );
     }
@@ -160,10 +173,17 @@ class IndicatorAlertEvaluatorTest {
         assertTrue(alerts.isEmpty());
     }
 
+    // ── UC-SMC-009 acceptance criteria ────────────────────────────────────────
+
+    /** AC1: alert fires on OB mitigation (INFO — demand zone tested, potential entry). */
     @Test
-    void orderBlockTouch_generatesOrderBlockAlert() {
-        OrderBlockZone ob = new OrderBlockZone("BULLISH", new BigDecimal("62.50"), new BigDecimal("62.00"));
-        IndicatorAlertSnapshot snap = makeSnapshot(null, null, null, null, null, new BigDecimal("62.30"), List.of(ob));
+    void obMitigation_generatesInfoAlert() {
+        OrderBlockEvent mitigation = new OrderBlockEvent(
+                "MITIGATION", "BULLISH",
+                new BigDecimal("62.50"), new BigDecimal("62.00"));
+
+        IndicatorAlertSnapshot snap = makeSnapshotWithEvents(
+                null, null, null, null, null, null, null, List.of(mitigation));
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
@@ -171,6 +191,40 @@ class IndicatorAlertEvaluatorTest {
         Alert a = alerts.get(0);
         assertEquals(AlertSeverity.INFO, a.severity());
         assertEquals(AlertCategory.ORDER_BLOCK, a.category());
-        assertTrue(a.message().contains("VWAP inside"));
+        assertTrue(a.message().contains("BULLISH"), "message should contain OB type");
+        assertTrue(a.message().contains("mitigated"), "message should say 'mitigated'");
+    }
+
+    /** AC2: alert fires on OB invalidation (WARNING — zone broken, structural failure). */
+    @Test
+    void obInvalidation_generatesWarningAlert() {
+        OrderBlockEvent invalidation = new OrderBlockEvent(
+                "INVALIDATION", "BEARISH",
+                new BigDecimal("65.00"), new BigDecimal("64.50"));
+
+        IndicatorAlertSnapshot snap = makeSnapshotWithEvents(
+                null, null, null, null, null, null, null, List.of(invalidation));
+
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
+
+        assertEquals(1, alerts.size());
+        Alert a = alerts.get(0);
+        assertEquals(AlertSeverity.WARNING, a.severity());
+        assertEquals(AlertCategory.ORDER_BLOCK, a.category());
+        assertTrue(a.message().contains("BEARISH"), "message should contain OB type");
+        assertTrue(a.message().contains("invalidated"), "message should say 'invalidated'");
+    }
+
+    /** No false positives: VWAP inside OB zone alone must NOT generate an alert. */
+    @Test
+    void vwapInsideOb_noAlert_withoutObEvent() {
+        OrderBlockZone ob = new OrderBlockZone("BULLISH", new BigDecimal("62.50"), new BigDecimal("62.00"));
+        // VWAP inside OB zone — old proxy behaviour that should no longer fire
+        IndicatorAlertSnapshot snap = makeSnapshot(
+                null, null, null, null, null, new BigDecimal("62.30"), List.of(ob));
+
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
+
+        assertTrue(alerts.isEmpty(), "VWAP-inside-OB must no longer generate an alert on its own");
     }
 }
