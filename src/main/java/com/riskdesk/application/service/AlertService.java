@@ -169,6 +169,8 @@ public class AlertService {
             snapshot.rsiSignal(),
             snapshot.macdCrossover(),
             snapshot.lastBreakType(),
+            snapshot.lastInternalBreakType(),
+            snapshot.lastSwingBreakType(),
             snapshot.wtWt1(),
             snapshot.wtCrossover(),
             snapshot.wtSignal(),

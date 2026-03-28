@@ -14,6 +14,7 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import org.junit.jupiter.api.Test;
@@ -182,6 +183,8 @@ class MentorSignalReviewServiceTest {
                 List.of("Live re-check"),
                 List.of(),
                 "Trade Validé - Discipline Respectée",
+                ExecutionEligibilityStatus.ELIGIBLE,
+                "Setup still executable.",
                 "Rester discipline.",
                 null
             ),
@@ -248,6 +251,8 @@ class MentorSignalReviewServiceTest {
                 List.of("Live re-check"),
                 List.of(),
                 "Trade Validé - Discipline Respectée",
+                ExecutionEligibilityStatus.ELIGIBLE,
+                "Plan remains executable.",
                 "Rester discipline.",
                 new MentorProposedTradePlan(
                     24390.25,
@@ -409,6 +414,21 @@ class MentorSignalReviewServiceTest {
             null,
             "WT_BEARISH",
             "OVERBOUGHT",
+            // SMC: Internal structure
+            "BEARISH",                          // internalBias
+            null,                               // internalHigh
+            null,                               // internalLow
+            null,                               // internalHighTime
+            null,                               // internalLowTime
+            lastBreakType,                      // lastInternalBreakType
+            // SMC: Swing structure
+            null,                               // swingBias
+            null,                               // swingHigh
+            null,                               // swingLow
+            null,                               // swingHighTime
+            null,                               // swingLowTime
+            null,                               // lastSwingBreakType
+            // SMC: Legacy / derived
             "BEARISH",
             new BigDecimal("24520.00"),
             new BigDecimal("24320.00"),
@@ -419,12 +439,17 @@ class MentorSignalReviewServiceTest {
             null,
             null,
             null,
+            // SMC: Liquidity (EQH / EQL)
+            List.of(), List.of(),
+            // SMC: Premium / Discount / Equilibrium
+            null, null, null, null,
+            // SMC: Zones
             List.of(
                 new IndicatorSnapshot.OrderBlockView("BEARISH", new BigDecimal("24460.00"), new BigDecimal("24435.00"), new BigDecimal("24447.50"), 1L),
                 new IndicatorSnapshot.OrderBlockView("BULLISH", new BigDecimal("24405.00"), new BigDecimal("24380.00"), new BigDecimal("24392.50"), 2L)
             ),
             List.of(),
-            List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L)),
+            List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
             null
         );
     }

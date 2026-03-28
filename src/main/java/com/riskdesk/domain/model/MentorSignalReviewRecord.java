@@ -22,6 +22,8 @@ public class MentorSignalReviewRecord {
     private String analysisJson;
     private String verdict;
     private String errorMessage;
+    private ExecutionEligibilityStatus executionEligibilityStatus;
+    private String executionEligibilityReason;
     private TradeSimulationStatus simulationStatus;
     private Instant activationTime;
     private Instant resolutionTime;
@@ -169,6 +171,22 @@ public class MentorSignalReviewRecord {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public ExecutionEligibilityStatus getExecutionEligibilityStatus() {
+        return executionEligibilityStatus;
+    }
+
+    public void setExecutionEligibilityStatus(ExecutionEligibilityStatus executionEligibilityStatus) {
+        this.executionEligibilityStatus = executionEligibilityStatus;
+    }
+
+    public String getExecutionEligibilityReason() {
+        return executionEligibilityReason;
+    }
+
+    public void setExecutionEligibilityReason(String executionEligibilityReason) {
+        this.executionEligibilityReason = executionEligibilityReason;
     }
 
     public TradeSimulationStatus getSimulationStatus() {

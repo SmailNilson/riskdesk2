@@ -145,24 +145,77 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
         )}
       </Section>
 
-      {/* SMC */}
-      <Section title="SMC Structure">
+      {/* SMC Internal */}
+      <Section title="SMC Internal">
         <div className="flex justify-between items-center py-0.5">
-          <span className="text-zinc-500 text-xs">Trend</span>
-          <Badge label={s.marketStructureTrend}
-            color={s.marketStructureTrend === 'BULLISH' ? 'green' : s.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'} />
+          <span className="text-zinc-500 text-xs">Bias</span>
+          <Badge label={s.internalBias ?? '—'}
+            color={s.internalBias === 'BULLISH' ? 'green' : s.internalBias === 'BEARISH' ? 'red' : 'gray'} />
         </div>
-        <Row label="Strong High" value={n(s.strongHigh)} />
-        <Row label="Strong Low" value={n(s.strongLow)} />
-        <Row label="Weak High" value={n(s.weakHigh)} />
-        <Row label="Weak Low" value={n(s.weakLow)} />
-        {s.lastBreakType && (
+        <Row label="High" value={n(s.internalHigh)} sub="weak" />
+        <Row label="Low" value={n(s.internalLow)} sub="weak" />
+        {s.lastInternalBreakType && (
           <div className="flex justify-between items-center py-0.5">
             <span className="text-zinc-500 text-xs">Last</span>
-            <Badge label={s.lastBreakType} color={signalColor(s.lastBreakType)} />
+            <Badge label={s.lastInternalBreakType} color={signalColor(s.lastInternalBreakType)} />
           </div>
         )}
       </Section>
+
+      {/* SMC Swing */}
+      <Section title="SMC Swing">
+        <div className="flex justify-between items-center py-0.5">
+          <span className="text-zinc-500 text-xs">Bias</span>
+          <Badge label={s.swingBias ?? '—'}
+            color={s.swingBias === 'BULLISH' ? 'green' : s.swingBias === 'BEARISH' ? 'red' : 'gray'} />
+        </div>
+        <Row label="High" value={n(s.swingHigh)} sub="strong" />
+        <Row label="Low" value={n(s.swingLow)} sub="strong" />
+        {s.lastSwingBreakType && (
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Last</span>
+            <Badge label={s.lastSwingBreakType} color={signalColor(s.lastSwingBreakType)} />
+          </div>
+        )}
+      </Section>
+
+      {/* Premium / Discount / Equilibrium */}
+      {s.equilibriumLevel != null && (
+        <Section title="Premium / Discount">
+          <Row label="Premium Top" value={n(s.premiumZoneTop)} />
+          <Row label="Equilibrium" value={n(s.equilibriumLevel)} />
+          <Row label="Discount Bot" value={n(s.discountZoneBottom)} />
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Zone</span>
+            <Badge
+              label={s.currentZone ?? '—'}
+              color={s.currentZone === 'PREMIUM' ? 'red' : s.currentZone === 'DISCOUNT' ? 'green' : 'blue'}
+            />
+          </div>
+          <div className="mt-1.5 w-full bg-zinc-800 rounded-full h-1.5 relative overflow-hidden">
+            <div className="absolute inset-y-0 left-0 w-1/2 bg-emerald-900/60 rounded-l-full" />
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-red-900/60 rounded-r-full" />
+          </div>
+        </Section>
+      )}
+
+      {/* EQH / EQL */}
+      {(s.equalHighs.length > 0 || s.equalLows.length > 0) && (
+        <Section title={`EQH/EQL (${s.equalHighs.length + s.equalLows.length})`}>
+          {s.equalHighs.map((eq, i) => (
+            <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+              <Badge label="EQH" color="red" />
+              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+            </div>
+          ))}
+          {s.equalLows.map((eq, i) => (
+            <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+              <Badge label="EQL" color="green" />
+              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+            </div>
+          ))}
+        </Section>
+      )}
 
       {/* Order Blocks */}
       <Section title={`Order Blocks (${s.activeOrderBlocks.length})`} fullWidth>

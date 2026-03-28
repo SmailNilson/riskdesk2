@@ -10,6 +10,8 @@ public record IndicatorAlertSnapshot(
     String rsiSignal,
     String macdCrossover,
     String lastBreakType,
+    String lastInternalBreakType,
+    String lastSwingBreakType,
     BigDecimal wtWt1,
     String wtCrossover,
     String wtSignal,

@@ -1,5 +1,6 @@
 package com.riskdesk.application.dto;
 
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 
 public record MentorSignalReview(
@@ -16,6 +17,8 @@ public record MentorSignalReview(
     String action,
     String timestamp,
     String createdAt,
+    ExecutionEligibilityStatus executionEligibilityStatus,
+    String executionEligibilityReason,
     TradeSimulationStatus simulationStatus,
     String activationTime,
     String resolutionTime,

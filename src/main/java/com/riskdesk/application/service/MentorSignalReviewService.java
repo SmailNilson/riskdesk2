@@ -12,6 +12,7 @@ import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
@@ -269,6 +270,8 @@ public class MentorSignalReviewService {
         review.setAlertTimestamp(alert.timestamp());
         review.setCreatedAt(createdAt);
         review.setSnapshotJson(defaultSnapshotJson(snapshotJson));
+        review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.NOT_EVALUATED);
+        review.setExecutionEligibilityReason("Mentor analysis pending.");
         return review;
     }
 
@@ -285,6 +288,8 @@ public class MentorSignalReviewService {
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(analysis));
                 review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
+                review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(analysis));
+                review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(analysis));
                 review.setErrorMessage(null);
                 initializeSimulationState(review, analysis);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
@@ -300,6 +305,8 @@ public class MentorSignalReviewService {
             review.setStatus(STATUS_ERROR);
             review.setCompletedAt(Instant.now());
             review.setErrorMessage(message);
+            review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+            review.setExecutionEligibilityReason(message);
             review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
             MentorSignalReviewRecord updated = reviewRepository.save(review);
             publish(updated);
@@ -338,6 +345,8 @@ public class MentorSignalReviewService {
             review.getAction(),
             review.getAlertTimestamp() == null ? null : review.getAlertTimestamp().toString(),
             review.getCreatedAt() == null ? null : review.getCreatedAt().toString(),
+            review.getExecutionEligibilityStatus(),
+            review.getExecutionEligibilityReason(),
             review.getSimulationStatus(),
             review.getActivationTime() == null ? null : review.getActivationTime().toString(),
             review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
@@ -362,12 +371,32 @@ public class MentorSignalReviewService {
         if (analysis == null || analysis.analysis() == null || analysis.analysis().proposedTradePlan() == null) {
             return false;
         }
-        if (review.getVerdict() == null || !review.getVerdict().contains("Validé")) {
+        if (review.getExecutionEligibilityStatus() != ExecutionEligibilityStatus.ELIGIBLE) {
             return false;
         }
         return analysis.analysis().proposedTradePlan().entryPrice() != null
             && analysis.analysis().proposedTradePlan().stopLoss() != null
             && analysis.analysis().proposedTradePlan().takeProfit() != null;
+    }
+
+    private ExecutionEligibilityStatus resolveExecutionEligibilityStatus(MentorAnalyzeResponse analysis) {
+        if (analysis == null || analysis.analysis() == null || analysis.analysis().executionEligibilityStatus() == null) {
+            return ExecutionEligibilityStatus.INELIGIBLE;
+        }
+        return analysis.analysis().executionEligibilityStatus();
+    }
+
+    private String resolveExecutionEligibilityReason(MentorAnalyzeResponse analysis) {
+        if (analysis == null || analysis.analysis() == null) {
+            return "Mentor analysis unavailable.";
+        }
+        String reason = analysis.analysis().executionEligibilityReason();
+        if (reason == null || reason.isBlank()) {
+            return analysis.analysis().executionEligibilityStatus() == ExecutionEligibilityStatus.ELIGIBLE
+                ? "Mentor explicitly marked the review as execution-eligible."
+                : "Mentor did not mark the review as execution-eligible.";
+        }
+        return reason;
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate,

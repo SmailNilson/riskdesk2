@@ -41,6 +41,23 @@ public record IndicatorSnapshot(
     BigDecimal wtDiff,
     String wtCrossover,
     String wtSignal,
+    // ── SMC: Internal structure ────────────────────────────────────────
+    String internalBias,
+    BigDecimal internalHigh,
+    BigDecimal internalLow,
+    Long internalHighTime,
+    Long internalLowTime,
+    String lastInternalBreakType,
+
+    // ── SMC: Swing structure ─────────────────────────────────────────
+    String swingBias,
+    BigDecimal swingHigh,
+    BigDecimal swingLow,
+    Long swingHighTime,
+    Long swingLowTime,
+    String lastSwingBreakType,
+
+    // ── SMC: Legacy / derived (kept for frontend backward compat) ────
     String marketStructureTrend,
     BigDecimal strongHigh,
     BigDecimal strongLow,
@@ -51,6 +68,18 @@ public record IndicatorSnapshot(
     Long strongLowTime,
     Long weakHighTime,
     Long weakLowTime,
+
+    // ── SMC: Liquidity (EQH / EQL) ─────────────────────────────────
+    List<EqualLevelView> equalHighs,
+    List<EqualLevelView> equalLows,
+
+    // ── SMC: Premium / Discount / Equilibrium (UC-SMC-004) ─────────
+    BigDecimal premiumZoneTop,
+    BigDecimal equilibriumLevel,
+    BigDecimal discountZoneBottom,
+    String currentZone,
+
+    // ── SMC: Zones ───────────────────────────────────────────────────
     List<OrderBlockView> activeOrderBlocks,
     List<FairValueGapView> activeFairValueGaps,
     List<StructureBreakView> recentBreaks,
@@ -61,5 +90,7 @@ public record IndicatorSnapshot(
 
     public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime) {}
 
-    public record StructureBreakView(String type, String trend, BigDecimal level, long barTime) {}
+    public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
+
+    public record EqualLevelView(String type, BigDecimal price, long firstBarTime, long secondBarTime) {}
 }

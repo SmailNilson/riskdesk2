@@ -185,6 +185,24 @@ Current behavior:
   - `MISSED`
   - `CANCELLED`
 
+### Execution Foundation
+
+RiskDesk now has a dedicated execution persistence model for future live-order orchestration.
+
+Current behavior:
+
+- live execution state is no longer meant to be stored on `mentor_signal_reviews`
+- a dedicated `trade_executions` table owns the future live execution lifecycle
+- the idempotence key is the persisted Mentor review ID, not the alert thread key
+- `TradeExecutionEntity` stores frozen review linkage, normalized entry price, virtual SL/TP placeholders, broker account, and execution timestamps
+- Slice 1 does not place any IBKR order yet
+- Mentor reviews now carry an explicit `executionEligibilityStatus` and `executionEligibilityReason`
+- backend execution creation must require:
+  - review status `DONE`
+  - explicit eligibility status `ELIGIBLE`
+  - complete `Entry / SL / TP`
+  - tick-normalized prices
+
 ## Operational Commands
 
 ### Compile backend

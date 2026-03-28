@@ -106,7 +106,39 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // SMC — only on transition AND on a new candle (Rule 4: candle close guard)
+        // SMC Internal — only on transition AND on a new candle (Rule 4: candle close guard)
+        String smcIntKey = "smc:internal:" + tf;
+        if (isTransition(smcIntKey, snap.lastInternalBreakType())
+                && snap.lastInternalBreakType() != null
+                && canFireOnCandle(smcIntKey + ":candle", snap.lastCandleTimestamp())) {
+            if (snap.lastInternalBreakType().startsWith("CHOCH")) {
+                alerts.add(new Alert("smc:internal:choch:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Internal CHoCH: " + snap.lastInternalBreakType(),
+                    AlertCategory.SMC, instrument.name()));
+            } else if (snap.lastInternalBreakType().startsWith("BOS")) {
+                alerts.add(new Alert("smc:internal:bos:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Internal BOS: " + snap.lastInternalBreakType(),
+                    AlertCategory.SMC, instrument.name()));
+            }
+        }
+
+        // SMC Swing — only on transition AND on a new candle (Rule 4: candle close guard)
+        String smcSwKey = "smc:swing:" + tf;
+        if (isTransition(smcSwKey, snap.lastSwingBreakType())
+                && snap.lastSwingBreakType() != null
+                && canFireOnCandle(smcSwKey + ":candle", snap.lastCandleTimestamp())) {
+            if (snap.lastSwingBreakType().startsWith("CHOCH")) {
+                alerts.add(new Alert("smc:swing:choch:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Swing CHoCH: " + snap.lastSwingBreakType(),
+                    AlertCategory.SMC, instrument.name()));
+            } else if (snap.lastSwingBreakType().startsWith("BOS")) {
+                alerts.add(new Alert("smc:swing:bos:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Swing BOS: " + snap.lastSwingBreakType(),
+                    AlertCategory.SMC, instrument.name()));
+            }
+        }
+
+        // SMC legacy — kept for backward compat (fires on either level transition)
         String smcKey = "smc:" + tf;
         if (isTransition(smcKey, snap.lastBreakType())
                 && snap.lastBreakType() != null

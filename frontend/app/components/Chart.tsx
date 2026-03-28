@@ -493,6 +493,19 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     addLine(snapshot.weakHigh,   '#f97316aa', LineStyle.Dotted, 'Weak H');
     addLine(snapshot.weakLow,    '#3b82f6aa', LineStyle.Dotted, 'Weak L');
 
+    // EQH / EQL — horizontal dashed lines at liquidity pools
+    for (const eq of snapshot.equalHighs ?? []) {
+      addLine(eq.price, '#ef4444aa', LineStyle.SparseDotted, 'EQH');
+    }
+    for (const eq of snapshot.equalLows ?? []) {
+      addLine(eq.price, '#22c55eaa', LineStyle.SparseDotted, 'EQL');
+    }
+
+    // Premium / Discount / Equilibrium zone lines
+    addLine(snapshot.premiumZoneTop, '#ef444480', LineStyle.Dashed, 'Premium');
+    addLine(snapshot.equilibriumLevel, '#a78bfa99', LineStyle.Solid, 'EQ 50%');
+    addLine(snapshot.discountZoneBottom, '#22c55e80', LineStyle.Dashed, 'Discount');
+
     // ── BOS / CHoCH arrow markers ─────────────────────────────────────────
     const markers: SeriesMarker<Time>[] = (snapshot.recentBreaks ?? [])
       .slice(-15)
@@ -550,7 +563,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
           {/* SMC toggle */}
           <Tag
             color={snapshot.marketStructureTrend === 'BULLISH' ? 'green' : snapshot.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'}
-            label={`SMC ${snapshot.lastBreakType?.replace('_', ' ') ?? snapshot.marketStructureTrend}`}
+            label={`SMC ${snapshot.swingBias ?? snapshot.internalBias ?? snapshot.marketStructureTrend}`}
             active={vis.smc}
             onClick={() => toggle('smc')}
           />

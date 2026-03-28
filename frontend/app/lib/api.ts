@@ -94,11 +94,19 @@ export interface FairValueGapView {
   startTime: number;   // epoch seconds
 }
 
+export interface EqualLevelView {
+  type: 'EQH' | 'EQL';
+  price: number;
+  firstBarTime: number;   // epoch seconds
+  secondBarTime: number;  // epoch seconds
+}
+
 export interface StructureBreakView {
   type: 'BOS' | 'CHOCH';
   trend: 'BULLISH' | 'BEARISH';
   level: number;
   barTime: number;     // epoch seconds
+  structureLevel: 'INTERNAL' | 'SWING' | null;
 }
 
 export interface IndicatorSnapshot {
@@ -138,6 +146,29 @@ export interface IndicatorSnapshot {
   wtDiff: number | null;
   wtCrossover: string | null;
   wtSignal: string | null;
+  // SMC: Internal structure
+  internalBias: string | null;
+  internalHigh: number | null;
+  internalLow: number | null;
+  internalHighTime: number | null;
+  internalLowTime: number | null;
+  lastInternalBreakType: string | null;
+  // SMC: Swing structure
+  swingBias: string | null;
+  swingHigh: number | null;
+  swingLow: number | null;
+  swingHighTime: number | null;
+  swingLowTime: number | null;
+  lastSwingBreakType: string | null;
+  // SMC: Liquidity (EQH / EQL)
+  equalHighs: EqualLevelView[];
+  equalLows: EqualLevelView[];
+  // SMC: Premium / Discount / Equilibrium (UC-SMC-004)
+  premiumZoneTop: number | null;
+  equilibriumLevel: number | null;
+  discountZoneBottom: number | null;
+  currentZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
+  // SMC: Legacy / derived (backward compat)
   marketStructureTrend: string;
   strongHigh: number | null;
   strongLow: number | null;
@@ -397,6 +428,8 @@ export interface MentorSignalReview {
   action: 'LONG' | 'SHORT';
   timestamp: string;
   createdAt: string;
+  executionEligibilityStatus: 'NOT_EVALUATED' | 'ELIGIBLE' | 'INELIGIBLE' | null;
+  executionEligibilityReason: string | null;
   simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | null;
   activationTime: string | null;
   resolutionTime: string | null;

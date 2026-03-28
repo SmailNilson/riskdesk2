@@ -13,6 +13,7 @@ import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorManualReviewService;
 import com.riskdesk.application.service.MentorMemoryService;
 import com.riskdesk.application.service.MentorSignalReviewService;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -70,6 +71,8 @@ class MentorControllerIntegrationTest {
                     List.of("VWAP respected"),
                     List.of("No DXY context"),
                     "Trade Non-Conforme - Erreur de Processus",
+                    ExecutionEligibilityStatus.INELIGIBLE,
+                    "Setup not executable.",
                     "Wait for clearer structure.",
                     new MentorProposedTradePlan(
                         3012.5,
@@ -146,6 +149,8 @@ class MentorControllerIntegrationTest {
                         List.of("Momentum clean"),
                         List.of(),
                         "Trade Validé - Discipline Respectée",
+                        ExecutionEligibilityStatus.ELIGIBLE,
+                        "Review explicitly eligible.",
                         "Patience sur l'entrée.",
                         null
                     ),
@@ -183,6 +188,8 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
+                ExecutionEligibilityStatus.ELIGIBLE,
+                "Review explicitly eligible.",
                 null,
                 null,
                 null,
@@ -216,6 +223,8 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
+                ExecutionEligibilityStatus.ELIGIBLE,
+                "Review explicitly eligible.",
                 null,
                 null,
                 null,
@@ -237,6 +246,8 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:31:10Z",
+                ExecutionEligibilityStatus.NOT_EVALUATED,
+                "Mentor analysis pending.",
                 null,
                 null,
                 null,
@@ -279,6 +290,8 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:32:00Z",
+                ExecutionEligibilityStatus.NOT_EVALUATED,
+                "Mentor analysis pending.",
                 null,
                 null,
                 null,

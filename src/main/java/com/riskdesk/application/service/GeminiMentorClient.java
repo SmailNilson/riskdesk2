@@ -47,6 +47,8 @@ public class GeminiMentorClient implements MentorModelClient {
           "strengths": ["point 1", "point 2"],
           "errors": ["point 1", "point 2"],
           "verdict": "Trade Validé - Discipline Respectée" ou "Trade Non-Conforme - Erreur de Processus",
+          "executionEligibilityStatus": "ELIGIBLE" ou "INELIGIBLE",
+          "executionEligibilityReason": "raison courte expliquant la décision d'exécution",
           "improvementTip": "une phrase claire",
           "proposedTradePlan": {
             "entryPrice": 0,
@@ -93,6 +95,9 @@ public class GeminiMentorClient implements MentorModelClient {
                 Tu dois recalculer toi-même l'Optimal Entry en Limit Order, même si le verdict final est non conforme.
                 Retourne proposedTradePlan dès que les niveaux de marché suffisent à construire un plan exploitable.
                 N'utilise proposedTradePlan = null que si les données techniques sont insuffisantes pour proposer une entrée fiable.
+                executionEligibilityStatus doit être ELIGIBLE uniquement si le setup est autorisé pour l'exécution réelle backend maintenant.
+                Si le trade est non conforme, trop tardif, structurellement invalide, ou sans Entry/SL/TP complets, retourne executionEligibilityStatus = INELIGIBLE.
+                executionEligibilityReason doit expliquer brièvement cette décision.
                 Si trade_intention.review_type = MANUAL_REANALYSIS, traite original_alert_context comme le contexte historique de départ, mais fonde ton verdict principal sur les données live que tu reçois maintenant.
                 %s
 
