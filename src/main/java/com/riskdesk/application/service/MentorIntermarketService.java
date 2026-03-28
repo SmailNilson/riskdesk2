@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.beans.factory.ObjectProvider;
@@ -19,11 +20,14 @@ public class MentorIntermarketService {
 
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
     private final CandleRepositoryPort candleRepositoryPort;
+    private final ActiveContractRegistry contractRegistry;
 
     public MentorIntermarketService(ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                    CandleRepositoryPort candleRepositoryPort) {
+                                    CandleRepositoryPort candleRepositoryPort,
+                                    ActiveContractRegistry contractRegistry) {
         this.marketDataServiceProvider = marketDataServiceProvider;
         this.candleRepositoryPort = candleRepositoryPort;
+        this.contractRegistry = contractRegistry;
     }
 
     public MentorIntermarketSnapshot current(Instrument focusInstrument) {
@@ -84,10 +88,16 @@ public class MentorIntermarketService {
     }
 
     private List<Candle> recentDxyCandles() {
-        List<Candle> recent10m = candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2);
-        if (!recent10m.isEmpty()) {
-            return recent10m;
+        String contractMonth = contractRegistry.getContractMonth(Instrument.DXY).orElse(null);
+        if (contractMonth != null) {
+            List<Candle> tagged10m = candleRepositoryPort.findRecentCandlesByContractMonth(Instrument.DXY, "10m", contractMonth, 2);
+            if (!tagged10m.isEmpty()) return tagged10m;
+            List<Candle> tagged1h = candleRepositoryPort.findRecentCandlesByContractMonth(Instrument.DXY, "1h", contractMonth, 2);
+            if (!tagged1h.isEmpty()) return tagged1h;
         }
+        // Fallback to legacy untagged rows
+        List<Candle> recent10m = candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2);
+        if (!recent10m.isEmpty()) return recent10m;
         return candleRepositoryPort.findRecentCandles(Instrument.DXY, "1h", 2);
     }
 
