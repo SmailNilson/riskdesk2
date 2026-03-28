@@ -78,6 +78,7 @@ public class IbGatewayNativeClient {
     private final Object connectionLock = new Object();
     private final Object accountSnapshotLock = new Object();
     private final Object streamingLock = new Object();
+    private final Object orderPlacementLock = new Object();
     private volatile ApiController controller;
     private volatile CompletableFuture<Void> connectedFuture = new CompletableFuture<>();
     private volatile CompletableFuture<List<String>> accountsFuture = new CompletableFuture<>();
@@ -350,7 +351,9 @@ public class IbGatewayNativeClient {
             }
         };
 
-        controller.placeOrModifyOrder(contract, order, handler);
+        synchronized (orderPlacementLock) {
+            controller.placeOrModifyOrder(contract, order, handler);
+        }
 
         boolean completed = false;
         try {

@@ -11,6 +11,8 @@ import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -46,6 +48,7 @@ public class MentorAnalysisService {
         return analyze(payload, MANUAL_SOURCE_PREFIX + Instant.now().toEpochMilli());
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public MentorAnalyzeResponse analyze(JsonNode payload, String sourceRef) {
         List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(payload);
         try {
