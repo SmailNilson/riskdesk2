@@ -39,6 +39,26 @@ function timeframeToSeconds(timeframe: string) {
   return timeframe === '1d' ? 86400 : timeframe === '1h' ? 3600 : timeframe === '5m' ? 300 : 600;
 }
 
+// Normalise any time value coming from the backend to a Unix timestamp in seconds.
+// The Java backend may serialise LocalDateTime / Instant as an ISO string, a plain
+// number (epoch-seconds or epoch-millis), or even a structured object — handle all.
+function toUnixSeconds(raw: unknown): number {
+  if (typeof raw === 'number') {
+    // Epoch-millis are > ~1e12; epoch-seconds are ~1.7e9 as of 2025
+    return raw > 1e10 ? Math.floor(raw / 1000) : Math.floor(raw);
+  }
+  if (typeof raw === 'string') {
+    const ms = new Date(raw).getTime();
+    return isNaN(ms) ? Math.floor(Date.now() / 1000) : Math.floor(ms / 1000);
+  }
+  if (raw !== null && typeof raw === 'object') {
+    // Fallback: stringify and try to parse (handles Java date structs like {year,month,…})
+    const ms = new Date(String(raw)).getTime();
+    return isNaN(ms) ? Math.floor(Date.now() / 1000) : Math.floor(ms / 1000);
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
 function resolveBarTime(update: PriceUpdate, timeframe: string): Time {
   const priceTs = update.timestamp ? Math.floor(new Date(update.timestamp).getTime() / 1000) : Math.floor(Date.now() / 1000);
   const periodSec = timeframeToSeconds(timeframe);
@@ -145,13 +165,17 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
 
       if (candles.length === 0) return;
 
-      const candleData = candles.map(c => ({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }));
+      const candleData = candles
+        .map(c => ({
+          time: toUnixSeconds(c.time) as Time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number))
+        // Remove duplicate timestamps — keep last occurrence (most recent data wins)
+        .filter((item, idx, arr) => idx === arr.length - 1 || item.time !== arr[idx + 1].time);
 
       candleSeries.setData(candleData);
       lastCandleRef.current = candleData[candleData.length - 1];
@@ -165,16 +189,26 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         setLastBarTime(mergedLiveCandle.time);
       }
 
-      ema9Series.setData(indicatorSeries.ema9.map(p => ({ time: p.time as Time, value: p.value })));
-      ema50Series.setData(indicatorSeries.ema50.map(p => ({ time: p.time as Time, value: p.value })));
-      ema200Series.setData(indicatorSeries.ema200.map(p => ({ time: p.time as Time, value: p.value })));
-      bbUpperSeries.setData(indicatorSeries.bollingerBands.map(p => ({ time: p.time as Time, value: p.upper })));
-      bbLowerSeries.setData(indicatorSeries.bollingerBands.map(p => ({ time: p.time as Time, value: p.lower })));
+      // Helper: normalise + sort + dedup a line-point array
+      const normLine = <T extends { time: unknown }>(
+        arr: T[],
+      ): (Omit<T, 'time'> & { time: Time })[] =>
+        arr
+          .map(p => ({ ...p, time: toUnixSeconds(p.time) as Time }))
+          .sort((a, b) => (a.time as number) - (b.time as number))
+          .filter((p, i, a) => i === a.length - 1 || p.time !== a[i + 1].time);
 
-      wt1Series.setData(indicatorSeries.waveTrend.map(p => ({ time: p.time as Time, value: p.wt1 })));
-      wt2Series.setData(indicatorSeries.waveTrend.map(p => ({ time: p.time as Time, value: p.wt2 })));
-      wtDiffSeries.setData(indicatorSeries.waveTrend.map(p => ({
-        time: p.time as Time,
+      ema9Series.setData(normLine(indicatorSeries.ema9).map(p => ({ time: p.time, value: p.value })));
+      ema50Series.setData(normLine(indicatorSeries.ema50).map(p => ({ time: p.time, value: p.value })));
+      ema200Series.setData(normLine(indicatorSeries.ema200).map(p => ({ time: p.time, value: p.value })));
+      bbUpperSeries.setData(normLine(indicatorSeries.bollingerBands).map(p => ({ time: p.time, value: p.upper })));
+      bbLowerSeries.setData(normLine(indicatorSeries.bollingerBands).map(p => ({ time: p.time, value: p.lower })));
+
+      const wtNorm = normLine(indicatorSeries.waveTrend);
+      wt1Series.setData(wtNorm.map(p => ({ time: p.time, value: p.wt1 })));
+      wt2Series.setData(wtNorm.map(p => ({ time: p.time, value: p.wt2 })));
+      wtDiffSeries.setData(wtNorm.map(p => ({
+        time: p.time,
         value: p.diff,
         color: p.diff >= 0 ? '#22c55e60' : '#ef444460',
       })));
@@ -483,6 +517,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   useEffect(() => {
     if (!livePrice || !candleRef.current) return;
     const updated = mergeLivePrice(lastCandleRef.current, livePrice, timeframe);
+    // lightweight-charts throws if we update() with a time older than the last bar
+    if (lastCandleRef.current && (updated.time as number) < (lastCandleRef.current.time as number)) return;
     lastCandleRef.current = updated;
     setLastBarTime(updated.time);
     candleRef.current.update(updated);
