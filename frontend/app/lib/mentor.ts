@@ -52,9 +52,8 @@ export async function runMentorAnalysis(params: {
   includePortfolioContext: boolean;
   tradeIntention: MentorTradeIntention;
 }) {
-  await api.refreshMentorContext(params.instrument, params.timeframe).catch(() => null);
-
-  const [livePriceView, freshSummary, freshAlerts, freshSnapshot, indicatorSeries, h1Snapshot, candles, intermarket] = await Promise.all([
+  const [, livePriceView, freshSummary, freshAlerts, freshSnapshot, indicatorSeries, h1Snapshot, candles, intermarket] = await Promise.all([
+    api.refreshMentorContext(params.instrument, params.timeframe).catch(() => null),
     api.getLivePrice(params.instrument).catch(() => null),
     params.includePortfolioContext
       ? api.getPortfolioSummary().catch(() => params.summary)
