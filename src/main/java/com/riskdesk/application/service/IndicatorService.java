@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.engine.indicators.*;
 import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
@@ -29,7 +30,8 @@ public class IndicatorService {
     private static final int WT_N2 = 21;
     private static final int WT_SIGNAL_PERIOD = 4;
 
-    private final CandleRepositoryPort candlePort;
+    private final CandleRepositoryPort  candlePort;
+    private final ActiveContractRegistry contractRegistry;
 
     // Indicators — initialized with TradingView defaults
     private final EMAIndicator ema9   = new EMAIndicator(EMA_9_PERIOD);
@@ -47,8 +49,9 @@ public class IndicatorService {
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(5);
 
-    public IndicatorService(CandleRepositoryPort candlePort) {
-        this.candlePort = candlePort;
+    public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
+        this.candlePort       = candlePort;
+        this.contractRegistry = contractRegistry;
     }
 
     public IndicatorSnapshot computeSnapshot(Instrument instrument, String timeframe) {
@@ -217,9 +220,20 @@ public class IndicatorService {
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
-        List<Candle> candles = new ArrayList<>(candlePort.findRecentCandles(instrument, timeframe, limit));
-        Collections.reverse(candles);
-        return candles;
+        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        List<Candle> candles;
+        if (contractMonth != null) {
+            candles = candlePort.findRecentCandlesByContractMonth(instrument, timeframe, contractMonth, limit);
+            if (candles.isEmpty()) {
+                // Migration path: no tagged candles yet — fall back to legacy untagged rows
+                candles = candlePort.findRecentCandles(instrument, timeframe, limit);
+            }
+        } else {
+            candles = candlePort.findRecentCandles(instrument, timeframe, limit);
+        }
+        List<Candle> ordered = new ArrayList<>(candles);
+        Collections.reverse(ordered);
+        return ordered;
     }
 
     private BigDecimal last(List<BigDecimal> list) {

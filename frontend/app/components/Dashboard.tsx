@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, PortfolioSummary, IndicatorSnapshot } from '@/app/lib/api';
 import { useWebSocket } from '@/app/hooks/useWebSocket';
 import MetricsBar from './MetricsBar';
+import RolloverBanner from './RolloverBanner';
 import Chart from './Chart';
 import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
@@ -135,6 +136,9 @@ export default function Dashboard() {
 
       {/* Metrics bar */}
       <MetricsBar summary={summary} connected={connected} />
+
+      {/* Rollover warning — visible only when a contract is near expiry */}
+      <RolloverBanner />
 
       {/* Live price ticker */}
       <div className="flex gap-4 px-4 py-1.5 bg-zinc-900/50 border-b border-zinc-800/50 overflow-x-auto">

@@ -16,6 +16,14 @@ public interface CandleRepositoryPort {
 
     List<Candle> findRecentCandles(Instrument instrument, String timeframe, int limit);
 
+    /**
+     * Fetches recent candles tagged with a specific contract month.
+     * This is the primary query for all live indicator and analysis services.
+     * Falls back to {@link #findRecentCandles} for legacy untagged data.
+     */
+    List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe,
+                                                  String contractMonth, int limit);
+
     Candle save(Candle candle);
 
     List<Candle> saveAll(List<Candle> candles);
