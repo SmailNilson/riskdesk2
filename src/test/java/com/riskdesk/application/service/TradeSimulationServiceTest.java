@@ -8,6 +8,7 @@ import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
@@ -138,6 +139,8 @@ class TradeSimulationServiceTest {
                 List.of(),
                 List.of(),
                 "Trade Validé - Discipline Respectée",
+                ExecutionEligibilityStatus.ELIGIBLE,
+                "Simulation plan is executable.",
                 "Stay patient",
                 plan
             ),

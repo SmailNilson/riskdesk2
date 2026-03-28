@@ -7,6 +7,7 @@ import com.riskdesk.application.dto.MentorManualReview;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.MentorAudit;
 import org.springframework.stereotype.Service;
 
@@ -89,6 +90,8 @@ public class MentorManualReviewService {
                 List.of(),
                 List.of("La réponse sauvegardée n'était pas un JSON strictement exploitable."),
                 "Trade Non-Conforme - Erreur de Processus",
+                ExecutionEligibilityStatus.INELIGIBLE,
+                "Structured mentor response unavailable.",
                 "Relance une analyse manuelle si tu veux une version plus structurée.",
                 null
             );

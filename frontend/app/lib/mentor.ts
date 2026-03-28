@@ -201,7 +201,11 @@ export function buildMentorPayload(params: {
     market_structure_the_king: {
       trend_H1: params.h1Snapshot.marketStructureTrend,
       trend_focus: params.snapshot.marketStructureTrend,
+      internal_bias: params.snapshot.internalBias,
+      swing_bias: params.snapshot.swingBias,
       focus_timeframe: toMentorTimeframe(params.timeframe),
+      last_internal_event: params.snapshot.lastInternalBreakType,
+      last_swing_event: params.snapshot.lastSwingBreakType,
       last_event: params.snapshot.lastBreakType,
       last_event_price: params.snapshot.recentBreaks[0]?.level ?? null,
       nearest_support_ob: nearestSupport,

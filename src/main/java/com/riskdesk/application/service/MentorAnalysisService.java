@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
@@ -80,6 +81,8 @@ public class MentorAnalysisService {
                 List.of(),
                 List.of("La réponse du modèle n'était pas un JSON strictement exploitable."),
                 "Trade Non-Conforme - Erreur de Processus",
+                ExecutionEligibilityStatus.INELIGIBLE,
+                "Structured mentor response unavailable.",
                 "Rends la sortie du mentor plus structurée avant de l'utiliser en décision.",
                 null
             );

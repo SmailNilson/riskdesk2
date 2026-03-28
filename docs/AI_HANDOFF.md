@@ -1,6 +1,6 @@
 # AI Handoff
 
-Last updated: 2026-03-26
+Last updated: 2026-03-28
 
 ## Goal of this file
 
@@ -182,6 +182,34 @@ Why:
 
 - persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
 - multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
+
+### 7. Execution foundation for real IBKR workflow
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/ExecutionManagerService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/persistence/entity/TradeExecutionEntity.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/persistence/JpaTradeExecutionRepositoryAdapter.java`
+
+What changed:
+
+- introduced a dedicated `trade_executions` table instead of extending `mentor_signal_reviews` again
+- idempotence is now defined per persisted Mentor review ID (`mentorSignalReviewId`)
+- `ExecutionManagerService.ensureExecutionCreated()` creates a pending execution foundation row only
+- no IBKR `placeOrder` or `EWrapper` execution callback wiring exists yet
+- `MentorSignalReview` persistence now stores explicit execution eligibility metadata:
+  - `executionEligibilityStatus`
+  - `executionEligibilityReason`
+
+Why:
+
+- live execution lifecycle is orthogonal to review persistence and simulation persistence
+- one review must never create duplicate live executions under retries, restart replays, or double clicks
+- execution gating must not depend on parsing the verdict string in UI code
+
+Operational note:
+
+- the new eligibility field on historical rows may be `null`; treat those rows as legacy, display-only records until they are reanalyzed
 
 ## Known Runtime Behavior
 

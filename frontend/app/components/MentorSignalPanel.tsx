@@ -378,6 +378,7 @@ export default function MentorSignalPanel({
                       <SimulationChip status={bestReview?.simulationStatus ?? null} />
                       <StatusChip
                         status={bestReview?.status ?? 'MISSING'}
+                        executionEligibilityStatus={bestReview?.executionEligibilityStatus}
                         verdict={bestReview?.analysis?.analysis?.verdict}
                       />
                     </span>
@@ -421,6 +422,7 @@ export default function MentorSignalPanel({
                   <SimulationChip status={preferredSelectedGroupReview?.simulationStatus ?? null} />
                   <StatusChip
                     status={preferredSelectedGroupReview?.status ?? 'MISSING'}
+                    executionEligibilityStatus={preferredSelectedGroupReview?.executionEligibilityStatus}
                     verdict={preferredSelectedGroupReview?.analysis?.analysis?.verdict}
                   />
                   {selectedGroup.alerts.length > 0 ? (
@@ -525,7 +527,11 @@ export default function MentorSignalPanel({
                           <span className={`rounded px-2 py-1 text-[10px] ${review.triggerType === 'INITIAL' ? 'bg-cyan-950/60 text-cyan-300' : 'bg-amber-950/60 text-amber-300'}`}>
                             {review.triggerType === 'INITIAL' ? 'Initial' : 'Reanalysis'}
                           </span>
-                          <StatusChip status={review.status} verdict={review.analysis?.analysis?.verdict} />
+                          <StatusChip
+                            status={review.status}
+                            executionEligibilityStatus={review.executionEligibilityStatus}
+                            verdict={review.analysis?.analysis?.verdict}
+                          />
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone.tz })}
@@ -600,9 +606,19 @@ function Section({ label, value }: { label: string; value: string | null | undef
   );
 }
 
-function StatusChip({ status, verdict }: { status: MentorSignalReview['status'] | 'MISSING'; verdict?: string }) {
+function StatusChip({
+  status,
+  executionEligibilityStatus,
+  verdict,
+}: {
+  status: MentorSignalReview['status'] | 'MISSING';
+  executionEligibilityStatus?: MentorSignalReview['executionEligibilityStatus'];
+  verdict?: string;
+}) {
   if (status === 'DONE') {
-    const valid = verdict?.includes('Valid');
+    const valid = executionEligibilityStatus === 'NOT_EVALUATED' || executionEligibilityStatus == null
+      ? verdict?.includes('Valid')
+      : executionEligibilityStatus === 'ELIGIBLE';
     return (
       <span className={`rounded px-2 py-1 text-[10px] font-semibold ${valid ? 'bg-emerald-950/70 text-emerald-300' : 'bg-red-950/70 text-red-300'}`}>
         {valid ? 'Trade OK' : 'Trade Non-Conforme'}
@@ -629,7 +645,7 @@ function pickPreferredReview(reviews: MentorSignalReview[]) {
   const sorted = sortReviews(reviews);
   const latestValid = [...sorted]
     .reverse()
-    .find(review => review.status === 'DONE' && review.analysis?.analysis?.verdict?.includes('Valid'));
+    .find(review => review.status === 'DONE' && isExecutionEligible(review));
 
   if (latestValid) {
     return latestValid;
@@ -655,8 +671,7 @@ function matchesGroupStatusFilter(
     return preferredReview.simulationStatus === 'PENDING_ENTRY';
   }
 
-  const verdict = preferredReview.analysis?.analysis?.verdict ?? '';
-  const valid = preferredReview.status === 'DONE' && verdict.includes('Valid');
+  const valid = preferredReview.status === 'DONE' && isExecutionEligible(preferredReview);
 
   if (filter === 'TRADE_OK') {
     return valid;
@@ -802,4 +817,14 @@ function inferDirection(alert: AlertMessage) {
   if (normalized.includes('BULLISH') || normalized.includes('OVERSOLD')) return 'LONG';
   if (normalized.includes('BEARISH') || normalized.includes('OVERBOUGHT')) return 'SHORT';
   return null;
+}
+
+function isExecutionEligible(review: MentorSignalReview) {
+  if (review.executionEligibilityStatus === 'ELIGIBLE') {
+    return true;
+  }
+  if (review.executionEligibilityStatus === 'INELIGIBLE') {
+    return false;
+  }
+  return review.analysis?.analysis?.verdict?.includes('Valid') ?? false;
 }

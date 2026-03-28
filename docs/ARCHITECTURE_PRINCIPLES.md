@@ -195,6 +195,16 @@ When evaluating whether a saved Mentor trade plan was correct:
 - do not recompute the original Mentor review payload during outcome evaluation
 - use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
 
+### Live Execution Foundation Rule
+
+When introducing real-order execution:
+
+- do not overload `MentorSignalReview` with broker order lifecycle state
+- persist live execution workflow in a dedicated model/table linked by review ID
+- treat `mentorSignalReviewId` as the idempotence key for execution creation
+- require backend-owned eligibility metadata on the review; do not parse UI verdict strings as execution truth
+- keep Slice 1 free of IBKR order placement side effects until the persistence and state machine foundation is stable
+
 ## Review Checklist
 
 When reviewing a change, ask:

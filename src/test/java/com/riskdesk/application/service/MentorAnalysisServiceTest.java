@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.junit.jupiter.api.Test;
@@ -51,6 +52,8 @@ class MentorAnalysisServiceTest {
               "strengths": ["Respect de la structure"],
               "errors": ["Corrélations absentes"],
               "verdict": "Trade Validé - Discipline Respectée",
+              "executionEligibilityStatus": "ELIGIBLE",
+              "executionEligibilityReason": "Plan complet et setup conforme.",
               "improvementTip": "Attends plus de confluence macro.",
               "proposedTradePlan": {
                 "entryPrice": 3012.5,
@@ -85,6 +88,7 @@ class MentorAnalysisServiceTest {
         assertThat(response.auditId()).isEqualTo(42L);
         assertThat(response.model()).isEqualTo("gemini-test");
         assertThat(response.analysis().verdict()).isEqualTo("Trade Validé - Discipline Respectée");
+        assertThat(response.analysis().executionEligibilityStatus()).isEqualTo(ExecutionEligibilityStatus.ELIGIBLE);
         assertThat(response.analysis().strengths()).containsExactly("Respect de la structure");
         assertThat(response.analysis().proposedTradePlan()).isNotNull();
         assertThat(response.analysis().proposedTradePlan().safeDeepEntry()).isNotNull();

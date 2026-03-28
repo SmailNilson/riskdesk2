@@ -514,7 +514,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
           {/* SMC toggle */}
           <Tag
             color={snapshot.marketStructureTrend === 'BULLISH' ? 'green' : snapshot.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'}
-            label={`SMC ${snapshot.lastBreakType?.replace('_', ' ') ?? snapshot.marketStructureTrend}`}
+            label={`SMC ${snapshot.swingBias ?? snapshot.internalBias ?? snapshot.marketStructureTrend}`}
             active={vis.smc}
             onClick={() => toggle('smc')}
           />

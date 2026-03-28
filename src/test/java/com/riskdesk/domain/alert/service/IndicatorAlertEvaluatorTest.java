@@ -34,6 +34,8 @@ class IndicatorAlertEvaluatorTest {
             rsi, rsiSignal,
             macdCrossover,
             lastBreakType,
+            lastBreakType,  // lastInternalBreakType (same for test simplicity)
+            null,           // lastSwingBreakType
             null,
             null,
             null,
@@ -116,11 +118,14 @@ class IndicatorAlertEvaluatorTest {
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
 
-        assertEquals(1, alerts.size());
-        Alert a = alerts.get(0);
-        assertEquals(AlertSeverity.INFO, a.severity());
-        assertEquals(AlertCategory.SMC, a.category());
-        assertTrue(a.message().contains("BOS"));
+        // Internal BOS + legacy BOS = 2 alerts
+        assertEquals(2, alerts.size());
+        assertTrue(alerts.stream().anyMatch(a ->
+                a.severity() == AlertSeverity.INFO && a.category() == AlertCategory.SMC
+                        && a.key().startsWith("smc:internal:bos:") && a.message().contains("Internal BOS")));
+        assertTrue(alerts.stream().anyMatch(a ->
+                a.severity() == AlertSeverity.INFO && a.category() == AlertCategory.SMC
+                        && a.key().startsWith("smc:bos:") && a.message().contains("BOS")));
     }
 
     @Test
@@ -129,11 +134,14 @@ class IndicatorAlertEvaluatorTest {
 
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
-        assertEquals(1, alerts.size());
-        Alert a = alerts.get(0);
-        assertEquals(AlertSeverity.WARNING, a.severity());
-        assertEquals(AlertCategory.SMC, a.category());
-        assertTrue(a.message().contains("CHoCH"));
+        // Internal CHoCH + legacy CHoCH = 2 alerts
+        assertEquals(2, alerts.size());
+        assertTrue(alerts.stream().anyMatch(a ->
+                a.severity() == AlertSeverity.WARNING && a.category() == AlertCategory.SMC
+                        && a.key().startsWith("smc:internal:choch:") && a.message().contains("Internal CHoCH")));
+        assertTrue(alerts.stream().anyMatch(a ->
+                a.severity() == AlertSeverity.WARNING && a.category() == AlertCategory.SMC
+                        && a.key().startsWith("smc:choch:") && a.message().contains("CHoCH")));
     }
 
     @Test

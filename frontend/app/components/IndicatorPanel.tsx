@@ -145,21 +145,36 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
         )}
       </Section>
 
-      {/* SMC */}
-      <Section title="SMC Structure">
+      {/* SMC Internal */}
+      <Section title="SMC Internal">
         <div className="flex justify-between items-center py-0.5">
-          <span className="text-zinc-500 text-xs">Trend</span>
-          <Badge label={s.marketStructureTrend}
-            color={s.marketStructureTrend === 'BULLISH' ? 'green' : s.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'} />
+          <span className="text-zinc-500 text-xs">Bias</span>
+          <Badge label={s.internalBias ?? '—'}
+            color={s.internalBias === 'BULLISH' ? 'green' : s.internalBias === 'BEARISH' ? 'red' : 'gray'} />
         </div>
-        <Row label="Strong High" value={n(s.strongHigh)} />
-        <Row label="Strong Low" value={n(s.strongLow)} />
-        <Row label="Weak High" value={n(s.weakHigh)} />
-        <Row label="Weak Low" value={n(s.weakLow)} />
-        {s.lastBreakType && (
+        <Row label="High" value={n(s.internalHigh)} sub="weak" />
+        <Row label="Low" value={n(s.internalLow)} sub="weak" />
+        {s.lastInternalBreakType && (
           <div className="flex justify-between items-center py-0.5">
             <span className="text-zinc-500 text-xs">Last</span>
-            <Badge label={s.lastBreakType} color={signalColor(s.lastBreakType)} />
+            <Badge label={s.lastInternalBreakType} color={signalColor(s.lastInternalBreakType)} />
+          </div>
+        )}
+      </Section>
+
+      {/* SMC Swing */}
+      <Section title="SMC Swing">
+        <div className="flex justify-between items-center py-0.5">
+          <span className="text-zinc-500 text-xs">Bias</span>
+          <Badge label={s.swingBias ?? '—'}
+            color={s.swingBias === 'BULLISH' ? 'green' : s.swingBias === 'BEARISH' ? 'red' : 'gray'} />
+        </div>
+        <Row label="High" value={n(s.swingHigh)} sub="strong" />
+        <Row label="Low" value={n(s.swingLow)} sub="strong" />
+        {s.lastSwingBreakType && (
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Last</span>
+            <Badge label={s.lastSwingBreakType} color={signalColor(s.lastSwingBreakType)} />
           </div>
         )}
       </Section>

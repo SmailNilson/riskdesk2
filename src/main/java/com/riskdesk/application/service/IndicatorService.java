@@ -43,7 +43,6 @@ public class IndicatorService {
     private final BollingerBandsIndicator bb = new BollingerBandsIndicator(BB_PERIOD, 2.0, BB_TREND_FAST_PERIOD, BB_TREND_SLOW_PERIOD, 2.0);
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
-    private final MarketStructure marketStructure = new MarketStructure(5);
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(5);
 
@@ -92,36 +91,50 @@ public class IndicatorService {
         // WaveTrend
         WaveTrendIndicator.WaveTrendResult wt = waveTrend.current(candles);
 
-        // ── SMC ──────────────────────────────────────────────────────────────────
+        // ── SMC (UC-SMC-002: Internal + Swing structure) ─────────────────────────
 
-        // Market Structure (BOS / CHoCH, strong/weak H/L)
-        MarketStructure.StructureAnalysis structure = marketStructure.analyze(candles);
-        List<MarketStructure.StructureBreak> breaks = structure.breaks();
-        String lastBreak = breaks.isEmpty() ? null :
-                breaks.get(breaks.size() - 1).type().name() + "_" + breaks.get(breaks.size() - 1).newTrend().name();
+        SmcStructureEngine smcEngine = new SmcStructureEngine(5, 50);
+        SmcStructureEngine.StructureSnapshot smcSnap = smcEngine.computeFromHistory(candles);
 
-        // Timestamps for chart price-line rendering
-        Long strongHighTime = swingTime(structure.swingPoints(), candles,
-                MarketStructure.SwingType.HIGH, structure.strongHigh(), MarketStructure.Strength.STRONG);
-        Long strongLowTime  = swingTime(structure.swingPoints(), candles,
-                MarketStructure.SwingType.LOW,  structure.strongLow(),  MarketStructure.Strength.STRONG);
-        Long weakHighTime   = swingTime(structure.swingPoints(), candles,
-                MarketStructure.SwingType.HIGH, structure.weakHigh(),   MarketStructure.Strength.WEAK);
-        Long weakLowTime    = swingTime(structure.swingPoints(), candles,
-                MarketStructure.SwingType.LOW,  structure.weakLow(),    MarketStructure.Strength.WEAK);
+        // Internal bias & pivots
+        String internalBias = smcSnap.internalBias() != null ? smcSnap.internalBias().name() : null;
+        BigDecimal internalHigh = smcSnap.internalHigh() != null ? BigDecimal.valueOf(smcSnap.internalHigh().price()) : null;
+        BigDecimal internalLow  = smcSnap.internalLow()  != null ? BigDecimal.valueOf(smcSnap.internalLow().price())  : null;
+        Long internalHighTime = smcSnap.internalHigh() != null ? smcSnap.internalHigh().timestamp().getEpochSecond() : null;
+        Long internalLowTime  = smcSnap.internalLow()  != null ? smcSnap.internalLow().timestamp().getEpochSecond()  : null;
 
-        // Recent BOS / CHoCH with bar timestamps (last 15 for chart markers)
-        List<IndicatorSnapshot.StructureBreakView> recentBreaks = breaks.stream()
-                .filter(b -> b.breakIndex() < candles.size())
-                .map(b -> new IndicatorSnapshot.StructureBreakView(
-                        b.type().name(),
-                        b.newTrend().name(),
-                        b.breakLevel(),
-                        candles.get(b.breakIndex()).getTimestamp().getEpochSecond()
-                ))
-                .toList();
+        // Swing bias & pivots
+        String swingBias = smcSnap.swingBias() != null ? smcSnap.swingBias().name() : null;
+        BigDecimal swingHigh = smcSnap.swingHigh() != null ? BigDecimal.valueOf(smcSnap.swingHigh().price()) : null;
+        BigDecimal swingLow  = smcSnap.swingLow()  != null ? BigDecimal.valueOf(smcSnap.swingLow().price())  : null;
+        Long swingHighTime = smcSnap.swingHigh() != null ? smcSnap.swingHigh().timestamp().getEpochSecond() : null;
+        Long swingLowTime  = smcSnap.swingLow()  != null ? smcSnap.swingLow().timestamp().getEpochSecond()  : null;
 
-        // Order Blocks
+        // Legacy derived fields (backward compat until frontend migrates to internal/swing)
+        // marketStructureTrend: prefer swing bias if available, else internal
+        String marketStructureTrend = swingBias != null ? swingBias : (internalBias != null ? internalBias : "UNDEFINED");
+        // strong = swing pivots, weak = internal pivots (matches LuxAlgo semantics)
+        BigDecimal strongHigh = swingHigh;
+        BigDecimal strongLow  = swingLow;
+        BigDecimal weakHigh   = internalHigh;
+        BigDecimal weakLow    = internalLow;
+        Long strongHighTime = swingHighTime;
+        Long strongLowTime  = swingLowTime;
+        Long weakHighTime   = internalHighTime;
+        Long weakLowTime    = internalLowTime;
+
+        // Last break type per level (from allEvents — empty in batch mode, so derive from bias transitions)
+        // In batch mode, allEvents is empty. We use bias as proxy: if bias is set, there was at least one break.
+        // For alert purposes, the IndicatorAlertEvaluator uses lastBreakType which fires on transition.
+        String lastInternalBreak = null;
+        String lastSwingBreak = null;
+        // Legacy single lastBreakType: prefer swing, else internal
+        String lastBreak = lastSwingBreak != null ? lastSwingBreak : lastInternalBreak;
+
+        // recentBreaks: empty in batch mode (no events captured — to be populated in step 1d with tail capture)
+        List<IndicatorSnapshot.StructureBreakView> recentBreaks = List.of();
+
+        // Order Blocks (unchanged — still uses MarketStructure-compatible detector)
         List<OrderBlockDetector.OrderBlock> obs = obDetector.detect(candles);
         List<IndicatorSnapshot.OrderBlockView> obViews = obs.stream()
                 .map(ob -> new IndicatorSnapshot.OrderBlockView(
@@ -130,7 +143,7 @@ public class IndicatorService {
                                 ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
                 .toList();
 
-        // Fair Value Gaps
+        // Fair Value Gaps (unchanged)
         List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(candles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
                 .map(f -> new IndicatorSnapshot.FairValueGapView(
@@ -170,11 +183,18 @@ public class IndicatorService {
                 wt != null ? wt.diff()      : null,
                 wt != null ? wt.crossover() : null,
                 wt != null ? wt.signal()    : null,
-                structure.currentTrend().name(),
-                structure.strongHigh(), structure.strongLow(),
-                structure.weakHigh(),   structure.weakLow(),
+                // SMC: Internal
+                internalBias, internalHigh, internalLow,
+                internalHighTime, internalLowTime, lastInternalBreak,
+                // SMC: Swing
+                swingBias, swingHigh, swingLow,
+                swingHighTime, swingLowTime, lastSwingBreak,
+                // SMC: Legacy / derived
+                marketStructureTrend,
+                strongHigh, strongLow, weakHigh, weakLow,
                 lastBreak,
                 strongHighTime, strongLowTime, weakHighTime, weakLowTime,
+                // SMC: Zones
                 obViews,
                 fvgViews,
                 recentBreaks,
@@ -281,21 +301,6 @@ public class IndicatorService {
         return points;
     }
 
-    /** Return the epoch-second timestamp of the candle at a swing point matching price + type + strength. */
-    private Long swingTime(List<MarketStructure.SwingPoint> swings, List<Candle> candles,
-                           MarketStructure.SwingType type, BigDecimal price,
-                           MarketStructure.Strength strength) {
-        if (price == null) return null;
-        return swings.stream()
-                .filter(sp -> sp.type() == type
-                        && sp.strength() == strength
-                        && sp.price().compareTo(price) == 0
-                        && sp.index() < candles.size())
-                .findFirst()
-                .map(sp -> candles.get(sp.index()).getTimestamp().getEpochSecond())
-                .orElse(null);
-    }
-
     private IndicatorSnapshot emptySnapshot(Instrument instrument, String timeframe) {
         return new IndicatorSnapshot(
                 instrument.name(), timeframe,
@@ -309,8 +314,14 @@ public class IndicatorService {
                 null, false, null,
                 null, null, null, null,
                 null, null, null, null, null,
+                // SMC: Internal
+                null, null, null, null, null, null,
+                // SMC: Swing
+                null, null, null, null, null, null,
+                // SMC: Legacy / derived
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,
+                // SMC: Zones
                 Collections.emptyList(),
                 Collections.emptyList(),
                 Collections.emptyList(),

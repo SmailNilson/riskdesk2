@@ -1,5 +1,6 @@
 package com.riskdesk.infrastructure.persistence.entity;
 
+import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -82,6 +83,13 @@ public class MentorSignalReviewEntity {
 
     @Column(columnDefinition = "TEXT")
     private String errorMessage;
+
+    @Enumerated(EnumType.STRING)
+    @Column(length = 32)
+    private ExecutionEligibilityStatus executionEligibilityStatus = ExecutionEligibilityStatus.NOT_EVALUATED;
+
+    @Column(length = 256)
+    private String executionEligibilityReason;
 
     @Enumerated(EnumType.STRING)
     @Column(length = 32)
@@ -238,6 +246,22 @@ public class MentorSignalReviewEntity {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public ExecutionEligibilityStatus getExecutionEligibilityStatus() {
+        return executionEligibilityStatus;
+    }
+
+    public void setExecutionEligibilityStatus(ExecutionEligibilityStatus executionEligibilityStatus) {
+        this.executionEligibilityStatus = executionEligibilityStatus;
+    }
+
+    public String getExecutionEligibilityReason() {
+        return executionEligibilityReason;
+    }
+
+    public void setExecutionEligibilityReason(String executionEligibilityReason) {
+        this.executionEligibilityReason = executionEligibilityReason;
     }
 
     public TradeSimulationStatus getSimulationStatus() {
