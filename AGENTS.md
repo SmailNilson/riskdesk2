@@ -6,6 +6,47 @@ This file is the operational guide for human developers and coding agents workin
 
 Read this file before making changes.
 
+## Multi-Agent Git Rules
+
+This repo is worked on by multiple AI agents simultaneously (Codex, Claude Code, MAQ).
+These rules are mandatory for all agents.
+
+### Workspace isolation
+
+Each agent has its own isolated working directory. Never work from another agent's directory.
+
+| Agent | Working directory |
+|---|---|
+| Codex | `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` |
+| Claude Code | `~/.claude/worktrees/<name>/` (auto-managed) |
+| MAQ | `~/riskdesk2-maq/` |
+| Human / VS Code | `~/riskdesk2/` |
+
+### Branch rules
+
+- Always branch from `main` before starting a task:
+  ```bash
+  git fetch origin
+  git switch -c <agent>/my-feature origin/main
+  ```
+- Use your agent prefix: `codex/`, `claude/`, `maq/`
+- Keep branches short-lived (1–2 days max)
+- Open a PR and let the human merge — never merge another agent's branch yourself
+
+### Never commit agent runtime files
+
+The following are already in `.gitignore` — do not force-add them:
+- `.codex/`, `.codex-bedrock/`, `.codex-vertex/`
+- `.claude/`
+- `.gemini/`
+- `.maq/`
+
+### Avoid working on the same files as another agent
+
+Before starting a task, check open PRs on GitHub. If another agent has an open PR touching the same files, coordinate with the human before proceeding.
+
+---
+
 ## Non-Negotiable Rules
 
 ### 1. Market data source policy
