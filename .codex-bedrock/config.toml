@@ -1,0 +1,10 @@
+model = "claude-opus-4-6"
+model_provider = "bedrock_claude"
+
+[model_providers.bedrock_claude]
+name = "AWS Bedrock Claude Proxy"
+base_url = "http://127.0.0.1:4141/v1"
+env_key = "CODEX_BEDROCK_PROXY_TOKEN"
+env_key_instructions = "Export CODEX_BEDROCK_PROXY_TOKEN before starting Codex."
+requires_openai_auth = false
+responses_v1 = true
