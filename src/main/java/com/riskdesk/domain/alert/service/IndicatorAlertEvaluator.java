@@ -33,11 +33,11 @@ public class IndicatorAlertEvaluator {
 
     /**
      * Rule 4: Returns true if this is a new candle (different from the last candle on which this
-     * signal fired), and records the current candle timestamp. Returns true if no timestamp is
-     * available (fail-open). Used for SMC and WaveTrend to prevent intra-bar repainting noise.
+     * signal fired), and records the current candle timestamp. Returns false if no timestamp is
+     * available (fail-closed: no timestamp means candle close is not confirmed). Used for SMC and WaveTrend to prevent intra-bar repainting noise.
      */
     private boolean canFireOnCandle(String candleKey, Instant lastCandleTimestamp) {
-        if (lastCandleTimestamp == null) return true;
+        if (lastCandleTimestamp == null) return false;
         Instant prev = lastFiredCandle.get(candleKey);
         if (lastCandleTimestamp.equals(prev)) return false;
         lastFiredCandle.put(candleKey, lastCandleTimestamp);
@@ -193,7 +193,7 @@ public class IndicatorAlertEvaluator {
         // Order Block lifecycle events (UC-SMC-009) — fires on real MITIGATION / INVALIDATION
         if (snap.recentObEvents() != null && !snap.recentObEvents().isEmpty()) {
             for (IndicatorAlertSnapshot.OrderBlockEvent evt : snap.recentObEvents()) {
-                String obEvtKey = "ob:" + evt.eventType() + ":" + evt.obType() + ":" + tf;
+                String obEvtKey = "ob:" + evt.eventType() + ":" + evt.obType() + ":" + evt.high().toPlainString() + ":" + tf;
                 if (isTransition(obEvtKey, evt.eventType())
                         && canFireOnCandle(obEvtKey + ":candle", snap.lastCandleTimestamp())) {
                     AlertSeverity sev = "INVALIDATION".equals(evt.eventType())

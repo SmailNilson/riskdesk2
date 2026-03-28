@@ -119,7 +119,7 @@ public class GeminiMentorClient implements MentorModelClient {
                     )
                 ),
                 "generationConfig", Map.of(
-                    "temperature", 1,
+                    "temperature", 0.2,
                     "responseMimeType", "application/json"
                 )
             );

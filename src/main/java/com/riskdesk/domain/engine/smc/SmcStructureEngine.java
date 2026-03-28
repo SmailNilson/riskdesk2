@@ -404,7 +404,7 @@ public class SmcStructureEngine {
                                                 double internalPivotPrice) {
         if (s.level != StructureLevel.INTERNAL) return true;
         if (Double.isNaN(swingPivotPrice)) return true;
-        return internalPivotPrice != swingPivotPrice;
+        return Math.abs(internalPivotPrice - swingPivotPrice) > 1e-9;
     }
 
     // ── Trailing extremes ────────────────────────────────────────────────
