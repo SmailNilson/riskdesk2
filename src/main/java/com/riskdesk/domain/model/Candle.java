@@ -8,6 +8,7 @@ public class Candle {
     private Long id;
     private Instrument instrument;
     private String timeframe; // "1m", "5m", "10m", "1h", "4h", "1d"
+    private String contractMonth; // "YYYYMM" e.g. "202606" — nullable for legacy rows
     private Instant timestamp;
     private BigDecimal open;
     private BigDecimal high;
@@ -27,6 +28,12 @@ public class Candle {
         this.low = low;
         this.close = close;
         this.volume = volume;
+    }
+
+    public Candle(Instrument instrument, String timeframe, String contractMonth, Instant timestamp,
+                  BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close, long volume) {
+        this(instrument, timeframe, timestamp, open, high, low, close, volume);
+        this.contractMonth = contractMonth;
     }
 
     // --- Helpers ---
@@ -53,6 +60,8 @@ public class Candle {
     public void setInstrument(Instrument instrument) { this.instrument = instrument; }
     public String getTimeframe() { return timeframe; }
     public void setTimeframe(String timeframe) { this.timeframe = timeframe; }
+    public String getContractMonth() { return contractMonth; }
+    public void setContractMonth(String contractMonth) { this.contractMonth = contractMonth; }
     public Instant getTimestamp() { return timestamp; }
     public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
     public BigDecimal getOpen() { return open; }

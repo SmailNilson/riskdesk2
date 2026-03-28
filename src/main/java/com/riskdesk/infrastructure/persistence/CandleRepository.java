@@ -18,4 +18,8 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     /** Fetches exactly {@code pageable.getPageSize()} candles newest-first (use PageRequest.of(0, limit)). */
     List<CandleEntity> findByInstrumentAndTimeframeOrderByTimestampDesc(
             Instrument instrument, String timeframe, Pageable pageable);
+
+    /** Fetches candles for a specific contract month, newest-first. */
+    List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
+            Instrument instrument, String timeframe, String contractMonth, Pageable pageable);
 }

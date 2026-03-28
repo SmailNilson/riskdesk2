@@ -64,6 +64,15 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     }
 
     @Override
+    public List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe,
+                                                         String contractMonth, int limit) {
+        return springDataRepo.findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
+                instrument, timeframe, contractMonth, PageRequest.of(0, limit)).stream()
+            .map(CandleEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     public long count() {
         return springDataRepo.count();
     }
