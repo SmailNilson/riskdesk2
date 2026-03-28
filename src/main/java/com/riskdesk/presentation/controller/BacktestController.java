@@ -7,6 +7,7 @@ import com.riskdesk.application.service.WaveTrendSignalScanner;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.engine.backtest.BacktestDataInspector;
 import com.riskdesk.domain.engine.backtest.BacktestResult;
+import com.riskdesk.domain.engine.backtest.ContinuousContractBuilder;
 import com.riskdesk.domain.engine.backtest.EntryFilterService;
 import com.riskdesk.domain.engine.backtest.HigherTimeframeLevelService;
 import com.riskdesk.domain.engine.backtest.MarketStructureService;
@@ -23,11 +24,13 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/backtest")
@@ -229,8 +232,8 @@ public class BacktestController {
 
         List<Candle> candles = candlePort.findCandles(inst, timeframe, fetchFrom);
 
-        if (continuous && "MNQ".equals(instrument.toUpperCase())) {
-            log.info("Continuous MNQ backtest now uses the candles stored in the local database / native IB Gateway history.");
+        if (continuous) {
+            candles = buildContinuousCandles(candles, inst, timeframe);
         }
 
         BacktestDataInspector.InspectionResult inspection = BacktestDataInspector.inspect(
@@ -268,7 +271,7 @@ public class BacktestController {
             debugLogging
         );
         Map<String, List<Candle>> htfCandles = enableSmcFilter
-            ? fetchHigherTimeframeCandles(inst, requestedStart, minHtf, useH1Levels, useH4Levels, useDailyLevels)
+            ? fetchHigherTimeframeCandles(inst, requestedStart, minHtf, useH1Levels, useH4Levels, useDailyLevels, continuous)
             : Map.of();
         HigherTimeframeLevelService.LevelIndex levelIndex = enableSmcFilter
             ? buildHigherTimeframeLevelIndex(htfCandles, swingLengthHtf)
@@ -369,7 +372,8 @@ public class BacktestController {
         String minHtf,
         boolean useH1Levels,
         boolean useH4Levels,
-        boolean useDailyLevels
+        boolean useDailyLevels,
+        boolean continuous
     ) {
         Instant from = requestedStart == null
             ? Instant.now().minus(365 * 3L, ChronoUnit.DAYS)
@@ -377,9 +381,9 @@ public class BacktestController {
         Timeframe minimum = Timeframe.fromLabel(minHtf);
         Map<String, List<Candle>> result = new LinkedHashMap<>();
 
-        maybeAddTimeframe(result, instrument, "1h", minimum, useH1Levels, from);
-        maybeAddTimeframe(result, instrument, "4h", minimum, useH4Levels, from);
-        maybeAddTimeframe(result, instrument, "1d", minimum, useDailyLevels, from);
+        maybeAddTimeframe(result, instrument, "1h", minimum, useH1Levels, from, continuous);
+        maybeAddTimeframe(result, instrument, "4h", minimum, useH4Levels, from, continuous);
+        maybeAddTimeframe(result, instrument, "1d", minimum, useDailyLevels, from, continuous);
         return result;
     }
 
@@ -389,16 +393,68 @@ public class BacktestController {
         String timeframe,
         Timeframe minimum,
         boolean enabled,
-        Instant from
+        Instant from,
+        boolean continuous
     ) {
         if (!enabled || Timeframe.fromLabel(timeframe).minutes() < minimum.minutes()) {
             return;
         }
         List<Candle> candles = candlePort.findCandles(instrument, timeframe, from);
+        if (continuous) {
+            candles = buildContinuousCandles(candles, instrument, timeframe);
+        }
         List<Candle> sanitized = BacktestDataInspector.inspect(instrument, timeframe, candles, null, 0).candles();
         if (!sanitized.isEmpty()) {
             result.put(timeframe, sanitized);
         }
+    }
+
+    /**
+     * Splices raw DB candles from multiple contract months into a single continuous series.
+     * Uses the last timestamp of each front-month contract as the roll date, matching
+     * TradingView's no-adjustment continuous contract (e.g., MNQ1!).
+     *
+     * Candles with null contractMonth (legacy, untagged) are treated as the oldest layer
+     * and are always included before tagged contracts.
+     *
+     * If fewer than 2 distinct tagged contract months exist, returns the input unchanged.
+     */
+    private List<Candle> buildContinuousCandles(List<Candle> rawCandles, Instrument inst, String timeframe) {
+        // Partition into legacy (null contractMonth) and tagged groups
+        Map<String, List<Candle>> byMonth = rawCandles.stream()
+            .collect(Collectors.groupingBy(c -> c.getContractMonth() != null ? c.getContractMonth() : ""));
+
+        List<String> taggedMonths = byMonth.keySet().stream()
+            .filter(k -> !k.isEmpty())
+            .sorted()
+            .collect(Collectors.toList());
+
+        if (taggedMonths.size() <= 1) {
+            // Only one (or zero) tagged contract months — no splicing needed
+            return rawCandles;
+        }
+
+        List<Candle> legacyCandles = byMonth.getOrDefault("", List.of());
+
+        // Seed result: legacy candles + first tagged contract month
+        List<Candle> result = new ArrayList<>(legacyCandles);
+        result.addAll(byMonth.get(taggedMonths.get(0)));
+        result.sort(Comparator.comparing(Candle::getTimestamp));
+
+        // Iteratively splice each subsequent contract month
+        for (int i = 1; i < taggedMonths.size(); i++) {
+            List<Candle> backMonth = byMonth.get(taggedMonths.get(i));
+            // Roll date = last timestamp currently in the series
+            Instant rollDate = result.stream()
+                .map(Candle::getTimestamp)
+                .max(Comparator.naturalOrder())
+                .orElse(Instant.EPOCH);
+            result = ContinuousContractBuilder.splice(result, backMonth, rollDate, inst, timeframe);
+        }
+
+        log.info("Continuous contract built for {} {}: {} raw candles → {} spliced across {} contracts",
+            inst, timeframe, rawCandles.size(), result.size(), taggedMonths.size());
+        return result;
     }
 
     private static BigDecimal round(double val) {
