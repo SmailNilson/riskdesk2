@@ -178,6 +178,9 @@ public class AlertService {
             snapshot.activeOrderBlocks() == null ? List.of() : snapshot.activeOrderBlocks().stream()
                 .map(block -> new IndicatorAlertSnapshot.OrderBlockZone(block.type(), block.high(), block.low()))
                 .toList(),
+            snapshot.recentOrderBlockEvents() == null ? List.of() : snapshot.recentOrderBlockEvents().stream()
+                .map(evt -> new IndicatorAlertSnapshot.OrderBlockEvent(evt.eventType(), evt.obType(), evt.high(), evt.low()))
+                .toList(),
             snapshot.lastCandleTimestamp()
         );
     }

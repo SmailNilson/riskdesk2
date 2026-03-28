@@ -87,6 +87,15 @@ export interface OrderBlockView {
   startTime: number;   // epoch seconds of formation candle
 }
 
+/** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
+export interface OrderBlockEventView {
+  eventType: 'MITIGATION' | 'INVALIDATION';
+  obType: 'BULLISH' | 'BEARISH';
+  high: number;
+  low: number;
+  eventTime: number;   // epoch seconds
+}
+
 export interface FairValueGapView {
   bias: 'BULLISH' | 'BEARISH';
   top: number;
@@ -181,9 +190,10 @@ export interface IndicatorSnapshot {
   weakHighTime:   number | null;
   weakLowTime:    number | null;
   // SMC overlays
-  activeOrderBlocks:    OrderBlockView[];
-  activeFairValueGaps:  FairValueGapView[];
-  recentBreaks:         StructureBreakView[];
+  activeOrderBlocks:         OrderBlockView[];
+  recentOrderBlockEvents:    OrderBlockEventView[];
+  activeFairValueGaps:       FairValueGapView[];
+  recentBreaks:              StructureBreakView[];
 }
 
 export interface CreatePositionRequest {

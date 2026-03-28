@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -36,11 +37,14 @@ class MarketDataServiceTest {
         when(candlePort.findRecentCandles(Instrument.MCL, "10m", 1)).thenReturn(List.of(older10m));
         when(candlePort.findRecentCandles(Instrument.MCL, "5m", 1)).thenReturn(List.of(newer5m));
 
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
         MarketDataService service = new MarketDataService(
             marketDataProvider,
             positionService,
             alertService,
             candlePort,
+            contractRegistry,
             messagingTemplate,
             eventPublisher
         );

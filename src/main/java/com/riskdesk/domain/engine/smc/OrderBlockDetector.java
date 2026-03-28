@@ -2,12 +2,16 @@ package com.riskdesk.domain.engine.smc;
 
 import com.riskdesk.domain.model.Candle;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.*;
 
 /**
  * Order Block & Breaker Block detection.
  * An Order Block is the last opposing candle before an impulsive move.
  * Settings: lookback 10, max OB count 3, max BB count 3 (matching LuxAlgo config).
+ *
+ * UC-SMC-009: also exposes lifecycle events (MITIGATION / INVALIDATION) so the
+ * alert layer can fire on real OB activity instead of the VWAP-inside proxy.
  */
 public class OrderBlockDetector {
 
@@ -27,6 +31,7 @@ public class OrderBlockDetector {
 
     public enum OBType { BULLISH, BEARISH }
     public enum OBStatus { ACTIVE, MITIGATED, BREAKER }
+    public enum OBEventType { MITIGATION, INVALIDATION }
 
     public record OrderBlock(
             OBType type,
@@ -41,10 +46,49 @@ public class OrderBlockDetector {
         }
     }
 
-    public List<OrderBlock> detect(List<Candle> candles) {
-        if (candles.size() < lookback + 3) return Collections.emptyList();
+    /**
+     * Lifecycle event emitted when an Order Block is mitigated (price tests the zone)
+     * or invalidated (price closes through the zone).
+     */
+    public record OrderBlockEvent(
+            OBEventType eventType,
+            OBType obType,
+            BigDecimal high,
+            BigDecimal low,
+            int formationIndex,
+            int eventBarIndex,
+            Instant eventTime
+    ) {}
 
-        List<OrderBlock> orderBlocks = new ArrayList<>();
+    /** Bundles active OBs with lifecycle events detected on the last bar. */
+    public record DetectionResult(
+            List<OrderBlock> activeOrderBlocks,
+            List<OrderBlockEvent> events
+    ) {}
+
+    /**
+     * Legacy API — returns only active (unmitigated) OBs.
+     */
+    public List<OrderBlock> detect(List<Candle> candles) {
+        return detectWithEvents(candles).activeOrderBlocks();
+    }
+
+    /**
+     * Full detection: returns active OBs plus lifecycle events on the last bar.
+     *
+     * Mitigation (BULLISH OB): last bar low &le; OB high (price tested demand zone).
+     * Invalidation (BULLISH OB): last bar close &lt; OB low (demand zone broken).
+     *
+     * Mitigation (BEARISH OB): last bar high &ge; OB low (price tested supply zone).
+     * Invalidation (BEARISH OB): last bar close &gt; OB high (supply zone broken).
+     */
+    public DetectionResult detectWithEvents(List<Candle> candles) {
+        if (candles.size() < lookback + 3) {
+            return new DetectionResult(Collections.emptyList(), Collections.emptyList());
+        }
+
+        // Phase 1: Identify all candidate OBs
+        List<OrderBlock> candidates = new ArrayList<>();
 
         for (int i = lookback; i < candles.size() - 2; i++) {
             Candle current = candles.get(i);
@@ -53,56 +97,95 @@ public class OrderBlockDetector {
 
             // Bullish OB: bearish candle followed by strong bullish move
             if (current.isBearish() && isBullishImpulse(next, confirm)) {
-                OrderBlock ob = new OrderBlock(
+                candidates.add(new OrderBlock(
                         OBType.BULLISH, OBStatus.ACTIVE,
                         current.getOpen(), current.getLow(),
                         i, -1
-                );
-                orderBlocks.add(ob);
+                ));
             }
 
             // Bearish OB: bullish candle followed by strong bearish move
             if (current.isBullish() && isBearishImpulse(next, confirm)) {
-                OrderBlock ob = new OrderBlock(
+                candidates.add(new OrderBlock(
                         OBType.BEARISH, OBStatus.ACTIVE,
                         current.getHigh(), current.getOpen(),
                         i, -1
-                );
-                orderBlocks.add(ob);
+                ));
             }
         }
 
-        // Check mitigation (price returned to OB zone)
-        List<OrderBlock> result = new ArrayList<>();
-        for (OrderBlock ob : orderBlocks) {
-            OBStatus status = ob.status();
+        // Phase 2: Walk forward — track mitigation/invalidation and collect events on last bar
+        int lastBarIdx = candles.size() - 1;
+        Candle lastBar = candles.get(lastBarIdx);
+        Instant lastBarTime = lastBar.getTimestamp();
+        List<OrderBlockEvent> events = new ArrayList<>();
+        List<OrderBlock> resolved = new ArrayList<>();
+
+        for (OrderBlock ob : candidates) {
+            OBStatus status = OBStatus.ACTIVE;
             int mitigationIdx = -1;
 
             for (int j = ob.formationIndex() + 3; j < candles.size(); j++) {
                 Candle c = candles.get(j);
-                if (ob.type() == OBType.BULLISH && c.getLow().compareTo(ob.highPrice()) <= 0) {
-                    // Price returned to bullish OB — could be mitigation or reaction
-                    if (c.getClose().compareTo(ob.lowPrice()) < 0) {
-                        status = OBStatus.MITIGATED;
-                        mitigationIdx = j;
-                        break;
+                boolean isLastBar = (j == lastBarIdx);
+
+                if (ob.type() == OBType.BULLISH) {
+                    // Price entered bullish OB (demand zone)
+                    if (c.getLow().compareTo(ob.highPrice()) <= 0) {
+                        if (c.getClose().compareTo(ob.lowPrice()) < 0) {
+                            // Close below the entire zone → invalidation
+                            status = OBStatus.MITIGATED;
+                            mitigationIdx = j;
+                            if (isLastBar) {
+                                events.add(new OrderBlockEvent(
+                                        OBEventType.INVALIDATION, ob.type(),
+                                        ob.highPrice(), ob.lowPrice(),
+                                        ob.formationIndex(), j, lastBarTime));
+                            }
+                            break;
+                        } else {
+                            // Touched but held → mitigation (test)
+                            if (isLastBar) {
+                                events.add(new OrderBlockEvent(
+                                        OBEventType.MITIGATION, ob.type(),
+                                        ob.highPrice(), ob.lowPrice(),
+                                        ob.formationIndex(), j, lastBarTime));
+                            }
+                        }
                     }
-                }
-                if (ob.type() == OBType.BEARISH && c.getHigh().compareTo(ob.lowPrice()) >= 0) {
-                    if (c.getClose().compareTo(ob.highPrice()) > 0) {
-                        status = OBStatus.MITIGATED;
-                        mitigationIdx = j;
-                        break;
+                } else { // BEARISH
+                    // Price entered bearish OB (supply zone)
+                    if (c.getHigh().compareTo(ob.lowPrice()) >= 0) {
+                        if (c.getClose().compareTo(ob.highPrice()) > 0) {
+                            // Close above the entire zone → invalidation
+                            status = OBStatus.MITIGATED;
+                            mitigationIdx = j;
+                            if (isLastBar) {
+                                events.add(new OrderBlockEvent(
+                                        OBEventType.INVALIDATION, ob.type(),
+                                        ob.highPrice(), ob.lowPrice(),
+                                        ob.formationIndex(), j, lastBarTime));
+                            }
+                            break;
+                        } else {
+                            // Touched but held → mitigation (test)
+                            if (isLastBar) {
+                                events.add(new OrderBlockEvent(
+                                        OBEventType.MITIGATION, ob.type(),
+                                        ob.highPrice(), ob.lowPrice(),
+                                        ob.formationIndex(), j, lastBarTime));
+                            }
+                        }
                     }
                 }
             }
 
-            result.add(new OrderBlock(ob.type(), status, ob.highPrice(), ob.lowPrice(),
+            resolved.add(new OrderBlock(ob.type(), status, ob.highPrice(), ob.lowPrice(),
                     ob.formationIndex(), mitigationIdx));
         }
 
-        // Return only active (unmitigated) OBs, capped at maxOrderBlocks per type
-        List<OrderBlock> activeOBs = result.stream()
+        // Phase 3: Keep only active (unmitigated) OBs, capped at maxOrderBlocks per type
+        List<OrderBlock> activeOBs = resolved.stream()
                 .filter(ob -> ob.status() == OBStatus.ACTIVE)
                 .toList();
 
@@ -119,7 +202,7 @@ public class OrderBlockDetector {
             }
         }
 
-        return finalResult;
+        return new DetectionResult(finalResult, events);
     }
 
     private boolean isBullishImpulse(Candle next, Candle confirm) {

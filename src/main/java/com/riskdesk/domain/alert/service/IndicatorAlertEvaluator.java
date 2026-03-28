@@ -190,21 +190,22 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // Order Block touch proxy using VWAP — only on transition per OB type
-        if (snap.activeOrderBlocks() != null && !snap.activeOrderBlocks().isEmpty() && snap.vwap() != null) {
-            BigDecimal vwap = snap.vwap();
-            snap.activeOrderBlocks().forEach(ob -> {
-                boolean inside = vwap.compareTo(ob.low()) >= 0 && vwap.compareTo(ob.high()) <= 0;
-                String obKey = "ob:" + ob.type() + ":" + tf;
-                String obSignal = inside ? "INSIDE" : null;
-                if (isTransition(obKey, obSignal)) {
-                    alerts.add(new Alert("ob:touch:" + ob.type() + ":" + tf, AlertSeverity.INFO,
-                        String.format("%s [%s] — VWAP inside %s Order Block [%.5f – %.5f]",
-                            instrument.getDisplayName(), timeframe, ob.type(),
-                            ob.low().doubleValue(), ob.high().doubleValue()),
+        // Order Block lifecycle events (UC-SMC-009) — fires on real MITIGATION / INVALIDATION
+        if (snap.recentObEvents() != null && !snap.recentObEvents().isEmpty()) {
+            for (IndicatorAlertSnapshot.OrderBlockEvent evt : snap.recentObEvents()) {
+                String obEvtKey = "ob:" + evt.eventType() + ":" + evt.obType() + ":" + tf;
+                if (isTransition(obEvtKey, evt.eventType())
+                        && canFireOnCandle(obEvtKey + ":candle", snap.lastCandleTimestamp())) {
+                    AlertSeverity sev = "INVALIDATION".equals(evt.eventType())
+                            ? AlertSeverity.WARNING : AlertSeverity.INFO;
+                    String verb = "MITIGATION".equals(evt.eventType()) ? "mitigated" : "invalidated";
+                    alerts.add(new Alert("ob:" + evt.eventType().toLowerCase() + ":" + evt.obType() + ":" + tf, sev,
+                        String.format("%s [%s] — %s OB %s [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, evt.obType(),
+                            verb, evt.low().doubleValue(), evt.high().doubleValue()),
                         AlertCategory.ORDER_BLOCK, instrument.name()));
                 }
-            });
+            }
         }
 
         return alerts;

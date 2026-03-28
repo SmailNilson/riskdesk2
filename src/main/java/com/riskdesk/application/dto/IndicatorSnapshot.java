@@ -81,6 +81,7 @@ public record IndicatorSnapshot(
 
     // ── SMC: Zones ───────────────────────────────────────────────────
     List<OrderBlockView> activeOrderBlocks,
+    List<OrderBlockEventView> recentOrderBlockEvents,
     List<FairValueGapView> activeFairValueGaps,
     List<StructureBreakView> recentBreaks,
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
@@ -93,4 +94,7 @@ public record IndicatorSnapshot(
     public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
 
     public record EqualLevelView(String type, BigDecimal price, long firstBarTime, long secondBarTime) {}
+
+    /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
+    public record OrderBlockEventView(String eventType, String obType, BigDecimal high, BigDecimal low, long eventTime) {}
 }

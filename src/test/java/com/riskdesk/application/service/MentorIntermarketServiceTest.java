@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
@@ -23,7 +24,8 @@ class MentorIntermarketServiceTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
         CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort, contractRegistry);
 
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of(
             candle("2026-03-26T00:00:00Z", "104.000"),
@@ -47,7 +49,8 @@ class MentorIntermarketServiceTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<MarketDataService> marketDataServiceProvider = mock(ObjectProvider.class);
         CandleRepositoryPort candleRepositoryPort = mock(CandleRepositoryPort.class);
-        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        MentorIntermarketService service = new MentorIntermarketService(marketDataServiceProvider, candleRepositoryPort, contractRegistry);
 
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "10m", 2)).thenReturn(List.of());
         when(candleRepositoryPort.findRecentCandles(Instrument.DXY, "1h", 2)).thenReturn(List.of());

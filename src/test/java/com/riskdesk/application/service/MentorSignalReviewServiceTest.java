@@ -10,6 +10,7 @@ import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
@@ -59,6 +60,9 @@ class MentorSignalReviewServiceTest {
     private CandleRepositoryPort candleRepositoryPort;
 
     @Mock
+    private ActiveContractRegistry contractRegistry;
+
+    @Mock
     private MentorSignalReviewRepositoryPort reviewRepository;
 
     @Mock
@@ -74,6 +78,7 @@ class MentorSignalReviewServiceTest {
             mentorIntermarketService,
             marketDataServiceProvider,
             candleRepositoryPort,
+            contractRegistry,
             reviewRepository,
             messagingTemplate,
             objectMapper
@@ -225,6 +230,7 @@ class MentorSignalReviewServiceTest {
             mentorIntermarketService,
             marketDataServiceProvider,
             candleRepositoryPort,
+            contractRegistry,
             reviewRepository,
             messagingTemplate,
             objectMapper
@@ -448,6 +454,7 @@ class MentorSignalReviewServiceTest {
                 new IndicatorSnapshot.OrderBlockView("BEARISH", new BigDecimal("24460.00"), new BigDecimal("24435.00"), new BigDecimal("24447.50"), 1L),
                 new IndicatorSnapshot.OrderBlockView("BULLISH", new BigDecimal("24405.00"), new BigDecimal("24380.00"), new BigDecimal("24392.50"), 2L)
             ),
+            List.of(),   // recentOrderBlockEvents
             List.of(),
             List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
             null

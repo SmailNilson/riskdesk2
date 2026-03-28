@@ -138,13 +138,19 @@ public class IndicatorService {
         // recentBreaks: empty in batch mode (no events captured — to be populated in step 1d with tail capture)
         List<IndicatorSnapshot.StructureBreakView> recentBreaks = List.of();
 
-        // Order Blocks (unchanged — still uses MarketStructure-compatible detector)
-        List<OrderBlockDetector.OrderBlock> obs = obDetector.detect(candles);
-        List<IndicatorSnapshot.OrderBlockView> obViews = obs.stream()
+        // Order Blocks + lifecycle events (UC-SMC-009)
+        OrderBlockDetector.DetectionResult obResult = obDetector.detectWithEvents(candles);
+        List<IndicatorSnapshot.OrderBlockView> obViews = obResult.activeOrderBlocks().stream()
                 .map(ob -> new IndicatorSnapshot.OrderBlockView(
                         ob.type().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
                         ob.formationIndex() < candles.size()
                                 ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
+                .toList();
+        List<IndicatorSnapshot.OrderBlockEventView> obEventViews = obResult.events().stream()
+                .map(evt -> new IndicatorSnapshot.OrderBlockEventView(
+                        evt.eventType().name(), evt.obType().name(),
+                        evt.high(), evt.low(),
+                        evt.eventTime().getEpochSecond()))
                 .toList();
 
         // Fair Value Gaps (unchanged)
@@ -242,7 +248,7 @@ public class IndicatorService {
                 // SMC: Premium / Discount / Equilibrium
                 premiumZoneTop, equilibriumLevel, discountZoneBottom, currentZone,
                 // SMC: Zones
-                obViews,
+                obViews, obEventViews,
                 fvgViews,
                 recentBreaks,
                 lastCandleTimestamp
@@ -384,7 +390,7 @@ public class IndicatorService {
                 // SMC: Premium / Discount / Equilibrium
                 null, null, null, null,
                 // SMC: Zones
-                Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(),
                 Collections.emptyList(),
                 null

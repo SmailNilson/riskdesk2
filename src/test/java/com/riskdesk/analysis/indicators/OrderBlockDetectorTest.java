@@ -223,4 +223,88 @@ class OrderBlockDetectorTest {
                     "Returned OBs from detect() should be ACTIVE, was: " + ob.status());
         }
     }
+
+    // ── UC-SMC-009: lifecycle event tests ────────────────────────────────────
+
+    /**
+     * AC1: Mitigation event fires when the last bar enters a bullish OB (low touches zone)
+     * but the candle does NOT close below the low — demand zone tested, not broken.
+     */
+    @Test
+    void detectWithEvents_bullishOBMitigation_onLastBar() {
+        // Build: background + OB formation + continuation + last bar that touches OB
+        List<Candle> candles = new ArrayList<>();
+        int idx = 0;
+
+        // Background (lookback = 10)
+        for (int i = 0; i < 12; i++) {
+            double b = 100.0 + i * 0.1;
+            candles.add(candle(b, b + 0.2, b - 0.2, b + 0.05, 1000, BASE_TIME.plusSeconds(600L * idx++)));
+        }
+
+        // Bearish OB candle: open=101.50, close=101.10 (bearish)
+        candles.add(candle(101.50, 101.60, 101.05, 101.10, 2000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Bullish impulse: body >= 50% of range, bullish
+        candles.add(candle(101.10, 102.50, 101.00, 102.40, 5000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Bullish confirmation
+        candles.add(candle(102.40, 103.50, 102.30, 103.40, 4000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Continuation candles — price stays above OB
+        for (int i = 0; i < 5; i++) {
+            double b = 103.50 + i * 0.2;
+            candles.add(candle(b, b + 0.3, b - 0.1, b + 0.2, 1000, BASE_TIME.plusSeconds(600L * idx++)));
+        }
+
+        // Last bar: low touches bullish OB (low <= ob.high = 101.50), but close > ob.low (101.05)
+        // → mitigation (zone tested, demand held)
+        candles.add(candle(104.50, 104.60, 101.20, 102.80, 3000, BASE_TIME.plusSeconds(600L * idx)));
+
+        OrderBlockDetector.DetectionResult result = detector.detectWithEvents(candles);
+
+        boolean hasMitigation = result.events().stream()
+                .anyMatch(e -> e.eventType() == OBEventType.MITIGATION && e.obType() == OBType.BULLISH);
+        assertTrue(hasMitigation, "Expected a BULLISH MITIGATION event when last bar touches OB zone without closing below it. Events: " + result.events());
+    }
+
+    /**
+     * AC2: Invalidation event fires when the last bar closes below the entire bullish OB zone
+     * (close < ob.low) — demand failed, structural breakdown.
+     */
+    @Test
+    void detectWithEvents_bullishOBInvalidation_onLastBar() {
+        List<Candle> candles = new ArrayList<>();
+        int idx = 0;
+
+        // Background
+        for (int i = 0; i < 12; i++) {
+            double b = 100.0 + i * 0.1;
+            candles.add(candle(b, b + 0.2, b - 0.2, b + 0.05, 1000, BASE_TIME.plusSeconds(600L * idx++)));
+        }
+
+        // Bearish OB candle: high=101.60, low=101.05, open=101.50, close=101.10
+        candles.add(candle(101.50, 101.60, 101.05, 101.10, 2000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Bullish impulse
+        candles.add(candle(101.10, 102.50, 101.00, 102.40, 5000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Bullish confirmation
+        candles.add(candle(102.40, 103.50, 102.30, 103.40, 4000, BASE_TIME.plusSeconds(600L * idx++)));
+
+        // Continuation above OB
+        for (int i = 0; i < 5; i++) {
+            double b = 103.50 + i * 0.2;
+            candles.add(candle(b, b + 0.3, b - 0.1, b + 0.2, 1000, BASE_TIME.plusSeconds(600L * idx++)));
+        }
+
+        // Last bar: low enters OB (low <= ob.high = 101.50) AND close < ob.low (101.05) → invalidation
+        candles.add(candle(104.00, 104.10, 100.80, 100.90, 8000, BASE_TIME.plusSeconds(600L * idx)));
+
+        OrderBlockDetector.DetectionResult result = detector.detectWithEvents(candles);
+
+        boolean hasInvalidation = result.events().stream()
+                .anyMatch(e -> e.eventType() == OBEventType.INVALIDATION && e.obType() == OBType.BULLISH);
+        assertTrue(hasInvalidation, "Expected a BULLISH INVALIDATION event when last bar closes below OB low. Events: " + result.events());
+    }
 }
