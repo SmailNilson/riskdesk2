@@ -194,14 +194,21 @@ Current behavior:
 - live execution state is no longer meant to be stored on `mentor_signal_reviews`
 - a dedicated `trade_executions` table owns the future live execution lifecycle
 - the idempotence key is the persisted Mentor review ID, not the alert thread key
-- `TradeExecutionEntity` stores frozen review linkage, normalized entry price, virtual SL/TP placeholders, broker account, and execution timestamps
+- `TradeExecutionEntity` stores frozen review linkage, broker account, execution quantity, normalized entry price, virtual SL/TP placeholders, and execution timestamps
 - Slice 1 does not place any IBKR order yet
+- Slice 1 now exposes manual arming endpoints under `/api/mentor/executions`
+- the `MentorSignalPanel` can create an execution foundation row for an eligible saved review once an IBKR account and quantity are selected
+- execution lookup is batched by `mentorSignalReviewId` so the UI can display existing execution state without coupling it into the review aggregate
 - Mentor reviews now carry an explicit `executionEligibilityStatus` and `executionEligibilityReason`
 - backend execution creation must require:
   - review status `DONE`
   - explicit eligibility status `ELIGIBLE`
   - complete `Entry / SL / TP`
   - tick-normalized prices
+- Slice 2 has now started:
+  - `POST /api/mentor/executions/{executionId}/submit-entry` submits a simple IBKR limit entry order
+  - submission is locked on the execution row before broker side effects
+  - the IB Gateway adapter uses `orderRef = executionKey` and checks existing live/completed orders before re-submitting
 
 ## Operational Commands
 

@@ -34,3 +34,6 @@ Thumbs.db
 ### Local tools ###
 .git/
 .claude/
+.codex/
+.codex-bedrock/
+.codex-vertex/

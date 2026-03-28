@@ -235,8 +235,8 @@ public class MarketDataService {
         if (closed[0] != null) {
             Candle candle = closed[0].build();
             candlePort.save(candle);
-            log.debug("Saved candle {} {} O={} H={} L={} C={}",
-                instrument, timeframe, candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose());
+            log.debug("Saved candle {} {} {} O={} H={} L={} C={}",
+                instrument, timeframe, contractMonth, candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose());
             eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
         }
     }

@@ -1,10 +1,14 @@
 package com.riskdesk.application.service;
 
+import com.ib.client.Types.Action;
 import com.ib.controller.Position;
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.IbkrAccountView;
 import com.riskdesk.application.dto.IbkrAuthStatusView;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
+import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayAccountSnapshot;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
@@ -107,6 +111,32 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         nativeClient.disconnect();
         portfolioCache.clear();
         return getAuthStatus();
+    }
+
+    @Override
+    public BrokerEntryOrderSubmission submitEntryOrder(BrokerEntryOrderRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("request is required");
+        }
+        Instrument instrument = Instrument.valueOf(request.instrument());
+        var resolved = contractResolver.resolve(instrument)
+            .orElseThrow(() -> new IllegalStateException("Unable to resolve IBKR contract for " + instrument));
+
+        var submission = nativeClient.placeLimitOrder(
+            resolved.contract(),
+            request.brokerAccountId(),
+            "SHORT".equalsIgnoreCase(request.action()) ? Action.SELL : Action.BUY,
+            request.quantity(),
+            request.limitPrice(),
+            request.executionKey()
+        );
+
+        return new BrokerEntryOrderSubmission(
+            submission.orderId(),
+            submission.status(),
+            submission.orderRef(),
+            submission.submittedAt()
+        );
     }
 
     private IbkrPositionView toPositionView(Position position) {

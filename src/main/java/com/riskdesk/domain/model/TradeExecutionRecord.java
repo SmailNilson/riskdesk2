@@ -15,6 +15,7 @@ public class TradeExecutionRecord {
     private String instrument;
     private String timeframe;
     private String action;
+    private Integer quantity;
     private ExecutionTriggerSource triggerSource;
     private String requestedBy;
     private ExecutionStatus status;
@@ -113,6 +114,14 @@ public class TradeExecutionRecord {
 
     public void setAction(String action) {
         this.action = action;
+    }
+
+    public Integer getQuantity() {
+        return quantity;
+    }
+
+    public void setQuantity(Integer quantity) {
+        this.quantity = quantity;
     }
 
     public ExecutionTriggerSource getTriggerSource() {

@@ -194,6 +194,7 @@ export default function Dashboard() {
           timezone={timezone}
           alerts={alerts}
           reviews={mentorSignalReviews}
+          selectedBrokerAccountId={selectedIbkrAccountId}
         />
       </div>
     </div>

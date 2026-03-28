@@ -4,7 +4,10 @@ import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorManualReview;
 import com.riskdesk.application.dto.MentorSignalReview;
+import com.riskdesk.application.dto.TradeExecutionView;
 import com.riskdesk.application.dto.HistoricalTradesDTO;
+import com.riskdesk.application.service.CreateExecutionCommand;
+import com.riskdesk.application.service.ExecutionManagerService;
 import com.riskdesk.application.service.HistoricalDataService;
 import com.riskdesk.application.service.HistoricalTradeImporterService;
 import com.riskdesk.application.service.MentorAnalysisService;
@@ -12,11 +15,15 @@ import com.riskdesk.application.service.MentorIntermarketService;
 import com.riskdesk.application.service.MentorMemoryService;
 import com.riskdesk.application.service.MentorManualReviewService;
 import com.riskdesk.application.service.MentorSignalReviewService;
+import com.riskdesk.application.service.SubmitEntryOrderCommand;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.presentation.dto.CreateTradeExecutionRequest;
 import com.riskdesk.presentation.dto.HistoricalTradeImportFileRequest;
 import com.riskdesk.presentation.dto.MentorAlertReviewRequest;
 import com.riskdesk.presentation.dto.HistoricalTradeImportResponse;
 import com.riskdesk.presentation.dto.MentorAnalyzeRequest;
+import com.riskdesk.presentation.dto.TradeExecutionLookupRequest;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
@@ -45,6 +52,7 @@ public class MentorController {
     private final MentorMemoryService mentorMemoryService;
     private final MentorManualReviewService mentorManualReviewService;
     private final MentorSignalReviewService mentorSignalReviewService;
+    private final ExecutionManagerService executionManagerService;
 
     public MentorController(MentorAnalysisService mentorAnalysisService,
                             MentorIntermarketService mentorIntermarketService,
@@ -52,7 +60,8 @@ public class MentorController {
                             HistoricalTradeImporterService historicalTradeImporterService,
                             MentorMemoryService mentorMemoryService,
                             MentorManualReviewService mentorManualReviewService,
-                            MentorSignalReviewService mentorSignalReviewService) {
+                            MentorSignalReviewService mentorSignalReviewService,
+                            ExecutionManagerService executionManagerService) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.mentorIntermarketService = mentorIntermarketService;
         this.historicalDataService = historicalDataService;
@@ -60,6 +69,7 @@ public class MentorController {
         this.mentorMemoryService = mentorMemoryService;
         this.mentorManualReviewService = mentorManualReviewService;
         this.mentorSignalReviewService = mentorSignalReviewService;
+        this.executionManagerService = executionManagerService;
     }
 
     @PostMapping("/analyze")
@@ -126,6 +136,53 @@ public class MentorController {
             );
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+    }
+
+    @PostMapping("/executions")
+    public TradeExecutionView createExecution(@Valid @RequestBody CreateTradeExecutionRequest request) {
+        try {
+            return TradeExecutionView.from(executionManagerService.ensureExecutionCreated(new CreateExecutionCommand(
+                request.mentorSignalReviewId(),
+                request.brokerAccountId(),
+                request.quantity(),
+                ExecutionTriggerSource.MANUAL_ARMING,
+                Instant.now(),
+                "mentor-panel"
+            )));
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/executions/by-review/{mentorSignalReviewId}")
+    public TradeExecutionView executionByReview(@PathVariable Long mentorSignalReviewId) {
+        return executionManagerService.findByMentorSignalReviewId(mentorSignalReviewId)
+            .map(TradeExecutionView::from)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "trade execution not found"));
+    }
+
+    @PostMapping("/executions/by-review-ids")
+    public List<TradeExecutionView> executionsByReviewIds(@Valid @RequestBody TradeExecutionLookupRequest request) {
+        return executionManagerService.findByMentorSignalReviewIds(request.mentorSignalReviewIds()).stream()
+            .map(TradeExecutionView::from)
+            .toList();
+    }
+
+    @PostMapping("/executions/{executionId}/submit-entry")
+    public TradeExecutionView submitEntryOrder(@PathVariable Long executionId) {
+        try {
+            return TradeExecutionView.from(executionManagerService.submitEntryOrder(new SubmitEntryOrderCommand(
+                executionId,
+                Instant.now(),
+                "mentor-panel"
+            )));
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e);
         }
     }
 
