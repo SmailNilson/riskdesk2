@@ -31,9 +31,11 @@ Thumbs.db
 *.env.local
 **/.env.local
 
-### Local tools ###
+### AI agent runtimes ###
 .git/
 .claude/
 .codex/
 .codex-bedrock/
 .codex-vertex/
+.gemini/
+.maq/
