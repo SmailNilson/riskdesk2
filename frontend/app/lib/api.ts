@@ -100,7 +100,8 @@ export interface FairValueGapView {
   bias: 'BULLISH' | 'BEARISH';
   top: number;
   bottom: number;
-  startTime: number;   // epoch seconds
+  startTime: number;       // epoch seconds
+  extensionEndTime: number; // UC-SMC-010: visual zone extension end time
 }
 
 export interface EqualLevelView {
