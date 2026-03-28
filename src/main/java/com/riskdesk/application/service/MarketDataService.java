@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.marketdata.event.MarketPriceUpdated;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
@@ -43,11 +44,12 @@ public class MarketDataService {
     private static final long FRESH_CACHE_SECONDS = 15L;
     private static final long INSTANT_FETCH_TIMEOUT_MS = 1200L;
 
-    private final MarketDataProvider      marketDataProvider;
-    private final PositionService         positionService;
-    private final AlertService            alertService;
-    private final CandleRepositoryPort    candlePort;
-    private final SimpMessagingTemplate   messagingTemplate;
+    private final MarketDataProvider        marketDataProvider;
+    private final PositionService           positionService;
+    private final AlertService              alertService;
+    private final CandleRepositoryPort      candlePort;
+    private final ActiveContractRegistry    contractRegistry;
+    private final SimpMessagingTemplate     messagingTemplate;
     private final ApplicationEventPublisher eventPublisher;
 
     private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
@@ -60,12 +62,14 @@ public class MarketDataService {
                              PositionService positionService,
                              AlertService alertService,
                              CandleRepositoryPort candlePort,
+                             ActiveContractRegistry contractRegistry,
                              SimpMessagingTemplate messagingTemplate,
                              ApplicationEventPublisher eventPublisher) {
         this.marketDataProvider = marketDataProvider;
         this.positionService    = positionService;
         this.alertService       = alertService;
         this.candlePort         = candlePort;
+        this.contractRegistry   = contractRegistry;
         this.messagingTemplate  = messagingTemplate;
         this.eventPublisher     = eventPublisher;
     }
@@ -206,24 +210,26 @@ public class MarketDataService {
     // -------------------------------------------------------------------------
 
     private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
-        String  key        = instrument.name() + ":" + timeframe;
-        long    periodMins = TIMEFRAMES.get(timeframe);
-        Instant periodStart = truncateToPeriod(now, periodMins);
+        String  contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        String  key           = instrument.name() + ":" + timeframe;
+        long    periodMins    = TIMEFRAMES.get(timeframe);
+        Instant periodStart   = truncateToPeriod(now, periodMins);
 
         CandleAccumulator acc = accumulators.get(key);
 
         if (acc == null) {
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, periodStart, price));
+            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
             return;
         }
 
         if (acc.periodStart.isBefore(periodStart)) {
             Candle closed = acc.build();
             candlePort.save(closed);
-            log.debug("Saved candle {} {} O={} H={} L={} C={}",
-                instrument, timeframe, closed.getOpen(), closed.getHigh(), closed.getLow(), closed.getClose());
+            log.debug("Saved candle {} {} {} O={} H={} L={} C={}",
+                instrument, timeframe, contractMonth,
+                closed.getOpen(), closed.getHigh(), closed.getLow(), closed.getClose());
             eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
-            accumulators.put(key, new CandleAccumulator(instrument, timeframe, periodStart, price));
+            accumulators.put(key, new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price));
         } else {
             acc.update(price);
         }
@@ -242,6 +248,7 @@ public class MarketDataService {
     private static class CandleAccumulator {
         final Instrument instrument;
         final String     timeframe;
+        final String     contractMonth;
         final Instant    periodStart;
         final BigDecimal open;
         BigDecimal high;
@@ -249,10 +256,12 @@ public class MarketDataService {
         BigDecimal close;
         long volume = 1;
 
-        CandleAccumulator(Instrument instrument, String timeframe, Instant periodStart, BigDecimal firstPrice) {
-            this.instrument  = instrument;
-            this.timeframe   = timeframe;
-            this.periodStart = periodStart;
+        CandleAccumulator(Instrument instrument, String timeframe, String contractMonth,
+                          Instant periodStart, BigDecimal firstPrice) {
+            this.instrument    = instrument;
+            this.timeframe     = timeframe;
+            this.contractMonth = contractMonth;
+            this.periodStart   = periodStart;
             this.open  = firstPrice;
             this.high  = firstPrice;
             this.low   = firstPrice;
@@ -267,7 +276,7 @@ public class MarketDataService {
         }
 
         Candle build() {
-            return new Candle(instrument, timeframe, periodStart, open, high, low, close, volume);
+            return new Candle(instrument, timeframe, contractMonth, periodStart, open, high, low, close, volume);
         }
     }
 

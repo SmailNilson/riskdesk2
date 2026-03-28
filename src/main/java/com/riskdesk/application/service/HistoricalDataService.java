@@ -1,5 +1,6 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -41,6 +42,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private final HistoricalDataProvider historicalProvider;
     private final CandleRepositoryPort   candlePort;
+    private final ActiveContractRegistry contractRegistry;
 
     @Value("${riskdesk.market-data.historical.enabled:false}")
     private boolean enabled;
@@ -62,9 +64,11 @@ public class HistoricalDataService implements ApplicationRunner {
     private final Map<String, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
 
     public HistoricalDataService(HistoricalDataProvider historicalProvider,
-                                 CandleRepositoryPort candlePort) {
+                                 CandleRepositoryPort candlePort,
+                                 ActiveContractRegistry contractRegistry) {
         this.historicalProvider = historicalProvider;
         this.candlePort         = candlePort;
+        this.contractRegistry   = contractRegistry;
     }
 
     @Override
@@ -122,6 +126,7 @@ public class HistoricalDataService implements ApplicationRunner {
                 try {
                     int limit = candlesTargetFor(timeframe);
                     List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
+                    candles = tagWithContractMonth(candles, instrument);
                     candles = deduplicate(candles);
                     if (candles.isEmpty()) {
                         log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
@@ -153,7 +158,8 @@ public class HistoricalDataService implements ApplicationRunner {
 
         try {
             int limit = candlesTargetFor(timeframe);
-            List<Candle> candles = deduplicate(historicalProvider.fetchHistory(instrument, timeframe, limit));
+            List<Candle> candles = deduplicate(
+                tagWithContractMonth(historicalProvider.fetchHistory(instrument, timeframe, limit), instrument));
             if (candles.isEmpty()) {
                 log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
                 return 0;
@@ -203,6 +209,15 @@ public class HistoricalDataService implements ApplicationRunner {
         int safeDays = Math.max(days, 1);
         double candles = (safeDays * 24.0 * 60.0) / candleMinutes;
         return Math.max(DEFAULT_CANDLES_PER_PAIR, (int) Math.ceil(candles));
+    }
+
+    private List<Candle> tagWithContractMonth(List<Candle> candles, Instrument instrument) {
+        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        if (contractMonth == null) return candles;
+        for (Candle candle : candles) {
+            candle.setContractMonth(contractMonth);
+        }
+        return candles;
     }
 
     private List<Candle> deduplicate(List<Candle> candles) {
