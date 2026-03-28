@@ -94,6 +94,13 @@ export interface FairValueGapView {
   startTime: number;   // epoch seconds
 }
 
+export interface EqualLevelView {
+  type: 'EQH' | 'EQL';
+  price: number;
+  firstBarTime: number;   // epoch seconds
+  secondBarTime: number;  // epoch seconds
+}
+
 export interface StructureBreakView {
   type: 'BOS' | 'CHOCH';
   trend: 'BULLISH' | 'BEARISH';
@@ -153,6 +160,9 @@ export interface IndicatorSnapshot {
   swingHighTime: number | null;
   swingLowTime: number | null;
   lastSwingBreakType: string | null;
+  // SMC: Liquidity (EQH / EQL)
+  equalHighs: EqualLevelView[];
+  equalLows: EqualLevelView[];
   // SMC: Legacy / derived (backward compat)
   marketStructureTrend: string;
   strongHigh: number | null;

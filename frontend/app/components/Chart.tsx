@@ -459,6 +459,14 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     addLine(snapshot.weakHigh,   '#f97316aa', LineStyle.Dotted, 'Weak H');
     addLine(snapshot.weakLow,    '#3b82f6aa', LineStyle.Dotted, 'Weak L');
 
+    // EQH / EQL — horizontal dashed lines at liquidity pools
+    for (const eq of snapshot.equalHighs ?? []) {
+      addLine(eq.price, '#ef4444aa', LineStyle.SparseDotted, 'EQH');
+    }
+    for (const eq of snapshot.equalLows ?? []) {
+      addLine(eq.price, '#22c55eaa', LineStyle.SparseDotted, 'EQL');
+    }
+
     // ── BOS / CHoCH arrow markers ─────────────────────────────────────────
     const markers: SeriesMarker<Time>[] = (snapshot.recentBreaks ?? [])
       .slice(-15)

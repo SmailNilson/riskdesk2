@@ -45,6 +45,7 @@ public class IndicatorService {
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(5);
+    private final EqualLevelDetector eqDetector = new EqualLevelDetector(5, 0.1);
 
     public IndicatorService(CandleRepositoryPort candlePort) {
         this.candlePort = candlePort;
@@ -150,6 +151,23 @@ public class IndicatorService {
                         f.bias(), f.top(), f.bottom(), f.startBarTime()))
                 .toList();
 
+        // Equal Highs / Equal Lows (UC-SMC-003)
+        List<EqualLevelDetector.EqualLevel> eqLevels = eqDetector.detect(candles);
+        List<IndicatorSnapshot.EqualLevelView> eqhViews = eqLevels.stream()
+                .filter(e -> e.type() == EqualLevelDetector.EqualType.EQH)
+                .map(e -> new IndicatorSnapshot.EqualLevelView("EQH",
+                        BigDecimal.valueOf(e.price()),
+                        e.firstTime().getEpochSecond(),
+                        e.secondTime().getEpochSecond()))
+                .toList();
+        List<IndicatorSnapshot.EqualLevelView> eqlViews = eqLevels.stream()
+                .filter(e -> e.type() == EqualLevelDetector.EqualType.EQL)
+                .map(e -> new IndicatorSnapshot.EqualLevelView("EQL",
+                        BigDecimal.valueOf(e.price()),
+                        e.firstTime().getEpochSecond(),
+                        e.secondTime().getEpochSecond()))
+                .toList();
+
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
         return new IndicatorSnapshot(
@@ -194,6 +212,8 @@ public class IndicatorService {
                 strongHigh, strongLow, weakHigh, weakLow,
                 lastBreak,
                 strongHighTime, strongLowTime, weakHighTime, weakLowTime,
+                // SMC: Liquidity (EQH / EQL)
+                eqhViews, eqlViews,
                 // SMC: Zones
                 obViews,
                 fvgViews,
@@ -321,6 +341,8 @@ public class IndicatorService {
                 // SMC: Legacy / derived
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,
+                // SMC: Liquidity (EQH / EQL)
+                Collections.emptyList(), Collections.emptyList(),
                 // SMC: Zones
                 Collections.emptyList(),
                 Collections.emptyList(),

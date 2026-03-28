@@ -69,6 +69,10 @@ public record IndicatorSnapshot(
     Long weakHighTime,
     Long weakLowTime,
 
+    // ── SMC: Liquidity (EQH / EQL) ─────────────────────────────────
+    List<EqualLevelView> equalHighs,
+    List<EqualLevelView> equalLows,
+
     // ── SMC: Zones ───────────────────────────────────────────────────
     List<OrderBlockView> activeOrderBlocks,
     List<FairValueGapView> activeFairValueGaps,
@@ -81,4 +85,6 @@ public record IndicatorSnapshot(
     public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime) {}
 
     public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
+
+    public record EqualLevelView(String type, BigDecimal price, long firstBarTime, long secondBarTime) {}
 }

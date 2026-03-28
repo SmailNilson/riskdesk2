@@ -179,6 +179,24 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
         )}
       </Section>
 
+      {/* EQH / EQL */}
+      {(s.equalHighs.length > 0 || s.equalLows.length > 0) && (
+        <Section title={`EQH/EQL (${s.equalHighs.length + s.equalLows.length})`}>
+          {s.equalHighs.map((eq, i) => (
+            <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+              <Badge label="EQH" color="red" />
+              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+            </div>
+          ))}
+          {s.equalLows.map((eq, i) => (
+            <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+              <Badge label="EQL" color="green" />
+              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+            </div>
+          ))}
+        </Section>
+      )}
+
       {/* Order Blocks */}
       <Section title={`Order Blocks (${s.activeOrderBlocks.length})`} fullWidth>
         {s.activeOrderBlocks.length === 0
