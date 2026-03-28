@@ -19,7 +19,7 @@ Each agent has its own isolated working directory. Never work from another agent
 |---|---|
 | Codex | `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` |
 | Claude Code | `~/.claude/worktrees/<name>/` (auto-managed) |
-| MAQ | `~/riskdesk2-maq/` |
+| Claude Bedrock (VS Code) | `~/riskdesk2-maq/` |
 | Human / VS Code | `~/riskdesk2/` |
 
 ### Branch rules
@@ -29,7 +29,7 @@ Each agent has its own isolated working directory. Never work from another agent
   git fetch origin
   git switch -c <agent>/my-feature origin/main
   ```
-- Use your agent prefix: `codex/`, `claude/`, `maq/`
+- Use your agent prefix: `codex/`, `claude/`, `claude-bedrock/`
 - Keep branches short-lived (1–2 days max)
 - Open a PR and let the human merge — never merge another agent's branch yourself
 
