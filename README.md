@@ -108,3 +108,52 @@ src/main/java/com/riskdesk/
 - [ ] Phase 3: WaveTrend, Trendlines with Breaks, Sniper signals
 - [ ] Frontend: React/Next.js dashboard with lightweight-charts
 - [ ] Alerts: Telegram bot for BOS/CHoCH and risk threshold alerts
+
+## Codex via AWS Bedrock Claude
+
+This repo now includes a project-local Codex provider config in `.codex-bedrock/config.toml` that points Codex at a loopback proxy instead of OpenAI. Direct `Codex -> Bedrock Claude` is not a reliable fit because Codex expects the OpenAI Responses API while Bedrock Claude uses the Bedrock Converse API. The proxy at `.codex-bedrock/bedrock_claude_responses_proxy.py` translates between those formats and forwards requests to Claude Opus 4.6 on AWS Bedrock using your existing AWS CLI credentials. The launcher `.codex-bedrock/codex-bedrock.sh` sets `CODEX_HOME` to this repo-local directory so the Bedrock config takes precedence without changing `~/.codex/config.toml`.
+
+This session could not write inside `.codex/` because that directory is sandbox-protected by the Codex desktop app, so `.codex-bedrock/` is the closest project-local equivalent that remains safe and reversible.
+
+Required environment variables:
+
+```bash
+export CODEX_BEDROCK_PROXY_TOKEN="$(openssl rand -hex 32)"
+export AWS_REGION="us-east-1"
+export ANTHROPIC_BEDROCK_MODEL_ID="global.anthropic.claude-opus-4-6-v1"
+```
+
+If your AWS CLI is already authenticated, the proxy reuses that setup directly. Shared credentials, SSO sessions, role-based auth, and `AWS_PROFILE` all work because the proxy shells out to `aws bedrock-runtime converse`.
+
+Start the proxy:
+
+```bash
+python3 .codex-bedrock/bedrock_claude_responses_proxy.py
+```
+
+Verify auth and local readiness:
+
+```bash
+aws sts get-caller-identity >/dev/null
+aws bedrock get-inference-profile --inference-profile-identifier "$ANTHROPIC_BEDROCK_MODEL_ID" >/dev/null
+curl -s http://127.0.0.1:4141/health
+```
+
+Use the repo-local launcher so this repo's Bedrock config is the active Codex config:
+
+```bash
+bash ./.codex-bedrock/codex-bedrock.sh
+```
+
+Verify Codex is using Bedrock Claude for this project:
+
+```bash
+CODEX_BEDROCK_PROXY_TOKEN="$CODEX_BEDROCK_PROXY_TOKEN" bash ./.codex-bedrock/codex-bedrock.sh exec "Say hi in one short sentence."
+```
+
+Troubleshooting:
+
+- If `/health` reports AWS auth failures, renew your AWS session or run the login flow used by your current AWS CLI setup.
+- If `Converse` rejects the model ID, use an inference profile ID instead of a foundation model ID. The default here is `global.anthropic.claude-opus-4-6-v1`.
+- If Codex returns `Invalid proxy bearer token`, ensure the same `CODEX_BEDROCK_PROXY_TOKEN` is present in both the proxy shell and the Codex shell.
+- If you want a different Claude model on Bedrock, override `ANTHROPIC_BEDROCK_MODEL_ID` without editing tracked files.

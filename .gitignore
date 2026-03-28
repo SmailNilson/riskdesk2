@@ -34,3 +34,11 @@ Thumbs.db
 ### Local tools ###
 .git/
 .claude/
+.codex/*
+!.codex/config.toml
+!.codex/vertex_claude_responses_proxy.py
+!.codex/codex-vertex.sh
+.codex-bedrock/*
+!.codex-bedrock/config.toml
+!.codex-bedrock/bedrock_claude_responses_proxy.py
+!.codex-bedrock/codex-bedrock.sh
