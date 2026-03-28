@@ -19,7 +19,7 @@ Each agent has its own isolated working directory. Never work from another agent
 |---|---|
 | Codex | `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` |
 | Claude Code | `~/.claude/worktrees/<name>/` (auto-managed) |
-| Claude Bedrock (VS Code) | `~/riskdesk2-maq/` |
+| Claude Bedrock (VS Code) | `~/riskdesk2-bedrock/` |
 | Human / VS Code | `~/riskdesk2/` |
 
 ### Branch rules
