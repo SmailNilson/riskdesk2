@@ -4,6 +4,7 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -13,7 +14,6 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 /**
@@ -35,12 +35,15 @@ public class WaveTrendSignalScanner {
     private static final double NSV = -53;  // oversold threshold
     private static final int MIN_CANDLES = 50;
 
-    private final CandleRepositoryPort candlePort;
-    private final AlertService alertService;
+    private final CandleRepositoryPort  candlePort;
+    private final AlertService           alertService;
+    private final ActiveContractRegistry contractRegistry;
 
-    public WaveTrendSignalScanner(CandleRepositoryPort candlePort, AlertService alertService) {
-        this.candlePort = candlePort;
-        this.alertService = alertService;
+    public WaveTrendSignalScanner(CandleRepositoryPort candlePort, AlertService alertService,
+                                  ActiveContractRegistry contractRegistry) {
+        this.candlePort       = candlePort;
+        this.alertService     = alertService;
+        this.contractRegistry = contractRegistry;
     }
 
     @EventListener
@@ -66,8 +69,19 @@ public class WaveTrendSignalScanner {
     }
 
     private void scan(Instrument instrument, Instant candleTime) {
-        List<Candle> candles = candlePort.findCandles(instrument, "1h",
-                Instant.now().minus(30, ChronoUnit.DAYS));
+        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        List<Candle> candles;
+        if (contractMonth != null) {
+            candles = candlePort.findRecentCandlesByContractMonth(instrument, "1h", contractMonth, 500);
+            if (candles.size() < MIN_CANDLES) {
+                candles = candlePort.findRecentCandles(instrument, "1h", 500);
+            }
+        } else {
+            candles = candlePort.findRecentCandles(instrument, "1h", 500);
+        }
+        // WaveTrend requires oldest→newest order
+        candles = new java.util.ArrayList<>(candles);
+        candles.sort(java.util.Comparator.comparing(Candle::getTimestamp));
 
         if (candles.size() < MIN_CANDLES) {
             log.debug("WT scanner: only {} candles for MNQ 1h, need {}", candles.size(), MIN_CANDLES);

@@ -1,6 +1,7 @@
 package com.riskdesk.presentation.controller;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import jakarta.validation.constraints.Max;
@@ -9,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -19,17 +21,20 @@ import java.util.Map;
  * GET /api/candles/{instrument}/{timeframe}?limit=300
  *
  * Returns candles ordered oldest→newest (as lightweight-charts requires).
+ * Always filters by the active contract month so the chart never mixes contracts.
  */
 @Validated
 @RestController
 @RequestMapping("/api/candles")
-@org.springframework.web.bind.annotation.CrossOrigin
+@CrossOrigin
 public class CandleController {
 
-    private final CandleRepositoryPort candlePort;
+    private final CandleRepositoryPort   candlePort;
+    private final ActiveContractRegistry contractRegistry;
 
-    public CandleController(CandleRepositoryPort candlePort) {
-        this.candlePort = candlePort;
+    public CandleController(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
+        this.candlePort       = candlePort;
+        this.contractRegistry = contractRegistry;
     }
 
     @GetMapping("/{instrument}/{timeframe}")
@@ -45,18 +50,26 @@ public class CandleController {
             return ResponseEntity.badRequest().build();
         }
 
-        // Fetch most recent `limit` candles (desc), then reverse to oldest→newest
-        List<Candle> candles = candlePort.findRecentCandles(inst, timeframe, limit);
+        String contractMonth = contractRegistry.getContractMonth(inst).orElse(null);
+        List<Candle> candles;
+        if (contractMonth != null) {
+            candles = candlePort.findRecentCandlesByContractMonth(inst, timeframe, contractMonth, limit);
+            if (candles.isEmpty()) {
+                candles = candlePort.findRecentCandles(inst, timeframe, limit);
+            }
+        } else {
+            candles = candlePort.findRecentCandles(inst, timeframe, limit);
+        }
 
-        List<Candle> ordered = new java.util.ArrayList<>(candles);
+        List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
 
         List<Map<String, Object>> result = ordered.stream().map(c -> Map.<String, Object>of(
-            "time",  c.getTimestamp().getEpochSecond(),
-            "open",  c.getOpen().doubleValue(),
-            "high",  c.getHigh().doubleValue(),
-            "low",   c.getLow().doubleValue(),
-            "close", c.getClose().doubleValue(),
+            "time",   c.getTimestamp().getEpochSecond(),
+            "open",   c.getOpen().doubleValue(),
+            "high",   c.getHigh().doubleValue(),
+            "low",    c.getLow().doubleValue(),
+            "close",  c.getClose().doubleValue(),
             "volume", c.getVolume()
         )).toList();
 

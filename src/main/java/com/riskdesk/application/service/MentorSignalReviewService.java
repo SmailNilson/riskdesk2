@@ -9,6 +9,7 @@ import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -48,6 +49,7 @@ public class MentorSignalReviewService {
     private final MentorIntermarketService mentorIntermarketService;
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
     private final CandleRepositoryPort candleRepositoryPort;
+    private final ActiveContractRegistry contractRegistry;
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
@@ -63,6 +65,7 @@ public class MentorSignalReviewService {
                                      MentorIntermarketService mentorIntermarketService,
                                      ObjectProvider<MarketDataService> marketDataServiceProvider,
                                      CandleRepositoryPort candleRepositoryPort,
+                                     ActiveContractRegistry contractRegistry,
                                      MentorSignalReviewRepositoryPort reviewRepository,
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper) {
@@ -71,6 +74,7 @@ public class MentorSignalReviewService {
         this.mentorIntermarketService = mentorIntermarketService;
         this.marketDataServiceProvider = marketDataServiceProvider;
         this.candleRepositoryPort = candleRepositoryPort;
+        this.contractRegistry = contractRegistry;
         this.reviewRepository = reviewRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
@@ -520,9 +524,19 @@ public class MentorSignalReviewService {
     }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
-        List<Candle> candles = new ArrayList<>(candleRepositoryPort.findRecentCandles(instrument, timeframe, limit));
-        candles.sort(Comparator.comparing(Candle::getTimestamp));
-        return candles;
+        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        List<Candle> candles;
+        if (contractMonth != null) {
+            candles = candleRepositoryPort.findRecentCandlesByContractMonth(instrument, timeframe, contractMonth, limit);
+            if (candles.isEmpty()) {
+                candles = candleRepositoryPort.findRecentCandles(instrument, timeframe, limit);
+            }
+        } else {
+            candles = candleRepositoryPort.findRecentCandles(instrument, timeframe, limit);
+        }
+        List<Candle> ordered = new ArrayList<>(candles);
+        ordered.sort(Comparator.comparing(Candle::getTimestamp));
+        return ordered;
     }
 
     private BigDecimal currentPrice(MarketDataService.StoredPrice livePrice, List<Candle> candles) {
