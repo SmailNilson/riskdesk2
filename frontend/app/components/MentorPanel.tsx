@@ -204,9 +204,8 @@ export default function MentorPanel({
         </div>
         <button
           onClick={() => setIncludePortfolioContext(v => !v)}
-          className={`rounded px-2 py-1 font-semibold ${
-            includePortfolioContext ? 'bg-amber-700 text-white' : 'bg-emerald-700 text-white'
-          }`}
+          className={`rounded px-2 py-1 font-semibold ${includePortfolioContext ? 'bg-amber-700 text-white' : 'bg-emerald-700 text-white'
+            }`}
         >
           {includePortfolioContext ? 'Portfolio ON' : 'Portfolio OFF'}
         </button>
@@ -366,11 +365,10 @@ export default function MentorPanel({
                         setError(null);
                       }
                     }}
-                    className={`w-full rounded border px-3 py-2 text-left transition-colors ${
-                      selected
+                    className={`w-full rounded border px-3 py-2 text-left transition-colors ${selected
                         ? 'border-cyan-600 bg-cyan-950/20'
                         : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-900'
-                    }`}
+                      }`}
                   >
                     <div className="mb-2 flex items-center gap-2">
                       <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
