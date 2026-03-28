@@ -441,6 +441,8 @@ class MentorSignalReviewServiceTest {
             null,
             // SMC: Liquidity (EQH / EQL)
             List.of(), List.of(),
+            // SMC: Premium / Discount / Equilibrium
+            null, null, null, null,
             // SMC: Zones
             List.of(
                 new IndicatorSnapshot.OrderBlockView("BEARISH", new BigDecimal("24460.00"), new BigDecimal("24435.00"), new BigDecimal("24447.50"), 1L),

@@ -163,6 +163,11 @@ export interface IndicatorSnapshot {
   // SMC: Liquidity (EQH / EQL)
   equalHighs: EqualLevelView[];
   equalLows: EqualLevelView[];
+  // SMC: Premium / Discount / Equilibrium (UC-SMC-004)
+  premiumZoneTop: number | null;
+  equilibriumLevel: number | null;
+  discountZoneBottom: number | null;
+  currentZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
   // SMC: Legacy / derived (backward compat)
   marketStructureTrend: string;
   strongHigh: number | null;

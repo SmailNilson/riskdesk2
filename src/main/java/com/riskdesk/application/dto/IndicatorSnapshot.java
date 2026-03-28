@@ -73,6 +73,12 @@ public record IndicatorSnapshot(
     List<EqualLevelView> equalHighs,
     List<EqualLevelView> equalLows,
 
+    // ── SMC: Premium / Discount / Equilibrium (UC-SMC-004) ─────────
+    BigDecimal premiumZoneTop,
+    BigDecimal equilibriumLevel,
+    BigDecimal discountZoneBottom,
+    String currentZone,
+
     // ── SMC: Zones ───────────────────────────────────────────────────
     List<OrderBlockView> activeOrderBlocks,
     List<FairValueGapView> activeFairValueGaps,

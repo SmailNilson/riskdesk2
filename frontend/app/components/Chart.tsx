@@ -467,6 +467,11 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       addLine(eq.price, '#22c55eaa', LineStyle.SparseDotted, 'EQL');
     }
 
+    // Premium / Discount / Equilibrium zone lines
+    addLine(snapshot.premiumZoneTop, '#ef444480', LineStyle.Dashed, 'Premium');
+    addLine(snapshot.equilibriumLevel, '#a78bfa99', LineStyle.Solid, 'EQ 50%');
+    addLine(snapshot.discountZoneBottom, '#22c55e80', LineStyle.Dashed, 'Discount');
+
     // ── BOS / CHoCH arrow markers ─────────────────────────────────────────
     const markers: SeriesMarker<Time>[] = (snapshot.recentBreaks ?? [])
       .slice(-15)

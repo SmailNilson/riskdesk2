@@ -151,6 +151,28 @@ public class IndicatorService {
                         f.bias(), f.top(), f.bottom(), f.startBarTime()))
                 .toList();
 
+        // ── Premium / Discount / Equilibrium (UC-SMC-004) ──────────────────
+        BigDecimal premiumZoneTop = null;
+        BigDecimal equilibriumLevel = null;
+        BigDecimal discountZoneBottom = null;
+        String currentZone = null;
+        double tt = smcSnap.trailingTop();
+        double tb = smcSnap.trailingBottom();
+        if (!Double.isNaN(tt) && !Double.isNaN(tb) && tt > tb) {
+            premiumZoneTop = BigDecimal.valueOf(tt);
+            discountZoneBottom = BigDecimal.valueOf(tb);
+            double eq = (tt + tb) / 2.0;
+            equilibriumLevel = BigDecimal.valueOf(eq);
+            double lastClose = candles.get(candles.size() - 1).getClose().doubleValue();
+            if (lastClose > eq) {
+                currentZone = "PREMIUM";
+            } else if (lastClose < eq) {
+                currentZone = "DISCOUNT";
+            } else {
+                currentZone = "EQUILIBRIUM";
+            }
+        }
+
         // Equal Highs / Equal Lows (UC-SMC-003)
         List<EqualLevelDetector.EqualLevel> eqLevels = eqDetector.detect(candles);
         List<IndicatorSnapshot.EqualLevelView> eqhViews = eqLevels.stream()
@@ -214,6 +236,8 @@ public class IndicatorService {
                 strongHighTime, strongLowTime, weakHighTime, weakLowTime,
                 // SMC: Liquidity (EQH / EQL)
                 eqhViews, eqlViews,
+                // SMC: Premium / Discount / Equilibrium
+                premiumZoneTop, equilibriumLevel, discountZoneBottom, currentZone,
                 // SMC: Zones
                 obViews,
                 fvgViews,
@@ -343,6 +367,8 @@ public class IndicatorService {
                 null, null, null, null,
                 // SMC: Liquidity (EQH / EQL)
                 Collections.emptyList(), Collections.emptyList(),
+                // SMC: Premium / Discount / Equilibrium
+                null, null, null, null,
                 // SMC: Zones
                 Collections.emptyList(),
                 Collections.emptyList(),
