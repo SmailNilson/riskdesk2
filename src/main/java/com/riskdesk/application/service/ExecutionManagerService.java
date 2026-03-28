@@ -1,6 +1,8 @@
 package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
@@ -11,23 +13,31 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
 
 @Service
 public class ExecutionManagerService {
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
+    private final IbkrOrderService ibkrOrderService;
     private final ObjectMapper objectMapper;
 
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
+                                   IbkrOrderService ibkrOrderService,
                                    ObjectMapper objectMapper) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
+        this.ibkrOrderService = ibkrOrderService;
         this.objectMapper = objectMapper;
     }
 
@@ -38,8 +48,16 @@ public class ExecutionManagerService {
         if (command.brokerAccountId() == null || command.brokerAccountId().isBlank()) {
             throw new IllegalArgumentException("brokerAccountId is required");
         }
+        if (command.quantity() == null || command.quantity() < 1) {
+            throw new IllegalArgumentException("quantity must be >= 1");
+        }
         if (command.triggerSource() == null) {
             throw new IllegalArgumentException("triggerSource is required");
+        }
+
+        Optional<TradeExecutionRecord> existing = tradeExecutionRepository.findByMentorSignalReviewId(command.mentorSignalReviewId());
+        if (existing.isPresent()) {
+            return enrichExistingExecution(existing.get(), command);
         }
 
         MentorSignalReviewRecord review = reviewRepository.findById(command.mentorSignalReviewId())
@@ -60,6 +78,7 @@ public class ExecutionManagerService {
         candidate.setInstrument(review.getInstrument());
         candidate.setTimeframe(review.getTimeframe());
         candidate.setAction(review.getAction());
+        candidate.setQuantity(command.quantity());
         candidate.setTriggerSource(command.triggerSource());
         candidate.setRequestedBy(blankToNull(command.requestedBy()));
         candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
@@ -81,6 +100,96 @@ public class ExecutionManagerService {
         candidate.setClosedAt(null);
 
         return tradeExecutionRepository.createIfAbsent(candidate);
+    }
+
+    @Transactional(noRollbackFor = IllegalStateException.class)
+    public TradeExecutionRecord submitEntryOrder(SubmitEntryOrderCommand command) {
+        if (command.executionId() == null) {
+            throw new IllegalArgumentException("executionId is required");
+        }
+
+        TradeExecutionRecord execution = tradeExecutionRepository.findByIdForUpdate(command.executionId())
+            .orElseThrow(() -> new IllegalArgumentException("trade execution not found: " + command.executionId()));
+
+        if (execution.getEntryOrderId() != null && execution.getStatus() == ExecutionStatus.ENTRY_SUBMITTED) {
+            return execution;
+        }
+        if (execution.getStatus() != ExecutionStatus.PENDING_ENTRY_SUBMISSION) {
+            throw new IllegalStateException("trade execution is not pending entry submission");
+        }
+        if (execution.getQuantity() == null || execution.getQuantity() < 1) {
+            throw new IllegalStateException("trade execution is missing quantity");
+        }
+
+        Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
+        try {
+            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
+                execution.getId(),
+                execution.getExecutionKey(),
+                execution.getBrokerAccountId(),
+                execution.getInstrument(),
+                execution.getAction(),
+                execution.getQuantity(),
+                execution.getNormalizedEntryPrice()
+            ));
+
+            execution.setEntryOrderId(submission.brokerOrderId());
+            execution.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+            execution.setStatusReason("IBKR entry order submitted: " + submission.brokerOrderStatus());
+            execution.setEntrySubmittedAt(submission.submittedAt() == null ? requestedAt : submission.submittedAt());
+            execution.setUpdatedAt(submission.submittedAt() == null ? requestedAt : submission.submittedAt());
+            execution.setRequestedBy(blankToNull(command.requestedBy()) == null ? execution.getRequestedBy() : blankToNull(command.requestedBy()));
+            return tradeExecutionRepository.save(execution);
+        } catch (RuntimeException e) {
+            String errorMessage = truncate("IBKR entry submission failed: " + e.getMessage(), 256);
+            execution.setStatus(ExecutionStatus.FAILED);
+            execution.setStatusReason(errorMessage);
+            execution.setUpdatedAt(requestedAt);
+            tradeExecutionRepository.save(execution);
+            throw new IllegalStateException(errorMessage, e);
+        }
+    }
+
+    public Optional<TradeExecutionRecord> findByMentorSignalReviewId(Long mentorSignalReviewId) {
+        if (mentorSignalReviewId == null) {
+            return Optional.empty();
+        }
+        return tradeExecutionRepository.findByMentorSignalReviewId(mentorSignalReviewId);
+    }
+
+    public List<TradeExecutionRecord> findByMentorSignalReviewIds(Collection<Long> mentorSignalReviewIds) {
+        if (mentorSignalReviewIds == null || mentorSignalReviewIds.isEmpty()) {
+            return List.of();
+        }
+        return tradeExecutionRepository.findByMentorSignalReviewIds(mentorSignalReviewIds).stream()
+            .sorted(Comparator.comparing(TradeExecutionRecord::getCreatedAt, Comparator.nullsLast(Comparator.naturalOrder())))
+            .toList();
+    }
+
+    public Optional<TradeExecutionRecord> findById(Long executionId) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        return tradeExecutionRepository.findById(executionId);
+    }
+
+    private TradeExecutionRecord enrichExistingExecution(TradeExecutionRecord existing, CreateExecutionCommand command) {
+        boolean dirty = false;
+        Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
+
+        if (existing.getQuantity() == null && command.quantity() != null) {
+            existing.setQuantity(command.quantity());
+            dirty = true;
+        }
+        if ((existing.getRequestedBy() == null || existing.getRequestedBy().isBlank()) && blankToNull(command.requestedBy()) != null) {
+            existing.setRequestedBy(blankToNull(command.requestedBy()));
+            dirty = true;
+        }
+        if (dirty) {
+            existing.setUpdatedAt(requestedAt);
+            return tradeExecutionRepository.save(existing);
+        }
+        return existing;
     }
 
     private void validateReviewForExecution(MentorSignalReviewRecord review) {
@@ -126,5 +235,12 @@ public class ExecutionManagerService {
 
     private String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    private String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
     }
 }

@@ -20,6 +20,7 @@ final class TradeExecutionEntityMapper {
         entity.setInstrument(execution.getInstrument());
         entity.setTimeframe(execution.getTimeframe());
         entity.setAction(execution.getAction());
+        entity.setQuantity(execution.getQuantity());
         entity.setTriggerSource(execution.getTriggerSource());
         entity.setRequestedBy(execution.getRequestedBy());
         entity.setStatus(execution.getStatus());
@@ -54,6 +55,7 @@ final class TradeExecutionEntityMapper {
         execution.setInstrument(entity.getInstrument());
         execution.setTimeframe(entity.getTimeframe());
         execution.setAction(entity.getAction());
+        execution.setQuantity(entity.getQuantity());
         execution.setTriggerSource(entity.getTriggerSource());
         execution.setRequestedBy(entity.getRequestedBy());
         execution.setStatus(entity.getStatus());

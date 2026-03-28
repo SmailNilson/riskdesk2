@@ -3,8 +3,13 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Decimal;
+import com.ib.client.Order;
+import com.ib.client.OrderState;
+import com.ib.client.OrderStatus;
+import com.ib.client.OrderType;
 import com.ib.client.TickAttrib;
 import com.ib.client.TickType;
+import com.ib.client.Types.Action;
 import com.ib.client.Types.BarSize;
 import com.ib.client.Types.DurationUnit;
 import com.ib.client.Types.WhatToShow;
@@ -34,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class IbGatewayNativeClient {
@@ -43,6 +49,7 @@ public class IbGatewayNativeClient {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration SNAPSHOT_TIMEOUT = Duration.ofSeconds(2);
+    private static final Duration ORDER_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration RECONNECT_COOLDOWN = Duration.ofSeconds(5);
     /** Subscriptions that produce no price tick for this long are considered stale. */
     private static final long STALE_PRICE_SECONDS = 60L;
@@ -229,6 +236,152 @@ public class IbGatewayNativeClient {
         return requestAccountSnapshot(requestedAccountId)
             .map(IbGatewayAccountSnapshot::positions)
             .orElseGet(List::of);
+    }
+
+    public Optional<NativeOrderSnapshot> findOrderByOrderRef(String requestedAccountId, String orderRef) {
+        if (orderRef == null || orderRef.isBlank() || !ensureConnected()) {
+            return Optional.empty();
+        }
+
+        String accountId = resolveAccountId(requestedAccountId);
+        if (accountId == null) {
+            return Optional.empty();
+        }
+
+        Optional<NativeOrderSnapshot> openOrder = findOpenOrderByOrderRef(accountId, orderRef);
+        return openOrder.isPresent() ? openOrder : findCompletedOrderByOrderRef(accountId, orderRef);
+    }
+
+    public NativeOrderSubmission placeLimitOrder(Contract contract,
+                                                 String requestedAccountId,
+                                                 Action action,
+                                                 int quantity,
+                                                 BigDecimal limitPrice,
+                                                 String orderRef) {
+        if (contract == null) {
+            throw new IllegalArgumentException("contract is required");
+        }
+        if (quantity < 1) {
+            throw new IllegalArgumentException("quantity must be >= 1");
+        }
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            throw new IllegalArgumentException("limitPrice must be > 0");
+        }
+        if (orderRef == null || orderRef.isBlank()) {
+            throw new IllegalArgumentException("orderRef is required");
+        }
+        if (!ensureConnected()) {
+            throw new IllegalStateException("IB Gateway native API is not connected.");
+        }
+
+        String accountId = resolveAccountId(requestedAccountId);
+        if (accountId == null) {
+            throw new IllegalStateException("No IBKR account is available for order placement.");
+        }
+
+        Optional<NativeOrderSnapshot> existing = findOrderByOrderRef(accountId, orderRef);
+        if (existing.isPresent()) {
+            NativeOrderSnapshot snapshot = existing.get();
+            return new NativeOrderSubmission(snapshot.orderId(), snapshot.status(), snapshot.orderRef(), Instant.now());
+        }
+
+        Order order = new Order();
+        order.account(accountId);
+        order.orderRef(orderRef);
+        order.action(action);
+        order.orderType(OrderType.LMT);
+        order.totalQuantity(Decimal.get(quantity));
+        order.lmtPrice(limitPrice.doubleValue());
+        order.tif("DAY");
+        order.transmit(true);
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> acceptedStatus = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+
+        ApiController.IOrderHandler handler = new ApiController.IOrderHandler() {
+            @Override
+            public void orderState(OrderState orderState, Order liveOrder) {
+                if (liveOrder != null
+                    && orderRef.equals(liveOrder.orderRef())
+                    && orderState != null
+                    && orderState.rejectReason() != null
+                    && !orderState.rejectReason().isBlank()) {
+                    error.compareAndSet(null, orderState.rejectReason());
+                    latch.countDown();
+                }
+            }
+
+            @Override
+            public void orderStatus(OrderStatus status,
+                                    Decimal filled,
+                                    Decimal remaining,
+                                    double avgFillPrice,
+                                    long permId,
+                                    int parentId,
+                                    double lastFillPrice,
+                                    int clientId,
+                                    String whyHeld,
+                                    double mktCapPrice) {
+                if (status == null) {
+                    return;
+                }
+                if (status == OrderStatus.Submitted
+                    || status == OrderStatus.PreSubmitted
+                    || status == OrderStatus.PendingSubmit
+                    || status == OrderStatus.Filled) {
+                    acceptedStatus.compareAndSet(null, status.name());
+                    latch.countDown();
+                    return;
+                }
+                if (status == OrderStatus.Cancelled || status == OrderStatus.ApiCancelled || status == OrderStatus.Inactive) {
+                    String suffix = whyHeld == null || whyHeld.isBlank() ? "" : " (" + whyHeld + ")";
+                    error.compareAndSet(null, "IBKR order " + status.name() + suffix);
+                    latch.countDown();
+                }
+            }
+
+            @Override
+            public void handle(int orderId, String errorMsg) {
+                error.compareAndSet(null, errorMsg == null || errorMsg.isBlank()
+                    ? "IBKR order submission failed."
+                    : errorMsg);
+                latch.countDown();
+            }
+        };
+
+        controller.placeOrModifyOrder(contract, order, handler);
+
+        boolean completed = false;
+        try {
+            completed = latch.await(ORDER_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            error.compareAndSet(null, "Interrupted while waiting for IBKR order acknowledgement.");
+        } finally {
+            try {
+                controller.removeOrderHandler(handler);
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (acceptedStatus.get() != null) {
+            return new NativeOrderSubmission((long) order.orderId(), acceptedStatus.get(), orderRef, Instant.now());
+        }
+
+        Optional<NativeOrderSnapshot> recovered = findOrderByOrderRef(accountId, orderRef);
+        if (recovered.isPresent()) {
+            NativeOrderSnapshot snapshot = recovered.get();
+            return new NativeOrderSubmission(snapshot.orderId(), snapshot.status(), snapshot.orderRef(), Instant.now());
+        }
+
+        if (error.get() != null) {
+            throw new IllegalStateException(error.get());
+        }
+        if (!completed) {
+            throw new IllegalStateException("IBKR order submission timed out without acknowledgement.");
+        }
+        throw new IllegalStateException("IBKR order submission did not yield a confirmed status.");
     }
 
     // -------------------------------------------------------------------------
@@ -482,11 +635,102 @@ public class IbGatewayNativeClient {
         return value == null ? "" : value;
     }
 
+    private Optional<NativeOrderSnapshot> findOpenOrderByOrderRef(String accountId, String orderRef) {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+
+        ApiController.ILiveOrderHandler handler = new ApiController.ILiveOrderHandler() {
+            @Override
+            public void openOrder(Contract contract, Order order, OrderState orderState) {
+                if (order == null || found.get() != null) {
+                    return;
+                }
+                if (!accountId.equals(order.account()) || !orderRef.equals(order.orderRef())) {
+                    return;
+                }
+                String status = orderState != null && orderState.status() != null
+                    ? orderState.status().name()
+                    : "OPEN";
+                found.compareAndSet(null, new NativeOrderSnapshot((long) order.orderId(), order.orderRef(), order.account(), status));
+            }
+
+            @Override
+            public void openOrderEnd() {
+                latch.countDown();
+            }
+
+            @Override
+            public void orderStatus(int orderId,
+                                    OrderStatus status,
+                                    Decimal filled,
+                                    Decimal remaining,
+                                    double avgFillPrice,
+                                    long permId,
+                                    int parentId,
+                                    double lastFillPrice,
+                                    int clientId,
+                                    String whyHeld,
+                                    double mktCapPrice) {
+                // no-op
+            }
+
+            @Override
+            public void handle(int orderId, int errorCode, String errorMsg) {
+                log.debug("IB Gateway live order lookup error code={} msg={}", errorCode, errorMsg);
+                latch.countDown();
+            }
+        };
+
+        controller.reqLiveOrders(handler);
+        awaitLatch(latch, "live orders", ORDER_TIMEOUT);
+        try {
+            controller.removeLiveOrderHandler(handler);
+        } catch (Exception ignored) {
+        }
+        return Optional.ofNullable(found.get());
+    }
+
+    private Optional<NativeOrderSnapshot> findCompletedOrderByOrderRef(String accountId, String orderRef) {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+
+        ApiController.ICompletedOrdersHandler handler = new ApiController.ICompletedOrdersHandler() {
+            @Override
+            public void completedOrder(Contract contract, Order order, OrderState orderState) {
+                if (order == null || found.get() != null) {
+                    return;
+                }
+                if (!accountId.equals(order.account()) || !orderRef.equals(order.orderRef())) {
+                    return;
+                }
+                String status = orderState != null && orderState.completedStatus() != null && !orderState.completedStatus().isBlank()
+                    ? orderState.completedStatus()
+                    : orderState != null && orderState.status() != null
+                        ? orderState.status().name()
+                        : "COMPLETED";
+                found.compareAndSet(null, new NativeOrderSnapshot((long) order.orderId(), order.orderRef(), order.account(), status));
+            }
+
+            @Override
+            public void completedOrdersEnd() {
+                latch.countDown();
+            }
+        };
+
+        controller.reqCompletedOrders(handler);
+        awaitLatch(latch, "completed orders", ORDER_TIMEOUT);
+        return Optional.ofNullable(found.get());
+    }
+
     // -------------------------------------------------------------------------
     // Internal record: cleanup context
     // -------------------------------------------------------------------------
 
     private record DisconnectContext(ApiController controller, List<StreamingPriceSubscription> subscriptions) {}
+
+    public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
+
+    public record NativeOrderSubmission(Long orderId, String status, String orderRef, Instant submittedAt) {}
 
     // -------------------------------------------------------------------------
     // IBKR connection callback handler

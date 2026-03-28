@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, MentorSignalReview } from '@/app/lib/api';
+import { api, MentorSignalReview, TradeExecutionView } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
 
@@ -28,10 +28,12 @@ export default function MentorSignalPanel({
   timezone,
   alerts,
   reviews,
+  selectedBrokerAccountId,
 }: {
   timezone: TzEntry;
   alerts: AlertMessage[];
   reviews: MentorSignalReview[];
+  selectedBrokerAccountId?: string;
 }) {
   const liveEligibleAlerts = useMemo(() => alerts.filter(isMentorEligibleAlert), [alerts]);
 
@@ -114,9 +116,13 @@ export default function MentorSignalPanel({
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const [loadingGroupKey, setLoadingGroupKey] = useState<string | null>(null);
   const [reanalyzingAlertKey, setReanalyzingAlertKey] = useState<string | null>(null);
+  const [armingReviewId, setArmingReviewId] = useState<number | null>(null);
+  const [submittingExecutionId, setSubmittingExecutionId] = useState<number | null>(null);
   const [reanalysisDraft, setReanalysisDraft] = useState<ReanalysisDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [threadsByAlertKey, setThreadsByAlertKey] = useState<Record<string, MentorSignalReview[]>>({});
+  const [executionsByReviewId, setExecutionsByReviewId] = useState<Record<number, TradeExecutionView>>({});
+  const [armingQuantityByReviewId, setArmingQuantityByReviewId] = useState<Record<number, string>>({});
 
   const groupLatestReview = useCallback((group: AlertGroup) => {
     let latestReview: MentorSignalReview | null = null;
@@ -199,6 +205,39 @@ export default function MentorSignalPanel({
 
   const preferredSelectedGroupReview = pickPreferredReview(selectedGroupThreads);
 
+  const loadExecutionsForReviewIds = useCallback(async (reviewIds: number[]) => {
+    if (reviewIds.length === 0) {
+      return;
+    }
+    try {
+      const executions = await api.getTradeExecutionsByReviewIds(reviewIds);
+      if (executions.length === 0) {
+        return;
+      }
+      setExecutionsByReviewId(prev => {
+        const next = { ...prev };
+        for (const execution of executions) {
+          next[execution.mentorSignalReviewId] = execution;
+        }
+        return next;
+      });
+    } catch {
+      // Ignore load errors here; arming errors are surfaced explicitly.
+    }
+  }, []);
+
+  useEffect(() => {
+    const missingReviewIds = selectedGroupThreads
+      .map(review => review.id)
+      .filter((reviewId): reviewId is number => reviewId != null && executionsByReviewId[reviewId] == null);
+
+    if (missingReviewIds.length === 0) {
+      return;
+    }
+
+    void loadExecutionsForReviewIds(Array.from(new Set(missingReviewIds)));
+  }, [selectedGroupThreads, executionsByReviewId, loadExecutionsForReviewIds]);
+
   const groupReviewCount = (group: AlertGroup) => {
     let count = 0;
     for (const alert of group.alerts) {
@@ -215,14 +254,21 @@ export default function MentorSignalPanel({
     setLoadingGroupKey(group.groupKey);
 
     try {
+      const loadedReviews: MentorSignalReview[] = [];
       for (const alert of group.alerts) {
         const alertKey = buildMentorAlertKey(alert);
         const thread = await api.getMentorAlertThread(toRequest(alert));
+        loadedReviews.push(...thread);
         setThreadsByAlertKey(prev => ({
           ...prev,
           [alertKey]: mergeReviews(prev[alertKey] ?? [], thread),
         }));
       }
+
+      const reviewIds = loadedReviews
+        .map(review => review.id)
+        .filter((reviewId): reviewId is number => reviewId != null);
+      await loadExecutionsForReviewIds(Array.from(new Set(reviewIds)));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Unable to load saved mentor reviews.');
     } finally {
@@ -286,6 +332,54 @@ export default function MentorSignalPanel({
       setError(nextError instanceof Error ? nextError.message : 'Mentor reanalysis failed.');
     } finally {
       setReanalyzingAlertKey(current => (current === alertKey ? null : current));
+    }
+  };
+
+  const armExecution = async (review: MentorSignalReview) => {
+    if (!selectedBrokerAccountId) {
+      setError("Selectionne un compte IBKR avant d'armer une execution.");
+      return;
+    }
+    const parsedQuantity = parseQuantityField(armingQuantityByReviewId[review.id] ?? '1');
+    if (parsedQuantity == null) {
+      setError('La quantite doit etre un entier >= 1.');
+      return;
+    }
+
+    setError(null);
+    setArmingReviewId(review.id);
+
+    try {
+      const execution = await api.createTradeExecution({
+        mentorSignalReviewId: review.id,
+        brokerAccountId: selectedBrokerAccountId,
+        quantity: parsedQuantity,
+      });
+      setExecutionsByReviewId(prev => ({
+        ...prev,
+        [execution.mentorSignalReviewId]: execution,
+      }));
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Impossible de creer l'execution Slice 1.");
+    } finally {
+      setArmingReviewId(current => (current === review.id ? null : current));
+    }
+  };
+
+  const submitEntryOrder = async (execution: TradeExecutionView) => {
+    setError(null);
+    setSubmittingExecutionId(execution.id);
+
+    try {
+      const updated = await api.submitTradeExecutionEntry(execution.id);
+      setExecutionsByReviewId(prev => ({
+        ...prev,
+        [updated.mentorSignalReviewId]: updated,
+      }));
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Impossible de soumettre l'ordre d'entree.");
+    } finally {
+      setSubmittingExecutionId(current => (current === execution.id ? null : current));
     }
   };
 
@@ -379,7 +473,6 @@ export default function MentorSignalPanel({
                       <StatusChip
                         status={bestReview?.status ?? 'MISSING'}
                         executionEligibilityStatus={bestReview?.executionEligibilityStatus}
-                        verdict={bestReview?.analysis?.analysis?.verdict}
                       />
                     </span>
                   </div>
@@ -420,10 +513,10 @@ export default function MentorSignalPanel({
                     </span>
                   ))}
                   <SimulationChip status={preferredSelectedGroupReview?.simulationStatus ?? null} />
+                  <ExecutionChip execution={preferredSelectedGroupReview ? executionsByReviewId[preferredSelectedGroupReview.id] : undefined} />
                   <StatusChip
                     status={preferredSelectedGroupReview?.status ?? 'MISSING'}
                     executionEligibilityStatus={preferredSelectedGroupReview?.executionEligibilityStatus}
-                    verdict={preferredSelectedGroupReview?.analysis?.analysis?.verdict}
                   />
                   {selectedGroup.alerts.length > 0 ? (
                     <span className="ml-auto flex flex-wrap justify-end gap-2">
@@ -446,6 +539,10 @@ export default function MentorSignalPanel({
                         })}
                     </span>
                   ) : null}
+                </div>
+
+                <div className="mb-3 rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[10px] text-zinc-500">
+                  Compte IBKR cible: <span className="font-semibold text-zinc-300">{selectedBrokerAccountId ?? 'aucun compte selectionne'}</span>
                 </div>
 
                 {reanalysisDraft ? (
@@ -530,9 +627,9 @@ export default function MentorSignalPanel({
                           <StatusChip
                             status={review.status}
                             executionEligibilityStatus={review.executionEligibilityStatus}
-                            verdict={review.analysis?.analysis?.verdict}
                           />
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
+                          <ExecutionChip execution={executionsByReviewId[review.id]} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone.tz })}
                           </span>
@@ -563,6 +660,37 @@ export default function MentorSignalPanel({
                               <PlanRow label="SL" value={review.analysis.analysis.proposedTradePlan?.stopLoss} />
                               <PlanRow label="TP" value={review.analysis.analysis.proposedTradePlan?.takeProfit} />
                               <PlanRow label="R:R" value={review.analysis.analysis.proposedTradePlan?.rewardToRiskRatio} />
+                              {review.executionEligibilityReason ? (
+                                <Section label="Execution Eligibility" value={review.executionEligibilityReason} />
+                              ) : null}
+                              {executionsByReviewId[review.id] ? (
+                                <ExecutionSummary
+                                  execution={executionsByReviewId[review.id]}
+                                  submitting={submittingExecutionId === executionsByReviewId[review.id].id}
+                                  onSubmitEntry={() => void submitEntryOrder(executionsByReviewId[review.id])}
+                                />
+                              ) : canArmReview(review) ? (
+                                <div className="rounded border border-emerald-900/30 bg-emerald-950/10 p-2">
+                                  <label className="mb-2 block rounded border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+                                    <div className="mb-1 text-[9px] uppercase tracking-wider text-zinc-500">Quantite</div>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      step="1"
+                                      value={armingQuantityByReviewId[review.id] ?? '1'}
+                                      onChange={event => setArmingQuantityByReviewId(current => ({ ...current, [review.id]: event.target.value }))}
+                                      className="w-full bg-transparent text-[11px] font-semibold text-zinc-200 outline-none"
+                                    />
+                                  </label>
+                                  <button
+                                    onClick={() => void armExecution(review)}
+                                    disabled={!selectedBrokerAccountId || armingReviewId === review.id}
+                                    className="w-full rounded border border-emerald-800 bg-emerald-950/40 px-3 py-2 text-[11px] font-semibold text-emerald-300 transition-colors hover:border-emerald-600 hover:bg-emerald-900/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+                                  >
+                                    {armingReviewId === review.id ? 'Arming...' : 'Armer execution Slice 1'}
+                                  </button>
+                                </div>
+                              ) : null}
                               {review.analysis.analysis.proposedTradePlan?.safeDeepEntry ? (
                                 <div className="rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px]">
                                   <div className="mb-1 text-[10px] font-bold uppercase tracking-widest text-amber-300">Safe Deep Entry</div>
@@ -609,19 +737,28 @@ function Section({ label, value }: { label: string; value: string | null | undef
 function StatusChip({
   status,
   executionEligibilityStatus,
-  verdict,
 }: {
   status: MentorSignalReview['status'] | 'MISSING';
   executionEligibilityStatus?: MentorSignalReview['executionEligibilityStatus'];
-  verdict?: string;
 }) {
   if (status === 'DONE') {
-    const valid = executionEligibilityStatus === 'NOT_EVALUATED' || executionEligibilityStatus == null
-      ? verdict?.includes('Valid')
-      : executionEligibilityStatus === 'ELIGIBLE';
+    if (executionEligibilityStatus === 'ELIGIBLE') {
+      return (
+        <span className="rounded bg-emerald-950/70 px-2 py-1 text-[10px] font-semibold text-emerald-300">
+          Trade OK
+        </span>
+      );
+    }
+    if (executionEligibilityStatus === 'INELIGIBLE') {
+      return (
+        <span className="rounded bg-red-950/70 px-2 py-1 text-[10px] font-semibold text-red-300">
+          Trade Non-Conforme
+        </span>
+      );
+    }
     return (
-      <span className={`rounded px-2 py-1 text-[10px] font-semibold ${valid ? 'bg-emerald-950/70 text-emerald-300' : 'bg-red-950/70 text-red-300'}`}>
-        {valid ? 'Trade OK' : 'Trade Non-Conforme'}
+      <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] font-semibold text-zinc-300">
+        Review Done
       </span>
     );
   }
@@ -820,11 +957,76 @@ function inferDirection(alert: AlertMessage) {
 }
 
 function isExecutionEligible(review: MentorSignalReview) {
-  if (review.executionEligibilityStatus === 'ELIGIBLE') {
-    return true;
+  return review.executionEligibilityStatus === 'ELIGIBLE';
+}
+
+function canArmReview(review: MentorSignalReview) {
+  return review.status === 'DONE' && isExecutionEligible(review);
+}
+
+function ExecutionChip({ execution }: { execution?: TradeExecutionView }) {
+  if (!execution) {
+    return null;
   }
-  if (review.executionEligibilityStatus === 'INELIGIBLE') {
-    return false;
+
+  const cls = execution.status === 'PENDING_ENTRY_SUBMISSION'
+    ? 'bg-amber-950/70 text-amber-300'
+    : execution.status === 'ENTRY_SUBMITTED'
+      ? 'bg-cyan-950/70 text-cyan-300'
+    : execution.status === 'ACTIVE'
+      ? 'bg-cyan-950/70 text-cyan-300'
+      : execution.status === 'CLOSED'
+        ? 'bg-emerald-950/70 text-emerald-300'
+        : execution.status === 'FAILED' || execution.status === 'REJECTED'
+          ? 'bg-red-950/70 text-red-300'
+          : 'bg-zinc-800 text-zinc-300';
+
+  return (
+    <span className={`rounded px-2 py-1 text-[10px] font-semibold ${cls}`}>
+      Exec {execution.status}
+    </span>
+  );
+}
+
+function ExecutionSummary({
+  execution,
+  submitting,
+  onSubmitEntry,
+}: {
+  execution: TradeExecutionView;
+  submitting: boolean;
+  onSubmitEntry: () => void;
+}) {
+  return (
+    <div className="rounded border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-[11px] text-amber-100">
+      <div className="mb-1 text-[10px] font-bold uppercase tracking-widest text-amber-300">Execution</div>
+      <div>Status: {execution.status}</div>
+      <div>Compte: {execution.brokerAccountId}</div>
+      <div>Quantite: {execution.quantity ?? 'n/a'}</div>
+      <div>Entry normalisee: {execution.normalizedEntryPrice}</div>
+      <div>Virtual SL: {execution.virtualStopLoss}</div>
+      <div>Virtual TP: {execution.virtualTakeProfit}</div>
+      <div className="mt-1 text-amber-200/80">{execution.statusReason ?? 'Aucune raison fournie.'}</div>
+      {execution.status === 'PENDING_ENTRY_SUBMISSION' ? (
+        <button
+          onClick={onSubmitEntry}
+          disabled={submitting}
+          className="mt-2 w-full rounded border border-cyan-800 bg-cyan-950/40 px-3 py-2 text-[11px] font-semibold text-cyan-300 transition-colors hover:border-cyan-600 hover:bg-cyan-900/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-500"
+        >
+          {submitting ? "Soumission en cours..." : "Soumettre ordre d'entree"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function parseQuantityField(value: string | undefined) {
+  if (!value || value.trim() === '') {
+    return null;
   }
-  return review.analysis?.analysis?.verdict?.includes('Valid') ?? false;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return null;
+  }
+  return parsed;
 }

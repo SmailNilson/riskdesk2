@@ -449,6 +449,49 @@ export interface MentorAlertReviewRequest {
   takeProfit?: number;
 }
 
+export interface TradeExecutionView {
+  id: number;
+  version: number | null;
+  executionKey: string;
+  mentorSignalReviewId: number;
+  reviewAlertKey: string;
+  reviewRevision: number;
+  brokerAccountId: string;
+  instrument: string;
+  timeframe: string;
+  action: 'LONG' | 'SHORT';
+  quantity: number | null;
+  triggerSource: 'MANUAL_ARMING';
+  requestedBy: string | null;
+  status:
+    | 'PENDING_ENTRY_SUBMISSION'
+    | 'ENTRY_SUBMITTED'
+    | 'ENTRY_PARTIALLY_FILLED'
+    | 'ACTIVE'
+    | 'VIRTUAL_EXIT_TRIGGERED'
+    | 'EXIT_SUBMITTED'
+    | 'CLOSED'
+    | 'CANCELLED'
+    | 'REJECTED'
+    | 'FAILED';
+  statusReason: string | null;
+  normalizedEntryPrice: number;
+  virtualStopLoss: number;
+  virtualTakeProfit: number;
+  disasterStopPrice: number | null;
+  entryOrderId: number | null;
+  disasterStopOrderId: number | null;
+  lastReliableLivePrice: number | null;
+  lastReliableLivePriceAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  entrySubmittedAt: string | null;
+  entryFilledAt: string | null;
+  virtualExitTriggeredAt: string | null;
+  exitSubmittedAt: string | null;
+  closedAt: string | null;
+}
+
 export interface MentorIntermarketSnapshot {
   dxyPctChange: number | null;
   dxyTrend: string | null;
@@ -493,6 +536,12 @@ export const api = {
     post<MentorSignalReview[]>('/api/mentor/auto-alerts/thread', request),
   reanalyzeMentorAlert: (request: MentorAlertReviewRequest) =>
     post<MentorSignalReview>('/api/mentor/auto-alerts/reanalyze', request),
+  createTradeExecution: (request: { mentorSignalReviewId: number; brokerAccountId: string; quantity: number }) =>
+    post<TradeExecutionView>('/api/mentor/executions', request),
+  getTradeExecutionsByReviewIds: (mentorSignalReviewIds: number[]) =>
+    post<TradeExecutionView[]>('/api/mentor/executions/by-review-ids', { mentorSignalReviewIds }),
+  submitTradeExecutionEntry: (executionId: number) =>
+    post<TradeExecutionView>(`/api/mentor/executions/${executionId}/submit-entry`, {}),
   getAutoAnalysisStatus: () =>
     get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
   toggleAutoAnalysis: () =>

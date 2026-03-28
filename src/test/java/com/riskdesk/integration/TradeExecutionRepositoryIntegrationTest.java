@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -104,6 +105,19 @@ class TradeExecutionRepositoryIntegrationTest {
             .isInstanceOf(ObjectOptimisticLockingFailureException.class);
     }
 
+    @Test
+    void findByMentorSignalReviewIds_returnsOnlyMatchingExecutions() {
+        adapter.createIfAbsent(execution(201L));
+        adapter.createIfAbsent(execution(202L));
+        adapter.createIfAbsent(execution(203L));
+
+        List<TradeExecutionRecord> found = adapter.findByMentorSignalReviewIds(List.of(202L, 204L, 201L));
+
+        assertThat(found)
+            .extracting(TradeExecutionRecord::getMentorSignalReviewId)
+            .containsExactlyInAnyOrder(201L, 202L);
+    }
+
     private TradeExecutionRecord execution(Long reviewId) {
         TradeExecutionRecord record = new TradeExecutionRecord();
         record.setExecutionKey("exec:mentor-review:" + reviewId);
@@ -114,6 +128,7 @@ class TradeExecutionRepositoryIntegrationTest {
         record.setInstrument("MNQ");
         record.setTimeframe("10m");
         record.setAction("LONG");
+        record.setQuantity(1);
         record.setTriggerSource(ExecutionTriggerSource.MANUAL_ARMING);
         record.setRequestedBy("integration-test");
         record.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);

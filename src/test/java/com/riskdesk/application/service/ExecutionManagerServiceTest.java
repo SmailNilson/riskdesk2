@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
@@ -36,6 +37,9 @@ class ExecutionManagerServiceTest {
     @Mock
     private TradeExecutionRepositoryPort tradeExecutionRepository;
 
+    @Mock
+    private IbkrOrderService ibkrOrderService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -43,6 +47,7 @@ class ExecutionManagerServiceTest {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
+            ibkrOrderService,
             objectMapper
         );
 
@@ -57,6 +62,7 @@ class ExecutionManagerServiceTest {
         TradeExecutionRecord created = service.ensureExecutionCreated(new CreateExecutionCommand(
             77L,
             "DU1234567",
+            2,
             ExecutionTriggerSource.MANUAL_ARMING,
             Instant.parse("2026-03-28T16:01:00Z"),
             "mentor-panel"
@@ -72,6 +78,7 @@ class ExecutionManagerServiceTest {
         assertThat(saved.getMentorSignalReviewId()).isEqualTo(77L);
         assertThat(saved.getReviewRevision()).isEqualTo(2);
         assertThat(saved.getBrokerAccountId()).isEqualTo("DU1234567");
+        assertThat(saved.getQuantity()).isEqualTo(2);
         assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         assertThat(saved.getNormalizedEntryPrice()).isEqualByComparingTo("18123.50");
         assertThat(saved.getVirtualStopLoss()).isEqualByComparingTo("18099.75");
@@ -83,6 +90,7 @@ class ExecutionManagerServiceTest {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
+            ibkrOrderService,
             objectMapper
         );
 
@@ -93,6 +101,7 @@ class ExecutionManagerServiceTest {
         assertThatThrownBy(() -> service.ensureExecutionCreated(new CreateExecutionCommand(
             77L,
             "DU1234567",
+            1,
             ExecutionTriggerSource.MANUAL_ARMING,
             Instant.parse("2026-03-28T16:01:00Z"),
             "mentor-panel"
@@ -106,6 +115,7 @@ class ExecutionManagerServiceTest {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
+            ibkrOrderService,
             objectMapper
         );
 
@@ -132,6 +142,7 @@ class ExecutionManagerServiceTest {
         assertThatThrownBy(() -> service.ensureExecutionCreated(new CreateExecutionCommand(
             77L,
             "DU1234567",
+            1,
             ExecutionTriggerSource.MANUAL_ARMING,
             Instant.parse("2026-03-28T16:01:00Z"),
             "mentor-panel"
@@ -145,6 +156,7 @@ class ExecutionManagerServiceTest {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
+            ibkrOrderService,
             objectMapper
         );
 
@@ -159,6 +171,7 @@ class ExecutionManagerServiceTest {
         TradeExecutionRecord first = service.ensureExecutionCreated(new CreateExecutionCommand(
             77L,
             "DU1234567",
+            1,
             ExecutionTriggerSource.MANUAL_ARMING,
             Instant.parse("2026-03-28T16:01:00Z"),
             "mentor-panel"
@@ -166,6 +179,7 @@ class ExecutionManagerServiceTest {
         TradeExecutionRecord second = service.ensureExecutionCreated(new CreateExecutionCommand(
             78L,
             "DU1234567",
+            1,
             ExecutionTriggerSource.MANUAL_ARMING,
             Instant.parse("2026-03-28T16:02:00Z"),
             "mentor-panel"
@@ -174,6 +188,81 @@ class ExecutionManagerServiceTest {
         assertThat(first.getExecutionKey()).isEqualTo("exec:mentor-review:77");
         assertThat(second.getExecutionKey()).isEqualTo("exec:mentor-review:78");
         assertThat(first.getMentorSignalReviewId()).isNotEqualTo(second.getMentorSignalReviewId());
+    }
+
+    @Test
+    void ensureExecutionCreated_enrichesExistingExecutionWithMissingQuantity() throws Exception {
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository,
+            tradeExecutionRepository,
+            ibkrOrderService,
+            objectMapper
+        );
+
+        TradeExecutionRecord existing = new TradeExecutionRecord();
+        existing.setId(501L);
+        existing.setExecutionKey("exec:mentor-review:77");
+        existing.setMentorSignalReviewId(77L);
+        existing.setBrokerAccountId("DU1234567");
+        existing.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        existing.setCreatedAt(Instant.parse("2026-03-28T16:00:00Z"));
+        existing.setUpdatedAt(Instant.parse("2026-03-28T16:00:00Z"));
+
+        when(tradeExecutionRepository.findByMentorSignalReviewId(77L)).thenReturn(Optional.of(existing));
+        when(tradeExecutionRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        TradeExecutionRecord updated = service.ensureExecutionCreated(new CreateExecutionCommand(
+            77L,
+            "DU1234567",
+            3,
+            ExecutionTriggerSource.MANUAL_ARMING,
+            Instant.parse("2026-03-28T16:01:00Z"),
+            "mentor-panel"
+        ));
+
+        assertThat(updated.getQuantity()).isEqualTo(3);
+        verify(tradeExecutionRepository).save(existing);
+    }
+
+    @Test
+    void submitEntryOrder_transitionsPendingExecutionToEntrySubmitted() {
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository,
+            tradeExecutionRepository,
+            ibkrOrderService,
+            objectMapper
+        );
+
+        TradeExecutionRecord execution = new TradeExecutionRecord();
+        execution.setId(901L);
+        execution.setExecutionKey("exec:mentor-review:77");
+        execution.setMentorSignalReviewId(77L);
+        execution.setBrokerAccountId("DU1234567");
+        execution.setInstrument("MNQ");
+        execution.setAction("LONG");
+        execution.setQuantity(2);
+        execution.setNormalizedEntryPrice(new java.math.BigDecimal("18123.50"));
+        execution.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        execution.setUpdatedAt(Instant.parse("2026-03-28T16:00:00Z"));
+
+        when(tradeExecutionRepository.findByIdForUpdate(901L)).thenReturn(Optional.of(execution));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(new BrokerEntryOrderSubmission(
+            44001L,
+            "Submitted",
+            "exec:mentor-review:77",
+            Instant.parse("2026-03-28T16:03:00Z")
+        ));
+        when(tradeExecutionRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        TradeExecutionRecord submitted = service.submitEntryOrder(new SubmitEntryOrderCommand(
+            901L,
+            Instant.parse("2026-03-28T16:03:00Z"),
+            "mentor-panel"
+        ));
+
+        assertThat(submitted.getEntryOrderId()).isEqualTo(44001L);
+        assertThat(submitted.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+        assertThat(submitted.getEntrySubmittedAt()).isEqualTo(Instant.parse("2026-03-28T16:03:00Z"));
     }
 
     private MentorSignalReviewRecord eligibleReview(Long id, int revision, String createdAt) throws Exception {

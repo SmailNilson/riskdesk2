@@ -196,7 +196,15 @@ What changed:
 - introduced a dedicated `trade_executions` table instead of extending `mentor_signal_reviews` again
 - idempotence is now defined per persisted Mentor review ID (`mentorSignalReviewId`)
 - `ExecutionManagerService.ensureExecutionCreated()` creates a pending execution foundation row only
-- no IBKR `placeOrder` or `EWrapper` execution callback wiring exists yet
+- `TradeExecutionRecord` now freezes `quantity` at arming time; this is required before any live broker submission
+- `MentorController` now exposes:
+  - `POST /api/mentor/executions`
+  - `GET /api/mentor/executions/by-review/{mentorSignalReviewId}`
+  - `POST /api/mentor/executions/by-review-ids`
+- `MentorController` now also exposes `POST /api/mentor/executions/{executionId}/submit-entry`
+- `MentorSignalPanel` now supports manual Slice 1 arming against the selected IBKR account and displays the persisted execution state
+- Slice 2 now submits a simple IBKR limit entry order through the native gateway adapter
+- full fill/re-sync/virtual exit orchestration does not exist yet
 - `MentorSignalReview` persistence now stores explicit execution eligibility metadata:
   - `executionEligibilityStatus`
   - `executionEligibilityReason`
@@ -210,6 +218,8 @@ Why:
 Operational note:
 
 - the new eligibility field on historical rows may be `null`; treat those rows as legacy, display-only records until they are reanalyzed
+- the UI no longer needs to parse verdict text to decide whether a review is execution-eligible
+- legacy `trade_executions` rows created before `quantity` existed may need enrichment before they can be submitted live
 
 ## Known Runtime Behavior
 

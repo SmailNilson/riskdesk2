@@ -2,6 +2,8 @@ package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.IbkrAccountView;
 import com.riskdesk.application.dto.IbkrAuthStatusView;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
@@ -136,6 +138,11 @@ public class ClientPortalIbkrBrokerGateway implements IbkrBrokerGateway {
             log.warn("IBKR Client Portal portfolio fetch failed: {}", e.getMessage());
             return disconnected("IBKR portfolio unavailable: " + e.getMessage());
         }
+    }
+
+    @Override
+    public BrokerEntryOrderSubmission submitEntryOrder(BrokerEntryOrderRequest request) {
+        throw new UnsupportedOperationException("IBKR order placement is not implemented for Client Portal mode.");
     }
 
     private JsonNode readJson(String path) throws Exception {

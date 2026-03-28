@@ -63,6 +63,9 @@ public class TradeExecutionEntity {
     @Column(nullable = false, length = 16)
     private String action;
 
+    @Column
+    private Integer quantity;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 32)
     private ExecutionTriggerSource triggerSource;
@@ -200,6 +203,14 @@ public class TradeExecutionEntity {
 
     public void setAction(String action) {
         this.action = action;
+    }
+
+    public Integer getQuantity() {
+        return quantity;
+    }
+
+    public void setQuantity(Integer quantity) {
+        this.quantity = quantity;
     }
 
     public ExecutionTriggerSource getTriggerSource() {

@@ -8,12 +8,15 @@ import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.application.service.ExecutionManagerService;
 import com.riskdesk.application.service.HistoricalTradeImporterService;
 import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorManualReviewService;
 import com.riskdesk.application.service.MentorMemoryService;
 import com.riskdesk.application.service.MentorSignalReviewService;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
+import com.riskdesk.domain.model.ExecutionStatus;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -27,6 +30,7 @@ import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -58,6 +62,9 @@ class MentorControllerIntegrationTest {
 
     @MockBean
     private MentorSignalReviewService mentorSignalReviewService;
+
+    @MockBean
+    private ExecutionManagerService executionManagerService;
 
     @Test
     void analyze_validPayload_returnsStructuredResponse() throws Exception {
@@ -316,6 +323,141 @@ class MentorControllerIntegrationTest {
             .andExpect(jsonPath("$.id").value(13))
             .andExpect(jsonPath("$.revision").value(3))
             .andExpect(jsonPath("$.status").value("ANALYZING"));
+    }
+
+    @Test
+    void createExecution_returnsSlice1Execution() throws Exception {
+        when(executionManagerService.ensureExecutionCreated(any())).thenReturn(
+            new com.riskdesk.domain.model.TradeExecutionRecord() {{
+                setId(801L);
+                setVersion(0L);
+                setExecutionKey("exec:mentor-review:13");
+                setMentorSignalReviewId(13L);
+                setReviewAlertKey("2026-03-26T02:30:39Z:MNQ:SMC:...");
+                setReviewRevision(3);
+                setBrokerAccountId("DU1234567");
+                setInstrument("MNQ");
+                setTimeframe("10m");
+                setAction("SHORT");
+                setQuantity(2);
+                setTriggerSource(ExecutionTriggerSource.MANUAL_ARMING);
+                setRequestedBy("mentor-panel");
+                setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+                setStatusReason("Execution foundation created. IBKR placement not started.");
+                setNormalizedEntryPrice(new java.math.BigDecimal("18123.50"));
+                setVirtualStopLoss(new java.math.BigDecimal("18099.75"));
+                setVirtualTakeProfit(new java.math.BigDecimal("18160.25"));
+                setCreatedAt(java.time.Instant.parse("2026-03-28T16:01:00Z"));
+                setUpdatedAt(java.time.Instant.parse("2026-03-28T16:01:00Z"));
+            }}
+        );
+
+        mockMvc.perform(post("/api/mentor/executions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "mentorSignalReviewId": 13,
+                      "brokerAccountId": "DU1234567",
+                      "quantity": 2
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.id").value(801))
+            .andExpect(jsonPath("$.mentorSignalReviewId").value(13))
+            .andExpect(jsonPath("$.brokerAccountId").value("DU1234567"))
+            .andExpect(jsonPath("$.quantity").value(2))
+            .andExpect(jsonPath("$.status").value("PENDING_ENTRY_SUBMISSION"));
+    }
+
+    @Test
+    void createExecution_whenReviewIsNotEligible_returns409() throws Exception {
+        when(executionManagerService.ensureExecutionCreated(any()))
+            .thenThrow(new IllegalStateException("mentor review is not execution-eligible"));
+
+        mockMvc.perform(post("/api/mentor/executions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "mentorSignalReviewId": 13,
+                      "brokerAccountId": "DU1234567",
+                      "quantity": 2
+                    }
+                    """))
+            .andExpect(status().isConflict());
+    }
+
+    @Test
+    void executionsByReviewIds_returnsExecutionBatch() throws Exception {
+        when(executionManagerService.findByMentorSignalReviewIds(anyCollection())).thenReturn(List.of(
+            new com.riskdesk.domain.model.TradeExecutionRecord() {{
+                setId(901L);
+                setExecutionKey("exec:mentor-review:21");
+                setMentorSignalReviewId(21L);
+                setReviewAlertKey("alert-key-21");
+                setReviewRevision(1);
+                setBrokerAccountId("DU1234567");
+                setInstrument("MGC");
+                setTimeframe("5m");
+                setAction("LONG");
+                setQuantity(1);
+                setTriggerSource(ExecutionTriggerSource.MANUAL_ARMING);
+                setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+                setNormalizedEntryPrice(new java.math.BigDecimal("3012.50"));
+                setVirtualStopLoss(new java.math.BigDecimal("3005.00"));
+                setVirtualTakeProfit(new java.math.BigDecimal("3035.00"));
+                setCreatedAt(java.time.Instant.parse("2026-03-28T16:01:00Z"));
+                setUpdatedAt(java.time.Instant.parse("2026-03-28T16:01:00Z"));
+            }}
+        ));
+
+        mockMvc.perform(post("/api/mentor/executions/by-review-ids")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "mentorSignalReviewIds": [21, 22]
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.length()").value(1))
+            .andExpect(jsonPath("$[0].mentorSignalReviewId").value(21))
+            .andExpect(jsonPath("$[0].quantity").value(1))
+            .andExpect(jsonPath("$[0].executionKey").value("exec:mentor-review:21"));
+    }
+
+    @Test
+    void submitEntryOrder_returnsEntrySubmittedExecution() throws Exception {
+        when(executionManagerService.submitEntryOrder(any())).thenReturn(
+            new com.riskdesk.domain.model.TradeExecutionRecord() {{
+                setId(901L);
+                setExecutionKey("exec:mentor-review:21");
+                setMentorSignalReviewId(21L);
+                setReviewAlertKey("alert-key-21");
+                setReviewRevision(1);
+                setBrokerAccountId("DU1234567");
+                setInstrument("MGC");
+                setTimeframe("5m");
+                setAction("LONG");
+                setQuantity(1);
+                setTriggerSource(ExecutionTriggerSource.MANUAL_ARMING);
+                setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+                setEntryOrderId(44001L);
+                setStatusReason("IBKR entry order submitted: Submitted");
+                setNormalizedEntryPrice(new java.math.BigDecimal("3012.50"));
+                setVirtualStopLoss(new java.math.BigDecimal("3005.00"));
+                setVirtualTakeProfit(new java.math.BigDecimal("3035.00"));
+                setEntrySubmittedAt(java.time.Instant.parse("2026-03-28T16:04:00Z"));
+                setCreatedAt(java.time.Instant.parse("2026-03-28T16:01:00Z"));
+                setUpdatedAt(java.time.Instant.parse("2026-03-28T16:04:00Z"));
+            }}
+        );
+
+        mockMvc.perform(post("/api/mentor/executions/901/submit-entry")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.id").value(901))
+            .andExpect(jsonPath("$.entryOrderId").value(44001))
+            .andExpect(jsonPath("$.status").value("ENTRY_SUBMITTED"));
     }
 
     @Test

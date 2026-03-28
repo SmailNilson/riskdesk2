@@ -6,6 +6,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 @Component
@@ -47,7 +49,22 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
     }
 
     @Override
+    public Optional<TradeExecutionRecord> findByIdForUpdate(Long id) {
+        return repository.findByIdForUpdate(id).map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
     public Optional<TradeExecutionRecord> findByMentorSignalReviewId(Long mentorSignalReviewId) {
         return repository.findByMentorSignalReviewId(mentorSignalReviewId).map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
+    public List<TradeExecutionRecord> findByMentorSignalReviewIds(Collection<Long> mentorSignalReviewIds) {
+        if (mentorSignalReviewIds == null || mentorSignalReviewIds.isEmpty()) {
+            return List.of();
+        }
+        return repository.findAllByMentorSignalReviewIdIn(mentorSignalReviewIds).stream()
+            .map(TradeExecutionEntityMapper::toDomain)
+            .toList();
     }
 }

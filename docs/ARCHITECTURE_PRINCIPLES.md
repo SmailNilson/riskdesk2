@@ -204,6 +204,9 @@ When introducing real-order execution:
 - treat `mentorSignalReviewId` as the idempotence key for execution creation
 - require backend-owned eligibility metadata on the review; do not parse UI verdict strings as execution truth
 - keep Slice 1 free of IBKR order placement side effects until the persistence and state machine foundation is stable
+- expose execution reads and writes through dedicated execution transport DTOs/endpoints rather than nesting the execution aggregate into review persistence by default
+- freeze execution quantity on the execution aggregate itself before any broker submission
+- when submitting an entry order, lock the execution row before the external broker side effect so two concurrent triggers cannot place two orders
 
 ## Review Checklist
 
