@@ -1,5 +1,7 @@
 import { IndicatorSnapshot, OrderBlockView } from '@/app/lib/api';
 
+const BREAKER_MAX_DISTANCE_RATIO = 0.02;
+
 export function breakerReferenceTime(block: OrderBlockView): number {
   return block.breakerTime ?? block.startTime;
 }
@@ -23,7 +25,12 @@ export function relevantBreakerBlocks(snapshot: IndicatorSnapshot | null, curren
     return sorted;
   }
 
-  return sorted.filter(block =>
-    block.type === 'BULLISH' ? block.mid <= currentPrice : block.mid >= currentPrice
-  );
+  const absCurrentPrice = Math.max(Math.abs(currentPrice), 1);
+  const maxDistance = absCurrentPrice * BREAKER_MAX_DISTANCE_RATIO;
+
+  return sorted.filter(block => {
+    const isOnActionableSide = block.type === 'BULLISH' ? block.mid <= currentPrice : block.mid >= currentPrice;
+    const distanceFromPrice = Math.abs(block.mid - currentPrice);
+    return isOnActionableSide && distanceFromPrice <= maxDistance;
+  });
 }

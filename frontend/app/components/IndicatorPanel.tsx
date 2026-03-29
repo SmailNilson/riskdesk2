@@ -247,7 +247,7 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
             <div className="text-[10px] uppercase tracking-widest text-zinc-500">V2 Breaker</div>
             {hiddenBreakerCount > 0 && (
               <span className="text-[10px] text-zinc-600">
-                {hiddenBreakerCount} offside
+                {hiddenBreakerCount} hidden
               </span>
             )}
           </div>
