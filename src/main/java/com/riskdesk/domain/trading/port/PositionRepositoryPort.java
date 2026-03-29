@@ -3,6 +3,7 @@ package com.riskdesk.domain.trading.port;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Position;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -25,7 +26,7 @@ public interface PositionRepositoryPort {
 
     BigDecimal totalUnrealizedPnL();
 
-    BigDecimal todayRealizedPnL();
+    BigDecimal todayRealizedPnL(Instant sessionStart);
 
     long openPositionCount();
 

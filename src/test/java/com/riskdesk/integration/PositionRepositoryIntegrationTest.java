@@ -162,7 +162,8 @@ class PositionRepositoryIntegrationTest {
         // Open position — should NOT be included
         openPosition(Instrument.MNQ, Side.LONG, 1, 18100.00, 300.00);
 
-        BigDecimal todayPnL = positionRepository.todayRealizedPnL();
+        BigDecimal todayPnL = positionRepository.todayRealizedPnL(
+                now.minus(24, ChronoUnit.HOURS));
 
         // 280 + 750 = 1030
         assertEquals(0, new BigDecimal("1030.00").compareTo(todayPnL),

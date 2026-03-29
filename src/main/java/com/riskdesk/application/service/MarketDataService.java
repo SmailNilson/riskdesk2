@@ -15,6 +15,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Map;
@@ -242,6 +244,10 @@ public class MarketDataService {
     }
 
     private static Instant truncateToPeriod(Instant ts, long periodMinutes) {
+        if (periodMinutes >= 1440) {
+            // Daily+ candles align to CME session close (17:00 ET), not midnight UTC.
+            return TradingSessionResolver.dailySessionStart(ts);
+        }
         long epochMin    = ts.getEpochSecond() / 60;
         long periodStart = (epochMin / periodMinutes) * periodMinutes;
         return Instant.ofEpochSecond(periodStart * 60);

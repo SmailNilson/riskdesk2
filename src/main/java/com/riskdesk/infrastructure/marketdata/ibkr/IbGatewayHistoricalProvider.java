@@ -153,6 +153,15 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         );
     }
 
+    /**
+     * Parses the bar timestamp from IBKR.  The primary path uses {@code bar.time()}
+     * which returns epoch seconds (timezone-safe).  The string fallback ({@code bar.timeStr()})
+     * is treated as UTC, which is correct when the TWS API Controller pre-parses the time.
+     * <p>
+     * <b>Caution:</b> if IBKR ever returns raw exchange-timezone strings in the fallback
+     * path, they would be mis-interpreted as UTC (4-5 h offset for CME).  A warning is
+     * logged whenever the fallback activates so this can be detected in production.
+     */
     private long parseBarTime(Bar bar) {
         if (bar.time() != Long.MAX_VALUE) {
             return bar.time();
@@ -162,6 +171,9 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         if (raw == null || raw.isBlank()) {
             return Instant.now().getEpochSecond();
         }
+
+        log.warn("IBKR bar.time() unavailable, falling back to timeStr '{}' parsed as UTC. "
+                + "Verify this is not exchange-local time.", raw);
 
         String normalized = raw.trim().replaceAll("\\s+", " ");
         try {

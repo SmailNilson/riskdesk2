@@ -11,6 +11,7 @@ import com.riskdesk.domain.trading.aggregate.Portfolio;
 import com.riskdesk.domain.trading.event.PositionClosed;
 import com.riskdesk.domain.trading.event.PositionOpened;
 import com.riskdesk.domain.trading.event.PositionPnLUpdated;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.port.PositionRepositoryPort;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -103,7 +104,8 @@ public class PositionService {
     private PortfolioSummary getLocalPortfolioSummary() {
         List<Position> openPositions = positionPort.findOpenPositions();
         BigDecimal unrealizedPnL = positionPort.totalUnrealizedPnL();
-        BigDecimal realizedPnL   = positionPort.todayRealizedPnL();
+        BigDecimal realizedPnL   = positionPort.todayRealizedPnL(
+                TradingSessionResolver.dailySessionStart(Instant.now()));
         long count               = positionPort.openPositionCount();
 
         BigDecimal totalExposure = openPositions.stream()
