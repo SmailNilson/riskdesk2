@@ -50,6 +50,7 @@ git branch -d <agent>/<task-slug>
   git fetch origin
   git switch -c <agent>/my-feature origin/main
   ```
+- On every new session, move to an agent branch immediately before any investigation or implementation work. Read-only debugging, incident analysis, and code review are still "starting a task" and must not happen on `main`.
 - Use your agent prefix: `codex/`, `claude/`, `maq/`, `claude-bedrock/`
 - Keep branches short-lived (1–2 days max)
 - Open a PR and let the human merge — never merge another agent's branch yourself
