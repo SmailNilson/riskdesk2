@@ -126,6 +126,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
   // UC-SMC-005: MTF levels toggle
   const [showMtf, setShowMtf] = useState(false);
+  // UC-SMC-007: candle coloring by SMC trend
+  const [smcCandleColor, setSmcCandleColor] = useState(false);
   // lastBarTime as state so the SMC effect re-fires after candles load
   const [lastBarTime, setLastBarTime] = useState<Time>(0 as Time);
 
@@ -133,6 +135,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   useEffect(() => {
     setVis({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
     setShowMtf(false);
+    setSmcCandleColor(false);
     setLastBarTime(0 as Time);
     lastCandleRef.current = null;
   }, [instrument, timeframe]);
@@ -397,6 +400,36 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     wtChartRef.current?.applyOptions({ localization: fmt });
   }, [timezone]);
 
+  // ── UC-SMC-007: SMC candle coloring ──────────────────────────────────────────
+  useEffect(() => {
+    const cs = candleRef.current;
+    if (!cs) return;
+    if (!smcCandleColor || !snapshot) {
+      // Restore default candle colors
+      cs.applyOptions({
+        upColor: '#22c55e', downColor: '#ef4444',
+        borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+        wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      });
+      return;
+    }
+    // Derive active bias: prefer swing (longer-term), fallback to internal
+    const bias = snapshot.swingBias ?? snapshot.internalBias ?? null;
+    if (bias === 'BULLISH') {
+      cs.applyOptions({
+        upColor: '#26a69a', downColor: '#4db6ac',
+        borderUpColor: '#26a69a', borderDownColor: '#4db6ac',
+        wickUpColor: '#26a69a', wickDownColor: '#4db6ac',
+      });
+    } else if (bias === 'BEARISH') {
+      cs.applyOptions({
+        upColor: '#ef5350', downColor: '#e57373',
+        borderUpColor: '#ef5350', borderDownColor: '#e57373',
+        wickUpColor: '#ef5350', wickDownColor: '#e57373',
+      });
+    }
+  }, [smcCandleColor, snapshot]);
+
   // ── SMC overlays — re-render whenever snapshot or SMC visibility changes ─────
   useEffect(() => {
     const series = candleRef.current;
@@ -622,6 +655,13 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
           {snapshot.mtfLevels && (
             <Tag color="amber" label="MTF" active={showMtf} onClick={() => setShowMtf(v => !v)} />
           )}
+          {/* UC-SMC-007: candle color by SMC trend */}
+          <Tag
+            color="gray"
+            label="C●"
+            active={smcCandleColor}
+            onClick={() => setSmcCandleColor(v => !v)}
+          />
         </div>
       )}
 
