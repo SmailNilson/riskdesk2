@@ -84,6 +84,10 @@ public record IndicatorSnapshot(
     List<OrderBlockEventView> recentOrderBlockEvents,
     List<FairValueGapView> activeFairValueGaps,
     List<StructureBreakView> recentBreaks,
+
+    // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ───
+    MtfLevelsView mtfLevels,
+
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
     Instant lastCandleTimestamp
 ) {
@@ -97,4 +101,10 @@ public record IndicatorSnapshot(
 
     /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
     public record OrderBlockEventView(String eventType, String obType, BigDecimal high, BigDecimal low, long eventTime) {}
+
+    /** UC-SMC-005: OHLC levels for a single higher timeframe candle. */
+    public record MtfLevelView(BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close) {}
+
+    /** UC-SMC-005: Multi-timeframe OHLC levels (daily, weekly, monthly). Null means no data for that timeframe. */
+    public record MtfLevelsView(MtfLevelView daily, MtfLevelView weekly, MtfLevelView monthly) {}
 }

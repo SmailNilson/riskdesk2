@@ -110,6 +110,21 @@ export interface EqualLevelView {
   secondBarTime: number;  // epoch seconds
 }
 
+/** UC-SMC-005: OHLC for a single higher-timeframe candle. */
+export interface MtfLevelView {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** UC-SMC-005: Daily / weekly / monthly levels. Null = no data for that timeframe. */
+export interface MtfLevelsView {
+  daily:   MtfLevelView | null;
+  weekly:  MtfLevelView | null;
+  monthly: MtfLevelView | null;
+}
+
 export interface StructureBreakView {
   type: 'BOS' | 'CHOCH';
   trend: 'BULLISH' | 'BEARISH';
@@ -194,6 +209,8 @@ export interface IndicatorSnapshot {
   recentOrderBlockEvents:    OrderBlockEventView[];
   activeFairValueGaps:       FairValueGapView[];
   recentBreaks:              StructureBreakView[];
+  // UC-SMC-005: Multi-timeframe levels
+  mtfLevels: MtfLevelsView | null;
 }
 
 export interface CreatePositionRequest {
