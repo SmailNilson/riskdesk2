@@ -57,6 +57,9 @@ public record IndicatorSnapshot(
     Long swingLowTime,
     String lastSwingBreakType,
 
+    // ── SMC: UC-SMC-008 confluence filter state ──────────────────────
+    boolean internalConfluenceFilterEnabled,
+
     // ── SMC: Legacy / derived (kept for frontend backward compat) ────
     String marketStructureTrend,
     BigDecimal strongHigh,

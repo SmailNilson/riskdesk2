@@ -32,6 +32,7 @@ public class IndicatorService {
     private static final String FVG_MIN_GAP_SIZE = "0";     // UC-SMC-010: no minimum threshold by default
     private static final int FVG_EXTENSION_BARS = 0;        // UC-SMC-010: no visual extension by default
     private static final String FVG_DEDICATED_TIMEFRAME = null; // UC-SMC-010: null = use chart timeframe
+    private static final boolean SMC_CONFLUENCE_FILTER = false; // UC-SMC-008: suppress internal breaks against swing
 
     private final CandleRepositoryPort  candlePort;
     private final ActiveContractRegistry contractRegistry;
@@ -105,7 +106,7 @@ public class IndicatorService {
 
         // ── SMC (UC-SMC-002: Internal + Swing structure) ─────────────────────────
 
-        SmcStructureEngine smcEngine = new SmcStructureEngine(5, 50);
+        SmcStructureEngine smcEngine = new SmcStructureEngine(5, 50, SMC_CONFLUENCE_FILTER);
         SmcStructureEngine.StructureSnapshot smcSnap = smcEngine.computeFromHistory(candles);
 
         // Internal bias & pivots
@@ -256,6 +257,8 @@ public class IndicatorService {
                 // SMC: Swing
                 swingBias, swingHigh, swingLow,
                 swingHighTime, swingLowTime, lastSwingBreak,
+                // SMC: UC-SMC-008 confluence filter state
+                SMC_CONFLUENCE_FILTER,
                 // SMC: Legacy / derived
                 marketStructureTrend,
                 strongHigh, strongLow, weakHigh, weakLow,
@@ -414,6 +417,8 @@ public class IndicatorService {
                 null, null, null, null, null, null,
                 // SMC: Swing
                 null, null, null, null, null, null,
+                // SMC: UC-SMC-008 confluence filter state
+                false,
                 // SMC: Legacy / derived
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,

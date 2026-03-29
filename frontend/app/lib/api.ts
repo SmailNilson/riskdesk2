@@ -185,6 +185,8 @@ export interface IndicatorSnapshot {
   swingHighTime: number | null;
   swingLowTime: number | null;
   lastSwingBreakType: string | null;
+  // SMC: UC-SMC-008 confluence filter
+  internalConfluenceFilterEnabled: boolean;
   // SMC: Liquidity (EQH / EQL)
   equalHighs: EqualLevelView[];
   equalLows: EqualLevelView[];

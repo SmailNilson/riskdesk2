@@ -434,6 +434,8 @@ class MentorSignalReviewServiceTest {
             null,                               // swingHighTime
             null,                               // swingLowTime
             null,                               // lastSwingBreakType
+            // SMC: UC-SMC-008 confluence filter state
+            false,
             // SMC: Legacy / derived
             "BEARISH",
             new BigDecimal("24520.00"),
