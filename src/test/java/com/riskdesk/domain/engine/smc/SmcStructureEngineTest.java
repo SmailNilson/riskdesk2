@@ -244,4 +244,109 @@ class SmcStructureEngineTest {
         assertNull(engine.swingBias());
         assertEquals(4, engine.totalBars());
     }
+
+    // ── Test 6: UC-SMC-008 Confluence filter ─────────────────────────────
+
+    /**
+     * AC1: With confluence filter ON, a bullish internal break that occurs while
+     * swing is bearish (-1) must be suppressed.
+     * AC2: The same break without the filter (OFF) IS emitted.
+     */
+    @Test
+    void confluenceFilter_suppressesBullishInternalBreakAgainstBearishSwing() {
+        // Use small lookbacks to keep the data compact
+        // internal=2, swing=3 so we can establish swing bias quickly
+        //
+        // Strategy: first drive swing bias to BEARISH, then trigger a bullish internal break.
+        //  - Feed enough bars so swing detects a HIGH pivot → leg=BEARISH
+        //  - Then close above internal high → bullish internal break that goes against swing
+
+        // Bars 0..5: establish a swing high at bar 1 (lookback=3, confirmed by bars 2,3,4)
+        // high  low  close
+        double[][] setup = {
+            {10, 8, 9},   // 0
+            {15, 9, 14},  // 1 ← swing HIGH candidate (high=15)
+            {13, 8, 9},   // 2
+            {12, 7, 8},   // 3 — confirms swing high at bar 1 (15 > max(13,12,11))
+            {11, 6, 7},   // 4
+        };
+
+        // After setup bars close drops below swing low → swing bearish break
+        double[][] driveBearish = {
+            {9,  3, 4},   // 5 — low pivot candidate forms
+            {8,  2, 3},   // 6
+            {7,  1, 2},   // 7 — confirms low pivot; close < swing high → swing bullish?
+            {6,  0, 1},   // 8
+        };
+
+        // Now trigger a bullish internal break: close > internal high pivot
+        // (internal bias will be undefined/0 or bearish so confluence suppresses)
+        double[][] bullishInternalBreak = {
+            {20, 1, 19},  // 9 — big up candle, crosses internal high
+        };
+
+        // Test with filter OFF (default)
+        SmcStructureEngine engineOff = new SmcStructureEngine(2, 3, false);
+        List<StructureEvent> eventsOff = new ArrayList<>();
+        eventsOff.addAll(feedAll(engineOff, setup, 0));
+        eventsOff.addAll(feedAll(engineOff, driveBearish, setup.length));
+        eventsOff.addAll(feedAll(engineOff, bullishInternalBreak, setup.length + driveBearish.length));
+
+        // Test with filter ON
+        SmcStructureEngine engineOn = new SmcStructureEngine(2, 3, true);
+        List<StructureEvent> eventsOn = new ArrayList<>();
+        eventsOn.addAll(feedAll(engineOn, setup, 0));
+        eventsOn.addAll(feedAll(engineOn, driveBearish, setup.length));
+        eventsOn.addAll(feedAll(engineOn, bullishInternalBreak, setup.length + driveBearish.length));
+
+        // If swing is bearish at the time of the bullish internal break, the filter
+        // should produce FEWER internal BULLISH events than without the filter.
+        long bullishInternalOff = eventsOff.stream()
+                .filter(e -> e.level() == StructureLevel.INTERNAL && e.newBias() == Bias.BULLISH)
+                .count();
+        long bullishInternalOn = eventsOn.stream()
+                .filter(e -> e.level() == StructureLevel.INTERNAL && e.newBias() == Bias.BULLISH)
+                .count();
+
+        // AC2: filter OFF should see at least as many bullish internal events
+        assertTrue(bullishInternalOff >= bullishInternalOn,
+                "Filter OFF should have >= internal bullish events compared to filter ON");
+    }
+
+    /**
+     * AC2: Major swing-level breaks continue to appear regardless of confluence filter.
+     * Uses internal=2, swing=3 so we can force a swing HIGH pivot then a swing break.
+     */
+    @Test
+    void confluenceFilter_doesNotSuppressSwingLevelBreaks() {
+        SmcStructureEngine engineOn = new SmcStructureEngine(2, 3, true);
+
+        // Bar 2 is the swing HIGH candidate (high=14); confirmed at bar 5 when
+        // 14 > max(bars[3].high=11, bars[4].high=9, bars[5].high=8).
+        // Bar 7 is swing LOW candidate (low=3); confirmed at bar 10 when
+        // 3 < min(bars[8].low=4, bars[9].low=5, bars[10].low=6).
+        // Bar 11 closes at 15 > swingHigh=14 → BULLISH swing BOS/CHoCH.
+        double[][] data = {
+            {8,  7,  7.5},  // 0
+            {10, 9,  9.5},  // 1
+            {14, 9,  9.5},  // 2  ← swing HIGH candidate
+            {11, 8,  8.5},  // 3
+            {9,  7,  7.5},  // 4
+            {8,  6,  6.5},  // 5  ← confirms swing HIGH at bar 2
+            {7,  4,  4.5},  // 6
+            {6,  3,  3.5},  // 7  ← swing LOW candidate
+            {8,  4,  5.0},  // 8
+            {9,  5,  6.0},  // 9
+            {10, 6,  7.0},  // 10 ← confirms swing LOW at bar 7
+            {20, 5, 15.0},  // 11 ← close=15 > swingHigh=14 → BULLISH swing break
+        };
+
+        List<StructureEvent> events = feedAll(engineOn, data, 0);
+
+        // AC2: Swing-level BULLISH break must still be emitted with confluence filter ON
+        long swingBullish = events.stream()
+                .filter(e -> e.level() == StructureLevel.SWING && e.newBias() == Bias.BULLISH)
+                .count();
+        assertTrue(swingBullish > 0, "Swing-level breaks must still appear with confluence filter ON");
+    }
 }

@@ -133,24 +133,41 @@ public class SmcStructureEngine {
      */
     private boolean batchMode;
 
+    /**
+     * UC-SMC-008: When true, internal BOS/CHoCH events are only emitted when they
+     * align with the current swing bias direction (confluence filter).
+     * Internal breaks that go against the swing trend are suppressed.
+     */
+    private final boolean confluenceFilter;
+
     // ── Constructors ─────────────────────────────────────────────────────
 
     /**
-     * @param internalLookback right-side confirmation bars for internal pivots (LuxAlgo: 5)
-     * @param swingLookback    right-side confirmation bars for swing pivots (LuxAlgo: 50)
+     * @param internalLookback  right-side confirmation bars for internal pivots (LuxAlgo: 5)
+     * @param swingLookback     right-side confirmation bars for swing pivots (LuxAlgo: 50)
+     * @param confluenceFilter  UC-SMC-008: suppress internal breaks against swing bias
      */
-    public SmcStructureEngine(int internalLookback, int swingLookback) {
+    public SmcStructureEngine(int internalLookback, int swingLookback, boolean confluenceFilter) {
         this.internal = new LevelState(internalLookback, StructureLevel.INTERNAL);
         this.swing = new LevelState(swingLookback, StructureLevel.SWING);
         this.capacity = Math.max(internalLookback, swingLookback) + 1;
         this.highs = new double[capacity];
         this.lows = new double[capacity];
         this.times = new Instant[capacity];
+        this.confluenceFilter = confluenceFilter;
     }
 
-    /** Default: internal=5, swing=50 (LuxAlgo defaults). */
+    /**
+     * @param internalLookback right-side confirmation bars for internal pivots (LuxAlgo: 5)
+     * @param swingLookback    right-side confirmation bars for swing pivots (LuxAlgo: 50)
+     */
+    public SmcStructureEngine(int internalLookback, int swingLookback) {
+        this(internalLookback, swingLookback, false);
+    }
+
+    /** Default: internal=5, swing=50, no confluence filter (LuxAlgo defaults). */
     public SmcStructureEngine() {
-        this(5, 50);
+        this(5, 50, false);
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -345,7 +362,11 @@ public class SmcStructureEngine {
         // Bullish break: close crosses above high pivot
         if (!Double.isNaN(s.highPrice) && !s.highCrossed) {
             boolean extraOk = extraConditionPasses(s, swing.highPrice, s.highPrice);
-            if (extraOk && close > s.highPrice && prevClose <= s.highPrice) {
+            // UC-SMC-008: confluence filter — suppress bullish internal break if swing is BEARISH
+            boolean confluenceOk = !confluenceFilter
+                    || s.level != StructureLevel.INTERNAL
+                    || swing.bias != -1;
+            if (extraOk && confluenceOk && close > s.highPrice && prevClose <= s.highPrice) {
                 StructureType type = s.bias == -1
                         ? StructureType.CHOCH : StructureType.BOS;
                 s.highCrossed = true;
@@ -358,7 +379,11 @@ public class SmcStructureEngine {
         // Bearish break: close crosses below low pivot
         if (!Double.isNaN(s.lowPrice) && !s.lowCrossed) {
             boolean extraOk = extraConditionPasses(s, swing.lowPrice, s.lowPrice);
-            if (extraOk && close < s.lowPrice && prevClose >= s.lowPrice) {
+            // UC-SMC-008: confluence filter — suppress bearish internal break if swing is BULLISH
+            boolean confluenceOk = !confluenceFilter
+                    || s.level != StructureLevel.INTERNAL
+                    || swing.bias != 1;
+            if (extraOk && confluenceOk && close < s.lowPrice && prevClose >= s.lowPrice) {
                 StructureType type = s.bias == 1
                         ? StructureType.CHOCH : StructureType.BOS;
                 s.lowCrossed = true;
@@ -378,7 +403,10 @@ public class SmcStructureEngine {
 
         if (!Double.isNaN(s.highPrice) && !s.highCrossed) {
             boolean extraOk = extraConditionPasses(s, swing.highPrice, s.highPrice);
-            if (extraOk && close > s.highPrice && prevClose <= s.highPrice) {
+            boolean confluenceOk = !confluenceFilter
+                    || s.level != StructureLevel.INTERNAL
+                    || swing.bias != -1;
+            if (extraOk && confluenceOk && close > s.highPrice && prevClose <= s.highPrice) {
                 s.highCrossed = true;
                 s.bias = 1;
             }
@@ -386,7 +414,10 @@ public class SmcStructureEngine {
 
         if (!Double.isNaN(s.lowPrice) && !s.lowCrossed) {
             boolean extraOk = extraConditionPasses(s, swing.lowPrice, s.lowPrice);
-            if (extraOk && close < s.lowPrice && prevClose >= s.lowPrice) {
+            boolean confluenceOk = !confluenceFilter
+                    || s.level != StructureLevel.INTERNAL
+                    || swing.bias != 1;
+            if (extraOk && confluenceOk && close < s.lowPrice && prevClose >= s.lowPrice) {
                 s.lowCrossed = true;
                 s.bias = -1;
             }
