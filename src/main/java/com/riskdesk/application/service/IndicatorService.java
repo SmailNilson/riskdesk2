@@ -17,7 +17,8 @@ import java.util.*;
 @Service
 public class IndicatorService {
 
-    private static final int SERIES_LIMIT = 500;
+    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;
+    private static final int SERIES_WARMUP_BARS = 1_000;
     private static final int EMA_9_PERIOD = 9;
     private static final int EMA_50_PERIOD = 50;
     private static final int EMA_200_PERIOD = 200;
@@ -66,7 +67,7 @@ public class IndicatorService {
     }
 
     public IndicatorSnapshot computeSnapshot(Instrument instrument, String timeframe) {
-        List<Candle> candles = loadCandles(instrument, timeframe, SERIES_LIMIT);
+        List<Candle> candles = loadCandles(instrument, timeframe, SNAPSHOT_LOOKBACK_BARS);
         if (candles.isEmpty()) {
             return emptySnapshot(instrument, timeframe);
         }
@@ -165,13 +166,18 @@ public class IndicatorService {
                 .map(ob -> new IndicatorSnapshot.OrderBlockView(
                         ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
                         ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
+                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
+                        ob.type().name(),
+                        null))
                 .toList();
         List<IndicatorSnapshot.OrderBlockView> breakerViews = obResult.breakerOrderBlocks().stream()
                 .map(ob -> new IndicatorSnapshot.OrderBlockView(
                         ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
                         ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
+                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
+                        oppositeType(ob.type()).name(),
+                        ob.mitigationIndex() >= 0 && ob.mitigationIndex() < candles.size()
+                                ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null))
                 .toList();
         List<IndicatorSnapshot.OrderBlockEventView> obEventViews = obResult.events().stream()
                 .map(evt -> new IndicatorSnapshot.OrderBlockEventView(
@@ -311,7 +317,8 @@ public class IndicatorService {
     }
 
     public IndicatorSeriesSnapshot computeSeries(Instrument instrument, String timeframe, int limit) {
-        List<Candle> candles = loadCandles(instrument, timeframe, limit);
+        int safeLimit = Math.max(limit, 1);
+        List<Candle> candles = loadCandles(instrument, timeframe, safeLimit + SERIES_WARMUP_BARS);
         if (candles.isEmpty()) {
             return new IndicatorSeriesSnapshot(
                     instrument.name(),
@@ -324,12 +331,27 @@ public class IndicatorService {
             );
         }
 
-        List<IndicatorSeriesSnapshot.LinePoint> ema9Series = mapLinePoints(candles, EMA_9_PERIOD - 1, ema9.calculate(candles));
-        List<IndicatorSeriesSnapshot.LinePoint> ema50Series = mapLinePoints(candles, EMA_50_PERIOD - 1, ema50.calculate(candles));
-        List<IndicatorSeriesSnapshot.LinePoint> ema200Series = mapLinePoints(candles, EMA_200_PERIOD - 1, ema200.calculate(candles));
+        List<IndicatorSeriesSnapshot.LinePoint> ema9Series = trimLast(
+                mapLinePoints(candles, EMA_9_PERIOD - 1, ema9.calculate(candles)),
+                safeLimit
+        );
+        List<IndicatorSeriesSnapshot.LinePoint> ema50Series = trimLast(
+                mapLinePoints(candles, EMA_50_PERIOD - 1, ema50.calculate(candles)),
+                safeLimit
+        );
+        List<IndicatorSeriesSnapshot.LinePoint> ema200Series = trimLast(
+                mapLinePoints(candles, EMA_200_PERIOD - 1, ema200.calculate(candles)),
+                safeLimit
+        );
 
-        List<IndicatorSeriesSnapshot.BollingerPoint> bollingerSeries = mapBollingerPoints(candles, BB_PERIOD - 1, bb.calculate(candles));
-        List<IndicatorSeriesSnapshot.WaveTrendPoint> waveTrendSeries = mapWaveTrendPoints(candles, WT_SIGNAL_PERIOD - 1, waveTrend.calculate(candles));
+        List<IndicatorSeriesSnapshot.BollingerPoint> bollingerSeries = trimLast(
+                mapBollingerPoints(candles, BB_PERIOD - 1, bb.calculate(candles)),
+                safeLimit
+        );
+        List<IndicatorSeriesSnapshot.WaveTrendPoint> waveTrendSeries = trimLast(
+                mapWaveTrendPoints(candles, WT_SIGNAL_PERIOD - 1, waveTrend.calculate(candles)),
+                safeLimit
+        );
 
         return new IndicatorSeriesSnapshot(
                 instrument.name(),
@@ -356,6 +378,12 @@ public class IndicatorService {
                 last.getOpen(), last.getHigh(), last.getLow(), last.getClose());
     }
 
+    private static OrderBlockDetector.OBType oppositeType(OrderBlockDetector.OBType type) {
+        return type == OrderBlockDetector.OBType.BULLISH
+                ? OrderBlockDetector.OBType.BEARISH
+                : OrderBlockDetector.OBType.BULLISH;
+    }
+
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         List<Candle> candles;
@@ -375,6 +403,13 @@ public class IndicatorService {
 
     private BigDecimal last(List<BigDecimal> list) {
         return list.isEmpty() ? null : list.get(list.size() - 1);
+    }
+
+    private <T> List<T> trimLast(List<T> values, int limit) {
+        if (values.size() <= limit) {
+            return values;
+        }
+        return values.subList(values.size() - limit, values.size());
     }
 
     private SmcStructureEngine.StructureEvent latestStructureEvent(

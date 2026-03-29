@@ -453,8 +453,8 @@ class MentorSignalReviewServiceTest {
             null, null, null, null,
             // SMC: Zones
             List.of(
-                new IndicatorSnapshot.OrderBlockView("BEARISH", "ACTIVE", new BigDecimal("24460.00"), new BigDecimal("24435.00"), new BigDecimal("24447.50"), 1L),
-                new IndicatorSnapshot.OrderBlockView("BULLISH", "ACTIVE", new BigDecimal("24405.00"), new BigDecimal("24380.00"), new BigDecimal("24392.50"), 2L)
+                new IndicatorSnapshot.OrderBlockView("BEARISH", "ACTIVE", new BigDecimal("24460.00"), new BigDecimal("24435.00"), new BigDecimal("24447.50"), 1L, "BEARISH", null),
+                new IndicatorSnapshot.OrderBlockView("BULLISH", "ACTIVE", new BigDecimal("24405.00"), new BigDecimal("24380.00"), new BigDecimal("24392.50"), 2L, "BULLISH", null)
             ),
             List.of(),
             List.of(),   // recentOrderBlockEvents

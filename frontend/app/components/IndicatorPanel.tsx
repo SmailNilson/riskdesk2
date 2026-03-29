@@ -1,8 +1,12 @@
 'use client';
 
 import { IndicatorSnapshot } from '@/app/lib/api';
+import { breakerOriginalType, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 
-interface Props { snapshot: IndicatorSnapshot | null }
+interface Props {
+  snapshot: IndicatorSnapshot | null;
+  currentPrice: number | null;
+}
 
 function Row({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -35,7 +39,7 @@ function signalColor(signal: string | null): 'green' | 'red' | 'amber' | 'gray' 
   return 'gray';
 }
 
-export default function IndicatorPanel({ snapshot: s }: Props) {
+export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
   if (!s) return (
     <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 text-zinc-500 text-sm">
       Loading indicators…
@@ -47,6 +51,8 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
     : s.cmf > 0 ? { label: 'BUYING', color: 'green' as const }
     : s.cmf < 0 ? { label: 'SELLING', color: 'red' as const }
     : { label: 'NEUTRAL', color: 'gray' as const };
+  const visibleBreakers = relevantBreakerBlocks(s, currentPrice);
+  const hiddenBreakerCount = Math.max(s.breakerOrderBlocks.length - visibleBreakers.length, 0);
 
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -220,7 +226,7 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
       )}
 
       {/* Order Blocks */}
-      <Section title={`Order Blocks V1/V2 (${s.activeOrderBlocks.length + s.breakerOrderBlocks.length})`} fullWidth>
+      <Section title={`Order Blocks V1/V2 (${s.activeOrderBlocks.length + visibleBreakers.length})`} fullWidth>
         <div className="space-y-1.5">
           <div className="text-[10px] uppercase tracking-widest text-zinc-500">V1 Active</div>
           {s.activeOrderBlocks.length === 0
@@ -237,16 +243,25 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
           }
         </div>
         <div className="mt-3 space-y-1.5">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500">V2 Breaker</div>
-          {s.breakerOrderBlocks.length === 0
-            ? <span className="text-zinc-600 text-xs">No breaker OBs</span>
-            : s.breakerOrderBlocks.map((ob, i) => (
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] uppercase tracking-widest text-zinc-500">V2 Breaker</div>
+            {hiddenBreakerCount > 0 && (
+              <span className="text-[10px] text-zinc-600">
+                {hiddenBreakerCount} offside
+              </span>
+            )}
+          </div>
+          {visibleBreakers.length === 0
+            ? <span className="text-zinc-600 text-xs">No breaker OBs near current price</span>
+            : visibleBreakers.map((ob, i) => (
               <div key={`breaker-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
                 <Badge label={`${ob.type} V2`} color={ob.type === 'BULLISH' ? 'blue' : 'amber'} />
                 <span className="text-zinc-400">
                   {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
                 </span>
-                <span className="text-zinc-500">mid {ob.mid.toFixed(4)}</span>
+                <span className="text-zinc-500">
+                  from {breakerOriginalType(ob).toLowerCase()} · mid {ob.mid.toFixed(4)}
+                </span>
               </div>
             ))
           }

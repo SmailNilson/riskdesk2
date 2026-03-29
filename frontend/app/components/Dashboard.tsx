@@ -168,7 +168,7 @@ export default function Dashboard() {
         />
 
         {/* Indicators */}
-        <IndicatorPanel snapshot={snapshot} />
+        <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
 
         <MentorPanel
           instrument={instrument}

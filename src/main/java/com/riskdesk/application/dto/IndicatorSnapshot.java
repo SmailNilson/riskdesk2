@@ -95,7 +95,16 @@ public record IndicatorSnapshot(
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
     Instant lastCandleTimestamp
 ) {
-    public record OrderBlockView(String type, String status, BigDecimal high, BigDecimal low, BigDecimal mid, long startTime) {}
+    public record OrderBlockView(
+        String type,
+        String status,
+        BigDecimal high,
+        BigDecimal low,
+        BigDecimal mid,
+        long startTime,
+        String originalType,
+        Long breakerTime
+    ) {}
 
     public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {}
 
