@@ -226,19 +226,37 @@ class VWAPIndicatorTest {
     @Test
     void calculate_resetsVwapWhenSessionDateChanges() {
         VWAPIndicator vwap = new VWAPIndicator();
-        Instant dayOne = Instant.parse("2026-03-20T19:50:00Z");
-        Instant dayTwo = dayOne.plus(1, ChronoUnit.DAYS);
+        Instant beforeSessionClose = Instant.parse("2026-03-20T20:50:00Z"); // 16:50 ET
+        Instant afterSessionClose = Instant.parse("2026-03-20T21:10:00Z");  // 17:10 ET
 
         List<Candle> candles = List.of(
-                candleAt(dayOne, 99.0, 101.0, 98.0, 100.0, 1000),
-                candleAt(dayOne.plus(10, ChronoUnit.MINUTES), 101.0, 103.0, 100.0, 102.0, 1000),
-                candleAt(dayTwo, 199.0, 201.0, 198.0, 200.0, 1000)
+                candleAt(beforeSessionClose, 99.0, 101.0, 98.0, 100.0, 1000),
+                candleAt(beforeSessionClose.plus(10, ChronoUnit.MINUTES), 101.0, 103.0, 100.0, 102.0, 1000),
+                candleAt(afterSessionClose, 199.0, 201.0, 198.0, 200.0, 1000)
         );
 
         List<VWAPResult> results = vwap.calculate(candles);
 
         assertEquals(3, results.size());
         assertEquals(new BigDecimal("199.66667"), results.get(2).vwap(),
-                "VWAP should restart from the first candle of the new session");
+                "VWAP should restart at the 17:00 ET CME session boundary");
+    }
+
+    @Test
+    void calculate_doesNotResetAtMidnightInsideSameCmeSession() {
+        VWAPIndicator vwap = new VWAPIndicator();
+        Instant beforeMidnight = Instant.parse("2026-03-21T03:50:00Z"); // 23:50 ET on Mar 20
+        Instant afterMidnight = Instant.parse("2026-03-21T04:10:00Z");  // 00:10 ET on Mar 21, same CME session
+
+        List<Candle> candles = List.of(
+                candleAt(beforeMidnight, 99.0, 101.0, 98.0, 100.0, 1000),
+                candleAt(afterMidnight, 101.0, 103.0, 100.0, 102.0, 1000)
+        );
+
+        List<VWAPResult> results = vwap.calculate(candles);
+
+        assertEquals(2, results.size());
+        assertEquals(new BigDecimal("100.66667"), results.get(1).vwap(),
+                "VWAP should continue across midnight until the next 17:00 ET session reset");
     }
 }
