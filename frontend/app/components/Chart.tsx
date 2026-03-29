@@ -34,6 +34,7 @@ type CandlePoint   = { time: Time; open: number; high: number; low: number; clos
 
 const WT_OVERBOUGHT = 53;
 const WT_OVERSOLD = -53;
+const PRESENT_OB_WINDOW_BARS = 48;
 
 function timeframeToSeconds(timeframe: string) {
   return timeframe === '1d' ? 86400 : timeframe === '1h' ? 3600 : timeframe === '5m' ? 300 : 600;
@@ -96,6 +97,7 @@ function makeTimeFormatter(tz: string) {
 
 export default function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: Props) {
   const dark = theme === 'dark';
+  const pricePaneRef = useRef<HTMLDivElement>(null);
   const priceContainerRef = useRef<HTMLDivElement>(null);
   const wtContainerRef    = useRef<HTMLDivElement>(null);
 
@@ -118,6 +120,9 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   const mtfLinesRef    = useRef<any[]>([]);                        // UC-SMC-005: D/W/M price lines
   const smcCanvasRef   = useRef<HTMLCanvasElement | null>(null);   // OB + FVG overlay canvas
   const drawSMCRef     = useRef<(() => void) | null>(null);        // current draw function
+  const smcRedrawRaf1Ref = useRef<number | null>(null);
+  const smcRedrawRaf2Ref = useRef<number | null>(null);
+  const smcRedrawTimeoutRef = useRef<number | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersApiRef  = useRef<any>(null);                        // createSeriesMarkers handle
   const livePriceRef = useRef<PriceUpdate | undefined>(livePrice);
@@ -129,16 +134,17 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // UC-SMC-007: candle coloring by SMC trend
   const [smcCandleColor, setSmcCandleColor] = useState(false);
   // UC-SMC-006: SMC render mode controls
-  const [smcRenderMode, setSmcRenderMode] = useState<'historical' | 'present'>('historical');
+  const [smcRenderMode, setSmcRenderMode] = useState<'historical' | 'present'>('present');
   const [smcColorMode,  setSmcColorMode]  = useState<'colored' | 'monochrome'>('colored');
   // lastBarTime as state so the SMC effect re-fires after candles load
   const [lastBarTime, setLastBarTime] = useState<Time>(0 as Time);
 
   // Reset visibility + lastBarTime when chart is recreated (instrument / timeframe change)
   useEffect(() => {
-    setVis({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
+    setVis(prev => ({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: prev.smc }));
     setShowMtf(false);
     setSmcCandleColor(false);
+    setSmcRenderMode('present');
     setLastBarTime(0 as Time);
     lastCandleRef.current = null;
   }, [instrument, timeframe]);
@@ -146,6 +152,36 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   useEffect(() => {
     livePriceRef.current = livePrice;
   }, [livePrice]);
+
+  const cancelScheduledSmcRedraw = useCallback(() => {
+    if (smcRedrawRaf1Ref.current != null) {
+      window.cancelAnimationFrame(smcRedrawRaf1Ref.current);
+      smcRedrawRaf1Ref.current = null;
+    }
+    if (smcRedrawRaf2Ref.current != null) {
+      window.cancelAnimationFrame(smcRedrawRaf2Ref.current);
+      smcRedrawRaf2Ref.current = null;
+    }
+    if (smcRedrawTimeoutRef.current != null) {
+      window.clearTimeout(smcRedrawTimeoutRef.current);
+      smcRedrawTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleSmcRedraw = useCallback(() => {
+    cancelScheduledSmcRedraw();
+    smcRedrawRaf1Ref.current = window.requestAnimationFrame(() => {
+      smcRedrawRaf1Ref.current = null;
+      smcRedrawRaf2Ref.current = window.requestAnimationFrame(() => {
+        smcRedrawRaf2Ref.current = null;
+        drawSMCRef.current?.();
+      });
+    });
+    smcRedrawTimeoutRef.current = window.setTimeout(() => {
+      smcRedrawTimeoutRef.current = null;
+      drawSMCRef.current?.();
+    }, 120);
+  }, [cancelScheduledSmcRedraw]);
 
   const reloadSeries = useCallback(async (fitContent = false) => {
     const candleSeries = candleRef.current;
@@ -362,7 +398,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
 
     // ── SMC canvas — subscribe to range change so boxes redraw on scroll/zoom ──
     priceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-      drawSMCRef.current?.();
+      scheduleSmcRedraw();
     });
 
     // ── Resize observer ────────────────────────────────────────────────────────
@@ -371,7 +407,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         priceChart.applyOptions({ width: priceContainerRef.current.clientWidth });
       if (wtContainerRef.current)
         wtChart.applyOptions({ width: wtContainerRef.current.clientWidth });
-      drawSMCRef.current?.();  // canvas auto-sizes itself inside draw
+      scheduleSmcRedraw();
     });
     observer.observe(priceContainerRef.current);
 
@@ -385,9 +421,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       mtfLinesRef.current   = [];
       drawSMCRef.current    = null;
       markersApiRef.current = null;
+      cancelScheduledSmcRedraw();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instrument, timeframe, theme, reloadSeries]);
+  }, [instrument, timeframe, theme, reloadSeries, scheduleSmcRedraw, cancelScheduledSmcRedraw]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -451,23 +488,27 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // Auto-size: mirror the first chart canvas so we're always pixel-perfect
-      const refCv = Array.from(canvas.parentElement?.querySelectorAll('canvas') ?? [])
-        .find(c => c !== canvas) as HTMLCanvasElement | null;
-      if (refCv && (canvas.width !== refCv.width || canvas.height !== refCv.height)) {
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width  = refCv.width;
-        canvas.height = refCv.height;
-        canvas.style.width  = (refCv.width  / dpr) + 'px';
-        canvas.style.height = (refCv.height / dpr) + 'px';
+      const host = pricePaneRef.current;
+      const dpr = window.devicePixelRatio || 1;
+      const cssWidth = host?.clientWidth ?? 0;
+      const cssHeight = host?.clientHeight ?? 0;
+      const targetWidth = Math.round(cssWidth * dpr);
+      const targetHeight = Math.round(cssHeight * dpr);
+      if (targetWidth <= 0 || targetHeight <= 0) return;
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        canvas.style.width = `${cssWidth}px`;
+        canvas.style.height = `${cssHeight}px`;
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (!snapshot || !vis.smc || !chart) return;
 
       const t2  = lastBarTime;
-      const dpr = window.devicePixelRatio || 1;
+      const W   = canvas.width;
       const H   = canvas.height;   // clamp y to canvas bounds
+      const periodSec = timeframeToSeconds(timeframe);
 
       // UC-SMC-006: monochrome palette flag
       const mono = smcColorMode === 'monochrome';
@@ -485,12 +526,14 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         const y1 = series.priceToCoordinate(low);
         const y2 = series.priceToCoordinate(high);
         if (x1 == null || x2 == null || y1 == null || y2 == null) return;
-        const lx = Math.min(x1, x2) * dpr;
-        const rx = Math.max(x1, x2) * dpr;
+        const rawLx = Math.min(x1, x2) * dpr;
+        const rawRx = Math.max(x1, x2) * dpr;
+        const lx = Math.max(0, Math.min(rawLx, W));
+        const rx = Math.max(0, Math.min(rawRx, W));
         // clamp y to canvas — priceToCoordinate can return huge values for off-screen prices
         const ty = Math.max(0, Math.min(Math.min(y1, y2) * dpr, H));
         const by = Math.max(0, Math.min(Math.max(y1, y2) * dpr, H));
-        if (by - ty < 1) return;     // skip degenerate boxes
+        if (rx - lx < 1 || by - ty < 1) return;     // skip degenerate boxes
         ctx.fillStyle   = mono ? fillMono   : fill;
         ctx.fillRect(lx, ty, rx - lx, by - ty);
         ctx.strokeStyle = mono ? strokeMono : stroke;
@@ -504,24 +547,54 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         }
       };
 
-      // UC-SMC-006: Present mode limits to most recent 3 elements
+      // UC-SMC-006: Present mode limits to most recent 3 elements.
+      // Order blocks come back newest-first from the backend; FVGs are not guaranteed,
+      // so normalize both before selecting the "present" subset.
       const PRESENT_LIMIT = 3;
-      const obsVisible  = smcRenderMode === 'present'
-        ? (snapshot.activeOrderBlocks ?? []).slice(-PRESENT_LIMIT)
-        : (snapshot.activeOrderBlocks ?? []);
-      const fvgsVisible = smcRenderMode === 'present'
-        ? (snapshot.activeFairValueGaps ?? []).slice(-PRESENT_LIMIT)
-        : (snapshot.activeFairValueGaps ?? []);
+      const orderBlocks = [...(snapshot.activeOrderBlocks ?? [])]
+        .sort((a, b) => Number(b.startTime) - Number(a.startTime));
+      const breakerBlocks = [...(snapshot.breakerOrderBlocks ?? [])]
+        .sort((a, b) => Number(b.startTime) - Number(a.startTime));
+      const fairValueGaps = [...(snapshot.activeFairValueGaps ?? [])]
+        .sort((a, b) => Number(b.startTime) - Number(a.startTime));
+      const obsVisible = (smcRenderMode === 'present'
+        ? orderBlocks.slice(0, PRESENT_LIMIT)
+        : orderBlocks
+      ).sort((a, b) => Number(a.startTime) - Number(b.startTime));
+      const breakerVisible = (smcRenderMode === 'present'
+        ? breakerBlocks.slice(0, PRESENT_LIMIT)
+        : breakerBlocks
+      ).sort((a, b) => Number(a.startTime) - Number(b.startTime));
+      const fvgsVisible = (smcRenderMode === 'present'
+        ? fairValueGaps.slice(0, PRESENT_LIMIT)
+        : fairValueGaps
+      ).sort((a, b) => Number(a.startTime) - Number(b.startTime));
 
       // Order Block boxes  (blue=bull, red=bear — colored; gray — monochrome)
       for (const ob of obsVisible) {
         if (!ob.startTime) continue;
         const bull = ob.type === 'BULLISH';
-        drawBox(ob.startTime as Time, ob.low, ob.high,
+        const obStart = smcRenderMode === 'present'
+          ? (Math.max(Number(ob.startTime), Number(t2) - periodSec * PRESENT_OB_WINDOW_BARS) as Time)
+          : (ob.startTime as Time);
+        drawBox(obStart, ob.low, ob.high,
           bull ? 'rgba(49,121,245,0.35)' : 'rgba(247,70,80,0.35)',
           bull ? 'rgba(100,160,255,1)'   : 'rgba(255,100,100,1)',
           'rgba(150,150,170,0.25)', 'rgba(180,180,200,0.9)',
           bull ? 'OB ▲' : 'OB ▼');
+      }
+      // Breaker Block boxes (V2)
+      for (const ob of breakerVisible) {
+        if (!ob.startTime) continue;
+        const bull = ob.type === 'BULLISH';
+        const obStart = smcRenderMode === 'present'
+          ? (Math.max(Number(ob.startTime), Number(t2) - periodSec * PRESENT_OB_WINDOW_BARS) as Time)
+          : (ob.startTime as Time);
+        drawBox(obStart, ob.low, ob.high,
+          bull ? 'rgba(45,212,191,0.24)' : 'rgba(251,146,60,0.24)',
+          bull ? 'rgba(94,234,212,0.95)' : 'rgba(253,186,116,0.95)',
+          'rgba(150,150,170,0.20)', 'rgba(180,180,200,0.8)',
+          bull ? 'BB ▲' : 'BB ▼');
       }
       // Fair Value Gap boxes  (teal=bull, orange=bear — colored; gray — monochrome)
       for (const fvg of fvgsVisible) {
@@ -538,16 +611,22 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
           tEnd);
       }
     };
-    drawSMCRef.current();   // draw immediately
+    scheduleSmcRedraw();
 
     if (!snapshot || !vis.smc) return;
 
     // ── Strong / Weak High + Low — horizontal dashed price lines ─────────
-    const addLine = (price: number | null, color: string, style: LineStyle, title: string) => {
+    const addLine = (
+      price: number | null,
+      color: string,
+      style: LineStyle,
+      title: string,
+      axisLabelVisible = true,
+    ) => {
       if (price == null) return;
       smcLinesRef.current.push(series.createPriceLine({
         price, color, lineWidth: 1, lineStyle: style,
-        axisLabelVisible: true, title,
+        axisLabelVisible, title,
       }));
     };
     addLine(snapshot.strongHigh, '#ef4444cc', LineStyle.Dashed, 'Strong H');
@@ -555,12 +634,29 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     addLine(snapshot.weakHigh,   '#f97316aa', LineStyle.Dotted, 'Weak H');
     addLine(snapshot.weakLow,    '#3b82f6aa', LineStyle.Dotted, 'Weak L');
 
-    // EQH / EQL — horizontal dashed lines at liquidity pools
+    // EQH / EQL — show only the two nearest liquidity labels, keep the rest unlabeled
+    const liquidityLevels = [
+      ...(snapshot.equalHighs ?? []).map(eq => ({ key: `EQH:${eq.price}:${eq.lastBarTime}`, title: 'EQH', price: eq.price })),
+      ...(snapshot.equalLows ?? []).map(eq => ({ key: `EQL:${eq.price}:${eq.lastBarTime}`, title: 'EQL', price: eq.price })),
+    ];
+    const referencePrice = lastCandleRef.current?.close ?? null;
+    const labeledLiquidity = new Set(
+      liquidityLevels
+        .slice()
+        .sort((a, b) => {
+          if (referencePrice == null) return 0;
+          return Math.abs(a.price - referencePrice) - Math.abs(b.price - referencePrice);
+        })
+        .slice(0, 2)
+        .map(level => level.key)
+    );
     for (const eq of snapshot.equalHighs ?? []) {
-      addLine(eq.price, '#ef4444aa', LineStyle.SparseDotted, 'EQH');
+      const key = `EQH:${eq.price}:${eq.lastBarTime}`;
+      addLine(eq.price, '#ef4444aa', LineStyle.SparseDotted, labeledLiquidity.has(key) ? 'EQH' : '', labeledLiquidity.has(key));
     }
     for (const eq of snapshot.equalLows ?? []) {
-      addLine(eq.price, '#22c55eaa', LineStyle.SparseDotted, 'EQL');
+      const key = `EQL:${eq.price}:${eq.lastBarTime}`;
+      addLine(eq.price, '#22c55eaa', LineStyle.SparseDotted, labeledLiquidity.has(key) ? 'EQL' : '', labeledLiquidity.has(key));
     }
 
     // Premium / Discount / Equilibrium zone lines
@@ -569,8 +665,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     addLine(snapshot.discountZoneBottom, '#22c55e80', LineStyle.Dashed, 'Discount');
 
     // ── BOS / CHoCH arrow markers ─────────────────────────────────────────
-    const markers: SeriesMarker<Time>[] = (snapshot.recentBreaks ?? [])
-      .slice(-15)
+    const markers: SeriesMarker<Time>[] = [...(snapshot.recentBreaks ?? [])]
+      .sort((a, b) => a.barTime - b.barTime)
       .map(b => ({
         time:     b.barTime as Time,
         position: (b.trend === 'BULLISH' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
@@ -586,7 +682,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       markersApiRef.current = createSeriesMarkers(series, markers);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot, vis.smc, lastBarTime, smcRenderMode, smcColorMode]);
+  }, [snapshot, vis.smc, lastBarTime, smcRenderMode, smcColorMode, scheduleSmcRedraw]);
 
   // ── UC-SMC-005: MTF level price lines ────────────────────────────────────────
   useEffect(() => {
@@ -644,63 +740,65 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   return (
     <div className={`relative rounded-lg overflow-hidden border ${dark ? 'bg-[#111] border-zinc-800' : 'bg-white border-slate-200'}`}>
       {/* ── Price chart ── */}
-      <div ref={priceContainerRef} className="w-full" />
-      {/* SMC zone boxes (OB + FVG) — overlay canvas above the chart canvas */}
-      <canvas ref={smcCanvasRef} className="absolute top-0 left-0 pointer-events-none" style={{ zIndex: 20 }} />
+      <div ref={pricePaneRef} className="relative">
+        <div ref={priceContainerRef} className="w-full" />
+        {/* SMC zone boxes (OB + FVG) — overlay canvas above the chart canvas */}
+        <canvas ref={smcCanvasRef} className="absolute inset-0 pointer-events-none" style={{ zIndex: 20 }} />
 
-      {/* Overlay legend tags — click to toggle indicator */}
-      {snapshot && (
-        <div className="absolute top-2 left-3 flex flex-wrap gap-2 text-[10px] font-mono z-10">
-          {snapshot.ema9   && <Tag color="green"  label={`EMA9 ${snapshot.ema9.toFixed(2)}`}   active={vis.ema9}   onClick={() => toggle('ema9')} />}
-          {snapshot.ema50  && <Tag color="red"    label={`EMA50 ${snapshot.ema50.toFixed(2)}`}  active={vis.ema50}  onClick={() => toggle('ema50')} />}
-          {snapshot.ema200 && <Tag color="blue"   label={`EMA200 ${snapshot.ema200.toFixed(2)}`} active={vis.ema200} onClick={() => toggle('ema200')} />}
-          {snapshot.vwap   && <Tag color="purple" label={`VWAP ${snapshot.vwap.toFixed(2)}`} />}
-          {snapshot.supertrendValue && (
+        {/* Overlay legend tags — click to toggle indicator */}
+        {snapshot && (
+          <div className="absolute top-2 left-3 flex flex-wrap gap-2 text-[10px] font-mono z-10">
+            {snapshot.ema9   && <Tag color="green"  label={`EMA9 ${snapshot.ema9.toFixed(2)}`}   active={vis.ema9}   onClick={() => toggle('ema9')} />}
+            {snapshot.ema50  && <Tag color="red"    label={`EMA50 ${snapshot.ema50.toFixed(2)}`}  active={vis.ema50}  onClick={() => toggle('ema50')} />}
+            {snapshot.ema200 && <Tag color="blue"   label={`EMA200 ${snapshot.ema200.toFixed(2)}`} active={vis.ema200} onClick={() => toggle('ema200')} />}
+            {snapshot.vwap   && <Tag color="purple" label={`VWAP ${snapshot.vwap.toFixed(2)}`} />}
+            {snapshot.supertrendValue && (
+              <Tag
+                color={snapshot.supertrendBullish ? 'green' : 'red'}
+                label={`ST ${snapshot.supertrendValue.toFixed(2)} ${snapshot.supertrendBullish ? '▲' : '▼'}`}
+              />
+            )}
+            {snapshot.bbUpper && (
+              <Tag color="gray" label={`BB ${snapshot.bbLower?.toFixed(2)}–${snapshot.bbUpper?.toFixed(2)}`} active={vis.bb} onClick={() => toggle('bb')} />
+            )}
+            {/* SMC toggle */}
             <Tag
-              color={snapshot.supertrendBullish ? 'green' : 'red'}
-              label={`ST ${snapshot.supertrendValue.toFixed(2)} ${snapshot.supertrendBullish ? '▲' : '▼'}`}
+              color={snapshot.marketStructureTrend === 'BULLISH' ? 'green' : snapshot.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'}
+              label={`SMC ${snapshot.swingBias ?? snapshot.internalBias ?? snapshot.marketStructureTrend}`}
+              active={vis.smc}
+              onClick={() => toggle('smc')}
             />
-          )}
-          {snapshot.bbUpper && (
-            <Tag color="gray" label={`BB ${snapshot.bbLower?.toFixed(2)}–${snapshot.bbUpper?.toFixed(2)}`} active={vis.bb} onClick={() => toggle('bb')} />
-          )}
-          {/* SMC toggle */}
-          <Tag
-            color={snapshot.marketStructureTrend === 'BULLISH' ? 'green' : snapshot.marketStructureTrend === 'BEARISH' ? 'red' : 'gray'}
-            label={`SMC ${snapshot.swingBias ?? snapshot.internalBias ?? snapshot.marketStructureTrend}`}
-            active={vis.smc}
-            onClick={() => toggle('smc')}
-          />
-          {/* UC-SMC-005: MTF levels toggle */}
-          {snapshot.mtfLevels && (
-            <Tag color="amber" label="MTF" active={showMtf} onClick={() => setShowMtf(v => !v)} />
-          )}
-          {/* UC-SMC-007: candle color by SMC trend */}
-          <Tag
-            color="gray"
-            label="C●"
-            active={smcCandleColor}
-            onClick={() => setSmcCandleColor(v => !v)}
-          />
-          {/* UC-SMC-006: render mode toggles (only visible when SMC is on) */}
-          {vis.smc && (
-            <>
-              <Tag
-                color="gray"
-                label={smcRenderMode === 'historical' ? 'Hist' : 'Now'}
-                active
-                onClick={() => setSmcRenderMode(m => m === 'historical' ? 'present' : 'historical')}
-              />
-              <Tag
-                color="gray"
-                label={smcColorMode === 'colored' ? 'Color' : 'Mono'}
-                active
-                onClick={() => setSmcColorMode(m => m === 'colored' ? 'monochrome' : 'colored')}
-              />
-            </>
-          )}
-        </div>
-      )}
+            {/* UC-SMC-005: MTF levels toggle */}
+            {snapshot.mtfLevels && (
+              <Tag color="amber" label="MTF" active={showMtf} onClick={() => setShowMtf(v => !v)} />
+            )}
+            {/* UC-SMC-007: candle color by SMC trend */}
+            <Tag
+              color="gray"
+              label="C●"
+              active={smcCandleColor}
+              onClick={() => setSmcCandleColor(v => !v)}
+            />
+            {/* UC-SMC-006: render mode toggles (only visible when SMC is on) */}
+            {vis.smc && (
+              <>
+                <Tag
+                  color="gray"
+                  label={smcRenderMode === 'historical' ? 'Hist' : 'Now'}
+                  active
+                  onClick={() => setSmcRenderMode(m => m === 'historical' ? 'present' : 'historical')}
+                />
+                <Tag
+                  color="gray"
+                  label={smcColorMode === 'colored' ? 'Color' : 'Mono'}
+                  active
+                  onClick={() => setSmcColorMode(m => m === 'colored' ? 'monochrome' : 'colored')}
+                />
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ── WaveTrend oscillator ── */}
       <div className={`relative border-t border-zinc-800/60 ${vis.wt ? '' : 'hidden'}`}>

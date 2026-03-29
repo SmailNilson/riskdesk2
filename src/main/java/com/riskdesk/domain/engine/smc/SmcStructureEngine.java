@@ -231,20 +231,27 @@ public class SmcStructureEngine {
      */
     public StructureSnapshot computeFromHistory(List<Candle> candles, int tailEvents) {
         reset();
+        int replayBars = tailEvents <= 0
+                ? 0
+                : Math.min(candles.size(), Math.max(capacity * 2, tailEvents * 12));
+        int batchBars = Math.max(0, candles.size() - replayBars);
 
-        // Phase 1: batch mode — process all but the last tailEvents-worth of bars
-        // We process ALL bars in batch mode first (no allocations), then replay none.
-        // Instead, we capture events only in the final snapshot from engine state.
         batchMode = true;
-        for (int i = 0, n = candles.size(); i < n; i++) {
+        for (int i = 0; i < batchBars; i++) {
             onCandle(candles.get(i));
         }
         batchMode = false;
 
-        // Build snapshot — allEvents is empty in batch mode, which is fine:
-        // the caller (IndicatorService) only needs current bias + pivot levels.
-        // recentBreaks are reconstructed from the last structure state if needed.
-        return snapshot();
+        allEvents.clear();
+        for (int i = batchBars; i < candles.size(); i++) {
+            onCandle(candles.get(i));
+        }
+
+        if (tailEvents <= 0 || allEvents.size() <= tailEvents) {
+            return snapshot();
+        }
+        int from = Math.max(0, allEvents.size() - tailEvents);
+        return snapshot(List.copyOf(allEvents.subList(from, allEvents.size())));
     }
 
     /** Convenience overload: no tail events captured. */
@@ -282,13 +289,17 @@ public class SmcStructureEngine {
 
     /** Immutable snapshot of current engine state. */
     public StructureSnapshot snapshot() {
+        return snapshot(List.copyOf(allEvents));
+    }
+
+    private StructureSnapshot snapshot(List<StructureEvent> events) {
         return new StructureSnapshot(
                 biasOf(internal), biasOf(swing),
                 pivotOf(internal, PivotSide.HIGH), pivotOf(internal, PivotSide.LOW),
                 pivotOf(swing, PivotSide.HIGH), pivotOf(swing, PivotSide.LOW),
                 trailingTop, trailingTopTime,
                 trailingBottom, trailingBottomTime,
-                List.copyOf(allEvents));
+                events);
     }
 
     public Bias internalBias() { return biasOf(internal); }

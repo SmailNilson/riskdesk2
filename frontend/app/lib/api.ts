@@ -81,6 +81,7 @@ export interface IbkrAuthStatus {
 
 export interface OrderBlockView {
   type: 'BULLISH' | 'BEARISH';
+  status: 'ACTIVE' | 'MITIGATED' | 'BREAKER';
   high: number;
   low: number;
   mid: number;
@@ -108,7 +109,8 @@ export interface EqualLevelView {
   type: 'EQH' | 'EQL';
   price: number;
   firstBarTime: number;   // epoch seconds
-  secondBarTime: number;  // epoch seconds
+  lastBarTime: number;    // epoch seconds
+  touchCount: number;
 }
 
 /** UC-SMC-005: OHLC for a single higher-timeframe candle. */
@@ -209,6 +211,7 @@ export interface IndicatorSnapshot {
   weakLowTime:    number | null;
   // SMC overlays
   activeOrderBlocks:         OrderBlockView[];
+  breakerOrderBlocks:        OrderBlockView[];
   recentOrderBlockEvents:    OrderBlockEventView[];
   activeFairValueGaps:       FairValueGapView[];
   recentBreaks:              StructureBreakView[];

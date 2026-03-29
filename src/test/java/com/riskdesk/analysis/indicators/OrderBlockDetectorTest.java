@@ -306,5 +306,7 @@ class OrderBlockDetectorTest {
         boolean hasInvalidation = result.events().stream()
                 .anyMatch(e -> e.eventType() == OBEventType.INVALIDATION && e.obType() == OBType.BULLISH);
         assertTrue(hasInvalidation, "Expected a BULLISH INVALIDATION event when last bar closes below OB low. Events: " + result.events());
+        assertTrue(result.breakerOrderBlocks().stream().anyMatch(ob -> ob.status() == OBStatus.BREAKER && ob.type() == OBType.BEARISH),
+                "Expected invalidated bullish OB to surface as a bearish breaker block (V2). Breakers: " + result.breakerOrderBlocks());
     }
 }
