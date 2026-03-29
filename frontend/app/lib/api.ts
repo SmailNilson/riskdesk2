@@ -528,6 +528,18 @@ export interface MentorIntermarketSnapshot {
   metalsConvergenceStatus: string;
 }
 
+function normalizeIndicatorSnapshot(snapshot: IndicatorSnapshot): IndicatorSnapshot {
+  return {
+    ...snapshot,
+    equalHighs: snapshot.equalHighs ?? [],
+    equalLows: snapshot.equalLows ?? [],
+    activeOrderBlocks: snapshot.activeOrderBlocks ?? [],
+    recentOrderBlockEvents: snapshot.recentOrderBlockEvents ?? [],
+    activeFairValueGaps: snapshot.activeFairValueGaps ?? [],
+    recentBreaks: snapshot.recentBreaks ?? [],
+  };
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
@@ -539,7 +551,7 @@ export const api = {
   getIbkrAuthStatus: () => get<IbkrAuthStatus>('/api/ibkr/connection/status'),
   refreshIbkrAuth: () => post<IbkrAuthStatus>('/api/ibkr/connection/refresh', {}),
   getIndicators: (instrument: string, timeframe: string) =>
-    get<IndicatorSnapshot>(`/api/indicators/${instrument}/${timeframe}`),
+    get<IndicatorSnapshot>(`/api/indicators/${instrument}/${timeframe}`).then(normalizeIndicatorSnapshot),
   getIndicatorSeries: (instrument: string, timeframe: string, limit = 500) =>
     get<IndicatorSeriesSnapshot>(`/api/indicators/${instrument}/${timeframe}/series?limit=${limit}`),
   getCandles: (instrument: string, timeframe: string, limit = 300) =>

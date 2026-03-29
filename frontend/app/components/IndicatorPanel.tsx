@@ -43,6 +43,9 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
   );
 
   const n = (v: number | null, d = 2) => v != null ? v.toFixed(d) : '—';
+  const equalHighs = s.equalHighs ?? [];
+  const equalLows = s.equalLows ?? [];
+  const activeOrderBlocks = s.activeOrderBlocks ?? [];
   const chaikinFlow = s.cmf == null ? { label: '—', color: 'gray' as const }
     : s.cmf > 0 ? { label: 'BUYING', color: 'green' as const }
     : s.cmf < 0 ? { label: 'SELLING', color: 'red' as const }
@@ -200,15 +203,15 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
       )}
 
       {/* EQH / EQL */}
-      {(s.equalHighs.length > 0 || s.equalLows.length > 0) && (
-        <Section title={`EQH/EQL (${s.equalHighs.length + s.equalLows.length})`}>
-          {s.equalHighs.map((eq, i) => (
+      {(equalHighs.length > 0 || equalLows.length > 0) && (
+        <Section title={`EQH/EQL (${equalHighs.length + equalLows.length})`}>
+          {equalHighs.map((eq, i) => (
             <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQH" color="red" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
             </div>
           ))}
-          {s.equalLows.map((eq, i) => (
+          {equalLows.map((eq, i) => (
             <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQL" color="green" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
@@ -218,10 +221,10 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
       )}
 
       {/* Order Blocks */}
-      <Section title={`Order Blocks (${s.activeOrderBlocks.length})`} fullWidth>
-        {s.activeOrderBlocks.length === 0
+      <Section title={`Order Blocks (${activeOrderBlocks.length})`} fullWidth>
+        {activeOrderBlocks.length === 0
           ? <span className="text-zinc-600 text-xs">No active OBs</span>
-          : s.activeOrderBlocks.map((ob, i) => (
+          : activeOrderBlocks.map((ob, i) => (
             <div key={i} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
               <span className="text-zinc-400">
