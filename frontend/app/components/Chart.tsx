@@ -128,6 +128,9 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   const [showMtf, setShowMtf] = useState(false);
   // UC-SMC-007: candle coloring by SMC trend
   const [smcCandleColor, setSmcCandleColor] = useState(false);
+  // UC-SMC-006: SMC render mode controls
+  const [smcRenderMode, setSmcRenderMode] = useState<'historical' | 'present'>('historical');
+  const [smcColorMode,  setSmcColorMode]  = useState<'colored' | 'monochrome'>('colored');
   // lastBarTime as state so the SMC effect re-fires after candles load
   const [lastBarTime, setLastBarTime] = useState<Time>(0 as Time);
 
@@ -430,7 +433,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     }
   }, [smcCandleColor, snapshot]);
 
-  // ── SMC overlays — re-render whenever snapshot or SMC visibility changes ─────
+  // ── SMC overlays — re-render whenever snapshot, visibility or render mode changes ──
   useEffect(() => {
     const series = candleRef.current;
     const chart  = chartRef.current;
@@ -466,9 +469,13 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       const dpr = window.devicePixelRatio || 1;
       const H   = canvas.height;   // clamp y to canvas bounds
 
+      // UC-SMC-006: monochrome palette flag
+      const mono = smcColorMode === 'monochrome';
+
       const drawBox = (
         t1: Time, low: number, high: number,
         fill: string, stroke: string,
+        fillMono: string, strokeMono: string,
         label?: string,
         tEnd?: Time,  // UC-SMC-010: optional visual extension end time
       ) => {
@@ -484,36 +491,49 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         const ty = Math.max(0, Math.min(Math.min(y1, y2) * dpr, H));
         const by = Math.max(0, Math.min(Math.max(y1, y2) * dpr, H));
         if (by - ty < 1) return;     // skip degenerate boxes
-        ctx.fillStyle = fill;
+        ctx.fillStyle   = mono ? fillMono   : fill;
         ctx.fillRect(lx, ty, rx - lx, by - ty);
-        ctx.strokeStyle = stroke;
+        ctx.strokeStyle = mono ? strokeMono : stroke;
         ctx.lineWidth = dpr;
         ctx.strokeRect(lx, ty, rx - lx, by - ty);
         // Label in the box if there's room
         if (label && by - ty >= 10 * dpr) {
-          ctx.fillStyle = stroke;
+          ctx.fillStyle = mono ? strokeMono : stroke;
           ctx.font = `${9 * dpr}px monospace`;
           ctx.fillText(label, lx + 3 * dpr, ty + 9 * dpr);
         }
       };
 
-      // Order Block boxes  (blue=bull, red=bear — matching LuxAlgo SMC style)
-      for (const ob of snapshot.activeOrderBlocks ?? []) {
+      // UC-SMC-006: Present mode limits to most recent 3 elements
+      const PRESENT_LIMIT = 3;
+      const obsVisible  = smcRenderMode === 'present'
+        ? (snapshot.activeOrderBlocks ?? []).slice(-PRESENT_LIMIT)
+        : (snapshot.activeOrderBlocks ?? []);
+      const fvgsVisible = smcRenderMode === 'present'
+        ? (snapshot.activeFairValueGaps ?? []).slice(-PRESENT_LIMIT)
+        : (snapshot.activeFairValueGaps ?? []);
+
+      // Order Block boxes  (blue=bull, red=bear — colored; gray — monochrome)
+      for (const ob of obsVisible) {
         if (!ob.startTime) continue;
         const bull = ob.type === 'BULLISH';
         drawBox(ob.startTime as Time, ob.low, ob.high,
           bull ? 'rgba(49,121,245,0.35)' : 'rgba(247,70,80,0.35)',
           bull ? 'rgba(100,160,255,1)'   : 'rgba(255,100,100,1)',
+          'rgba(150,150,170,0.25)', 'rgba(180,180,200,0.9)',
           bull ? 'OB ▲' : 'OB ▼');
       }
-      // Fair Value Gap boxes  (teal=bull, orange=bear) — UC-SMC-010: with visual extension
-      for (const fvg of snapshot.activeFairValueGaps ?? []) {
+      // Fair Value Gap boxes  (teal=bull, orange=bear — colored; gray — monochrome)
+      for (const fvg of fvgsVisible) {
         if (!fvg.startTime) continue;
         const bull = fvg.bias === 'BULLISH';
-        const tEnd = fvg.extensionEndTime ? (fvg.extensionEndTime as Time) : undefined;
+        // Only use extensionEndTime when strictly after startTime (extensionBars > 0)
+        const tEnd = (fvg.extensionEndTime && fvg.extensionEndTime > fvg.startTime)
+          ? (fvg.extensionEndTime as Time) : undefined;
         drawBox(fvg.startTime as Time, fvg.bottom, fvg.top,
           bull ? 'rgba(0,204,136,0.28)' : 'rgba(255,100,50,0.28)',
           bull ? 'rgba(50,230,160,1)'   : 'rgba(255,130,80,1)',
+          'rgba(140,140,160,0.20)', 'rgba(160,160,180,0.85)',
           bull ? 'FVG ▲' : 'FVG ▼',
           tEnd);
       }
@@ -566,7 +586,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       markersApiRef.current = createSeriesMarkers(series, markers);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot, vis.smc, lastBarTime]);
+  }, [snapshot, vis.smc, lastBarTime, smcRenderMode, smcColorMode]);
 
   // ── UC-SMC-005: MTF level price lines ────────────────────────────────────────
   useEffect(() => {
@@ -662,6 +682,23 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
             active={smcCandleColor}
             onClick={() => setSmcCandleColor(v => !v)}
           />
+          {/* UC-SMC-006: render mode toggles (only visible when SMC is on) */}
+          {vis.smc && (
+            <>
+              <Tag
+                color="gray"
+                label={smcRenderMode === 'historical' ? 'Hist' : 'Now'}
+                active
+                onClick={() => setSmcRenderMode(m => m === 'historical' ? 'present' : 'historical')}
+              />
+              <Tag
+                color="gray"
+                label={smcColorMode === 'colored' ? 'Color' : 'Mono'}
+                active
+                onClick={() => setSmcColorMode(m => m === 'colored' ? 'monochrome' : 'colored')}
+              />
+            </>
+          )}
         </div>
       )}
 
