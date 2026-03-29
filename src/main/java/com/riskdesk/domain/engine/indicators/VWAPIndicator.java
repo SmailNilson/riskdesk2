@@ -1,23 +1,22 @@
 package com.riskdesk.domain.engine.indicators;
 
 import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.LocalDate;
-import java.time.ZoneId;
+import java.time.Instant;
 import java.util.*;
 
 /**
- * Session VWAP — Volume Weighted Average Price, resets daily.
+ * Session VWAP — Volume Weighted Average Price, resets on the CME trading-session
+ * boundary (17:00 ET), not at calendar midnight.
  */
 public class VWAPIndicator implements TechnicalIndicator<VWAPIndicator.VWAPResult> {
-
-    private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
     public record VWAPResult(BigDecimal vwap, BigDecimal upperBand, BigDecimal lowerBand) {}
 
     /**
-     * Calculate VWAP across candles, resetting at each market session date.
+     * Calculate VWAP across candles, resetting at each CME session boundary.
      * Bands = VWAP +/- stddev of typical price.
      */
     public List<VWAPResult> calculate(List<Candle> candles) {
@@ -27,10 +26,10 @@ public class VWAPIndicator implements TechnicalIndicator<VWAPIndicator.VWAPResul
         BigDecimal cumulativeTPV = BigDecimal.ZERO; // sum(TP * Volume)
         long cumulativeVolume = 0;
         List<BigDecimal> typicalPrices = new ArrayList<>();
-        LocalDate currentSession = null;
+        Instant currentSession = null;
 
         for (Candle c : candles) {
-            LocalDate candleSession = c.getTimestamp().atZone(MARKET_TZ).toLocalDate();
+            Instant candleSession = TradingSessionResolver.dailySessionStart(c.getTimestamp());
             if (currentSession != null && !currentSession.equals(candleSession)) {
                 cumulativeTPV = BigDecimal.ZERO;
                 cumulativeVolume = 0;

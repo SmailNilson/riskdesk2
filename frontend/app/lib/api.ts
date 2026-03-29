@@ -86,6 +86,8 @@ export interface OrderBlockView {
   low: number;
   mid: number;
   startTime: number;   // epoch seconds of formation candle
+  originalType?: 'BULLISH' | 'BEARISH';
+  breakerTime?: number | null; // epoch seconds of invalidation candle when status=BREAKER
 }
 
 /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */

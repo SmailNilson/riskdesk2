@@ -16,6 +16,7 @@ import {
   Time,
 } from 'lightweight-charts';
 import { IndicatorSnapshot, api } from '@/app/lib/api';
+import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
 
 interface Props {
@@ -553,8 +554,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       const PRESENT_LIMIT = 3;
       const orderBlocks = [...(snapshot.activeOrderBlocks ?? [])]
         .sort((a, b) => Number(b.startTime) - Number(a.startTime));
-      const breakerBlocks = [...(snapshot.breakerOrderBlocks ?? [])]
-        .sort((a, b) => Number(b.startTime) - Number(a.startTime));
+      const currentBreakerPrice = livePriceRef.current?.price ?? lastCandleRef.current?.close ?? null;
+      const breakerBlocks = relevantBreakerBlocks(snapshot, currentBreakerPrice);
       const fairValueGaps = [...(snapshot.activeFairValueGaps ?? [])]
         .sort((a, b) => Number(b.startTime) - Number(a.startTime));
       const obsVisible = (smcRenderMode === 'present'
@@ -564,7 +565,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       const breakerVisible = (smcRenderMode === 'present'
         ? breakerBlocks.slice(0, PRESENT_LIMIT)
         : breakerBlocks
-      ).sort((a, b) => Number(a.startTime) - Number(b.startTime));
+      ).sort((a, b) => breakerReferenceTime(a) - breakerReferenceTime(b));
       const fvgsVisible = (smcRenderMode === 'present'
         ? fairValueGaps.slice(0, PRESENT_LIMIT)
         : fairValueGaps
@@ -587,9 +588,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       for (const ob of breakerVisible) {
         if (!ob.startTime) continue;
         const bull = ob.type === 'BULLISH';
+        const breakerStart = ob.breakerTime ?? ob.startTime;
         const obStart = smcRenderMode === 'present'
-          ? (Math.max(Number(ob.startTime), Number(t2) - periodSec * PRESENT_OB_WINDOW_BARS) as Time)
-          : (ob.startTime as Time);
+          ? (Math.max(Number(breakerStart), Number(t2) - periodSec * PRESENT_OB_WINDOW_BARS) as Time)
+          : (breakerStart as Time);
         drawBox(obStart, ob.low, ob.high,
           bull ? 'rgba(45,212,191,0.24)' : 'rgba(251,146,60,0.24)',
           bull ? 'rgba(94,234,212,0.95)' : 'rgba(253,186,116,0.95)',
@@ -735,7 +737,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
     lastCandleRef.current = updated;
     setLastBarTime(updated.time);
     candleRef.current.update(updated);
-  }, [livePrice, timeframe, reloadSeries]);
+    scheduleSmcRedraw();
+  }, [livePrice, timeframe, reloadSeries, scheduleSmcRedraw]);
 
   return (
     <div className={`relative rounded-lg overflow-hidden border ${dark ? 'bg-[#111] border-zinc-800' : 'bg-white border-slate-200'}`}>
