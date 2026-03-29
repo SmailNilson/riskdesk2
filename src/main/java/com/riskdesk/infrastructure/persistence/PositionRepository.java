@@ -5,7 +5,10 @@ import com.riskdesk.infrastructure.persistence.entity.PositionEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 
+import org.springframework.data.repository.query.Param;
+
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 
 public interface PositionRepository extends JpaRepository<PositionEntity, Long> {
@@ -19,8 +22,8 @@ public interface PositionRepository extends JpaRepository<PositionEntity, Long> 
     @Query("SELECT COALESCE(SUM(p.unrealizedPnL), 0) FROM PositionEntity p WHERE p.open = true")
     BigDecimal totalUnrealizedPnL();
 
-    @Query("SELECT COALESCE(SUM(p.realizedPnL), 0) FROM PositionEntity p WHERE p.open = false AND p.closedAt >= CURRENT_DATE")
-    BigDecimal todayRealizedPnL();
+    @Query("SELECT COALESCE(SUM(p.realizedPnL), 0) FROM PositionEntity p WHERE p.open = false AND p.closedAt >= :sessionStart")
+    BigDecimal todayRealizedPnL(@Param("sessionStart") Instant sessionStart);
 
     @Query("SELECT COUNT(p) FROM PositionEntity p WHERE p.open = true")
     long openPositionCount();

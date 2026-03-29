@@ -6,6 +6,7 @@ import com.riskdesk.domain.trading.port.PositionRepositoryPort;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -58,8 +59,8 @@ public class JpaPositionRepositoryAdapter implements PositionRepositoryPort {
     }
 
     @Override
-    public BigDecimal todayRealizedPnL() {
-        return springDataRepo.todayRealizedPnL();
+    public BigDecimal todayRealizedPnL(Instant sessionStart) {
+        return springDataRepo.todayRealizedPnL(sessionStart);
     }
 
     @Override

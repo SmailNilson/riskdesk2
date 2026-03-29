@@ -3,6 +3,8 @@ package com.riskdesk.infrastructure.marketdata;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Map;
@@ -24,7 +26,13 @@ public class CandleAccumulator {
                            BigDecimal price, long volume, Consumer<Candle> onCandleClosed) {
         String key = instrument.name() + ":" + timeframe;
         long now = Instant.now().getEpochSecond();
-        long barStart = (now / periodSeconds) * periodSeconds;
+        long barStart;
+        if (periodSeconds >= 86_400) {
+            // Daily+ candles align to CME session close (17:00 ET), not midnight UTC.
+            barStart = TradingSessionResolver.dailySessionStart(Instant.now()).getEpochSecond();
+        } else {
+            barStart = (now / periodSeconds) * periodSeconds;
+        }
 
         building.compute(key, (k, current) -> {
             if (current == null || current.barStart != barStart) {

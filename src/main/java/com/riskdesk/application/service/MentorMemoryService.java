@@ -149,7 +149,7 @@ public class MentorMemoryService {
         jdbcTemplate.execute("""
             CREATE TABLE IF NOT EXISTS mentor_audit_memories (
                 audit_id BIGINT PRIMARY KEY REFERENCES mentor_audits(id) ON DELETE CASCADE,
-                created_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
                 instrument VARCHAR(32),
                 timeframe VARCHAR(16),
                 action VARCHAR(16),

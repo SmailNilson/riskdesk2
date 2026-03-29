@@ -19,8 +19,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -256,7 +257,7 @@ public class HistoricalTradeImporterService implements ApplicationRunner {
 
         try {
             return LocalDateTime.parse(timestamp.trim(), TRADE_TIMESTAMP_FORMATTER)
-                .atZone(ZoneId.systemDefault())
+                .atZone(TradingSessionResolver.CME_ZONE)
                 .toInstant();
         } catch (DateTimeParseException ignored) {
             try {

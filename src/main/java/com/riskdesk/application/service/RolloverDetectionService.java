@@ -11,6 +11,8 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -90,7 +92,7 @@ public class RolloverDetectionService {
             return new RolloverInfo(instrument.name(), contractMonth, null, -1, RolloverStatus.STABLE);
         }
 
-        long daysToExpiry = LocalDate.now().until(expiry, ChronoUnit.DAYS);
+        long daysToExpiry = LocalDate.now(TradingSessionResolver.CME_ZONE).until(expiry, ChronoUnit.DAYS);
         RolloverStatus status = statusFor(daysToExpiry);
         return new RolloverInfo(instrument.name(), contractMonth, expiry.toString(), daysToExpiry, status);
     }
