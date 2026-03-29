@@ -114,6 +114,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // SMC overlays — tracked for cleanup between snapshot updates
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const smcLinesRef    = useRef<any[]>([]);                        // Strong/Weak H/L price lines
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mtfLinesRef    = useRef<any[]>([]);                        // UC-SMC-005: D/W/M price lines
   const smcCanvasRef   = useRef<HTMLCanvasElement | null>(null);   // OB + FVG overlay canvas
   const drawSMCRef     = useRef<(() => void) | null>(null);        // current draw function
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,12 +124,15 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
 
   // ── Indicator visibility toggles ────────────────────────────────────────────
   const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
+  // UC-SMC-005: MTF levels toggle
+  const [showMtf, setShowMtf] = useState(false);
   // lastBarTime as state so the SMC effect re-fires after candles load
   const [lastBarTime, setLastBarTime] = useState<Time>(0 as Time);
 
   // Reset visibility + lastBarTime when chart is recreated (instrument / timeframe change)
   useEffect(() => {
     setVis({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
+    setShowMtf(false);
     setLastBarTime(0 as Time);
     lastCandleRef.current = null;
   }, [instrument, timeframe]);
@@ -371,6 +376,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       chartRef.current      = null;
       wtChartRef.current    = null;
       smcLinesRef.current   = [];
+      mtfLinesRef.current   = [];
       drawSMCRef.current    = null;
       markersApiRef.current = null;
     };
@@ -529,6 +535,48 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, vis.smc, lastBarTime]);
 
+  // ── UC-SMC-005: MTF level price lines ────────────────────────────────────────
+  useEffect(() => {
+    const series = candleRef.current;
+    if (!series) return;
+
+    // Remove previous MTF lines
+    mtfLinesRef.current.forEach(pl => { try { series.removePriceLine(pl); } catch {} });
+    mtfLinesRef.current = [];
+
+    if (!showMtf || !snapshot?.mtfLevels) return;
+
+    const addMtf = (price: number | null | undefined, color: string, style: LineStyle, title: string) => {
+      if (price == null) return;
+      mtfLinesRef.current.push(series.createPriceLine({
+        price, color, lineWidth: 1, lineStyle: style,
+        axisLabelVisible: true, title,
+      }));
+    };
+
+    const { daily, weekly, monthly } = snapshot.mtfLevels;
+    // Daily — solid bright lines
+    if (daily) {
+      addMtf(daily.high,   '#f59e0b', LineStyle.Solid,  'D H');
+      addMtf(daily.low,    '#f59e0b', LineStyle.Solid,  'D L');
+      addMtf(daily.open,   '#fbbf24', LineStyle.Dotted, 'D O');
+      addMtf(daily.close,  '#fbbf2480', LineStyle.Dotted, 'D C');
+    }
+    // Weekly — dashed purple lines
+    if (weekly) {
+      addMtf(weekly.high,  '#a78bfa', LineStyle.Dashed, 'W H');
+      addMtf(weekly.low,   '#a78bfa', LineStyle.Dashed, 'W L');
+      addMtf(weekly.open,  '#c4b5fd', LineStyle.Dotted, 'W O');
+    }
+    // Monthly — sparse-dotted teal lines
+    if (monthly) {
+      addMtf(monthly.high, '#2dd4bf', LineStyle.SparseDotted, 'M H');
+      addMtf(monthly.low,  '#2dd4bf', LineStyle.SparseDotted, 'M L');
+      addMtf(monthly.open, '#5eead4', LineStyle.SparseDotted, 'M O');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot, showMtf]);
+
   // ── Append live tick to current candle bar ──────────────────────────────────
   useEffect(() => {
     if (!livePrice || !candleRef.current) return;
@@ -570,6 +618,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
             active={vis.smc}
             onClick={() => toggle('smc')}
           />
+          {/* UC-SMC-005: MTF levels toggle */}
+          {snapshot.mtfLevels && (
+            <Tag color="amber" label="MTF" active={showMtf} onClick={() => setShowMtf(v => !v)} />
+          )}
         </div>
       )}
 

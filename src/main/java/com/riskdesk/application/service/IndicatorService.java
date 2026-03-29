@@ -210,6 +210,13 @@ public class IndicatorService {
                         e.secondTime().getEpochSecond()))
                 .toList();
 
+        // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ──────────
+        IndicatorSnapshot.MtfLevelView dailyLevel  = loadMtfLevel(instrument, "1d");
+        IndicatorSnapshot.MtfLevelView weeklyLevel  = loadMtfLevel(instrument, "1w");
+        IndicatorSnapshot.MtfLevelView monthlyLevel = loadMtfLevel(instrument, "1M");
+        IndicatorSnapshot.MtfLevelsView mtfLevels =
+                new IndicatorSnapshot.MtfLevelsView(dailyLevel, weeklyLevel, monthlyLevel);
+
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
         return new IndicatorSnapshot(
@@ -262,6 +269,8 @@ public class IndicatorService {
                 obViews, obEventViews,
                 fvgViews,
                 recentBreaks,
+                // UC-SMC-005: MTF levels
+                mtfLevels,
                 lastCandleTimestamp
         );
     }
@@ -299,6 +308,18 @@ public class IndicatorService {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
+
+    /**
+     * UC-SMC-005: Load the most recent closed candle for a higher timeframe and
+     * return its OHLC as an MtfLevelView. Returns null if no data is available.
+     */
+    private IndicatorSnapshot.MtfLevelView loadMtfLevel(Instrument instrument, String timeframe) {
+        List<Candle> htfCandles = loadCandles(instrument, timeframe, 2);
+        if (htfCandles.isEmpty()) return null;
+        Candle last = htfCandles.get(htfCandles.size() - 1);
+        return new IndicatorSnapshot.MtfLevelView(
+                last.getOpen(), last.getHigh(), last.getLow(), last.getClose());
+    }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
@@ -404,6 +425,8 @@ public class IndicatorService {
                 Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(),
                 Collections.emptyList(),
+                // UC-SMC-005: MTF levels
+                null,
                 null
         );
     }

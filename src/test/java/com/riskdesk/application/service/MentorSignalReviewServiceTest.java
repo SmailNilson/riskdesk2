@@ -457,6 +457,7 @@ class MentorSignalReviewServiceTest {
             List.of(),   // recentOrderBlockEvents
             List.of(),
             List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
+            null,   // mtfLevels (UC-SMC-005)
             null
         );
     }
