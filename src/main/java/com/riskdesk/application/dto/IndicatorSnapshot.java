@@ -89,7 +89,7 @@ public record IndicatorSnapshot(
 ) {
     public record OrderBlockView(String type, BigDecimal high, BigDecimal low, BigDecimal mid, long startTime) {}
 
-    public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime) {}
+    public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {}
 
     public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
 

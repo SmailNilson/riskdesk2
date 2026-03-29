@@ -431,10 +431,11 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         t1: Time, low: number, high: number,
         fill: string, stroke: string,
         label?: string,
+        tEnd?: Time,  // UC-SMC-010: optional visual extension end time
       ) => {
         if (!t2) return;
         const x1 = chart.timeScale().timeToCoordinate(t1);
-        const x2 = chart.timeScale().timeToCoordinate(t2);
+        const x2 = chart.timeScale().timeToCoordinate(tEnd ?? t2);
         const y1 = series.priceToCoordinate(low);
         const y2 = series.priceToCoordinate(high);
         if (x1 == null || x2 == null || y1 == null || y2 == null) return;
@@ -466,14 +467,16 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
           bull ? 'rgba(100,160,255,1)'   : 'rgba(255,100,100,1)',
           bull ? 'OB ▲' : 'OB ▼');
       }
-      // Fair Value Gap boxes  (teal=bull, orange=bear)
+      // Fair Value Gap boxes  (teal=bull, orange=bear) — UC-SMC-010: with visual extension
       for (const fvg of snapshot.activeFairValueGaps ?? []) {
         if (!fvg.startTime) continue;
         const bull = fvg.bias === 'BULLISH';
+        const tEnd = fvg.extensionEndTime ? (fvg.extensionEndTime as Time) : undefined;
         drawBox(fvg.startTime as Time, fvg.bottom, fvg.top,
           bull ? 'rgba(0,204,136,0.28)' : 'rgba(255,100,50,0.28)',
           bull ? 'rgba(50,230,160,1)'   : 'rgba(255,130,80,1)',
-          bull ? 'FVG ▲' : 'FVG ▼');
+          bull ? 'FVG ▲' : 'FVG ▼',
+          tEnd);
       }
     };
     drawSMCRef.current();   // draw immediately

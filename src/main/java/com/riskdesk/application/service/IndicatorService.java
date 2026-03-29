@@ -29,6 +29,9 @@ public class IndicatorService {
     private static final int WT_N1 = 10;
     private static final int WT_N2 = 21;
     private static final int WT_SIGNAL_PERIOD = 4;
+    private static final String FVG_MIN_GAP_SIZE = "0";     // UC-SMC-010: no minimum threshold by default
+    private static final int FVG_EXTENSION_BARS = 0;        // UC-SMC-010: no visual extension by default
+    private static final String FVG_DEDICATED_TIMEFRAME = null; // UC-SMC-010: null = use chart timeframe
 
     private final CandleRepositoryPort  candlePort;
     private final ActiveContractRegistry contractRegistry;
@@ -46,7 +49,12 @@ public class IndicatorService {
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
-    private final FairValueGapDetector fvgDetector = new FairValueGapDetector(5);
+    // UC-SMC-010: FVG detector with threshold filtering and visual extension
+    private final FairValueGapDetector fvgDetector = new FairValueGapDetector(
+            5,
+            new BigDecimal(FVG_MIN_GAP_SIZE),
+            FVG_EXTENSION_BARS
+    );
     private final EqualLevelDetector eqDetector = new EqualLevelDetector(5, 0.1);
 
     public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
@@ -153,11 +161,14 @@ public class IndicatorService {
                         evt.eventTime().getEpochSecond()))
                 .toList();
 
-        // Fair Value Gaps (unchanged)
-        List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(candles);
+        // Fair Value Gaps (UC-SMC-010: dedicated timeframe + extension metadata)
+        List<Candle> fvgCandles = FVG_DEDICATED_TIMEFRAME != null
+                ? loadCandles(instrument, FVG_DEDICATED_TIMEFRAME, SERIES_LIMIT)
+                : candles;
+        List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(fvgCandles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
                 .map(f -> new IndicatorSnapshot.FairValueGapView(
-                        f.bias(), f.top(), f.bottom(), f.startBarTime()))
+                        f.bias(), f.top(), f.bottom(), f.startBarTime(), f.extensionEndTime()))
                 .toList();
 
         // ── Premium / Discount / Equilibrium (UC-SMC-004) ──────────────────
