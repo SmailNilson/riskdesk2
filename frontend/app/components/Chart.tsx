@@ -471,7 +471,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       for (const fvg of snapshot.activeFairValueGaps ?? []) {
         if (!fvg.startTime) continue;
         const bull = fvg.bias === 'BULLISH';
-        const tEnd = fvg.extensionEndTime ? (fvg.extensionEndTime as Time) : undefined;
+        // Only use extensionEndTime when it is strictly after startTime (extensionBars > 0).
+        // When extensionBars = 0, extensionEndTime === startTime and the box would be zero-width.
+        const tEnd = (fvg.extensionEndTime && fvg.extensionEndTime > fvg.startTime)
+          ? (fvg.extensionEndTime as Time) : undefined;
         drawBox(fvg.startTime as Time, fvg.bottom, fvg.top,
           bull ? 'rgba(0,204,136,0.28)' : 'rgba(255,100,50,0.28)',
           bull ? 'rgba(50,230,160,1)'   : 'rgba(255,130,80,1)',
