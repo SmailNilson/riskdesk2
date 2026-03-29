@@ -102,42 +102,40 @@ class EqualLevelDetectorTest {
     @Test
     void detectsEqualHighs() {
         EqualLevelDetector detector = new EqualLevelDetector(2, 0.5);
-        List<EqualLevel> results = detector.detect(toCandles(EQH_DATA));
+        List<LiquidityPool> results = detector.detectPools(toCandles(EQH_DATA));
 
-        List<EqualLevel> eqh = results.stream()
+        List<LiquidityPool> eqh = results.stream()
                 .filter(e -> e.type() == EqualType.EQH).toList();
 
         assertEquals(1, eqh.size(), "Expected 1 EQH");
-        EqualLevel eq = eqh.get(0);
+        LiquidityPool eq = eqh.get(0);
         assertEquals(2, eq.firstBar());
-        assertEquals(7, eq.secondBar());
-        assertEquals(100.0, eq.firstPrice());
-        assertEquals(100.3, eq.secondPrice());
+        assertEquals(7, eq.lastBar());
+        assertEquals(2, eq.touchCount());
         assertEquals((100.0 + 100.3) / 2, eq.price(), 0.001);
     }
 
     @Test
     void detectsEqualLows() {
         EqualLevelDetector detector = new EqualLevelDetector(2, 0.5);
-        List<EqualLevel> results = detector.detect(toCandles(EQL_DATA));
+        List<LiquidityPool> results = detector.detectPools(toCandles(EQL_DATA));
 
-        List<EqualLevel> eql = results.stream()
+        List<LiquidityPool> eql = results.stream()
                 .filter(e -> e.type() == EqualType.EQL).toList();
 
         assertEquals(1, eql.size(), "Expected 1 EQL");
-        EqualLevel eq = eql.get(0);
+        LiquidityPool eq = eql.get(0);
         assertEquals(2, eq.firstBar());
-        assertEquals(7, eq.secondBar());
-        assertEquals(95.0, eq.firstPrice());
-        assertEquals(95.2, eq.secondPrice());
+        assertEquals(7, eq.lastBar());
+        assertEquals(2, eq.touchCount());
     }
 
     @Test
     void noSignalOutsideThreshold() {
         EqualLevelDetector detector = new EqualLevelDetector(2, 0.5);
-        List<EqualLevel> results = detector.detect(toCandles(NO_EQH_DATA));
+        List<LiquidityPool> results = detector.detectPools(toCandles(NO_EQH_DATA));
 
-        List<EqualLevel> eqh = results.stream()
+        List<LiquidityPool> eqh = results.stream()
                 .filter(e -> e.type() == EqualType.EQH).toList();
 
         assertTrue(eqh.isEmpty(), "Should not detect EQH when price diff exceeds threshold");
@@ -156,10 +154,61 @@ class EqualLevelDetectorTest {
         // With 0.5% threshold: NO_EQH_DATA yields 0 EQH (diff=2.96%)
         // With 5.0% threshold: same data yields 1 EQH
         EqualLevelDetector wide = new EqualLevelDetector(2, 5.0);
-        List<EqualLevel> results = wide.detect(toCandles(NO_EQH_DATA));
+        List<LiquidityPool> results = wide.detectPools(toCandles(NO_EQH_DATA));
 
-        List<EqualLevel> eqh = results.stream()
+        List<LiquidityPool> eqh = results.stream()
                 .filter(e -> e.type() == EqualType.EQH).toList();
         assertEquals(1, eqh.size(), "Wider threshold should catch the pair");
+    }
+
+    @Test
+    void clustersNearbyPivotsIntoSinglePool() {
+        double[][] data = {
+                {98, 96, 97},
+                {99, 97, 98},
+                {100.0, 98, 99},
+                {98, 96, 97},
+                {97, 95, 96},
+                {99, 97, 98},
+                {100.2, 98, 99},
+                {99, 97, 98},
+                {97, 95, 96},
+                {99, 97, 98},
+                {100.1, 98, 99},
+                {99, 97, 98},
+                {97, 95, 96},
+        };
+
+        EqualLevelDetector detector = new EqualLevelDetector(2, 0.5);
+        List<LiquidityPool> results = detector.detectPools(toCandles(data));
+
+        assertTrue(
+                results.stream().anyMatch(pool -> pool.type() == EqualType.EQH && pool.touchCount() == 3),
+                "Expected one EQH pool aggregating the 3 nearby pivots"
+        );
+    }
+
+    @Test
+    void excludesSweptPools() {
+        double[][] data = {
+                {98, 96, 97},
+                {99, 97, 98},
+                {100.0, 98, 99},
+                {98, 96, 97},
+                {99, 95, 96},
+                {97, 95, 96},
+                {99, 97, 98},
+                {100.2, 98, 99},
+                {99, 97, 98},
+                {97, 95, 96},
+                {101.5, 99, 100},
+                {99, 97, 98},
+                {98, 96, 97},
+        };
+
+        EqualLevelDetector detector = new EqualLevelDetector(2, 0.5);
+        List<LiquidityPool> results = detector.detectPools(toCandles(data));
+        assertTrue(results.stream().noneMatch(pool -> Math.abs(pool.price() - 100.1) < 0.5),
+                "Swept liquidity around the original equal highs should be hidden");
     }
 }

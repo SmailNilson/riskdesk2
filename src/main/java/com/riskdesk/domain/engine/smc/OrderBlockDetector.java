@@ -63,6 +63,7 @@ public class OrderBlockDetector {
     /** Bundles active OBs with lifecycle events detected on the last bar. */
     public record DetectionResult(
             List<OrderBlock> activeOrderBlocks,
+            List<OrderBlock> breakerOrderBlocks,
             List<OrderBlockEvent> events
     ) {}
 
@@ -84,7 +85,7 @@ public class OrderBlockDetector {
      */
     public DetectionResult detectWithEvents(List<Candle> candles) {
         if (candles.size() < lookback + 3) {
-            return new DetectionResult(Collections.emptyList(), Collections.emptyList());
+            return new DetectionResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
         }
 
         // Phase 1: Identify all candidate OBs
@@ -122,6 +123,7 @@ public class OrderBlockDetector {
         List<OrderBlock> resolved = new ArrayList<>();
 
         for (OrderBlock ob : candidates) {
+            OBType resolvedType = ob.type();
             OBStatus status = OBStatus.ACTIVE;
             int mitigationIdx = -1;
 
@@ -134,7 +136,8 @@ public class OrderBlockDetector {
                     if (c.getLow().compareTo(ob.highPrice()) <= 0) {
                         if (c.getClose().compareTo(ob.lowPrice()) < 0) {
                             // Close below the entire zone → invalidation
-                            status = OBStatus.MITIGATED;
+                            status = OBStatus.BREAKER;
+                            resolvedType = OBType.BEARISH;
                             mitigationIdx = j;
                             if (isLastBar) {
                                 events.add(new OrderBlockEvent(
@@ -158,7 +161,8 @@ public class OrderBlockDetector {
                     if (c.getHigh().compareTo(ob.lowPrice()) >= 0) {
                         if (c.getClose().compareTo(ob.highPrice()) > 0) {
                             // Close above the entire zone → invalidation
-                            status = OBStatus.MITIGATED;
+                            status = OBStatus.BREAKER;
+                            resolvedType = OBType.BULLISH;
                             mitigationIdx = j;
                             if (isLastBar) {
                                 events.add(new OrderBlockEvent(
@@ -180,29 +184,46 @@ public class OrderBlockDetector {
                 }
             }
 
-            resolved.add(new OrderBlock(ob.type(), status, ob.highPrice(), ob.lowPrice(),
+            resolved.add(new OrderBlock(resolvedType, status, ob.highPrice(), ob.lowPrice(),
                     ob.formationIndex(), mitigationIdx));
         }
 
-        // Phase 3: Keep only active (unmitigated) OBs, capped at maxOrderBlocks per type
+        // Phase 3: Keep only active OBs and breaker OBs, capped per type
         List<OrderBlock> activeOBs = resolved.stream()
                 .filter(ob -> ob.status() == OBStatus.ACTIVE)
                 .toList();
+        List<OrderBlock> breakerOBs = resolved.stream()
+                .filter(ob -> ob.status() == OBStatus.BREAKER)
+                .toList();
 
-        List<OrderBlock> finalResult = new ArrayList<>();
+        List<OrderBlock> finalActive = new ArrayList<>();
+        List<OrderBlock> finalBreaker = new ArrayList<>();
         long bullishCount = 0, bearishCount = 0;
         for (int i = activeOBs.size() - 1; i >= 0; i--) {
             OrderBlock ob = activeOBs.get(i);
             if (ob.type() == OBType.BULLISH && bullishCount < maxOrderBlocks) {
-                finalResult.add(ob);
+                finalActive.add(ob);
                 bullishCount++;
             } else if (ob.type() == OBType.BEARISH && bearishCount < maxOrderBlocks) {
-                finalResult.add(ob);
+                finalActive.add(ob);
                 bearishCount++;
             }
         }
 
-        return new DetectionResult(finalResult, events);
+        bullishCount = 0;
+        bearishCount = 0;
+        for (int i = breakerOBs.size() - 1; i >= 0; i--) {
+            OrderBlock ob = breakerOBs.get(i);
+            if (ob.type() == OBType.BULLISH && bullishCount < maxOrderBlocks) {
+                finalBreaker.add(ob);
+                bullishCount++;
+            } else if (ob.type() == OBType.BEARISH && bearishCount < maxOrderBlocks) {
+                finalBreaker.add(ob);
+                bearishCount++;
+            }
+        }
+
+        return new DetectionResult(finalActive, finalBreaker, events);
     }
 
     private boolean isBullishImpulse(Candle next, Candle confirm) {

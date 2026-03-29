@@ -29,6 +29,9 @@ public class IndicatorService {
     private static final int WT_N1 = 10;
     private static final int WT_N2 = 21;
     private static final int WT_SIGNAL_PERIOD = 4;
+    private static final int EQUAL_LEVEL_LOOKBACK = 5;
+    private static final int RECENT_BREAK_LIMIT = 12;
+    private static final int MAX_VISIBLE_LIQUIDITY_POOLS = 8;
     private static final String FVG_MIN_GAP_SIZE = "0";     // UC-SMC-010: no minimum threshold by default
     private static final int FVG_EXTENSION_BARS = 0;        // UC-SMC-010: no visual extension by default
     private static final String FVG_DEDICATED_TIMEFRAME = null; // UC-SMC-010: null = use chart timeframe
@@ -56,7 +59,6 @@ public class IndicatorService {
             new BigDecimal(FVG_MIN_GAP_SIZE),
             FVG_EXTENSION_BARS
     );
-    private final EqualLevelDetector eqDetector = new EqualLevelDetector(5, 0.1);
 
     public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
         this.candlePort       = candlePort;
@@ -107,7 +109,10 @@ public class IndicatorService {
         // ── SMC (UC-SMC-002: Internal + Swing structure) ─────────────────────────
 
         SmcStructureEngine smcEngine = new SmcStructureEngine(5, 50, SMC_CONFLUENCE_FILTER);
-        SmcStructureEngine.StructureSnapshot smcSnap = smcEngine.computeFromHistory(candles);
+        SmcStructureEngine.StructureSnapshot smcSnap = smcEngine.computeFromHistory(candles, RECENT_BREAK_LIMIT);
+        SmcStructureEngine.StructureEvent latestInternalEvent = latestStructureEvent(smcSnap.events(), SmcStructureEngine.StructureLevel.INTERNAL);
+        SmcStructureEngine.StructureEvent latestSwingEvent = latestStructureEvent(smcSnap.events(), SmcStructureEngine.StructureLevel.SWING);
+        SmcStructureEngine.StructureEvent latestEvent = latestStructureEvent(smcSnap.events(), null);
 
         // Internal bias & pivots
         String internalBias = smcSnap.internalBias() != null ? smcSnap.internalBias().name() : null;
@@ -139,19 +144,32 @@ public class IndicatorService {
         // Last break type per level (from allEvents — empty in batch mode, so derive from bias transitions)
         // In batch mode, allEvents is empty. We use bias as proxy: if bias is set, there was at least one break.
         // For alert purposes, the IndicatorAlertEvaluator uses lastBreakType which fires on transition.
-        String lastInternalBreak = null;
-        String lastSwingBreak = null;
+        String lastInternalBreak = formatBreakType(latestInternalEvent);
+        String lastSwingBreak = formatBreakType(latestSwingEvent);
         // Legacy single lastBreakType: prefer swing, else internal
-        String lastBreak = lastSwingBreak != null ? lastSwingBreak : lastInternalBreak;
+        String lastBreak = formatBreakType(latestEvent);
 
-        // recentBreaks: empty in batch mode (no events captured — to be populated in step 1d with tail capture)
-        List<IndicatorSnapshot.StructureBreakView> recentBreaks = List.of();
+        List<IndicatorSnapshot.StructureBreakView> recentBreaks = smcSnap.events().stream()
+                .sorted(Comparator.comparingInt(SmcStructureEngine.StructureEvent::barIndex).reversed())
+                .map(event -> new IndicatorSnapshot.StructureBreakView(
+                        event.type().name(),
+                        event.newBias().name(),
+                        BigDecimal.valueOf(event.breakPrice()),
+                        event.timestamp().getEpochSecond(),
+                        event.level().name()))
+                .toList();
 
         // Order Blocks + lifecycle events (UC-SMC-009)
         OrderBlockDetector.DetectionResult obResult = obDetector.detectWithEvents(candles);
         List<IndicatorSnapshot.OrderBlockView> obViews = obResult.activeOrderBlocks().stream()
                 .map(ob -> new IndicatorSnapshot.OrderBlockView(
-                        ob.type().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                        ob.formationIndex() < candles.size()
+                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
+                .toList();
+        List<IndicatorSnapshot.OrderBlockView> breakerViews = obResult.breakerOrderBlocks().stream()
+                .map(ob -> new IndicatorSnapshot.OrderBlockView(
+                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
                         ob.formationIndex() < candles.size()
                                 ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L))
                 .toList();
@@ -195,20 +213,34 @@ public class IndicatorService {
         }
 
         // Equal Highs / Equal Lows (UC-SMC-003)
-        List<EqualLevelDetector.EqualLevel> eqLevels = eqDetector.detect(candles);
-        List<IndicatorSnapshot.EqualLevelView> eqhViews = eqLevels.stream()
-                .filter(e -> e.type() == EqualLevelDetector.EqualType.EQH)
-                .map(e -> new IndicatorSnapshot.EqualLevelView("EQH",
-                        BigDecimal.valueOf(e.price()),
-                        e.firstTime().getEpochSecond(),
-                        e.secondTime().getEpochSecond()))
+        EqualLevelDetector eqDetector = EqualLevelDetector.tickNormalized(
+                EQUAL_LEVEL_LOOKBACK,
+                instrument.getTickSize(),
+                liquidityToleranceTicks(timeframe)
+        );
+        double currentPrice = candles.get(candles.size() - 1).getClose().doubleValue();
+        List<EqualLevelDetector.LiquidityPool> liquidityPools = selectVisibleLiquidityPools(
+                eqDetector.detectPools(candles),
+                currentPrice,
+                MAX_VISIBLE_LIQUIDITY_POOLS
+        );
+        List<IndicatorSnapshot.EqualLevelView> eqhViews = liquidityPools.stream()
+                .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQH)
+                .map(pool -> new IndicatorSnapshot.EqualLevelView(
+                        "EQH",
+                        BigDecimal.valueOf(pool.price()),
+                        pool.firstTime().getEpochSecond(),
+                        pool.lastTime().getEpochSecond(),
+                        pool.touchCount()))
                 .toList();
-        List<IndicatorSnapshot.EqualLevelView> eqlViews = eqLevels.stream()
-                .filter(e -> e.type() == EqualLevelDetector.EqualType.EQL)
-                .map(e -> new IndicatorSnapshot.EqualLevelView("EQL",
-                        BigDecimal.valueOf(e.price()),
-                        e.firstTime().getEpochSecond(),
-                        e.secondTime().getEpochSecond()))
+        List<IndicatorSnapshot.EqualLevelView> eqlViews = liquidityPools.stream()
+                .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQL)
+                .map(pool -> new IndicatorSnapshot.EqualLevelView(
+                        "EQL",
+                        BigDecimal.valueOf(pool.price()),
+                        pool.firstTime().getEpochSecond(),
+                        pool.lastTime().getEpochSecond(),
+                        pool.touchCount()))
                 .toList();
 
         // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ──────────
@@ -269,7 +301,7 @@ public class IndicatorService {
                 // SMC: Premium / Discount / Equilibrium
                 premiumZoneTop, equilibriumLevel, discountZoneBottom, currentZone,
                 // SMC: Zones
-                obViews, obEventViews,
+                obViews, breakerViews, obEventViews,
                 fvgViews,
                 recentBreaks,
                 // UC-SMC-005: MTF levels
@@ -343,6 +375,68 @@ public class IndicatorService {
 
     private BigDecimal last(List<BigDecimal> list) {
         return list.isEmpty() ? null : list.get(list.size() - 1);
+    }
+
+    private SmcStructureEngine.StructureEvent latestStructureEvent(
+            List<SmcStructureEngine.StructureEvent> events,
+            SmcStructureEngine.StructureLevel level
+    ) {
+        return events.stream()
+                .filter(event -> level == null || event.level() == level)
+                .max(Comparator.comparingInt(SmcStructureEngine.StructureEvent::barIndex))
+                .orElse(null);
+    }
+
+    private String formatBreakType(SmcStructureEngine.StructureEvent event) {
+        if (event == null) return null;
+        return event.type().name() + "_" + event.newBias().name();
+    }
+
+    private int liquidityToleranceTicks(String timeframe) {
+        return switch (timeframe) {
+            case "5m" -> 3;
+            case "10m", "1h" -> 4;
+            case "4h", "1d", "1w", "1M" -> 5;
+            default -> 4;
+        };
+    }
+
+    private List<EqualLevelDetector.LiquidityPool> selectVisibleLiquidityPools(
+            List<EqualLevelDetector.LiquidityPool> pools,
+            double currentPrice,
+            int maxVisible
+    ) {
+        if (pools.size() <= maxVisible) {
+            return pools.stream()
+                    .sorted(Comparator.comparingDouble(pool -> Math.abs(pool.price() - currentPrice)))
+                    .toList();
+        }
+
+        int sideBudget = maxVisible / 2;
+        List<EqualLevelDetector.LiquidityPool> above = pools.stream()
+                .filter(pool -> pool.price() >= currentPrice)
+                .sorted(Comparator.comparingDouble(pool -> pool.price() - currentPrice))
+                .toList();
+        List<EqualLevelDetector.LiquidityPool> below = pools.stream()
+                .filter(pool -> pool.price() < currentPrice)
+                .sorted(Comparator.comparingDouble(pool -> currentPrice - pool.price()))
+                .toList();
+
+        List<EqualLevelDetector.LiquidityPool> selected = new ArrayList<>();
+        selected.addAll(above.subList(0, Math.min(sideBudget, above.size())));
+        selected.addAll(below.subList(0, Math.min(sideBudget, below.size())));
+
+        if (selected.size() < maxVisible) {
+            List<EqualLevelDetector.LiquidityPool> leftovers = new ArrayList<>();
+            leftovers.addAll(above.subList(Math.min(sideBudget, above.size()), above.size()));
+            leftovers.addAll(below.subList(Math.min(sideBudget, below.size()), below.size()));
+            leftovers.sort(Comparator.comparingDouble(pool -> Math.abs(pool.price() - currentPrice)));
+            selected.addAll(leftovers.subList(0, Math.min(maxVisible - selected.size(), leftovers.size())));
+        }
+
+        return selected.stream()
+                .sorted(Comparator.comparingDouble(pool -> Math.abs(pool.price() - currentPrice)))
+                .toList();
     }
 
     private List<IndicatorSeriesSnapshot.LinePoint> mapLinePoints(List<Candle> candles, int startIndex, List<BigDecimal> values) {
@@ -427,7 +521,7 @@ public class IndicatorService {
                 // SMC: Premium / Discount / Equilibrium
                 null, null, null, null,
                 // SMC: Zones
-                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(),
                 Collections.emptyList(),
                 // UC-SMC-005: MTF levels

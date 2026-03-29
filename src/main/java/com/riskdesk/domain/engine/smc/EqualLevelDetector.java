@@ -1,6 +1,7 @@
 package com.riskdesk.domain.engine.smc;
 
 import com.riskdesk.domain.model.Candle;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,7 @@ import java.util.List;
 public class EqualLevelDetector {
 
     public enum EqualType { EQH, EQL }
+    private enum ThresholdMode { PERCENTAGE, ABSOLUTE_PRICE }
 
     /**
      * An equal-level zone: two consecutive swing pivots at approximately
@@ -45,8 +47,26 @@ public class EqualLevelDetector {
             Instant firstTime,
             Instant secondTime) {}
 
+    /**
+     * Aggregated liquidity pool built from one or more nearby equal pivots.
+     * Pools remain active until price trades through them ("swept").
+     */
+    public record LiquidityPool(
+            EqualType type,
+            double price,
+            double upperBound,
+            double lowerBound,
+            int firstBar,
+            int lastBar,
+            Instant firstTime,
+            Instant lastTime,
+            int touchCount,
+            boolean swept,
+            Instant sweptTime) {}
+
     private final int lookback;
-    private final double threshold;  // percentage (e.g. 0.1 = 0.1%)
+    private final ThresholdMode thresholdMode;
+    private final double threshold;
 
     /**
      * @param lookback  right-side confirmation bars for pivot detection
@@ -54,12 +74,30 @@ public class EqualLevelDetector {
      */
     public EqualLevelDetector(int lookback, double threshold) {
         this.lookback = lookback;
+        this.thresholdMode = ThresholdMode.PERCENTAGE;
         this.threshold = threshold;
+    }
+
+    /**
+     * Tick-normalized threshold for futures instruments.
+     *
+     * @param lookback        right-side confirmation bars for pivot detection
+     * @param tickSize        instrument minimum tick size
+     * @param toleranceTicks  maximum distance between pivots inside one pool
+     */
+    public EqualLevelDetector(int lookback, BigDecimal tickSize, int toleranceTicks) {
+        this.lookback = lookback;
+        this.thresholdMode = ThresholdMode.ABSOLUTE_PRICE;
+        this.threshold = tickSize.multiply(BigDecimal.valueOf(toleranceTicks)).doubleValue();
     }
 
     /** LuxAlgo defaults: lookback=5, threshold=0.1%. */
     public EqualLevelDetector() {
         this(5, 0.1);
+    }
+
+    public static EqualLevelDetector tickNormalized(int lookback, BigDecimal tickSize, int toleranceTicks) {
+        return new EqualLevelDetector(lookback, tickSize, toleranceTicks);
     }
 
     /**
@@ -69,12 +107,29 @@ public class EqualLevelDetector {
      * @return list of detected equal-level zones
      */
     public List<EqualLevel> detect(List<Candle> candles) {
+        return detectPools(candles).stream()
+                .map(pool -> new EqualLevel(
+                        pool.type(),
+                        pool.price(),
+                        pool.upperBound(),
+                        pool.lowerBound(),
+                        pool.firstBar(),
+                        pool.lastBar(),
+                        pool.firstTime(),
+                        pool.lastTime()))
+                .toList();
+    }
+
+    /**
+     * Detect and aggregate active liquidity pools from equal highs / lows.
+     */
+    public List<LiquidityPool> detectPools(List<Candle> candles) {
         int n = candles.size();
         if (n < lookback + 1) return List.of();
 
         // 1. Collect all confirmed swing pivots (right-side only)
-        List<int[]> swingHighs = new ArrayList<>();  // [barIndex]
-        List<int[]> swingLows = new ArrayList<>();
+        List<PivotCandidate> swingHighs = new ArrayList<>();
+        List<PivotCandidate> swingLows = new ArrayList<>();
 
         double[] highs = new double[n];
         double[] lows = new double[n];
@@ -99,47 +154,145 @@ public class EqualLevelDetector {
                 if (lows[idx] < minL) minL = lows[idx];
             }
 
-            if (candH > maxH) swingHighs.add(new int[]{cand});
-            if (candL < minL) swingLows.add(new int[]{cand});
+            if (candH > maxH) swingHighs.add(new PivotCandidate(cand, candH, times[cand]));
+            if (candL < minL) swingLows.add(new PivotCandidate(cand, candL, times[cand]));
         }
 
-        // 2. Compare consecutive same-type pivots for equality
-        List<EqualLevel> results = new ArrayList<>();
-
-        for (int i = 1; i < swingHighs.size(); i++) {
-            int bar1 = swingHighs.get(i - 1)[0];
-            int bar2 = swingHighs.get(i)[0];
-            double p1 = highs[bar1];
-            double p2 = highs[bar2];
-            if (isEqual(p1, p2)) {
-                double avg = (p1 + p2) / 2;
-                results.add(new EqualLevel(EqualType.EQH, avg, p1, p2,
-                        bar1, bar2, times[bar1], times[bar2]));
-            }
-        }
-
-        for (int i = 1; i < swingLows.size(); i++) {
-            int bar1 = swingLows.get(i - 1)[0];
-            int bar2 = swingLows.get(i)[0];
-            double p1 = lows[bar1];
-            double p2 = lows[bar2];
-            if (isEqual(p1, p2)) {
-                double avg = (p1 + p2) / 2;
-                results.add(new EqualLevel(EqualType.EQL, avg, p1, p2,
-                        bar1, bar2, times[bar1], times[bar2]));
-            }
-        }
-
-        return results;
+        List<LiquidityPool> results = new ArrayList<>();
+        clusterPivots(swingHighs, EqualType.EQH, candles, results);
+        clusterPivots(swingLows, EqualType.EQL, candles, results);
+        return results.stream()
+                .filter(pool -> !pool.swept())
+                .toList();
     }
 
     /**
      * Two prices are "equal" when their absolute difference is within
-     * {@code threshold%} of their average. Matches LuxAlgo eq_threshold.
+     * the configured tolerance.
      */
     private boolean isEqual(double p1, double p2) {
+        if (thresholdMode == ThresholdMode.ABSOLUTE_PRICE) {
+            return Math.abs(p1 - p2) <= threshold;
+        }
         double avg = (p1 + p2) / 2;
         if (avg == 0) return p1 == p2;
         return Math.abs(p1 - p2) / avg * 100 <= threshold;
+    }
+
+    private void clusterPivots(
+            List<PivotCandidate> pivots,
+            EqualType type,
+            List<Candle> candles,
+            List<LiquidityPool> out
+    ) {
+        if (pivots.size() < 2) return;
+
+        List<PivotCluster> clusters = new ArrayList<>();
+        PivotCluster current = new PivotCluster(pivots.get(0));
+        for (int i = 1; i < pivots.size(); i++) {
+            PivotCandidate pivot = pivots.get(i);
+            if (isEqual(current.referencePrice(), pivot.price())) {
+                current.add(pivot);
+                continue;
+            }
+            clusters.add(current);
+            current = new PivotCluster(pivot);
+        }
+        clusters.add(current);
+
+        List<PivotCluster> merged = new ArrayList<>();
+        for (PivotCluster cluster : clusters) {
+            if (!merged.isEmpty() && isEqual(merged.get(merged.size() - 1).referencePrice(), cluster.referencePrice())) {
+                merged.get(merged.size() - 1).merge(cluster);
+            } else {
+                merged.add(cluster);
+            }
+        }
+
+        for (PivotCluster cluster : merged) {
+            emitCluster(cluster, type, candles, out);
+        }
+    }
+
+    private void emitCluster(
+            PivotCluster cluster,
+            EqualType type,
+            List<Candle> candles,
+            List<LiquidityPool> out
+    ) {
+        if (cluster.touchCount < 2) return;
+        Instant sweptTime = detectSweep(type, cluster, candles);
+        out.add(new LiquidityPool(
+                type,
+                cluster.referencePrice(),
+                cluster.maxPrice,
+                cluster.minPrice,
+                cluster.firstBar,
+                cluster.lastBar,
+                cluster.firstTime,
+                cluster.lastTime,
+                cluster.touchCount,
+                sweptTime != null,
+                sweptTime
+        ));
+    }
+
+    private Instant detectSweep(EqualType type, PivotCluster cluster, List<Candle> candles) {
+        for (int i = cluster.lastBar + 1; i < candles.size(); i++) {
+            Candle candle = candles.get(i);
+            if (type == EqualType.EQH && candle.getHigh().doubleValue() > cluster.maxPrice) {
+                return candle.getTimestamp();
+            }
+            if (type == EqualType.EQL && candle.getLow().doubleValue() < cluster.minPrice) {
+                return candle.getTimestamp();
+            }
+        }
+        return null;
+    }
+
+    private record PivotCandidate(int barIndex, double price, Instant time) {}
+
+    private static final class PivotCluster {
+        private int firstBar;
+        private int lastBar;
+        private Instant firstTime;
+        private Instant lastTime;
+        private double minPrice;
+        private double maxPrice;
+        private double sumPrice;
+        private int touchCount;
+
+        private PivotCluster(PivotCandidate pivot) {
+            this.firstBar = pivot.barIndex();
+            this.lastBar = pivot.barIndex();
+            this.firstTime = pivot.time();
+            this.lastTime = pivot.time();
+            this.minPrice = pivot.price();
+            this.maxPrice = pivot.price();
+            this.sumPrice = pivot.price();
+            this.touchCount = 1;
+        }
+
+        private void add(PivotCandidate pivot) {
+            this.lastBar = pivot.barIndex();
+            this.lastTime = pivot.time();
+            this.minPrice = Math.min(this.minPrice, pivot.price());
+            this.maxPrice = Math.max(this.maxPrice, pivot.price());
+            this.sumPrice += pivot.price();
+            this.touchCount++;
+        }
+
+        private void merge(PivotCluster other) {
+            this.lastBar = other.lastBar;
+            this.lastTime = other.lastTime;
+            this.minPrice = Math.min(this.minPrice, other.minPrice);
+            this.maxPrice = Math.max(this.maxPrice, other.maxPrice);
+            this.sumPrice += other.sumPrice;
+            this.touchCount += other.touchCount;
+        }
+
+        private double referencePrice() {
+            return sumPrice / touchCount;
+        }
     }
 }

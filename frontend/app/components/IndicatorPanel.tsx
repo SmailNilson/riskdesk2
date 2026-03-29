@@ -206,31 +206,51 @@ export default function IndicatorPanel({ snapshot: s }: Props) {
             <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQH" color="red" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+              <span className="text-zinc-500">x{eq.touchCount}</span>
             </div>
           ))}
           {s.equalLows.map((eq, i) => (
             <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQL" color="green" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+              <span className="text-zinc-500">x{eq.touchCount}</span>
             </div>
           ))}
         </Section>
       )}
 
       {/* Order Blocks */}
-      <Section title={`Order Blocks (${s.activeOrderBlocks.length})`} fullWidth>
-        {s.activeOrderBlocks.length === 0
-          ? <span className="text-zinc-600 text-xs">No active OBs</span>
-          : s.activeOrderBlocks.map((ob, i) => (
-            <div key={i} className="flex justify-between items-center text-xs font-mono py-0.5">
-              <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
-              <span className="text-zinc-400">
-                {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
-              </span>
-              <span className="text-zinc-500">mid {ob.mid.toFixed(4)}</span>
-            </div>
-          ))
-        }
+      <Section title={`Order Blocks V1/V2 (${s.activeOrderBlocks.length + s.breakerOrderBlocks.length})`} fullWidth>
+        <div className="space-y-1.5">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">V1 Active</div>
+          {s.activeOrderBlocks.length === 0
+            ? <span className="text-zinc-600 text-xs">No active OBs</span>
+            : s.activeOrderBlocks.map((ob, i) => (
+              <div key={`active-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+                <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
+                <span className="text-zinc-400">
+                  {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
+                </span>
+                <span className="text-zinc-500">mid {ob.mid.toFixed(4)}</span>
+              </div>
+            ))
+          }
+        </div>
+        <div className="mt-3 space-y-1.5">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">V2 Breaker</div>
+          {s.breakerOrderBlocks.length === 0
+            ? <span className="text-zinc-600 text-xs">No breaker OBs</span>
+            : s.breakerOrderBlocks.map((ob, i) => (
+              <div key={`breaker-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+                <Badge label={`${ob.type} V2`} color={ob.type === 'BULLISH' ? 'blue' : 'amber'} />
+                <span className="text-zinc-400">
+                  {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
+                </span>
+                <span className="text-zinc-500">mid {ob.mid.toFixed(4)}</span>
+              </div>
+            ))
+          }
+        </div>
       </Section>
     </div>
   );
