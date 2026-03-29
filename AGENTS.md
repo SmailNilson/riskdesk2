@@ -13,23 +13,44 @@ These rules are mandatory for all agents.
 
 ### Workspace isolation
 
-Each agent has its own isolated working directory. Never work from another agent's directory.
+Each agent works in its own **git worktree** — never in the main checkout or another agent's worktree.
+Worktrees isolate sessions: each task gets a fresh directory without touching other in-flight branches.
 
-| Agent | Working directory |
-|---|---|
-| Codex | `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` |
-| Claude Code | `~/.claude/worktrees/<name>/` (auto-managed) |
-| Claude Bedrock (VS Code) | `~/riskdesk2-bedrock/` |
-| Human / VS Code | `~/riskdesk2/` |
+| Agent | Worktree root | Branch prefix |
+|---|---|---|
+| Codex | `.codex/worktrees/<name>/` (auto-managed) | `codex/` |
+| Claude Code | `.claude/worktrees/<name>/` (auto-managed) | `claude/` |
+| MAQ | `.maq/worktrees/<name>/` (auto-managed) | `maq/` |
+| Claude Bedrock (VS Code) | `.claude-bedrock/worktrees/<name>/` (auto-managed) | `claude-bedrock/` |
+| Human / VS Code | `~/riskdesk2/` | *(direct)* |
+
+Worktree roots are inside the repo under their agent's hidden directory (already `.gitignore`d).
+The main scratch clone at `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` is the **bare origin** — no agent edits files there directly.
+
+#### Creating a worktree (manual fallback)
+
+If your harness does not auto-create worktrees, run from the repo root:
+
+```bash
+git fetch origin
+git worktree add ./<agent>/worktrees/<task-slug> -b <agent>/<task-slug> origin/main
+```
+
+Remove it after the PR is merged:
+
+```bash
+git worktree remove ./<agent>/worktrees/<task-slug>
+git branch -d <agent>/<task-slug>
+```
 
 ### Branch rules
 
-- Always branch from `main` before starting a task:
+- Always branch from `main` (via worktree creation or explicit `git switch -c <base>`):
   ```bash
   git fetch origin
   git switch -c <agent>/my-feature origin/main
   ```
-- Use your agent prefix: `codex/`, `claude/`, `claude-bedrock/`
+- Use your agent prefix: `codex/`, `claude/`, `maq/`, `claude-bedrock/`
 - Keep branches short-lived (1–2 days max)
 - Open a PR and let the human merge — never merge another agent's branch yourself
 
