@@ -1,4 +1,6 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8090';
+import { API_BASE } from '@/app/lib/runtimeConfig';
+
+const BASE = API_BASE;
 
 export interface PositionView {
   id: number | null;
