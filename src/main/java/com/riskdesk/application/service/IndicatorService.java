@@ -18,6 +18,7 @@ import java.util.*;
 public class IndicatorService {
 
     private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;
+    private static final int SERIES_LIMIT = 500;
     private static final int SERIES_WARMUP_BARS = 1_000;
     private static final int EMA_9_PERIOD = 9;
     private static final int EMA_50_PERIOD = 50;
@@ -188,7 +189,7 @@ public class IndicatorService {
 
         // Fair Value Gaps (UC-SMC-010: dedicated timeframe + extension metadata)
         List<Candle> fvgCandles = FVG_DEDICATED_TIMEFRAME != null
-                ? loadCandles(instrument, FVG_DEDICATED_TIMEFRAME, SNAPSHOT_LOOKBACK_BARS)
+                ? loadCandles(instrument, FVG_DEDICATED_TIMEFRAME, SERIES_LIMIT)
                 : candles;
         List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(fvgCandles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
