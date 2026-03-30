@@ -20,8 +20,8 @@ export interface AlertMessage {
   timestamp: string;
 }
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8080/ws';
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8090/ws';
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8090';
 const MENTOR_REVIEW_HISTORY_LIMIT = 1000;
 
 export function useWebSocket() {

@@ -18,6 +18,7 @@ import java.util.*;
 public class IndicatorService {
 
     private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;
+    private static final int SERIES_LIMIT = 500;
     private static final int SERIES_WARMUP_BARS = 1_000;
     private static final int EMA_9_PERIOD = 9;
     private static final int EMA_50_PERIOD = 50;

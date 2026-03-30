@@ -50,6 +50,7 @@ git branch -d <agent>/<task-slug>
   git fetch origin
   git switch -c <agent>/my-feature origin/main
   ```
+- On every new session, move to an agent branch immediately before any investigation or implementation work. Read-only debugging, incident analysis, and code review are still "starting a task" and must not happen on `main`.
 - Use your agent prefix: `codex/`, `claude/`, `maq/`, `claude-bedrock/`
 - Keep branches short-lived (1–2 days max)
 - Open a PR and let the human merge — never merge another agent's branch yourself
@@ -89,7 +90,32 @@ Do not add, restore, or suggest any of the following:
 
 If you find code that reintroduces an external market data source, remove it or replace it with the IBKR/PostgreSQL flow.
 
-### 2. Secret handling
+### 2. Local Spring profile mandatory
+
+Every agent and developer **must** run the backend with the `local` Spring profile active.
+
+```bash
+# Maven
+mvn spring-boot:run -Dspring-boot.run.profiles=local
+
+# JAR
+java -Dspring.profiles.active=local -jar target/riskdesk-0.1.0-SNAPSHOT.jar
+```
+
+The `local` profile loads `application-local.properties` (gitignored) which must contain the instance-specific overrides:
+
+| Property | Claude | Codex | MAQ | Human |
+|---|---|---|---|---|
+| `server.port` | 8090 | 8080 | 8070 | 8080 |
+| `riskdesk.ibkr.native-client-id` | 8 | 7 | 9 | 1 |
+| `spring.datasource.username` | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* |
+
+Rules:
+- Never commit `application-local.*` — it is gitignored
+- Never hardcode a port or IBKR `client-id` into `application.properties`
+- Two agents running the same `client-id` simultaneously will both fail to connect to IB Gateway
+
+### 3. Secret handling
 
 Never commit secrets.
 
@@ -202,9 +228,11 @@ Before editing, prefer reading:
 ```bash
 mvn -q -DskipTests compile
 mvn -q test
-mvn -q spring-boot:run
-java -jar target/riskdesk-0.1.0-SNAPSHOT.jar
+mvn -q spring-boot:run -Dspring-boot.run.profiles=local
+java -Dspring.profiles.active=local -jar target/riskdesk-0.1.0-SNAPSHOT.jar
 ```
+
+> **Reminder**: always pass `-Dspring-boot.run.profiles=local` — see rule 2 above.
 
 ### Frontend
 

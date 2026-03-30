@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8090';
 
 export type RolloverStatusLevel = 'STABLE' | 'WARNING' | 'CRITICAL';
 
