@@ -125,20 +125,6 @@ export default function MentorSignalPanel({
   const [executionsByReviewId, setExecutionsByReviewId] = useState<Record<number, TradeExecutionView>>({});
   const [armingQuantityByReviewId, setArmingQuantityByReviewId] = useState<Record<number, string>>({});
 
-  const groupLatestReview = useCallback((group: AlertGroup) => {
-    let latestReview: MentorSignalReview | null = null;
-    for (const alert of group.alerts) {
-      const alertKey = buildMentorAlertKey(alert);
-      const thread = threadsByAlertKey[alertKey] ?? reviewsForAlert(reviews, alert);
-      const latest = thread.length > 0 ? thread[thread.length - 1] : null;
-      if (!latest) continue;
-      if (!latestReview || new Date(latest.createdAt).getTime() > new Date(latestReview.createdAt).getTime()) {
-        latestReview = latest;
-      }
-    }
-    return latestReview;
-  }, [threadsByAlertKey, reviews]);
-
   const groupPreferredReview = useCallback((group: AlertGroup) => {
     const allThreads: MentorSignalReview[] = [];
     for (const alert of group.alerts) {
@@ -154,14 +140,12 @@ export default function MentorSignalPanel({
       ? groups
       : groups.filter(group => group.instrument === filterInstrument);
 
-    const withoutErrors = instrumentFiltered.filter(group => groupLatestReview(group)?.status !== 'ERROR');
-
     if (filterStatus === 'ALL') {
-      return withoutErrors;
+      return instrumentFiltered;
     }
 
-    return withoutErrors.filter(group => matchesGroupStatusFilter(group, filterStatus, groupPreferredReview(group)));
-  }, [groups, filterInstrument, filterStatus, groupLatestReview, groupPreferredReview]);
+    return instrumentFiltered.filter(group => matchesGroupStatusFilter(group, filterStatus, groupPreferredReview(group)));
+  }, [groups, filterInstrument, filterStatus, groupPreferredReview]);
 
   useEffect(() => {
     if (!selectedGroupKey && filteredGroups[0]) {
@@ -635,7 +619,7 @@ export default function MentorSignalPanel({
                             {formatTime(review.createdAt, timezone.tz)}
                           </span>
                           <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400">
-                            TZ {review.selectedTimezone ?? 'UTC'}
+                            {review.selectedTimezone ?? 'UTC'}
                           </span>
                         </div>
 

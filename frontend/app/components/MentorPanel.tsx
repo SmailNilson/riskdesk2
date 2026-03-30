@@ -402,7 +402,7 @@ export default function MentorPanel({
                       {formatDateTime(review.createdAt, timezone.tz)}
                     </div>
                     <div className="mt-1 text-[10px] text-zinc-700">
-                      Saved TZ: {review.selectedTimezone ?? 'UTC'}
+                      {review.selectedTimezone ?? 'UTC'}
                     </div>
                   </button>
                 );
@@ -490,7 +490,7 @@ function ManualReviewDetail({
           {formatDateTime(review.createdAt, timezone)}
         </span>
         <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400">
-          TZ {review.selectedTimezone ?? 'UTC'}
+          {review.selectedTimezone ?? 'UTC'}
         </span>
       </div>
 
