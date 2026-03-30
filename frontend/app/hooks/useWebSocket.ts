@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { MentorSignalReview } from '@/app/lib/api';
+import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
 
 export interface PriceUpdate {
   instrument: string;
@@ -20,8 +21,8 @@ export interface AlertMessage {
   timestamp: string;
 }
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8080/ws';
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+const WS_URL = `${WS_BASE}/ws`;
+const API_URL = API_BASE;
 const MENTOR_REVIEW_HISTORY_LIMIT = 1000;
 
 export function useWebSocket() {

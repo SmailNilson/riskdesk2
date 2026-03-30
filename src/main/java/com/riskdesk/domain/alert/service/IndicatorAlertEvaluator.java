@@ -198,7 +198,7 @@ public class IndicatorAlertEvaluator {
                 alerts.add(new Alert("smc:internal:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — Internal CHoCH: " + snap.lastInternalBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastInternalBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastInternalBreakType()) || snap.lastInternalBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:internal:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — Internal BOS: " + snap.lastInternalBreakType(),
                     AlertCategory.SMC, instrument.name()));
@@ -213,7 +213,7 @@ public class IndicatorAlertEvaluator {
                 alerts.add(new Alert("smc:swing:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — Swing CHoCH: " + snap.lastSwingBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastSwingBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastSwingBreakType()) || snap.lastSwingBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:swing:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — Swing BOS: " + snap.lastSwingBreakType(),
                     AlertCategory.SMC, instrument.name()));
@@ -227,7 +227,7 @@ public class IndicatorAlertEvaluator {
                 alerts.add(new Alert("smc:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — CHoCH detected: " + snap.lastBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastBreakType()) || snap.lastBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — BOS: " + snap.lastBreakType(),
                     AlertCategory.SMC, instrument.name()));
