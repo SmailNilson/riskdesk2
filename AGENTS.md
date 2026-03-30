@@ -18,11 +18,11 @@
 
 ### Secrets & Credentials
 *   **NEVER** commit secrets, API keys, bot tokens, passwords, or local credentials into tracked files.
-*   **NEVER** force-add ignored files (e.g., `.env.local`, `frontend/.env.local`, `target/`, `frontend/node_modules/`, `.claude/`).
+*   **NEVER** force-add ignored files (e.g., `.env.local`, `frontend/.env.local`, `target/`, `frontend/node_modules/`, `.claude/`, `.gemini/`, `.codex/`, `.maq/`).
 
 ### Repository Scope
-*   **NEVER** edit files directly in the main scratch clone at **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/`**. This is a bare origin.
-*   **NEVER** recreate a nested Git repository inside **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend`**.
+*   **NEVER** edit files directly in the main scratch clone at the repository root. This is a bare origin.
+*   **NEVER** recreate a nested Git repository inside **`frontend`**.
 
 ---
 
@@ -42,6 +42,7 @@
 | Claude Code | **`.claude/worktrees/<name>/`** | **`claude/`** |
 | MAQ | **`.maq/worktrees/<name>/`** | **`maq/`** |
 | Claude Bedrock | **`.claude-bedrock/worktrees/<name>/`** | **`claude-bedrock/`** |
+| Gemini / Antigravity | **`.gemini/worktrees/<name>/`** | **`gemini/`** |
 
 ### Branching Rules
 *   **ALWAYS** branch from `main`.
@@ -84,11 +85,11 @@ java -Dspring.profiles.active=local -jar target/riskdesk-0.1.0-SNAPSHOT.jar
 ### Required `application-local.properties` Overrides
 To prevent IB Gateway connection failures, configure your specific overrides:
 
-| Configuration | Claude | Codex | MAQ | Human |
-|---|---|---|---|---|
-| **`server.port`** | 8090 | 8080 | 8070 | 8080 |
-| **`riskdesk.ibkr.native-client-id`** | 8 | 7 | 9 | 1 |
-| **`spring.datasource.username`** | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* |
+| Configuration | Claude | Codex | MAQ | Bedrock | Gemini | Human |
+|---|---|---|---|---|---|---|
+| **`server.port`** | 8090 | 8085 | 8070 | 8050 | 8060 | 8080 |
+| **`riskdesk.ibkr.native-client-id`** | 8 | 7 | 9 | 5 | 6 | 1 |
+| **`spring.datasource.username`** | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* |
 
 ---
 
@@ -125,9 +126,9 @@ To prevent IB Gateway connection failures, configure your specific overrides:
 
 ### Pre-requisite Reading
 Read these files BEFORE making architectural changes:
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/PROJECT_CONTEXT.md`**
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`**
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/resources/application.properties`**
+*   **`docs/PROJECT_CONTEXT.md`**
+*   **`docs/AI_HANDOFF.md`**
+*   **`src/main/resources/application.properties`**
 
 ### Development Commands
 **Backend:**
@@ -155,6 +156,6 @@ npm run dev
 
 ### Documentation Rule
 If you make a significant architectural or workflow change, you **MUST** update:
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/PROJECT_CONTEXT.md`**
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`**
-*   **`/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/ARCHITECTURE_PRINCIPLES.md`**
+*   **`docs/PROJECT_CONTEXT.md`**
+*   **`docs/AI_HANDOFF.md`**
+*   **`docs/ARCHITECTURE_PRINCIPLES.md`**
