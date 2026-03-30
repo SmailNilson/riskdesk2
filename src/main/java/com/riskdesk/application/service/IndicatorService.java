@@ -188,7 +188,7 @@ public class IndicatorService {
 
         // Fair Value Gaps (UC-SMC-010: dedicated timeframe + extension metadata)
         List<Candle> fvgCandles = FVG_DEDICATED_TIMEFRAME != null
-                ? loadCandles(instrument, FVG_DEDICATED_TIMEFRAME, SERIES_LIMIT)
+                ? loadCandles(instrument, FVG_DEDICATED_TIMEFRAME, SNAPSHOT_LOOKBACK_BARS)
                 : candles;
         List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(fvgCandles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
