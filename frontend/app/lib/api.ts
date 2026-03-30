@@ -441,6 +441,7 @@ export interface MentorManualReview {
   auditId: number;
   sourceType: 'MANUAL_MENTOR';
   createdAt: string;
+  selectedTimezone: string | null;
   instrument: string | null;
   timeframe: string | null;
   action: string | null;
@@ -465,6 +466,7 @@ export interface MentorSignalReview {
   action: 'LONG' | 'SHORT';
   timestamp: string;
   createdAt: string;
+  selectedTimezone: string | null;
   executionEligibilityStatus: 'NOT_EVALUATED' | 'ELIGIBLE' | 'INELIGIBLE' | null;
   executionEligibilityReason: string | null;
   simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | null;
@@ -481,6 +483,7 @@ export interface MentorAlertReviewRequest {
   message: string;
   instrument: string | null;
   timestamp: string;
+  selectedTimezone?: string;
   entryPrice?: number;
   stopLoss?: number;
   takeProfit?: number;

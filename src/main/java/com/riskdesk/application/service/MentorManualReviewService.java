@@ -54,6 +54,7 @@ public class MentorManualReviewService {
             audit.getId(),
             "MANUAL_MENTOR",
             audit.getCreatedAt() == null ? null : audit.getCreatedAt().toString(),
+            audit.getSelectedTimezone(),
             audit.getInstrument(),
             audit.getTimeframe(),
             audit.getAction(),

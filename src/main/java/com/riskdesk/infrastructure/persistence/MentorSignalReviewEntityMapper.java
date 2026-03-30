@@ -23,6 +23,7 @@ final class MentorSignalReviewEntityMapper {
         entity.setAction(review.getAction());
         entity.setAlertTimestamp(review.getAlertTimestamp());
         entity.setCreatedAt(review.getCreatedAt());
+        entity.setSelectedTimezone(review.getSelectedTimezone());
         entity.setCompletedAt(review.getCompletedAt());
         entity.setSnapshotJson(review.getSnapshotJson());
         entity.setAnalysisJson(review.getAnalysisJson());
@@ -52,6 +53,7 @@ final class MentorSignalReviewEntityMapper {
         review.setAction(entity.getAction());
         review.setAlertTimestamp(entity.getAlertTimestamp());
         review.setCreatedAt(entity.getCreatedAt());
+        review.setSelectedTimezone(entity.getSelectedTimezone());
         review.setCompletedAt(entity.getCompletedAt());
         review.setSnapshotJson(entity.getSnapshotJson());
         review.setAnalysisJson(entity.getAnalysisJson());

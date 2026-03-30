@@ -13,6 +13,7 @@ final class MentorAuditEntityMapper {
         entity.setId(audit.getId());
         entity.setSourceRef(audit.getSourceRef());
         entity.setCreatedAt(audit.getCreatedAt());
+        entity.setSelectedTimezone(audit.getSelectedTimezone());
         entity.setInstrument(audit.getInstrument());
         entity.setTimeframe(audit.getTimeframe());
         entity.setAction(audit.getAction());
@@ -35,6 +36,7 @@ final class MentorAuditEntityMapper {
         audit.setId(entity.getId());
         audit.setSourceRef(entity.getSourceRef());
         audit.setCreatedAt(entity.getCreatedAt());
+        audit.setSelectedTimezone(entity.getSelectedTimezone());
         audit.setInstrument(entity.getInstrument());
         audit.setTimeframe(entity.getTimeframe());
         audit.setAction(entity.getAction());

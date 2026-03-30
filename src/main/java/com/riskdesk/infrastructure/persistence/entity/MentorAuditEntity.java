@@ -27,6 +27,9 @@ public class MentorAuditEntity {
     @Column(nullable = false)
     private Instant createdAt;
 
+    @Column(length = 64)
+    private String selectedTimezone;
+
     @Column(length = 32)
     private String instrument;
 
@@ -73,6 +76,8 @@ public class MentorAuditEntity {
     public void setSourceRef(String sourceRef) { this.sourceRef = sourceRef; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public String getSelectedTimezone() { return selectedTimezone; }
+    public void setSelectedTimezone(String selectedTimezone) { this.selectedTimezone = selectedTimezone; }
     public String getInstrument() { return instrument; }
     public void setInstrument(String instrument) { this.instrument = instrument; }
     public String getTimeframe() { return timeframe; }

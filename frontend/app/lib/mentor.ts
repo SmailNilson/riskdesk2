@@ -1,6 +1,7 @@
 'use client';
 
 import { AlertMessage, PriceUpdate } from '@/app/hooks/useWebSocket';
+import type { TzEntry } from '@/app/lib/timezones';
 import {
   api,
   CandleBar,
@@ -13,11 +14,7 @@ import {
 export type Instrument = 'MCL' | 'MGC' | 'E6' | 'MNQ';
 export type Timeframe = '5m' | '10m' | '1h' | '1d';
 export type TradeAction = 'LONG' | 'SHORT';
-
-export type TzEntry = {
-  label: string;
-  tz: string;
-};
+export type { TzEntry } from '@/app/lib/timezones';
 
 export type MentorTradeIntention = {
   action: TradeAction;

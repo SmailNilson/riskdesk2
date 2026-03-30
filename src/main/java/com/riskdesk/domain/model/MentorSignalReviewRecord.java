@@ -17,6 +17,7 @@ public class MentorSignalReviewRecord {
     private String action;
     private Instant alertTimestamp;
     private Instant createdAt;
+    private String selectedTimezone;
     private Instant completedAt;
     private String snapshotJson;
     private String analysisJson;
@@ -131,6 +132,14 @@ public class MentorSignalReviewRecord {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getSelectedTimezone() {
+        return selectedTimezone;
+    }
+
+    public void setSelectedTimezone(String selectedTimezone) {
+        this.selectedTimezone = selectedTimezone;
     }
 
     public Instant getCompletedAt() {

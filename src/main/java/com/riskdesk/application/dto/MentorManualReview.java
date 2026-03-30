@@ -6,6 +6,7 @@ public record MentorManualReview(
     Long auditId,
     String sourceType,
     String createdAt,
+    String selectedTimezone,
     String instrument,
     String timeframe,
     String action,
