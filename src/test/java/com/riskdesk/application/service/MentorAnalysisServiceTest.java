@@ -9,6 +9,7 @@ import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -80,7 +81,7 @@ class MentorAnalysisServiceTest {
 
         MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
             {
-              "metadata": {"asset": "MGC1!", "timeframe_focus": "M5"},
+              "metadata": {"asset": "MGC1!", "timeframe_focus": "M5", "selected_timezone": "Africa/Casablanca"},
               "trade_intention": {"action": "LONG"}
             }
             """));
@@ -93,7 +94,9 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().proposedTradePlan()).isNotNull();
         assertThat(response.analysis().proposedTradePlan().safeDeepEntry()).isNotNull();
         assertThat(response.similarAudits()).hasSize(1);
-        verify(mentorAuditRepository).save(any());
+        ArgumentCaptor<MentorAudit> auditCaptor = ArgumentCaptor.forClass(MentorAudit.class);
+        verify(mentorAuditRepository).save(auditCaptor.capture());
+        assertThat(auditCaptor.getValue().getSelectedTimezone()).isEqualTo("Africa/Casablanca");
     }
 
     @Test

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, MentorSignalReview, TradeExecutionView } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
+import { formatTime } from '@/app/lib/datetime';
 
 type AlertGroup = {
   groupKey: string;
@@ -318,7 +319,7 @@ export default function MentorSignalPanel({
 
     try {
       const review = await api.reanalyzeMentorAlert({
-        ...toRequest(alert),
+        ...toRequest(alert, timezone.tz),
         entryPrice: parsePlanField(reanalysisDraft?.entryPrice),
         stopLoss: parsePlanField(reanalysisDraft?.stopLoss),
         takeProfit: parsePlanField(reanalysisDraft?.takeProfit),
@@ -484,7 +485,7 @@ export default function MentorSignalPanel({
                     ))}
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-zinc-600">
-                    <span>{new Date(group.timestamp).toLocaleTimeString(undefined, { timeZone: timezone.tz })}</span>
+                    <span>{formatTime(group.timestamp, timezone.tz)}</span>
                     <span>{reviewCount} review{reviewCount > 1 ? 's' : ''} · {group.alerts.length} signal{group.alerts.length > 1 ? 's' : ''}</span>
                   </div>
                 </button>
@@ -631,7 +632,10 @@ export default function MentorSignalPanel({
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
                           <ExecutionChip execution={executionsByReviewId[review.id]} />
                           <span className="ml-auto text-[10px] text-zinc-600">
-                            {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone.tz })}
+                            {formatTime(review.createdAt, timezone.tz)}
+                          </span>
+                          <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400">
+                            TZ {review.selectedTimezone ?? 'UTC'}
                           </span>
                         </div>
 
@@ -854,13 +858,14 @@ function EditablePlanField({
   );
 }
 
-function toRequest(alert: AlertMessage) {
+function toRequest(alert: AlertMessage, selectedTimezone?: string) {
   return {
     severity: alert.severity,
     category: alert.category,
     message: alert.message,
     instrument: alert.instrument,
     timestamp: alert.timestamp,
+    selectedTimezone,
   } as const;
 }
 

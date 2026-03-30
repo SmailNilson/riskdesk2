@@ -130,6 +130,7 @@ public class MentorController {
         try {
             return mentorSignalReviewService.reanalyzeAlert(
                 buildAlert(request),
+                request.selectedTimezone(),
                 request.entryPrice(),
                 request.stopLoss(),
                 request.takeProfit()

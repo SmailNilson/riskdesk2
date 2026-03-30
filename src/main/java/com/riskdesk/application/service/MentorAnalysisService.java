@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -100,6 +101,7 @@ public class MentorAnalysisService {
             MentorAudit audit = new MentorAudit();
             audit.setSourceRef(sourceRef);
             audit.setCreatedAt(Instant.now());
+            audit.setSelectedTimezone(extractSelectedTimezone(payload));
             audit.setInstrument(payload.path("metadata").path("asset").asText(null));
             audit.setTimeframe(payload.path("metadata").path("timeframe_focus").asText(null));
             audit.setAction(payload.path("trade_intention").path("action").asText(null));
@@ -123,6 +125,7 @@ public class MentorAnalysisService {
             MentorAudit audit = new MentorAudit();
             audit.setSourceRef(sourceRef);
             audit.setCreatedAt(Instant.now());
+            audit.setSelectedTimezone(extractSelectedTimezone(payload));
             audit.setInstrument(payload.path("metadata").path("asset").asText(null));
             audit.setTimeframe(payload.path("metadata").path("timeframe_focus").asText(null));
             audit.setAction(payload.path("trade_intention").path("action").asText(null));
@@ -156,5 +159,20 @@ public class MentorAnalysisService {
 
     private String valueOrEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    private String extractSelectedTimezone(JsonNode payload) {
+        return normalizeSelectedTimezone(payload.path("metadata").path("selected_timezone").asText(null));
+    }
+
+    private String normalizeSelectedTimezone(String selectedTimezone) {
+        if (selectedTimezone == null || selectedTimezone.isBlank()) {
+            return "UTC";
+        }
+        try {
+            return ZoneId.of(selectedTimezone).getId();
+        } catch (Exception ignored) {
+            return "UTC";
+        }
     }
 }

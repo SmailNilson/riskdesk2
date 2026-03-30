@@ -10,6 +10,7 @@ public record MentorAlertReviewRequest(
     @NotBlank String message,
     String instrument,
     @NotBlank String timestamp,
+    String selectedTimezone,
     BigDecimal entryPrice,
     BigDecimal stopLoss,
     BigDecimal takeProfit

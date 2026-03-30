@@ -8,6 +8,7 @@ public class MentorAudit {
     private Long id;
     private String sourceRef;
     private Instant createdAt;
+    private String selectedTimezone;
     private String instrument;
     private String timeframe;
     private String action;
@@ -45,6 +46,14 @@ public class MentorAudit {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getSelectedTimezone() {
+        return selectedTimezone;
+    }
+
+    public void setSelectedTimezone(String selectedTimezone) {
+        this.selectedTimezone = selectedTimezone;
     }
 
     public String getInstrument() {
