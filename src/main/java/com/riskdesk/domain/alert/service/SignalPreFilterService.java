@@ -31,10 +31,12 @@ public class SignalPreFilterService {
     private static final Logger log = LoggerFactory.getLogger(SignalPreFilterService.class);
     private static final long CHOP_WINDOW_SECONDS = 60;
 
-    /** Tracks recent signal directions per "instrument:timeframe" key for anti-chop detection. */
-    private final Map<String, Deque<DirectionEntry>> recentDirections = new ConcurrentHashMap<>();
+    /** Tracks recent signal directions per instrument+timeframe key for anti-chop detection. */
+    private final Map<DirectionKey, Deque<DirectionEntry>> recentDirections = new ConcurrentHashMap<>();
 
     public record FilterResult(boolean allowed, String reason) {}
+
+    private record DirectionKey(String instrument, String timeframe) {}
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -47,7 +49,7 @@ public class SignalPreFilterService {
         for (Alert alert : alerts) {
             String direction = extractDirection(alert);
             if (direction == null) continue;
-            String key = alert.instrument() + ":" + timeframe;
+            DirectionKey key = new DirectionKey(alert.instrument(), timeframe);
             recentDirections.computeIfAbsent(key, k -> new ArrayDeque<>())
                     .addLast(new DirectionEntry(direction, now));
         }
@@ -96,7 +98,7 @@ public class SignalPreFilterService {
         // Rule 3: Anti-Chop — cancel signal if the opposite direction fired within the chop window
         if (direction != null) {
             String opposite = "LONG".equals(direction) ? "SHORT" : "LONG";
-            String key = alert.instrument() + ":" + timeframe;
+            DirectionKey key = new DirectionKey(alert.instrument(), timeframe);
             if (hasRecentSignal(key, opposite)) {
                 log.warn("Market Chop detected - Signals cancelled [{} {} {}]",
                         alert.instrument(), timeframe, direction);
@@ -108,7 +110,7 @@ public class SignalPreFilterService {
         return new FilterResult(true, null);
     }
 
-    private boolean hasRecentSignal(String key, String direction) {
+    private boolean hasRecentSignal(DirectionKey key, String direction) {
         Deque<DirectionEntry> deque = recentDirections.get(key);
         if (deque == null || deque.isEmpty()) return false;
         Instant cutoff = Instant.now().minusSeconds(CHOP_WINDOW_SECONDS);

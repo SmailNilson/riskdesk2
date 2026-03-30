@@ -1,11 +1,16 @@
 package com.riskdesk.domain.alert.service;
 
-import com.riskdesk.domain.alert.model.*;
+import com.riskdesk.domain.alert.model.Alert;
+import com.riskdesk.domain.alert.model.AlertCategory;
+import com.riskdesk.domain.alert.model.AlertSeverity;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.model.Instrument;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,27 +22,64 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class IndicatorAlertEvaluator {
 
+    private static final int MAX_ORDER_BLOCK_EVENT_KEYS = 5_000;
+
     /**
      * Tracks the last known state for each indicator per instrument+timeframe.
-     * Key format: "INDICATOR:INSTRUMENT:TIMEFRAME" → last signal value.
      */
-    private final Map<String, String> lastState = new ConcurrentHashMap<>();
+    private final Map<EvalKey, String> lastState = new ConcurrentHashMap<>();
 
     /**
      * Rule 4 — Candle Close Guard.
-     * Tracks the last candle timestamp on which each SMC / WaveTrend signal fired.
+     * Tracks the last candle timestamp on which each signal fired.
      * Prevents re-firing on the same open candle due to intra-bar repainting.
-     * Key format: same as lastState. Value: candle open timestamp.
      */
-    private final Map<String, Instant> lastFiredCandle = new ConcurrentHashMap<>();
+    private final Map<EvalKey, Instant> lastFiredCandle = new ConcurrentHashMap<>();
 
     /**
-     * Rule 4: Returns true if this is a new candle (different from the last candle on which this
-     * signal fired), and records the current candle timestamp. Returns true if no timestamp is
-     * available (fail-open). Used for SMC and WaveTrend to prevent intra-bar repainting noise.
+     * OB lifecycle events are one-shot events, not persistent transitions.
+     * Keep a bounded set of recently-seen event keys so long-lived runtimes
+     * cannot retain every historical OB price level forever.
      */
-    private boolean canFireOnCandle(String candleKey, Instant lastCandleTimestamp) {
-        if (lastCandleTimestamp == null) return true;
+    private final Map<EvalKey, Instant> seenOrderBlockEvents = new ConcurrentHashMap<>();
+    private final Deque<EvalKey> orderBlockEventOrder = new ArrayDeque<>();
+    private final Object orderBlockEventLock = new Object();
+
+    private record EvalKey(
+            String family,
+            String instrument,
+            String timeframe,
+            String qualifier,
+            BigDecimal high,
+            BigDecimal low
+    ) {}
+
+    private static BigDecimal normalize(BigDecimal value) {
+        return value == null ? null : value.stripTrailingZeros();
+    }
+
+    private static EvalKey key(String family, Instrument instrument, String timeframe, String qualifier) {
+        return new EvalKey(family, instrument.name(), timeframe, qualifier, null, null);
+    }
+
+    private static EvalKey key(String family, Instrument instrument, String timeframe, String qualifier,
+                               BigDecimal high, BigDecimal low) {
+        return new EvalKey(family, instrument.name(), timeframe, qualifier, normalize(high), normalize(low));
+    }
+
+    private static EvalKey candleKey(EvalKey baseKey) {
+        String qualifier = baseKey.qualifier() == null ? "candle" : baseKey.qualifier() + ":candle";
+        return new EvalKey(baseKey.family(), baseKey.instrument(), baseKey.timeframe(), qualifier,
+                baseKey.high(), baseKey.low());
+    }
+
+    /**
+     * Returns true if this is a new candle (different from the last candle on which this
+     * signal fired), and records the current candle timestamp. Returns false if no timestamp is
+     * available (fail-closed: no timestamp means candle close is not confirmed).
+     */
+    private boolean canFireOnCandle(EvalKey candleKey, Instant lastCandleTimestamp) {
+        if (lastCandleTimestamp == null) return false;
         Instant prev = lastFiredCandle.get(candleKey);
         if (lastCandleTimestamp.equals(prev)) return false;
         lastFiredCandle.put(candleKey, lastCandleTimestamp);
@@ -48,7 +90,7 @@ public class IndicatorAlertEvaluator {
      * Returns true if the signal is new (different from last known state)
      * and updates the tracking map. Returns false if signal is unchanged or null.
      */
-    private boolean isTransition(String stateKey, String currentSignal) {
+    private boolean isTransition(EvalKey stateKey, String currentSignal) {
         if (currentSignal == null) {
             lastState.remove(stateKey);
             return false;
@@ -57,13 +99,55 @@ public class IndicatorAlertEvaluator {
         return !currentSignal.equals(previous);
     }
 
+    /**
+     * For candle-guarded signals, only commit the new state after the candle check passes.
+     * This avoids consuming an intra-bar transition that is later rejected as unconfirmed.
+     */
+    private boolean isConfirmedTransition(EvalKey stateKey, String currentSignal,
+                                          EvalKey candleKey, Instant lastCandleTimestamp) {
+        if (currentSignal == null) {
+            lastState.remove(stateKey);
+            return false;
+        }
+        String previous = lastState.get(stateKey);
+        if (currentSignal.equals(previous)) {
+            return false;
+        }
+        if (!canFireOnCandle(candleKey, lastCandleTimestamp)) {
+            return false;
+        }
+        lastState.put(stateKey, currentSignal);
+        return true;
+    }
+
+    private boolean shouldFireOrderBlockEvent(EvalKey eventKey, Instant lastCandleTimestamp) {
+        EvalKey eventCandleKey = candleKey(eventKey);
+        if (!canFireOnCandle(eventCandleKey, lastCandleTimestamp)) {
+            return false;
+        }
+        Instant previous = seenOrderBlockEvents.putIfAbsent(eventKey, lastCandleTimestamp);
+        if (previous != null) {
+            return false;
+        }
+
+        synchronized (orderBlockEventLock) {
+            orderBlockEventOrder.addLast(eventKey);
+            while (orderBlockEventOrder.size() > MAX_ORDER_BLOCK_EVENT_KEYS) {
+                EvalKey evicted = orderBlockEventOrder.removeFirst();
+                seenOrderBlockEvents.remove(evicted);
+                lastFiredCandle.remove(candleKey(evicted));
+            }
+        }
+        return true;
+    }
+
     public List<Alert> evaluate(Instrument instrument, String timeframe, IndicatorAlertSnapshot snap) {
         List<Alert> alerts = new ArrayList<>();
         if (snap == null) return alerts;
         String tf = instrument.name() + ":" + timeframe;
 
         // EMA crossover — only on transition
-        String emaKey = "ema:" + tf;
+        EvalKey emaKey = key("ema", instrument, timeframe, null);
         if (isTransition(emaKey, snap.emaCrossover())) {
             if ("GOLDEN_CROSS".equals(snap.emaCrossover())) {
                 alerts.add(new Alert("ema:golden:" + tf, AlertSeverity.INFO,
@@ -77,7 +161,7 @@ public class IndicatorAlertEvaluator {
         }
 
         // RSI extremes — only on transition
-        String rsiKey = "rsi:" + tf;
+        EvalKey rsiKey = key("rsi", instrument, timeframe, null);
         if (isTransition(rsiKey, snap.rsiSignal())) {
             if ("OVERSOLD".equals(snap.rsiSignal())) {
                 alerts.add(new Alert("rsi:oversold:" + tf, AlertSeverity.INFO,
@@ -93,7 +177,7 @@ public class IndicatorAlertEvaluator {
         }
 
         // MACD crossover — only on transition
-        String macdKey = "macd:" + tf;
+        EvalKey macdKey = key("macd", instrument, timeframe, null);
         if (isTransition(macdKey, snap.macdCrossover())) {
             if ("BULLISH_CROSS".equals(snap.macdCrossover())) {
                 alerts.add(new Alert("macd:bullish:" + tf, AlertSeverity.INFO,
@@ -107,15 +191,14 @@ public class IndicatorAlertEvaluator {
         }
 
         // SMC Internal — only on transition AND on a new candle (Rule 4: candle close guard)
-        String smcIntKey = "smc:internal:" + tf;
-        if (snap.lastInternalBreakType() != null
-                && canFireOnCandle(smcIntKey + ":candle", snap.lastCandleTimestamp())
-                && isTransition(smcIntKey, snap.lastInternalBreakType())) {
+        EvalKey smcInternalKey = key("smc", instrument, timeframe, "internal");
+        if (isConfirmedTransition(smcInternalKey, snap.lastInternalBreakType(),
+                candleKey(smcInternalKey), snap.lastCandleTimestamp())) {
             if (snap.lastInternalBreakType().startsWith("CHOCH")) {
                 alerts.add(new Alert("smc:internal:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — Internal CHoCH: " + snap.lastInternalBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastInternalBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastInternalBreakType()) || snap.lastInternalBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:internal:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — Internal BOS: " + snap.lastInternalBreakType(),
                     AlertCategory.SMC, instrument.name()));
@@ -123,15 +206,14 @@ public class IndicatorAlertEvaluator {
         }
 
         // SMC Swing — only on transition AND on a new candle (Rule 4: candle close guard)
-        String smcSwKey = "smc:swing:" + tf;
-        if (snap.lastSwingBreakType() != null
-                && canFireOnCandle(smcSwKey + ":candle", snap.lastCandleTimestamp())
-                && isTransition(smcSwKey, snap.lastSwingBreakType())) {
+        EvalKey smcSwingKey = key("smc", instrument, timeframe, "swing");
+        if (isConfirmedTransition(smcSwingKey, snap.lastSwingBreakType(),
+                candleKey(smcSwingKey), snap.lastCandleTimestamp())) {
             if (snap.lastSwingBreakType().startsWith("CHOCH")) {
                 alerts.add(new Alert("smc:swing:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — Swing CHoCH: " + snap.lastSwingBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastSwingBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastSwingBreakType()) || snap.lastSwingBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:swing:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — Swing BOS: " + snap.lastSwingBreakType(),
                     AlertCategory.SMC, instrument.name()));
@@ -139,15 +221,13 @@ public class IndicatorAlertEvaluator {
         }
 
         // SMC legacy — kept for backward compat (fires on either level transition)
-        String smcKey = "smc:" + tf;
-        if (snap.lastBreakType() != null
-                && canFireOnCandle(smcKey + ":candle", snap.lastCandleTimestamp())
-                && isTransition(smcKey, snap.lastBreakType())) {
+        EvalKey smcKey = key("smc", instrument, timeframe, "legacy");
+        if (isConfirmedTransition(smcKey, snap.lastBreakType(), candleKey(smcKey), snap.lastCandleTimestamp())) {
             if (snap.lastBreakType().startsWith("CHOCH")) {
                 alerts.add(new Alert("smc:choch:" + tf, AlertSeverity.WARNING,
                     instrument.getDisplayName() + " [" + timeframe + "] — CHoCH detected: " + snap.lastBreakType(),
                     AlertCategory.SMC, instrument.name()));
-            } else if (snap.lastBreakType().startsWith("BOS")) {
+            } else if ("BOS".equals(snap.lastBreakType()) || snap.lastBreakType().startsWith("BOS")) {
                 alerts.add(new Alert("smc:bos:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — BOS: " + snap.lastBreakType(),
                     AlertCategory.SMC, instrument.name()));
@@ -156,10 +236,9 @@ public class IndicatorAlertEvaluator {
 
         // WaveTrend signal — only on transition AND on a new candle (Rule 4: candle close guard)
         if (snap.wtWt1() != null) {
-            String wtSignalKey = "wt:signal:" + tf;
-            if (snap.wtSignal() != null
-                    && canFireOnCandle(wtSignalKey + ":candle", snap.lastCandleTimestamp())
-                    && isTransition(wtSignalKey, snap.wtSignal())) {
+            EvalKey wtSignalKey = key("wt", instrument, timeframe, "signal");
+            if (isConfirmedTransition(wtSignalKey, snap.wtSignal(),
+                    candleKey(wtSignalKey), snap.lastCandleTimestamp())) {
                 if ("OVERBOUGHT".equals(snap.wtSignal())) {
                     alerts.add(new Alert("wt:overbought:" + tf, AlertSeverity.WARNING,
                         String.format("%s [%s] — WaveTrend overbought (WT1=%.1f)",
@@ -174,10 +253,9 @@ public class IndicatorAlertEvaluator {
             }
 
             // WaveTrend crossover — only on transition AND on a new candle (Rule 4)
-            String wtCrossKey = "wt:cross:" + tf;
-            if (snap.wtCrossover() != null
-                    && canFireOnCandle(wtCrossKey + ":candle", snap.lastCandleTimestamp())
-                    && isTransition(wtCrossKey, snap.wtCrossover())) {
+            EvalKey wtCrossKey = key("wt", instrument, timeframe, "cross");
+            if (isConfirmedTransition(wtCrossKey, snap.wtCrossover(),
+                    candleKey(wtCrossKey), snap.lastCandleTimestamp())) {
                 if ("BULLISH_CROSS".equals(snap.wtCrossover())) {
                     alerts.add(new Alert("wt:bull:" + tf, AlertSeverity.INFO,
                         instrument.getDisplayName() + " [" + timeframe + "] — WaveTrend Bullish Cross",
@@ -193,9 +271,9 @@ public class IndicatorAlertEvaluator {
         // Order Block lifecycle events (UC-SMC-009) — fires on real MITIGATION / INVALIDATION
         if (snap.recentObEvents() != null && !snap.recentObEvents().isEmpty()) {
             for (IndicatorAlertSnapshot.OrderBlockEvent evt : snap.recentObEvents()) {
-                String obEvtKey = "ob:" + evt.eventType() + ":" + evt.obType() + ":" + evt.high().toPlainString() + ":" + evt.low().toPlainString() + ":" + tf;
-                if (canFireOnCandle(obEvtKey + ":candle", snap.lastCandleTimestamp())
-                        && isTransition(obEvtKey, evt.eventType())) {
+                EvalKey obEventKey = key("ob", instrument, timeframe, evt.eventType() + ":" + evt.obType(),
+                        evt.high(), evt.low());
+                if (shouldFireOrderBlockEvent(obEventKey, snap.lastCandleTimestamp())) {
                     AlertSeverity sev = "INVALIDATION".equals(evt.eventType())
                             ? AlertSeverity.WARNING : AlertSeverity.INFO;
                     String verb = "MITIGATION".equals(evt.eventType()) ? "mitigated" : "invalidated";
@@ -206,23 +284,6 @@ public class IndicatorAlertEvaluator {
                         AlertCategory.ORDER_BLOCK, instrument.name()));
                 }
             }
-        }
-
-        // Order Block VWAP proxy — fires when VWAP enters an active OB zone (transition only)
-        if (snap.activeOrderBlocks() != null && !snap.activeOrderBlocks().isEmpty() && snap.vwap() != null) {
-            BigDecimal vwap = snap.vwap();
-            snap.activeOrderBlocks().forEach(ob -> {
-                boolean inside = vwap.compareTo(ob.low()) >= 0 && vwap.compareTo(ob.high()) <= 0;
-                String obVwapKey = "ob:vwap:" + ob.type() + ":" + tf;
-                String obSignal = inside ? "INSIDE" : null;
-                if (isTransition(obVwapKey, obSignal)) {
-                    alerts.add(new Alert("ob:vwap:" + ob.type() + ":" + tf, AlertSeverity.INFO,
-                        String.format("%s [%s] — VWAP inside %s Order Block [%.5f – %.5f]",
-                            instrument.getDisplayName(), timeframe, ob.type(),
-                            ob.low().doubleValue(), ob.high().doubleValue()),
-                        AlertCategory.ORDER_BLOCK_VWAP, instrument.name()));
-                }
-            });
         }
 
         return alerts;

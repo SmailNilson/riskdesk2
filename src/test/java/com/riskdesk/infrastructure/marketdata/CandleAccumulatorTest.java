@@ -92,4 +92,25 @@ class CandleAccumulatorTest {
         // Still no candles closed (same period)
         assertTrue(closed.isEmpty());
     }
+
+    @Test
+    void differentTimeframes_forSameInstrumentAreTrackedIndependently() {
+        CandleAccumulator accumulator = new CandleAccumulator();
+        List<Candle> closed = new ArrayList<>();
+
+        accumulator.accumulate(Instrument.MCL, "1s", 1, new BigDecimal("62.40"), 1, closed::add);
+        accumulator.accumulate(Instrument.MCL, "10m", 600, new BigDecimal("62.55"), 1, closed::add);
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        accumulator.accumulate(Instrument.MCL, "1s", 1, new BigDecimal("62.60"), 1, closed::add);
+
+        assertEquals(1, closed.size(), "Only the 1s candle should roll over");
+        Candle candle = closed.get(0);
+        assertEquals(Instrument.MCL, candle.getInstrument());
+        assertEquals("1s", candle.getTimeframe());
+        assertEquals(new BigDecimal("62.40"), candle.getOpen());
+        assertEquals(new BigDecimal("62.40"), candle.getLow());
+        assertEquals(new BigDecimal("62.40"), candle.getClose());
+    }
 }
