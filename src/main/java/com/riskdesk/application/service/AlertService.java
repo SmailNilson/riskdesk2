@@ -126,7 +126,8 @@ public class AlertService {
                 || alert.category().name().equals("WAVETREND")
                 || alert.category().name().equals("RSI")
                 || alert.category().name().equals("SMC")
-                || alert.category().name().equals("ORDER_BLOCK")) {
+                || alert.category().name().equals("ORDER_BLOCK")
+                || alert.category().name().equals("ORDER_BLOCK_VWAP")) {
                 continue;
             }
             publishAlert(alert, null);
