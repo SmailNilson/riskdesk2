@@ -30,6 +30,11 @@ Thumbs.db
 .env.local
 *.env.local
 **/.env.local
+src/main/resources/application-local.properties
+
+### Local Spring profiles (instance-specific, never commit) ###
+src/main/resources/application-local.*
+src/main/resources/application-local-*.*
 
 ### AI agent runtimes ###
 .git/

@@ -47,12 +47,15 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
   );
 
   const n = (v: number | null, d = 2) => v != null ? v.toFixed(d) : '—';
+  const equalHighs = s.equalHighs ?? [];
+  const equalLows = s.equalLows ?? [];
+  const activeOrderBlocks = s.activeOrderBlocks ?? [];
   const chaikinFlow = s.cmf == null ? { label: '—', color: 'gray' as const }
     : s.cmf > 0 ? { label: 'BUYING', color: 'green' as const }
     : s.cmf < 0 ? { label: 'SELLING', color: 'red' as const }
     : { label: 'NEUTRAL', color: 'gray' as const };
   const visibleBreakers = relevantBreakerBlocks(s, currentPrice);
-  const hiddenBreakerCount = Math.max(s.breakerOrderBlocks.length - visibleBreakers.length, 0);
+  const hiddenBreakerCount = Math.max((s.breakerOrderBlocks ?? []).length - visibleBreakers.length, 0);
 
   return (
     <div className="grid grid-cols-2 gap-3">
@@ -206,16 +209,16 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
       )}
 
       {/* EQH / EQL */}
-      {(s.equalHighs.length > 0 || s.equalLows.length > 0) && (
-        <Section title={`EQH/EQL (${s.equalHighs.length + s.equalLows.length})`}>
-          {s.equalHighs.map((eq, i) => (
+      {(equalHighs.length > 0 || equalLows.length > 0) && (
+        <Section title={`EQH/EQL (${equalHighs.length + equalLows.length})`}>
+          {equalHighs.map((eq, i) => (
             <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQH" color="red" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
               <span className="text-zinc-500">x{eq.touchCount}</span>
             </div>
           ))}
-          {s.equalLows.map((eq, i) => (
+          {equalLows.map((eq, i) => (
             <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQL" color="green" />
               <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
@@ -226,12 +229,12 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
       )}
 
       {/* Order Blocks */}
-      <Section title={`Order Blocks V1/V2 (${s.activeOrderBlocks.length + visibleBreakers.length})`} fullWidth>
+      <Section title={`Order Blocks V1/V2 (${activeOrderBlocks.length + visibleBreakers.length})`} fullWidth>
         <div className="space-y-1.5">
           <div className="text-[10px] uppercase tracking-widest text-zinc-500">V1 Active</div>
-          {s.activeOrderBlocks.length === 0
+          {activeOrderBlocks.length === 0
             ? <span className="text-zinc-600 text-xs">No active OBs</span>
-            : s.activeOrderBlocks.map((ob, i) => (
+            : activeOrderBlocks.map((ob, i) => (
               <div key={`active-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
                 <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
                 <span className="text-zinc-400">

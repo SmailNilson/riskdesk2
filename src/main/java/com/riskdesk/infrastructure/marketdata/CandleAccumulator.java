@@ -20,11 +20,13 @@ import java.util.function.Consumer;
  */
 public class CandleAccumulator {
 
-    private final Map<String, BuildingCandle> building = new ConcurrentHashMap<>();
+    private final Map<CandleKey, BuildingCandle> building = new ConcurrentHashMap<>();
+
+    private record CandleKey(Instrument instrument, String timeframe) {}
 
     public void accumulate(Instrument instrument, String timeframe, int periodSeconds,
                            BigDecimal price, long volume, Consumer<Candle> onCandleClosed) {
-        String key = instrument.name() + ":" + timeframe;
+        CandleKey key = new CandleKey(instrument, timeframe);
         long now = Instant.now().getEpochSecond();
         long barStart;
         if (periodSeconds >= 86_400) {

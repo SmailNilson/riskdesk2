@@ -19,8 +19,9 @@ services:
     build: .
     container_name: riskdesk-api
     ports:
-      - "8080:8080"
+      - "8090:8090"
     environment:
+      SERVER_PORT: "8090"
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/riskdesk
       SPRING_DATASOURCE_USERNAME: riskdesk
       SPRING_DATASOURCE_PASSWORD: riskdesk_dev

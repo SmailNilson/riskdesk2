@@ -47,6 +47,46 @@ API available at http://localhost:8080
 docker-compose up -d
 ```
 
+### Build metadata for deployments
+To make `/actuator/info` report the exact build running in production, build the
+backend image with explicit metadata:
+
+```bash
+docker build \
+  --build-arg APP_VERSION=0.1.0-SNAPSHOT \
+  --build-arg APP_GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg APP_IMAGE_TAG="$(git rev-parse --short HEAD)" \
+  --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t riskdesk-backend:$(git rev-parse --short HEAD) .
+```
+
+Then verify on the running app:
+```bash
+curl http://localhost:8080/actuator/info
+```
+
+### Option 3: Named profile `local-ibkr-gcp`
+Use this when the local SaaS must run against the IBKR Gateway hosted on the
+GCP VM over an IAP tunnel.
+
+Open the tunnel in one terminal:
+```bash
+./scripts/open-gcp-ibkr-tunnel.sh local-ibkr-gcp
+```
+
+Start the local backend + frontend in another terminal:
+```bash
+./scripts/start-saas.sh local-ibkr-gcp
+```
+
+Stop the local backend + frontend:
+```bash
+./scripts/stop-saas.sh local-ibkr-gcp
+```
+
+Default profile file:
+`scripts/profiles/local-ibkr-gcp.env`
+
 ## API Endpoints
 
 ### Positions

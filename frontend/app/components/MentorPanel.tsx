@@ -17,6 +17,7 @@ import {
   TradeAction,
   TzEntry,
 } from '@/app/lib/mentor';
+import { formatDateTime } from '@/app/lib/datetime';
 
 export default function MentorPanel({
   instrument,
@@ -313,7 +314,7 @@ export default function MentorPanel({
                       </span>
                       <span className="text-cyan-300">{Math.round(match.similarity * 100)}% similaire</span>
                     </div>
-                    <div className="mb-1 text-zinc-500">{new Date(match.createdAt).toLocaleString()}</div>
+                    <div className="mb-1 text-zinc-500">{formatDateTime(match.createdAt, timezone.tz)}</div>
                     <div className="mb-1 text-zinc-400">{match.summary}</div>
                     <div className={match.verdict?.includes('Validé') ? 'text-emerald-300' : 'text-red-300'}>
                       {match.verdict}
@@ -398,7 +399,10 @@ export default function MentorPanel({
                       {review.verdict ?? review.errorMessage ?? 'No verdict saved.'}
                     </div>
                     <div className="mt-2 text-[10px] text-zinc-600">
-                      {new Date(review.createdAt).toLocaleString()}
+                      {formatDateTime(review.createdAt, timezone.tz)}
+                    </div>
+                    <div className="mt-1 text-[10px] text-zinc-700">
+                      {review.selectedTimezone ?? 'UTC'}
                     </div>
                   </button>
                 );
@@ -483,7 +487,10 @@ function ManualReviewDetail({
               : 'Trade Non-Conforme'}
         </span>
         <span className="ml-auto text-[10px] text-zinc-600">
-          {new Date(review.createdAt).toLocaleTimeString(undefined, { timeZone: timezone })}
+          {formatDateTime(review.createdAt, timezone)}
+        </span>
+        <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-400">
+          {review.selectedTimezone ?? 'UTC'}
         </span>
       </div>
 
@@ -567,7 +574,7 @@ function ManualReviewDetail({
                       </span>
                       <span className="text-cyan-300">{Math.round(match.similarity * 100)}% similaire</span>
                     </div>
-                    <div className="mb-1 text-zinc-500">{new Date(match.createdAt).toLocaleString()}</div>
+                    <div className="mb-1 text-zinc-500">{formatDateTime(match.createdAt, timezone)}</div>
                     <div className="mb-1 text-zinc-400">{match.summary}</div>
                     <div className={match.verdict?.includes('Validé') ? 'text-emerald-300' : 'text-red-300'}>
                       {match.verdict}

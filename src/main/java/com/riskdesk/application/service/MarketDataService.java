@@ -46,6 +46,8 @@ public class MarketDataService {
     private static final long FRESH_CACHE_SECONDS = 15L;
     private static final long INSTANT_FETCH_TIMEOUT_MS = 1200L;
 
+    private record CandleKey(Instrument instrument, String timeframe) {}
+
     private final MarketDataProvider        marketDataProvider;
     private final PositionService           positionService;
     private final AlertService              alertService;
@@ -57,7 +59,7 @@ public class MarketDataService {
     private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
     private final Map<Instrument, String>        lastSource   = new ConcurrentHashMap<>();
-    private final Map<String, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
+    private final Map<CandleKey, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
     public MarketDataService(MarketDataProvider marketDataProvider,
@@ -214,7 +216,7 @@ public class MarketDataService {
 
     private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
         String  contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
-        String  key           = instrument.name() + ":" + timeframe;
+        CandleKey key         = new CandleKey(instrument, timeframe);
         long    periodMins    = TIMEFRAMES.get(timeframe);
         Instant periodStart   = truncateToPeriod(now, periodMins);
 

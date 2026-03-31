@@ -33,7 +33,7 @@ export default function MetricsBar({ summary, connected }: Props) {
       {/* Connection status */}
       <div className="flex items-center gap-1.5 mr-2">
         <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} />
-        <span className="text-xs text-zinc-500">{connected ? 'LIVE' : 'DISCONNECTED'}</span>
+        <span className="text-xs text-zinc-500">{connected ? 'STREAM LIVE' : 'STREAM OFFLINE'}</span>
       </div>
 
       <Metric label="Unrealized P&L"

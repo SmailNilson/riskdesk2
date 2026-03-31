@@ -18,6 +18,7 @@ import {
 import { IndicatorSnapshot, api } from '@/app/lib/api';
 import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
+import { makeChartTickFormatter, makeChartTimeFormatter } from '@/app/lib/datetime';
 
 interface Props {
   instrument: string;
@@ -81,18 +82,6 @@ function mergeLivePrice(previous: CandlePoint | null, update: PriceUpdate, timef
     high: Math.max(previous.high, price),
     low: Math.min(previous.low, price),
     close: price,
-  };
-}
-
-// Build a localization formatter for the given IANA timezone
-function makeTimeFormatter(tz: string) {
-  return (ts: number) => {
-    const d = new Date(ts * 1000);
-    return d.toLocaleString('en-GB', {
-      timeZone: tz,
-      day: '2-digit', month: 'short', year: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
   };
 }
 
@@ -303,8 +292,12 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       grid:   { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
       crosshair:       { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: C.border },
-      timeScale:       { borderColor: C.border, timeVisible: true },
-      localization:    { timeFormatter: makeTimeFormatter(timezone) },
+      timeScale:       {
+        borderColor: C.border,
+        timeVisible: true,
+        tickMarkFormatter: makeChartTickFormatter(timezone),
+      },
+      localization:    { timeFormatter: makeChartTimeFormatter(timezone) },
       width:  priceContainerRef.current.clientWidth,
       height: 300,
     });
@@ -344,7 +337,13 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       grid:   { vertLines: { color: C.wtGrid }, horzLines: { color: C.wtGrid } },
       crosshair:       { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: C.border, scaleMargins: { top: 0.1, bottom: 0.1 } },
-      timeScale:       { borderColor: C.border, timeVisible: false, visible: false },
+      timeScale:       {
+        borderColor: C.border,
+        timeVisible: false,
+        visible: false,
+        tickMarkFormatter: makeChartTickFormatter(timezone),
+      },
+      localization:    { timeFormatter: makeChartTimeFormatter(timezone) },
       width:  wtContainerRef.current.clientWidth,
       height: 110,
     });
@@ -436,9 +435,10 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
 
   // ── Re-apply timezone formatter when timezone prop changes ─────────────────
   useEffect(() => {
-    const fmt = { timeFormatter: makeTimeFormatter(timezone) };
-    chartRef.current?.applyOptions({ localization: fmt });
-    wtChartRef.current?.applyOptions({ localization: fmt });
+    const localization = { timeFormatter: makeChartTimeFormatter(timezone) };
+    const timeScale = { tickMarkFormatter: makeChartTickFormatter(timezone) };
+    chartRef.current?.applyOptions({ localization, timeScale });
+    wtChartRef.current?.applyOptions({ localization, timeScale });
   }, [timezone]);
 
   // ── UC-SMC-007: SMC candle coloring ──────────────────────────────────────────

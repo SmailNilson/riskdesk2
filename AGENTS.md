@@ -1,214 +1,143 @@
-# AGENTS.md
+# AGENTS.md - Operational Guide
 
-## Purpose
+## 1. ABSOLUTE PROHIBITIONS
 
-This file is the operational guide for human developers and coding agents working on `riskdesk2`.
+### Market Data Sources
+*   **MUST ALWAYS** use exclusively this data path: `IBKR Gateway -> PostgreSQL -> internal services`.
+*   **NEVER** add, restore, or suggest any of the following:
+    *   Yahoo Finance
+    *   Stooq
+    *   Alpha Vantage
+    *   Polygon
+    *   Binance
+    *   CSV imports from external providers
+    *   Scraping-based feeds
+    *   Simulated fallback feeds for production logic
+*   **MUST** immediately remove or replace any code that reintroduces external market data sources with the IBKR/PostgreSQL flow.
+*   **MUST** preserve the ability to identify whether a value came from live IBKR or DB fallback when modifying market data behavior.
 
-Read this file before making changes.
+### Secrets & Credentials
+*   **NEVER** commit secrets, API keys, bot tokens, passwords, or local credentials into tracked files.
+*   **NEVER** force-add ignored files (e.g., `.env.local`, `frontend/.env.local`, `target/`, `frontend/node_modules/`, `.claude/`, `.gemini/`, `.codex/`, `.maq/`).
 
-## Multi-Agent Git Rules
+### Repository Scope
+*   **NEVER** edit files directly in the main scratch clone at the repository root. This is a bare origin.
+*   **NEVER** recreate a nested Git repository inside **`frontend`**.
 
-This repo is worked on by multiple AI agents simultaneously (Codex, Claude Code, MAQ).
-These rules are mandatory for all agents.
+---
 
-### Workspace isolation
+## 2. MULTI-AGENT GIT & WORKTREE RULES
 
-Each agent works in its own **git worktree** — never in the main checkout or another agent's worktree.
-Worktrees isolate sessions: each task gets a fresh directory without touching other in-flight branches.
+**ALL** agents (Codex, Claude, MAQ) **MUST** adhere to strict workspace isolation to prevent collisions.
 
-| Agent | Worktree root | Branch prefix |
+### Workspace Isolation
+*   **MUST ALWAYS** work within your designated **git worktree**.
+*   **NEVER** work in the main checkout or another agent's worktree.
+*   **MUST** check open PRs on GitHub before starting a task. **NEVER** modify files currently being touched by another agent's open PR without human coordination.
+
+### Agent Environment Mapping
+| Agent | Worktree Root | Branch Prefix |
 |---|---|---|
-| Codex | `.codex/worktrees/<name>/` (auto-managed) | `codex/` |
-| Claude Code | `.claude/worktrees/<name>/` (auto-managed) | `claude/` |
-| MAQ | `.maq/worktrees/<name>/` (auto-managed) | `maq/` |
-| Claude Bedrock (VS Code) | `.claude-bedrock/worktrees/<name>/` (auto-managed) | `claude-bedrock/` |
-| Human / VS Code | `~/riskdesk2/` | *(direct)* |
+| Codex | **`.codex/worktrees/<name>/`** | **`codex/`** |
+| Claude Code | **`.claude/worktrees/<name>/`** | **`claude/`** |
+| MAQ | **`.maq/worktrees/<name>/`** | **`maq/`** |
+| Claude Bedrock | **`.claude-bedrock/worktrees/<name>/`** | **`claude-bedrock/`** |
+| Gemini / Antigravity | **`.gemini/worktrees/<name>/`** | **`gemini/`** |
 
-Worktree roots are inside the repo under their agent's hidden directory (already `.gitignore`d).
-The main scratch clone at `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/` is the **bare origin** — no agent edits files there directly.
+### Branching Rules
+*   **ALWAYS** branch from `main`.
+*   **ALWAYS** apply your agent prefix to the branch name (e.g., `codex/feature-name`).
+*   **MUST** move to an agent branch immediately before any investigation, read-only debugging, or implementation.
+*   **NEVER** work directly on `main`.
+*   **NEVER** merge your own or another agent's branch. Open a PR and let the human merge.
+*   **MUST** keep branches short-lived (1–2 days max).
 
-#### Creating a worktree (manual fallback)
-
-If your harness does not auto-create worktrees, run from the repo root:
-
+### Manual Worktree Commands (Fallback)
+If auto-creation fails, execute from repo root:
 ```bash
+# Create
 git fetch origin
 git worktree add ./<agent>/worktrees/<task-slug> -b <agent>/<task-slug> origin/main
-```
 
-Remove it after the PR is merged:
-
-```bash
+# Teardown (Post-Merge)
 git worktree remove ./<agent>/worktrees/<task-slug>
 git branch -d <agent>/<task-slug>
 ```
 
-### Branch rules
+---
 
-- Always branch from `main` (via worktree creation or explicit `git switch -c <base>`):
-  ```bash
-  git fetch origin
-  git switch -c <agent>/my-feature origin/main
-  ```
-- On every new session, move to an agent branch immediately before any investigation or implementation work. Read-only debugging, incident analysis, and code review are still "starting a task" and must not happen on `main`.
-- Use your agent prefix: `codex/`, `claude/`, `maq/`, `claude-bedrock/`
-- Keep branches short-lived (1–2 days max)
-- Open a PR and let the human merge — never merge another agent's branch yourself
+## 3. RUNTIME & CONFIGURATION RULES
 
-### Never commit agent runtime files
+### Mandatory Local Spring Profile
+*   **MUST ALWAYS** run the backend with the `local` Spring profile active.
+*   **NEVER** hardcode a port or IBKR `client-id` into `application.properties`.
+*   **NEVER** commit `application-local.properties` (it is gitignored).
 
-The following are already in `.gitignore` — do not force-add them:
-- `.codex/`, `.codex-bedrock/`, `.codex-vertex/`
-- `.claude/`
-- `.gemini/`
-- `.maq/`
+**Backend Run Commands:**
+```bash
+# Maven
+mvn spring-boot:run -Dspring-boot.run.profiles=local
 
-### Avoid working on the same files as another agent
+# JAR
+java -Dspring.profiles.active=local -jar target/riskdesk-0.1.0-SNAPSHOT.jar
+```
 
-Before starting a task, check open PRs on GitHub. If another agent has an open PR touching the same files, coordinate with the human before proceeding.
+### Required `application-local.properties` Overrides
+To prevent IB Gateway connection failures, configure your specific overrides:
+
+| Configuration | Claude | Codex | MAQ | Bedrock | Gemini | Human |
+|---|---|---|---|---|---|---|
+| **`server.port`** | 8090 | 8085 | 8070 | 8050 | 8060 | 8080 |
+| **`riskdesk.ibkr.native-client-id`** | 8 | 7 | 9 | 5 | 6 | 1 |
+| **`spring.datasource.username`** | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* | *(local OS user)* |
 
 ---
 
-## Non-Negotiable Rules
+## 4. ARCHITECTURAL & ENGINEERING RULES
 
-### 1. Market data source policy
+**MUST ALWAYS** strictly implement Hexagonal Architecture, Domain-Driven Design (DDD), Test-Driven Development (TDD), and Behavior-Driven Development (BDD). These are structural mandates, not suggestions.
 
-Only the following data path is allowed:
+### Layer Responsibilities (Hexagonal Architecture)
+*   **`domain`**: **MUST** contain ONLY business rules. **NEVER** depend on Spring, HTTP, Database, or IBKR implementation details.
+*   **`application`**: **MUST** coordinate use cases and depend solely on domain abstractions.
+*   **`infrastructure`**: **MUST** implement ports declared by domain/application layers. **NEVER** leak infrastructure details upward.
+*   **`presentation`**: **MUST** adapt transport input/output (HTTP, WebSocket, DTOs) to use cases. **NEVER** contain domain rules.
 
-`IBKR Gateway -> PostgreSQL -> internal services`
+### TDD & BDD Mandates
+*   **ALWAYS** write or update tests *first* when changing business logic.
+*   **ALWAYS** include a regression test for every bug fix (unless purely wiring).
+*   **MUST** place focused unit tests in `src/test/java` near the changed business area.
+*   **MUST** express user-visible workflows in business scenarios (Cucumber features).
 
-Do not add, restore, or suggest any of the following:
+### Editing Guidance
+*   **ALWAYS** prefer small, localized changes.
+*   **ALWAYS** preserve the current domain-oriented package structure.
+*   **ALWAYS** keep API field names stable unless updating backend and frontend simultaneously.
+*   **NEVER** create "smart controllers" or "fat infrastructure services".
 
-- Yahoo Finance
-- Stooq
-- Alpha Vantage
-- Polygon
-- Binance
-- CSV imports from external providers
-- scraping-based feeds
-- simulated fallback feeds for production logic
+---
 
-If you find code that reintroduces an external market data source, remove it or replace it with the IBKR/PostgreSQL flow.
+## 5. PROJECT STRUCTURE & COMMANDS
 
-### 2. Secret handling
+### Tech Stack
+*   **Backend**: Spring Boot 3.2, Java 19, PostgreSQL
+*   **Frontend**: Next.js 14, React 18, TypeScript
+*   **Transport**: WebSocket/STOMP
 
-Never commit secrets.
+### Pre-requisite Reading
+Read these files BEFORE making architectural changes:
+*   **`docs/PROJECT_CONTEXT.md`**
+*   **`docs/AI_HANDOFF.md`**
+*   **`src/main/resources/application.properties`**
 
-Ignored local files already include:
-
-- `.env.local`
-- `frontend/.env.local`
-- `target/`
-- `frontend/node_modules/`
-- `.claude/`
-
-Do not paste or hardcode API keys, bot tokens, passwords, or local credentials into tracked files.
-
-### 3. Repo scope
-
-The Git repository root is this directory:
-
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2`
-
-The frontend lives inside:
-
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend`
-
-Do not recreate a nested Git repository inside `frontend/`.
-
-## Project Overview
-
-- Backend: Spring Boot 3.2, Java 19, PostgreSQL
-- Frontend: Next.js 14, React 18, TypeScript
-- Real-time transport: WebSocket/STOMP
-- Trading focus: futures risk dashboard with mentor workflow and IBKR integration
-
-## Engineering Principles
-
-The project must respect these principles:
-
-- DDD
-- TDD
-- BDD
-- Hexagonal Architecture
-
-These are not decorative labels. They should shape how changes are designed.
-
-### DDD expectations
-
-- business rules belong in `domain`
-- orchestration belongs in `application`
-- technical adapters belong in `infrastructure`
-- HTTP, WebSocket, and DTO concerns belong in `presentation`
-- avoid putting domain rules into controllers, repositories, or framework annotations
-
-### Hexagonal architecture expectations
-
-Use the following conceptual layers:
-
-- `presentation`
-- `application`
-- `domain`
-- `infrastructure`
-
-Rules:
-
-- `domain` must not depend on Spring, HTTP, database, or IBKR implementation details
-- `application` coordinates use cases and depends on domain abstractions
-- `infrastructure` implements ports declared by the domain/application layers
-- `presentation` only adapts transport input/output to use cases
-
-### TDD expectations
-
-- when changing business logic, add or update tests first when practical
-- every bug fix should come with a regression test unless the code path is purely wiring
-- prefer focused unit tests in `src/test/java` near the changed business area
-
-### BDD expectations
-
-- user-visible workflows should remain expressible in business scenarios
-- when a change affects behavior across the app, consider updating or adding Cucumber features
-- preserve the language of business outcomes, not framework internals
-
-## Current Architecture
-
-### Backend layers
-
-- `presentation`: controllers and DTOs, transport-only concerns
-- `application/service`: orchestration and use cases
-- `domain/*`: indicators, trading, market-data ports, alert logic, business rules
-- `infrastructure/config`: wiring and runtime configuration
-- `infrastructure/marketdata/ibkr`: IBKR adapters and native gateway integration
-- `infrastructure/persistence`: JPA adapters
-- `presentation/controller` and `presentation/dto`: HTTP API surface
-
-### Frontend areas
-
-- `frontend/app/components`: dashboard and mentor UI
-- `frontend/app/lib/api.ts`: API client calls
-- `frontend/app/hooks/useWebSocket.ts`: live updates
-
-## Files to Read First
-
-Before editing, prefer reading:
-
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/PROJECT_CONTEXT.md`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/resources/application.properties`
-
-## Development Commands
-
-### Backend
-
+### Development Commands
+**Backend:**
 ```bash
 mvn -q -DskipTests compile
 mvn -q test
-mvn -q spring-boot:run
-java -jar target/riskdesk-0.1.0-SNAPSHOT.jar
 ```
 
-### Frontend
-
+**Frontend:**
 ```bash
 cd frontend
 npm install
@@ -216,39 +145,17 @@ npm run lint
 npm run dev
 ```
 
-## Validation Expectations
+---
 
-For backend changes:
+## 6. VALIDATION & DOCUMENTATION
 
-- at minimum run `mvn -q -DskipTests compile`
-- when domain or application logic changes, prefer running the relevant tests or adding them first
+### Validation Expectations
+*   **Backend changes**: **MUST** run `mvn -q -DskipTests compile` and execute relevant tests.
+*   **Frontend changes**: **MUST** run `cd frontend && npm run lint`.
+*   **Cross-stack changes**: **MUST** run both.
 
-For frontend changes:
-
-- at minimum run `cd frontend && npm run lint`
-
-If touching both, run both checks.
-
-## Editing Guidance
-
-- Prefer small, localized changes
-- Preserve the current domain-oriented package structure
-- Keep API field names stable unless you are updating both backend and frontend together
-- When changing market data behavior, preserve the ability to identify whether a value came from live IBKR or DB fallback
-- If a change crosses layers, check that responsibilities still align with `presentation -> application -> domain <- infrastructure`
-- Prefer ports/interfaces over leaking infrastructure details upward
-- Avoid “smart controllers” and “fat infrastructure services”
-
-## Current Runtime Reality
-
-The application now avoids reconnect storms on the native IBKR client, but live prices can still fall back to PostgreSQL when IBKR market data farms are unavailable.
-
-That is an upstream IBKR connectivity/runtime issue, not a license to reintroduce external providers.
-
-## Documentation Rule
-
-If you make a significant architectural or workflow change, update:
-
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/PROJECT_CONTEXT.md`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/AI_HANDOFF.md`
-- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/docs/ARCHITECTURE_PRINCIPLES.md`
+### Documentation Rule
+If you make a significant architectural or workflow change, you **MUST** update:
+*   **`docs/PROJECT_CONTEXT.md`**
+*   **`docs/AI_HANDOFF.md`**
+*   **`docs/ARCHITECTURE_PRINCIPLES.md`**

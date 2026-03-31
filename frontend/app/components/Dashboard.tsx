@@ -12,27 +12,18 @@ import MentorSignalPanel from './MentorSignalPanel';
 import PositionForm from './PositionForm';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
+import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
 type Instrument = typeof INSTRUMENTS[number];
 const TIMEFRAMES = ['5m', '10m', '1h', '1d'] as const;
 type Timeframe = typeof TIMEFRAMES[number];
 
-const TIMEZONES = [
-  { label: 'UTC',        tz: 'UTC' },
-  { label: 'Paris',      tz: 'Europe/Paris' },
-  { label: 'London',     tz: 'Europe/London' },
-  { label: 'New York',   tz: 'America/New_York' },
-  { label: 'Chicago',    tz: 'America/Chicago' },
-  { label: 'Tokyo',      tz: 'Asia/Tokyo' },
-] as const;
-type TzEntry = typeof TIMEZONES[number];
-
 
 export default function Dashboard() {
   const [instrument, setInstrument] = useState<Instrument>('MCL');
   const [timeframe, setTimeframe] = useState<Timeframe>('10m');
-  const [timezone, setTimezone] = useState<TzEntry>(TIMEZONES[1]); // default: Paris
+  const [timezone, setTimezone] = useState<TzEntry>(DEFAULT_TIMEZONE);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
@@ -109,7 +100,7 @@ export default function Dashboard() {
             <span className="text-[10px] text-zinc-600 select-none">🌐</span>
             <select
               value={timezone.tz}
-              onChange={e => setTimezone(TIMEZONES.find(z => z.tz === e.target.value)!)}
+              onChange={e => setTimezone(findTimezoneByTz(e.target.value))}
               className="bg-transparent text-xs text-zinc-400 outline-none cursor-pointer hover:text-zinc-200 transition-colors"
             >
               {TIMEZONES.map(z => (
@@ -170,20 +161,6 @@ export default function Dashboard() {
         {/* Indicators */}
         <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
 
-        <MentorPanel
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone}
-          connected={connected}
-          summary={summary}
-          snapshot={snapshot}
-          prices={prices}
-          alerts={alerts}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
-
         <IbkrPortfolioPanel
           selectedAccountId={selectedIbkrAccountId}
           onAccountChange={setSelectedIbkrAccountId}
@@ -195,6 +172,20 @@ export default function Dashboard() {
           alerts={alerts}
           reviews={mentorSignalReviews}
           selectedBrokerAccountId={selectedIbkrAccountId}
+        />
+
+        {/* Backtest */}
+        <BacktestPanel />
+
+        <MentorPanel
+          instrument={instrument}
+          timeframe={timeframe}
+          timezone={timezone}
+          connected={connected}
+          summary={summary}
+          snapshot={snapshot}
+          prices={prices}
+          alerts={alerts}
         />
       </div>
     </div>

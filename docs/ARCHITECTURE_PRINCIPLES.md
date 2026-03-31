@@ -183,6 +183,7 @@ Alert evaluation must use transition-based detection, not state-based:
 - `IndicatorAlertEvaluator` in `domain` tracks last-known state per indicator/instrument/timeframe
 - this is a domain concern and must stay in the domain layer
 - `AlertService` in `application` orchestrates publishing and mentor review batching
+- indicator alert dedup remains key-based with a short shared cooldown; do not reintroduce timeframe-length blocking windows that suppress otherwise valid multiple alerts on `10m` or `1h`
 - when multiple indicators fire in the same polling cycle for the same instrument/timeframe/direction, the application layer batches them into a single mentor review via `captureGroupReview`
 - individual alerts are still published to WebSocket separately for the UI
 
