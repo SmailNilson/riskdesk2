@@ -63,6 +63,8 @@ What changed:
 - manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
 - images are published to `ghcr.io/smailnilson/riskdesk2`
 - stable tags also refresh the `latest` container tag
+- tagged releases can now also be deployed from GitHub Actions over SSH via `docker-compose.release.yml` on the server
+- the deploy workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
 - the private IBKR `tws-api` dependency is vendored in `vendor/maven-repo` so Docker and GitHub Actions builds can resolve it without a developer-local Maven cache
 
 Why:
