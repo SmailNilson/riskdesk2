@@ -8,7 +8,6 @@ import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.domain.shared.vo.Timeframe;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -105,11 +104,9 @@ public class AlertService {
                 // Apply Rules 1 (HTF alignment) and 3 (anti-chop)
                 List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, h1Trend);
 
-                // Publish with Rule 2: dynamic cooldown proportional to timeframe
-                long cooldownSeconds = Timeframe.fromLabel(timeframe).periodSeconds();
                 List<Alert> publishedAlerts = new ArrayList<>();
                 for (Alert alert : filteredAlerts) {
-                    if (publishAlertWithoutMentor(alert, cooldownSeconds)) {
+                    if (publishAlertWithoutMentor(alert)) {
                         publishedAlerts.add(alert);
                     }
                 }
@@ -188,11 +185,12 @@ public class AlertService {
 
     /**
      * Publish alert to WebSocket without triggering mentor review.
-     * Uses a timeframe-aware cooldown (Rule 2) instead of the global default.
+     * Uses the shared key-based dedup cooldown so multiple alerts can be emitted
+     * on the same timeframe when distinct transitions occur.
      * Returns true if the alert passed dedup and was actually published.
      */
-    private boolean publishAlertWithoutMentor(Alert alert, long cooldownSeconds) {
-        if (!deduplicator.shouldFire(alert, cooldownSeconds)) {
+    private boolean publishAlertWithoutMentor(Alert alert) {
+        if (!deduplicator.shouldFire(alert)) {
             return false;
         }
         log.info("ALERT [{}] {}", alert.severity(), alert.message());
