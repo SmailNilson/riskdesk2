@@ -173,6 +173,7 @@ What changed:
 - `IndicatorAlertEvaluator` switched from state-based to transition-based detection: alerts only fire when a condition *changes*, not when it persists across polling cycles
 - uses a `ConcurrentHashMap<String, String>` to track last-known state per indicator/instrument/timeframe
 - `AlertService` now publishes individual alerts to WebSocket but batches Mentor reviews by direction for alerts that fire in the same polling cycle
+- indicator alert dedup is now key-based on the shared short cooldown only; it no longer blocks a full `10m` or `1h` window, so multiple same-timeframe alerts can surface when new transitions occur
 - `MentorSignalReviewService.captureGroupReview()` groups alerts by direction and creates one combined review per group
 - `MentorSignalPanel` groups alerts in the UI by instrument+timeframe+direction within a 90-second time window
 - added instrument filter dropdown to `MentorSignalPanel`

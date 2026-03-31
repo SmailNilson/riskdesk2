@@ -141,6 +141,8 @@ Only these alert families are escalated into Mentor review:
 
 Alerts use transition-based detection: an alert fires only when a condition *changes* (e.g., RSI crosses into oversold), not when it persists across polling cycles. The `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe using a `ConcurrentHashMap`.
 
+`AlertService` still deduplicates by alert key on a short shared cooldown, but it no longer blocks an entire timeframe window (`10m` or `1h`). This means multiple alerts can be emitted on the same timeframe when distinct transitions happen before the bar period ends.
+
 #### Grouped reviews
 
 When multiple indicators fire simultaneously for the same instrument, timeframe, and direction (e.g., SMC + WAVETREND both signal LONG on MCL 10m), the backend batches them into a single combined Mentor review via `captureGroupReview`. Individual alerts are still published to WebSocket for the UI.
