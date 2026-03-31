@@ -2,11 +2,12 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.alert.model.Alert;
+import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
+import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
-import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
@@ -110,8 +111,11 @@ public class AlertService {
                         publishedAlerts.add(alert);
                     }
                 }
-                if (!publishedAlerts.isEmpty()) {
-                    mentorSignalReviewService.captureGroupReview(publishedAlerts, snap);
+                List<Alert> reviewEligibleAlerts = publishedAlerts.stream()
+                    .filter(this::shouldCreateMentorReview)
+                    .toList();
+                if (!reviewEligibleAlerts.isEmpty()) {
+                    mentorSignalReviewService.captureGroupReview(reviewEligibleAlerts, snap);
                 }
             } catch (Exception e) {
                 log.debug("Indicator evaluation error for {} {}: {}", instrument, timeframe, e.getMessage());
@@ -233,5 +237,10 @@ public class AlertService {
         } else {
             mentorSignalReviewService.captureInitialReview(alert);
         }
+    }
+
+    private boolean shouldCreateMentorReview(Alert alert) {
+        return alert.category() != AlertCategory.ORDER_BLOCK
+            && alert.category() != AlertCategory.ORDER_BLOCK_VWAP;
     }
 }
