@@ -161,20 +161,6 @@ export default function Dashboard() {
         {/* Indicators */}
         <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
 
-        <MentorPanel
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone}
-          connected={connected}
-          summary={summary}
-          snapshot={snapshot}
-          prices={prices}
-          alerts={alerts}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
-
         <IbkrPortfolioPanel
           selectedAccountId={selectedIbkrAccountId}
           onAccountChange={setSelectedIbkrAccountId}
@@ -186,6 +172,20 @@ export default function Dashboard() {
           alerts={alerts}
           reviews={mentorSignalReviews}
           selectedBrokerAccountId={selectedIbkrAccountId}
+        />
+
+        {/* Backtest */}
+        <BacktestPanel />
+
+        <MentorPanel
+          instrument={instrument}
+          timeframe={timeframe}
+          timezone={timezone}
+          connected={connected}
+          summary={summary}
+          snapshot={snapshot}
+          prices={prices}
+          alerts={alerts}
         />
       </div>
     </div>
