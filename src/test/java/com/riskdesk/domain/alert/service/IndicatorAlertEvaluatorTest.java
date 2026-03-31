@@ -10,6 +10,7 @@ import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 
@@ -17,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class IndicatorAlertEvaluatorTest {
 
+    private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-28T16:00:00Z");
     private final IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator();
 
     /**
@@ -54,7 +56,7 @@ class IndicatorAlertEvaluatorTest {
             vwap,
             activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
             obEvents == null ? Collections.emptyList() : obEvents,
-            null
+            CLOSED_CANDLE
         );
     }
 

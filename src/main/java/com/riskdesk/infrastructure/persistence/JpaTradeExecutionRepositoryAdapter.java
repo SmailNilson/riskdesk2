@@ -2,6 +2,8 @@ package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.infrastructure.persistence.entity.TradeExecutionEntity;
+import jakarta.persistence.EntityManager;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
@@ -14,18 +16,27 @@ import java.util.Optional;
 public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionRepositoryPort {
 
     private final TradeExecutionJpaRepository repository;
+    private final EntityManager entityManager;
 
-    public JpaTradeExecutionRepositoryAdapter(TradeExecutionJpaRepository repository) {
+    public JpaTradeExecutionRepositoryAdapter(TradeExecutionJpaRepository repository,
+                                              EntityManager entityManager) {
         this.repository = repository;
+        this.entityManager = entityManager;
     }
 
     @Override
     public TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution) {
+        Optional<TradeExecutionEntity> existing = repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId());
+        if (existing.isPresent()) {
+            return TradeExecutionEntityMapper.toDomain(existing.get());
+        }
+
         try {
             return TradeExecutionEntityMapper.toDomain(
                 repository.saveAndFlush(TradeExecutionEntityMapper.toEntity(execution))
             );
         } catch (DataIntegrityViolationException e) {
+            entityManager.clear();
             return repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId())
                 .map(TradeExecutionEntityMapper::toDomain)
                 .orElseThrow(() -> e);
