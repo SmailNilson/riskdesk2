@@ -162,6 +162,7 @@ If a change touches several layers:
 - release image publication must be driven by immutable Git tags
 - prefer GitHub Container Registry for repository-scoped image publishing because `GITHUB_TOKEN` can publish without storing an extra Docker registry secret
 - keep the Docker build context minimal with `.dockerignore` so CI does not upload local agent/runtime artifacts
+- if a required build dependency is not published to Maven Central, vendor it in a repo-local Maven repository so Docker and CI builds stay reproducible
 
 ### Frontend Workflow Rule
 

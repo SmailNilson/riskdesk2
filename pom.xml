@@ -23,6 +23,13 @@
         <jacoco.version>0.8.14</jacoco.version>
     </properties>
 
+    <repositories>
+        <repository>
+            <id>riskdesk-vendor-repo</id>
+            <url>file://${project.basedir}/vendor/maven-repo</url>
+        </repository>
+    </repositories>
+
     <dependencies>
         <!-- Web + WebSocket -->
         <dependency>

@@ -227,6 +227,7 @@ mvn -q -DskipTests compile
 - published images are pushed to `ghcr.io/smailnilson/riskdesk2`
 - if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
 - local Docker is no longer required for the standard image release path
+- the private IBKR `tws-api` dependency is vendored under `vendor/maven-repo` so Docker/CI builds do not depend on a developer-local `~/.m2`
 
 ### Run backend
 

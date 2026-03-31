@@ -63,6 +63,7 @@ What changed:
 - manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
 - images are published to `ghcr.io/smailnilson/riskdesk2`
 - stable tags also refresh the `latest` container tag
+- the private IBKR `tws-api` dependency is vendored in `vendor/maven-repo` so Docker and GitHub Actions builds can resolve it without a developer-local Maven cache
 
 Why:
 
