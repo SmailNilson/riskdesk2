@@ -1,7 +1,6 @@
 package com.riskdesk.domain.contract;
 
 import com.riskdesk.domain.model.Instrument;
-import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.Optional;
@@ -18,7 +17,6 @@ import java.util.concurrent.ConcurrentHashMap;
  *   1. Populated at startup by ActiveContractRegistryInitializer (IBKR → fallback properties).
  *   2. Updated ONLY when the trader explicitly confirms a rollover via POST /api/rollover/confirm.
  */
-@Component
 public class ActiveContractRegistry {
 
     private final Map<Instrument, String> contractMonths = new ConcurrentHashMap<>();

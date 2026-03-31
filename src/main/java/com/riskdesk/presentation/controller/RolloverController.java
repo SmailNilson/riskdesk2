@@ -3,7 +3,6 @@ package com.riskdesk.presentation.controller;
 import com.riskdesk.application.service.RolloverDetectionService;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -23,14 +22,11 @@ public class RolloverController {
 
     private final RolloverDetectionService  detectionService;
     private final ActiveContractRegistry    contractRegistry;
-    private final IbGatewayContractResolver resolver;
 
     public RolloverController(RolloverDetectionService detectionService,
-                              ActiveContractRegistry contractRegistry,
-                              IbGatewayContractResolver resolver) {
+                              ActiveContractRegistry contractRegistry) {
         this.detectionService = detectionService;
         this.contractRegistry = contractRegistry;
-        this.resolver         = resolver;
     }
 
     /**
@@ -75,8 +71,7 @@ public class RolloverController {
             return ResponseEntity.badRequest().body(Map.of("error", "contractMonth must be YYYYMM format"));
         }
 
-        contractRegistry.confirmRollover(inst, contractMonth);
-        resolver.clearCache();
+        detectionService.confirmRollover(inst, contractMonth);
 
         return ResponseEntity.ok(Map.of(
             "instrument",    inst.name(),

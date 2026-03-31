@@ -18,9 +18,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class IndicatorAlertEvaluatorTest {
 
-    private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-30T10:00:00Z");
-    private static final Instant NEXT_CANDLE = Instant.parse("2026-03-30T11:00:00Z");
-
+    private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-28T16:00:00Z");
+    private static final Instant NEXT_CANDLE = Instant.parse("2026-03-28T17:00:00Z");
     private final IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator();
 
     /**
@@ -82,7 +81,8 @@ class IndicatorAlertEvaluatorTest {
             Instant lastCandleTimestamp) {
         return new IndicatorAlertSnapshot(
                 null,
-                null, null,
+                null,
+                null,
                 null,
                 null,
                 null,

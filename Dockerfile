@@ -5,9 +5,11 @@ ARG APP_BUILD_TIME=unknown
 
 FROM eclipse-temurin:21-jdk-alpine AS build
 WORKDIR /app
+RUN apk add --no-cache maven
 COPY pom.xml .
+COPY vendor ./vendor
 COPY src ./src
-RUN apk add --no-cache maven && mvn clean package -DskipTests
+RUN mvn clean package -DskipTests
 
 FROM eclipse-temurin:21-jre-alpine
 ARG APP_VERSION=0.1.0-SNAPSHOT
