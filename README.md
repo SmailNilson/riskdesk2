@@ -47,6 +47,28 @@ API available at http://localhost:8080
 docker-compose up -d
 ```
 
+### Option 3: Named profile `local-ibkr-gcp`
+Use this when the local SaaS must run against the IBKR Gateway hosted on the
+GCP VM over an IAP tunnel.
+
+Open the tunnel in one terminal:
+```bash
+./scripts/open-gcp-ibkr-tunnel.sh local-ibkr-gcp
+```
+
+Start the local backend + frontend in another terminal:
+```bash
+./scripts/start-saas.sh local-ibkr-gcp
+```
+
+Stop the local backend + frontend:
+```bash
+./scripts/stop-saas.sh local-ibkr-gcp
+```
+
+Default profile file:
+`scripts/profiles/local-ibkr-gcp.env`
+
 ## API Endpoints
 
 ### Positions
