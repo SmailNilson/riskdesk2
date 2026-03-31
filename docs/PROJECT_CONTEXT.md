@@ -218,6 +218,14 @@ Current behavior:
 mvn -q -DskipTests compile
 ```
 
+## Container Release Workflow
+
+- Docker image validation now runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
+- Docker image publication now runs in GitHub Actions on Git tag pushes
+- published images are pushed to `ghcr.io/smailnilson/riskdesk2`
+- if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
+- local Docker is no longer required for the standard image release path
+
 ### Run backend
 
 ```bash

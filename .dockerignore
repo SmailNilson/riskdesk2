@@ -1,0 +1,14 @@
+.git
+.github/java-upgrade
+.codex
+.codex-bedrock
+.claude
+.claude-bedrock
+.gemini
+.maq
+.vscode
+target
+frontend/node_modules
+frontend/.next
+data
+*.log

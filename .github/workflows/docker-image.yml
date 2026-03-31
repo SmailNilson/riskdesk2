@@ -1,0 +1,123 @@
+name: Docker Image CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      git_tag:
+        description: "Tag Git deja cree a publier dans GHCR (ex: v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_dispatch' && github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for validation
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: riskdesk-ci:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag metadata
+        id: meta
+        shell: bash
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.git_tag || '' }}
+        run: |
+          TAG_NAME="$MANUAL_TAG"
+          if [[ -z "$TAG_NAME" ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+          STABLE_TAG=true
+          if [[ "$TAG_NAME" == *-* ]]; then
+            STABLE_TAG=false
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "image_repo=$IMAGE_REPO" >> "$GITHUB_OUTPUT"
+          echo "stable_tag=$STABLE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.meta.outputs.tag_name }}
+
+      - name: Capture revision
+        id: revision
+        shell: bash
+        run: |
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Docker tags
+        id: tags
+        shell: bash
+        env:
+          IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+          STABLE_TAG: ${{ steps.meta.outputs.stable_tag }}
+          SHORT_SHA: ${{ steps.revision.outputs.short_sha }}
+        run: |
+          TAGS="${IMAGE_REPO}:${TAG_NAME}"$'\n'"${IMAGE_REPO}:sha-${SHORT_SHA}"
+          if [[ "$STABLE_TAG" == "true" ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE_REPO}:latest"
+          fi
+
+          {
+            echo "value<<EOF"
+            printf "%s\n" "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.revision.outputs.full_sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -156,6 +156,13 @@ If a change touches several layers:
 - avoid shortcutting directly from `presentation` to `infrastructure`
 - prefer domain/application ports where the dependency direction matters
 
+### Container Release Rule
+
+- container image validation belongs in GitHub Actions, not as a required local developer step
+- release image publication must be driven by immutable Git tags
+- prefer GitHub Container Registry for repository-scoped image publishing because `GITHUB_TOKEN` can publish without storing an extra Docker registry secret
+- keep the Docker build context minimal with `.dockerignore` so CI does not upload local agent/runtime artifacts
+
 ### Frontend Workflow Rule
 
 When extending Mentor behavior in the UI:

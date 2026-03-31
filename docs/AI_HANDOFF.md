@@ -49,6 +49,26 @@ This is expected until internal IBKR/DB-backed inputs exist.
 
 ## Recent Technical Changes
 
+### 0. GitHub-hosted Docker image pipeline
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/.github/workflows/docker-image.yml`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/.dockerignore`
+
+What changed:
+
+- Docker image validation now runs in GitHub Actions for `push` to `main` and pull requests targeting `main`
+- Docker image publication now runs in GitHub Actions for Git tag pushes
+- manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
+- images are published to `ghcr.io/smailnilson/riskdesk2`
+- stable tags also refresh the `latest` container tag
+
+Why:
+
+- release publishing should not depend on running `docker build` locally
+- tag-based publishing keeps the release image aligned with an immutable Git ref
+
 ### 1. Native IBKR client stabilization
 
 File:
