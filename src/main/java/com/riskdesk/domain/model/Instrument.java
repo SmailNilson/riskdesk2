@@ -2,6 +2,8 @@ package com.riskdesk.domain.model;
 
 import com.riskdesk.domain.shared.vo.ContractSpec;
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.List;
 
 public enum Instrument {
 
@@ -9,7 +11,7 @@ public enum Instrument {
     MGC("Micro Gold", new BigDecimal("10"), new BigDecimal("0.10"), new BigDecimal("1.00")),
     E6("Euro FX Futures (6E)", new BigDecimal("125000"), new BigDecimal("0.00005"), new BigDecimal("6.25")),
     MNQ("Micro E-mini Nasdaq-100", new BigDecimal("2"), new BigDecimal("0.25"), new BigDecimal("0.50")),
-    DXY("US Dollar Index (Synthetic)", new BigDecimal("1000"), new BigDecimal("0.005"), new BigDecimal("5.00"));
+    DXY("Synthetic US Dollar Index", new BigDecimal("1000"), new BigDecimal("0.005"), new BigDecimal("5.00"));
 
     private final String displayName;
     private final BigDecimal contractMultiplier;
@@ -39,6 +41,17 @@ public enum Instrument {
     /** True for instruments whose price is calculated (not fetched from a single IBKR contract). */
     public boolean isSynthetic() {
         return this == DXY;
+    }
+
+    public boolean isExchangeTradedFuture() {
+        return this != DXY;
+    }
+
+    private static final List<Instrument> EXCHANGE_TRADED_FUTURES =
+        Arrays.stream(values()).filter(Instrument::isExchangeTradedFuture).toList();
+
+    public static List<Instrument> exchangeTradedFutures() {
+        return EXCHANGE_TRADED_FUTURES;
     }
 
     /**

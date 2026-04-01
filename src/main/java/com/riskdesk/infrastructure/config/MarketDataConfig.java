@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.infrastructure.marketdata.ibkr.*;
@@ -77,6 +78,13 @@ public class MarketDataConfig {
     public IbGatewayHistoricalProvider ibGatewayHistoricalProvider(IbGatewayNativeClient nativeClient,
                                                                    IbGatewayContractResolver contractResolver) {
         return new IbGatewayHistoricalProvider(nativeClient, contractResolver);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public FxQuoteProvider ibGatewayFxQuoteProvider(IbGatewayNativeClient nativeClient,
+                                                    IbGatewayFxContractResolver contractResolver) {
+        return new IbGatewayFxQuoteProvider(nativeClient, contractResolver);
     }
 
     // -------------------------------------------------------------------------

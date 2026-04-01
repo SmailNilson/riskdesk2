@@ -28,7 +28,6 @@ public class IbkrContractCache {
         Instrument.MGC, 706903676L,  // Micro Gold           APR26
         Instrument.E6,  496647057L,  // EUR/USD Futures (6E) JUN26
         Instrument.MNQ, 770561201L   // Micro E-mini Nasdaq  JUN26
-        // DXY is synthetic — computed from FX pairs, no IBKR conid
     );
 
     // Base conids for contract search (stable across rolls)
@@ -69,7 +68,7 @@ public class IbkrContractCache {
      * Called once during application startup.
      */
     public void refreshConids() {
-        for (Instrument inst : Instrument.values()) {
+        for (Instrument inst : Instrument.exchangeTradedFutures()) {
             refreshInstrument(inst);
         }
     }

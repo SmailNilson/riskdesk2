@@ -176,6 +176,7 @@ class MentorSignalReviewServiceTest {
             null,
             null,
             null,
+            null,
             "DXY_AVAILABLE"
         ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(new MentorAnalyzeResponse(
@@ -372,6 +373,7 @@ class MentorSignalReviewServiceTest {
             null,
             null,
             null,
+            null,
             "DXY_AVAILABLE"
         ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(latestAnalysis);
@@ -420,6 +422,7 @@ class MentorSignalReviewServiceTest {
             }
             return record;
         });
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(null);
         when(indicatorService.computeSnapshot(Instrument.MNQ, "1h")).thenReturn(snapshot("1h", new BigDecimal("24405.00"), new BigDecimal("44.10"), "CHOCH_BEARISH"));
         when(indicatorService.computeSeries(Instrument.MNQ, "10m", 500)).thenReturn(new IndicatorSeriesSnapshot(
             "MNQ",
@@ -437,6 +440,7 @@ class MentorSignalReviewServiceTest {
         when(mentorIntermarketService.current(Instrument.MNQ)).thenReturn(new MentorIntermarketSnapshot(
             0.35,
             "BULLISH",
+            null,
             null,
             null,
             null,
