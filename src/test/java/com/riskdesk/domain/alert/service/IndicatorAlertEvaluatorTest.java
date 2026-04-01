@@ -70,7 +70,9 @@ class IndicatorAlertEvaluatorTest {
             vwap,
             activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
             obEvents == null ? Collections.emptyList() : obEvents,
-            lastCandleTimestamp
+            lastCandleTimestamp,
+            null, null, null, null, Collections.emptyList(), Collections.emptyList(),
+            null, null, null, null, null, null, null, null
         );
     }
 
@@ -80,20 +82,12 @@ class IndicatorAlertEvaluatorTest {
             String wtSignal,
             Instant lastCandleTimestamp) {
         return new IndicatorAlertSnapshot(
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                wtWt1,
-                wtCrossover,
-                wtSignal,
-                null,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                lastCandleTimestamp
+                null, null, null, null, null, null, null,
+                wtWt1, wtCrossover, wtSignal,
+                null, Collections.emptyList(), Collections.emptyList(),
+                lastCandleTimestamp,
+                null, null, null, null, Collections.emptyList(), Collections.emptyList(),
+                null, null, null, null, null, null, null, null
         );
     }
 

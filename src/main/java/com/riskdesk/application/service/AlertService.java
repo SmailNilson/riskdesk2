@@ -87,12 +87,24 @@ public class AlertService {
             log.debug("H1 snapshot error for {}: {}", instrument, e.getMessage());
         }
 
-        // Indicator evaluation via domain service (both timeframes)
-        for (String timeframe : List.of("10m", "1h")) {
+        // Compute H4 snapshot for HTF filter on 1h signals
+        IndicatorSnapshot h4Snap = null;
+        String h4Trend = "UNDEFINED";
+        try {
+            h4Snap = indicatorService.computeSnapshot(instrument, "4h");
+            if (h4Snap != null) h4Trend = h4Snap.marketStructureTrend();
+        } catch (Exception e) {
+            log.debug("H4 snapshot error for {}: {}", instrument, e.getMessage());
+        }
+
+        // Indicator evaluation via domain service (all timeframes)
+        for (String timeframe : List.of("5m", "10m", "30m", "1h", "4h")) {
             try {
-                // Reuse already-computed H1 snapshot; compute fresh snapshot for 10m
-                IndicatorSnapshot snap = "1h".equals(timeframe) ? h1Snap
-                        : indicatorService.computeSnapshot(instrument, timeframe);
+                // Reuse pre-computed snapshots for H1 and H4; compute fresh for others
+                IndicatorSnapshot snap;
+                if ("1h".equals(timeframe)) snap = h1Snap;
+                else if ("4h".equals(timeframe)) snap = h4Snap;
+                else snap = indicatorService.computeSnapshot(instrument, timeframe);
                 if (snap == null) continue;
 
                 List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
@@ -179,7 +191,22 @@ public class AlertService {
             snapshot.recentOrderBlockEvents() == null ? List.of() : snapshot.recentOrderBlockEvents().stream()
                 .map(evt -> new IndicatorAlertSnapshot.OrderBlockEvent(evt.eventType(), evt.obType(), evt.high(), evt.low()))
                 .toList(),
-            snapshot.lastCandleTimestamp()
+            snapshot.lastCandleTimestamp(),
+            // ── V2 expansion fields (wired in Phase 6) ──
+            snapshot.supertrendBullish() ? "UPTREND" : "DOWNTREND",
+            snapshot.bbTrendSignal(),
+            null,  // close — wired in Phase 6
+            null,  // vwapPosition — wired in Phase 6
+            List.of(),  // recentFvgEvents
+            List.of(),  // recentSweepEvents
+            snapshot.deltaFlowBias(),
+            null,  // chaikinCrossover — wired in Phase 6
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().low() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().low() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null
         );
     }
 

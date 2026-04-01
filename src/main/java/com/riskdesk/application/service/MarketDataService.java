@@ -39,10 +39,13 @@ public class MarketDataService {
     private static final Logger log = LoggerFactory.getLogger(MarketDataService.class);
 
     private static final Map<String, Long> TIMEFRAMES = Map.of(
+        "5m",  5L,
         "10m", 10L,
-        "1h",  60L
+        "30m", 30L,
+        "1h",  60L,
+        "4h",  240L
     );
-    private static final String[] FALLBACK_TIMEFRAMES = {"5m", "10m", "1h", "4h", "1d"};
+    private static final String[] FALLBACK_TIMEFRAMES = {"5m", "10m", "30m", "1h", "4h", "1d"};
     private static final long FRESH_CACHE_SECONDS = 15L;
     private static final long INSTANT_FETCH_TIMEOUT_MS = 1200L;
 
