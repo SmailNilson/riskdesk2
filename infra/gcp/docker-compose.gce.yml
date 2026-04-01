@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: riskdesk-postgres
+    restart: unless-stopped
+    env_file:
+      - /etc/riskdesk/postgres.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    container_name: riskdesk-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    container_name: riskdesk-backend
+    restart: unless-stopped
+    env_file:
+      - /etc/riskdesk/runtime.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ibkr-gateway:
+        condition: service_started
+
+  edge:
+    image: nginx:1.27-alpine
+    container_name: riskdesk-edge
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./nginx/local-prod.conf:/etc/nginx/conf.d/default.conf:ro
+
+  ibkr-gateway:
+    image: ${IBKR_GATEWAY_IMAGE}
+    container_name: riskdesk-ibkr-gateway
+    restart: unless-stopped
+    env_file:
+      - /etc/riskdesk/ibkr.env
+    volumes:
+      - /var/lib/riskdesk/ibkr-settings:/home/ibgateway/tws_settings
+      - /var/log/riskdesk/ibkr:/home/ibgateway/logs
+
+volumes:
+  pgdata:

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.codex
+.claude
+.claude-bedrock
+.gemini
+.maq
+.DS_Store
+frontend/node_modules
+frontend/.next
+frontend/.env.local
+node_modules
+*.log
