@@ -110,6 +110,7 @@ public class DeltaFlowProfile {
                 ? new BigDecimal("0.5")
                 : rollingBuy.divide(total, 4, RoundingMode.HALF_UP);
 
+        // UC-ALERT-0006: thresholds 0.55/0.45 hardcoded — migrate to AlertDefinition config
         String bias = buyRatio.compareTo(new BigDecimal("0.55")) > 0 ? "BUYING"
                 : buyRatio.compareTo(new BigDecimal("0.45")) < 0 ? "SELLING" : "NEUTRAL";
 

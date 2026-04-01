@@ -8,7 +8,13 @@ import java.util.*;
  * Smart Money Concepts — Market Structure Analysis.
  * Detects: Swing Highs/Lows, BOS (Break of Structure), CHoCH (Change of Character),
  * Strong/Weak Highs and Lows.
+ *
+ * @deprecated Use {@link SmcStructureEngine} instead, which provides dual-level
+ *             (internal + swing) structure analysis with BOS/CHoCH event tracking.
+ *             This class is retained only for the backtest subsystem.
+ *             Tracked under UC-ALERT-0006 for future removal.
  */
+@Deprecated(forRemoval = true)
 public class MarketStructure {
 
     private final int swingLookback;

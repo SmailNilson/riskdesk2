@@ -55,6 +55,7 @@ public class IndicatorService {
     private final BollingerBandsIndicator bb = new BollingerBandsIndicator(BB_PERIOD, 2.0, BB_TREND_FAST_PERIOD, BB_TREND_SLOW_PERIOD, 2.0);
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
+    // UC-ALERT-0006: OB impulse threshold 0.5 hardcoded — migrate to AlertDefinition config
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     // UC-SMC-010: FVG detector with threshold filtering and visual extension
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(
@@ -260,6 +261,28 @@ public class IndicatorService {
 
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
+        // ── V2 alert wiring fields ────────────────────────────────────────────
+        BigDecimal lastClose = candles.get(candles.size() - 1).getClose();
+        String vwapPos = (vwapResult != null && vwapResult.vwap() != null)
+                ? (lastClose.compareTo(vwapResult.vwap()) > 0 ? "ABOVE" : "BELOW")
+                : null;
+        String chaikinCross = chaikin.crossover(candles);
+
+        // FVG events: gaps whose middle (formation) candle is the last closed candle
+        Instant prevCandleTs = candles.size() >= 2 ? candles.get(candles.size() - 2).getTimestamp() : null;
+        List<IndicatorSnapshot.FvgEventView> recentFvgEventViews = fvgs.stream()
+                .filter(fvg -> prevCandleTs != null && fvg.startBarTime() == prevCandleTs.getEpochSecond())
+                .map(fvg -> new IndicatorSnapshot.FvgEventView(fvg.bias(), fvg.top(), fvg.bottom()))
+                .toList();
+
+        // Sweep events: EQH/EQL pools swept on (or after) the last closed candle
+        List<IndicatorSnapshot.SweepEventView> recentSweepEventViews = eqDetector.detectAllPools(candles).stream()
+                .filter(p -> p.swept() && p.sweptTime() != null && !p.sweptTime().isBefore(lastCandleTimestamp))
+                .map(p -> new IndicatorSnapshot.SweepEventView(
+                        p.type() == EqualLevelDetector.EqualType.EQH ? "EQH_SWEPT" : "EQL_SWEPT",
+                        BigDecimal.valueOf(p.price())))
+                .toList();
+
         return new IndicatorSnapshot(
                 instrument.name(), timeframe,
                 last(ema9v), last(ema50v), last(ema200v), emaCross,
@@ -314,7 +337,9 @@ public class IndicatorService {
                 recentBreaks,
                 // UC-SMC-005: MTF levels
                 mtfLevels,
-                lastCandleTimestamp
+                lastCandleTimestamp,
+                // V2 alert wiring fields
+                lastClose, vwapPos, recentFvgEventViews, recentSweepEventViews, chaikinCross
         );
     }
 
@@ -563,7 +588,9 @@ public class IndicatorService {
                 Collections.emptyList(),
                 // UC-SMC-005: MTF levels
                 null,
-                null
+                null,
+                // V2 alert wiring fields
+                null, null, Collections.emptyList(), Collections.emptyList(), null
         );
     }
 }

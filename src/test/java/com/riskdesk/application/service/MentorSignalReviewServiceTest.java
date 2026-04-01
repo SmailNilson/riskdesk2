@@ -583,7 +583,9 @@ class MentorSignalReviewServiceTest {
             List.of(),
             List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
             null,   // mtfLevels (UC-SMC-005)
-            null
+            null,
+            // V2 alert wiring fields
+            null, null, List.of(), List.of(), null
         );
     }
 

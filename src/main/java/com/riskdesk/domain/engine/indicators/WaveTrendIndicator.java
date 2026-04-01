@@ -26,6 +26,7 @@ public class WaveTrendIndicator implements TechnicalIndicator<WaveTrendIndicator
     private final int n2;
     private final int signalPeriod;
 
+    // UC-ALERT-0006: levels ±53 and factor 0.015 hardcoded — migrate to AlertDefinition config
     private static final BigDecimal OB_LEVEL = BigDecimal.valueOf(53);
     private static final BigDecimal OS_LEVEL = BigDecimal.valueOf(-53);
     private static final BigDecimal FACTOR   = new BigDecimal("0.015");

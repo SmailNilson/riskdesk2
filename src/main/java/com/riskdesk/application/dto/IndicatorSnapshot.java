@@ -93,7 +93,19 @@ public record IndicatorSnapshot(
     MtfLevelsView mtfLevels,
 
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
-    Instant lastCandleTimestamp
+    Instant lastCandleTimestamp,
+
+    // ── V2 alert wiring fields ─────────────────────────────────────────────
+    /** Close price of the last candle — used for VWAP position and MTF level comparison. */
+    BigDecimal close,
+    /** Derived VWAP position: "ABOVE" or "BELOW". */
+    String vwapPosition,
+    /** FVG formations on the most recent closed candle (one-shot alert triggers). */
+    List<FvgEventView> recentFvgEvents,
+    /** Equal-level sweep events detected on the most recent closed candle. */
+    List<SweepEventView> recentSweepEvents,
+    /** Chaikin Oscillator zero-line crossover: "BULLISH_CROSS" or "BEARISH_CROSS". */
+    String chaikinCrossover
 ) {
     public record OrderBlockView(
         String type,
@@ -120,4 +132,10 @@ public record IndicatorSnapshot(
 
     /** UC-SMC-005: Multi-timeframe OHLC levels (daily, weekly, monthly). Null means no data for that timeframe. */
     public record MtfLevelsView(MtfLevelView daily, MtfLevelView weekly, MtfLevelView monthly) {}
+
+    /** FVG formation event (Phase 6: alert wiring). */
+    public record FvgEventView(String bias, BigDecimal top, BigDecimal bottom) {}
+
+    /** Equal-level sweep event (Phase 6: alert wiring). */
+    public record SweepEventView(String type, BigDecimal price) {}
 }

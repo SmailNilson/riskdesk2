@@ -192,15 +192,19 @@ public class AlertService {
                 .map(evt -> new IndicatorAlertSnapshot.OrderBlockEvent(evt.eventType(), evt.obType(), evt.high(), evt.low()))
                 .toList(),
             snapshot.lastCandleTimestamp(),
-            // ── V2 expansion fields (wired in Phase 6) ──
+            // ── V2 expansion fields ──
             snapshot.supertrendBullish() ? "UPTREND" : "DOWNTREND",
             snapshot.bbTrendSignal(),
-            null,  // close — wired in Phase 6
-            null,  // vwapPosition — wired in Phase 6
-            List.of(),  // recentFvgEvents
-            List.of(),  // recentSweepEvents
+            snapshot.close(),
+            snapshot.vwapPosition(),
+            snapshot.recentFvgEvents() == null ? List.of() : snapshot.recentFvgEvents().stream()
+                .map(f -> new IndicatorAlertSnapshot.FvgEvent(f.bias(), f.top(), f.bottom()))
+                .toList(),
+            snapshot.recentSweepEvents() == null ? List.of() : snapshot.recentSweepEvents().stream()
+                .map(s -> new IndicatorAlertSnapshot.SweepEvent(s.type(), s.price()))
+                .toList(),
             snapshot.deltaFlowBias(),
-            null,  // chaikinCrossover — wired in Phase 6
+            snapshot.chaikinCrossover(),
             snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().high() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().low() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().high() : null,

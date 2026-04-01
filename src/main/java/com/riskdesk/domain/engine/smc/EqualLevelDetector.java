@@ -4,6 +4,7 @@ import com.riskdesk.domain.model.Candle;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -122,10 +123,30 @@ public class EqualLevelDetector {
 
     /**
      * Detect and aggregate active liquidity pools from equal highs / lows.
+     * Returns only pools that have NOT been swept yet.
      */
     public List<LiquidityPool> detectPools(List<Candle> candles) {
+        if (candles.size() < lookback + 1) return List.of();
+        return buildAllPools(candles).stream()
+                .filter(pool -> !pool.swept())
+                .toList();
+    }
+
+    /**
+     * Detect all liquidity pools including swept ones.
+     * Used to identify recent sweep events (e.g. on the last closed candle).
+     */
+    public List<LiquidityPool> detectAllPools(List<Candle> candles) {
+        if (candles.size() < lookback + 1) return List.of();
+        return Collections.unmodifiableList(buildAllPools(candles));
+    }
+
+    /**
+     * Core pool-building logic: pivot detection → clustering → sweep detection.
+     * Returns all pools (swept and active).
+     */
+    private List<LiquidityPool> buildAllPools(List<Candle> candles) {
         int n = candles.size();
-        if (n < lookback + 1) return List.of();
 
         // 1. Collect all confirmed swing pivots (right-side only)
         List<PivotCandidate> swingHighs = new ArrayList<>();
@@ -161,9 +182,7 @@ public class EqualLevelDetector {
         List<LiquidityPool> results = new ArrayList<>();
         clusterPivots(swingHighs, EqualType.EQH, candles, results);
         clusterPivots(swingLows, EqualType.EQL, candles, results);
-        return results.stream()
-                .filter(pool -> !pool.swept())
-                .toList();
+        return results;
     }
 
     /**

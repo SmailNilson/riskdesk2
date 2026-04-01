@@ -254,7 +254,9 @@ class AlertServiceTest {
             List.of(),
             List.of(),
             null,
-            null
+            null,
+            // V2 alert wiring fields
+            null, null, List.of(), List.of(), null
         );
     }
 

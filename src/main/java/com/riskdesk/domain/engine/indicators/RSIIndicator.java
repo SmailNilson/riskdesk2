@@ -24,6 +24,7 @@ public class RSIIndicator implements TechnicalIndicator<BigDecimal> {
     }
 
     public RSIIndicator() {
+        // UC-ALERT-0006: thresholds 33/40/60 hardcoded — migrate to AlertDefinition config
         this(14, 33.0, 40.0, 60.0);
     }
 
