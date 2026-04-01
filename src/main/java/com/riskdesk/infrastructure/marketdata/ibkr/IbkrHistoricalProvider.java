@@ -78,6 +78,7 @@ public class IbkrHistoricalProvider implements HistoricalDataProvider {
                 double c = bar2.path("c").asDouble(0);
                 long   v = bar2.path("v").asLong(0);
                 if (o == 0 || c == 0) continue;
+                if (o == h && h == l && l == c && v == 0) continue;
 
                 candles.add(new Candle(instrument, timeframe,
                     Instant.ofEpochMilli(t),
