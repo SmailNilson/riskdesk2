@@ -61,7 +61,9 @@ public class HistoricalDataService implements ApplicationRunner {
 
     /** Set to true once real candles have been successfully loaded. */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
-    private final Map<String, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
+    private final Map<RefreshKey, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
+
+    private record RefreshKey(Instrument instrument, String timeframe) {}
 
     public HistoricalDataService(HistoricalDataProvider historicalProvider,
                                  CandleRepositoryPort candlePort,
@@ -176,7 +178,7 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     private int refreshSingleInstrumentTimeframeBounded(Instrument instrument, String timeframe, String context) {
-        String refreshKey = instrument.name() + ":" + timeframe;
+        RefreshKey refreshKey = new RefreshKey(instrument, timeframe);
         long now = System.currentTimeMillis();
         Long lastRefreshAt = mentorRefreshTimestamps.get(refreshKey);
         if (lastRefreshAt != null && now - lastRefreshAt < mentorRefreshCooldownMs) {

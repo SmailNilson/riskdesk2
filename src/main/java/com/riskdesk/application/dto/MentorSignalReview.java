@@ -17,6 +17,7 @@ public record MentorSignalReview(
     String action,
     String timestamp,
     String createdAt,
+    String selectedTimezone,
     ExecutionEligibilityStatus executionEligibilityStatus,
     String executionEligibilityReason,
     TradeSimulationStatus simulationStatus,

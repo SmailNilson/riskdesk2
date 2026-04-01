@@ -1,0 +1,11 @@
+# Local backend profile for using the IBKR Gateway running on GCP through
+# an SSH/IAP tunnel opened on the Mac:
+#   gcloud compute ssh --tunnel-through-iap riskdesk-prod-a --zone us-central1-a -- -N -L 4003:127.0.0.1:4003
+
+# Defaults target the production IBKR Gateway in LIVE mode.
+# Override with env vars if you need a different host/port/clientId.
+riskdesk.ibkr.native-host=${RISKDESK_IBKR_NATIVE_HOST:127.0.0.1}
+riskdesk.ibkr.native-port=${RISKDESK_IBKR_NATIVE_PORT:4003}
+riskdesk.ibkr.native-client-id=${RISKDESK_IBKR_NATIVE_CLIENT_ID:17}
+riskdesk.ibkr.native-read-only=true
+server.port=${RISKDESK_LOCAL_BACKEND_PORT:8081}

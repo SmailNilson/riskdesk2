@@ -7,6 +7,7 @@ import com.riskdesk.domain.model.Instrument;
 import io.cucumber.java.en.*;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -14,6 +15,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 public class IndicatorSignalSteps {
+    private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-28T16:00:00Z");
 
     private final IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator();
     private IndicatorAlertSnapshot snapshot;
@@ -25,16 +27,12 @@ public class IndicatorSignalSteps {
     public void indicatorSnapshotWithEmaCrossover(String crossover, String inst, String tf) {
         instrument = Instrument.valueOf(inst);
         timeframe = tf;
-        snapshot = new IndicatorAlertSnapshot(
+        snapshot = snapshot(
                 crossover,
                 null, null,
                 null,
                 null, null, null,
-                null, null, null,
-                null,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                null
+                null, null, null
         );
     }
 
@@ -42,16 +40,12 @@ public class IndicatorSignalSteps {
     public void indicatorSnapshotWithRsiSignal(String signal, double rsiValue, String inst, String tf) {
         instrument = Instrument.valueOf(inst);
         timeframe = tf;
-        snapshot = new IndicatorAlertSnapshot(
+        snapshot = snapshot(
                 null,
                 new BigDecimal(String.valueOf(rsiValue)), signal,
                 null,
                 null, null, null,
-                null, null, null,
-                null,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                null
+                null, null, null
         );
     }
 
@@ -59,16 +53,12 @@ public class IndicatorSignalSteps {
     public void indicatorSnapshotWithMacdCrossover(String crossover, String inst, String tf) {
         instrument = Instrument.valueOf(inst);
         timeframe = tf;
-        snapshot = new IndicatorAlertSnapshot(
+        snapshot = snapshot(
                 null,
                 null, null,
                 crossover,
                 null, null, null,
-                null, null, null,
-                null,
-                Collections.emptyList(),
-                Collections.emptyList(),
-                null
+                null, null, null
         );
     }
 
@@ -76,16 +66,42 @@ public class IndicatorSignalSteps {
     public void indicatorSnapshotWithBreakType(String breakType, String inst, String tf) {
         instrument = Instrument.valueOf(inst);
         timeframe = tf;
-        snapshot = new IndicatorAlertSnapshot(
+        snapshot = snapshot(
                 null,
                 null, null,
                 null,
                 breakType, breakType, null,
-                null, null, null,
+                null, null, null
+        );
+    }
+
+    private IndicatorAlertSnapshot snapshot(
+            String emaCrossover,
+            BigDecimal rsi,
+            String rsiSignal,
+            String macdCrossover,
+            String lastBreakType,
+            String lastInternalBreakType,
+            String lastSwingBreakType,
+            BigDecimal wtWt1,
+            String wtCrossover,
+            String wtSignal
+    ) {
+        return new IndicatorAlertSnapshot(
+                emaCrossover,
+                rsi,
+                rsiSignal,
+                macdCrossover,
+                lastBreakType,
+                lastInternalBreakType,
+                lastSwingBreakType,
+                wtWt1,
+                wtCrossover,
+                wtSignal,
                 null,
                 Collections.emptyList(),
                 Collections.emptyList(),
-                null
+                CLOSED_CANDLE
         );
     }
 

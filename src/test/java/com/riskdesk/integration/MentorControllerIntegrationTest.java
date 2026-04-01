@@ -140,6 +140,7 @@ class MentorControllerIntegrationTest {
                 21L,
                 "MANUAL_MENTOR",
                 "2026-03-26T03:10:54Z",
+                "Africa/Casablanca",
                 "E6",
                 "M10",
                 "LONG",
@@ -175,6 +176,7 @@ class MentorControllerIntegrationTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$[0].auditId").value(21))
             .andExpect(jsonPath("$[0].sourceType").value("MANUAL_MENTOR"))
+            .andExpect(jsonPath("$[0].selectedTimezone").value("Africa/Casablanca"))
             .andExpect(jsonPath("$[0].response.model").value("gemini-test"));
     }
 
@@ -195,6 +197,7 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
+                "UTC",
                 ExecutionEligibilityStatus.ELIGIBLE,
                 "Review explicitly eligible.",
                 null,
@@ -210,6 +213,7 @@ class MentorControllerIntegrationTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$[0].id").value(5))
             .andExpect(jsonPath("$[0].alertKey").exists())
+            .andExpect(jsonPath("$[0].selectedTimezone").value("UTC"))
             .andExpect(jsonPath("$[0].triggerType").value("INITIAL"));
     }
 
@@ -230,6 +234,7 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:30:40Z",
+                "UTC",
                 ExecutionEligibilityStatus.ELIGIBLE,
                 "Review explicitly eligible.",
                 null,
@@ -253,6 +258,7 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:31:10Z",
+                "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
                 null,
@@ -282,7 +288,7 @@ class MentorControllerIntegrationTest {
 
     @Test
     void reanalyzeExistingAlert_returnsPendingReview() throws Exception {
-        when(mentorSignalReviewService.reanalyzeAlert(any(), any(), any(), any())).thenReturn(
+        when(mentorSignalReviewService.reanalyzeAlert(any(), any(), any(), any(), any())).thenReturn(
             new MentorSignalReview(
                 13L,
                 "2026-03-26T02:30:39Z:MNQ:SMC:Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
@@ -297,6 +303,7 @@ class MentorControllerIntegrationTest {
                 "SHORT",
                 "2026-03-26T02:30:39Z",
                 "2026-03-26T02:32:00Z",
+                "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
                 null,
@@ -316,12 +323,14 @@ class MentorControllerIntegrationTest {
                       "category": "SMC",
                       "message": "Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
                       "instrument": "MNQ",
-                      "timestamp": "2026-03-26T02:30:39Z"
+                      "timestamp": "2026-03-26T02:30:39Z",
+                      "selectedTimezone": "Africa/Casablanca"
                     }
                     """))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.id").value(13))
             .andExpect(jsonPath("$.revision").value(3))
+            .andExpect(jsonPath("$.selectedTimezone").value("Africa/Casablanca"))
             .andExpect(jsonPath("$.status").value("ANALYZING"));
     }
 

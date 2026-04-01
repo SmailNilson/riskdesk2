@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
+import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
@@ -10,29 +11,45 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class IndicatorServiceTest {
 
     @Test
-    void computeSeriesLoadsWarmupHistoryButReturnsRequestedWindow() {
-        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
-        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
-        when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(Optional.empty());
+    void computeSnapshotLoadsSnapshotLookbackAndReturnsLatestTimestamp() {
+        FakeCandleRepositoryPort candlePort = new FakeCandleRepositoryPort();
+        ActiveContractRegistry contractRegistry = new ActiveContractRegistry();
+        List<Candle> history = buildHistory(2_100);
+        candlePort.stubRecentCandles(Instrument.MCL, "10m", 2_000, descendingTail(history, 2_000));
 
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry);
+
+        IndicatorSnapshot snapshot = service.computeSnapshot(Instrument.MCL, "10m");
+
+        assertEquals(List.of("MCL:10m:2000", "MCL:1d:2", "MCL:1w:2", "MCL:1M:2"), candlePort.recentRequests());
+        assertEquals("MCL", snapshot.instrument());
+        assertEquals("10m", snapshot.timeframe());
+        assertNotNull(snapshot.activeFairValueGaps());
+        assertEquals(history.get(history.size() - 1).getTimestamp(), snapshot.lastCandleTimestamp());
+    }
+
+    @Test
+    void computeSeriesLoadsWarmupHistoryButReturnsRequestedWindow() {
+        FakeCandleRepositoryPort candlePort = new FakeCandleRepositoryPort();
+        ActiveContractRegistry contractRegistry = new ActiveContractRegistry();
         List<Candle> history = buildHistory(1_600);
-        when(candlePort.findRecentCandles(Instrument.MCL, "10m", 1_500))
-                .thenReturn(descendingTail(history, 1_500));
+        candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_500, descendingTail(history, 1_500));
 
         IndicatorService service = new IndicatorService(candlePort, contractRegistry);
 
         IndicatorSeriesSnapshot series = service.computeSeries(Instrument.MCL, "10m", 500);
 
-        verify(candlePort).findRecentCandles(Instrument.MCL, "10m", 1_500);
+        assertEquals(List.of("MCL:10m:1500"), candlePort.recentRequests());
         assertEquals(500, series.ema9().size());
         assertEquals(500, series.ema50().size());
         assertEquals(500, series.ema200().size());
@@ -65,5 +82,64 @@ class IndicatorServiceTest {
         List<Candle> tail = new ArrayList<>(candles.subList(fromIndex, candles.size()));
         java.util.Collections.reverse(tail);
         return tail;
+    }
+
+    private static final class FakeCandleRepositoryPort implements CandleRepositoryPort {
+
+        private final Map<String, List<Candle>> recentCandles = new java.util.HashMap<>();
+        private final List<String> recentRequests = new ArrayList<>();
+
+        void stubRecentCandles(Instrument instrument, String timeframe, int limit, List<Candle> candles) {
+            recentCandles.put(key(instrument, timeframe, limit), candles);
+        }
+
+        List<String> recentRequests() {
+            return recentRequests;
+        }
+
+        @Override
+        public List<Candle> findCandles(Instrument instrument, String timeframe, Instant from) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public List<Candle> findRecentCandles(Instrument instrument, String timeframe, int limit) {
+            recentRequests.add(key(instrument, timeframe, limit));
+            return recentCandles.getOrDefault(key(instrument, timeframe, limit), Collections.emptyList());
+        }
+
+        @Override
+        public List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe, String contractMonth, int limit) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public Candle save(Candle candle) {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
+        public List<Candle> saveAll(List<Candle> candles) {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
+        public void deleteAll() {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
+        public void deleteByInstrumentAndTimeframe(Instrument instrument, String timeframe) {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
+        public long count() {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        private String key(Instrument instrument, String timeframe, int limit) {
+            return instrument.name() + ":" + timeframe + ":" + limit;
+        }
     }
 }

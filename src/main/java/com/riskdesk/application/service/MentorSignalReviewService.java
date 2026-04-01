@@ -17,12 +17,14 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -43,6 +45,7 @@ public class MentorSignalReviewService {
     private static final String STATUS_ERROR = "ERROR";
     private static final String TRIGGER_INITIAL = "INITIAL";
     private static final String TRIGGER_MANUAL_REANALYSIS = "MANUAL_REANALYSIS";
+    private static final String AUTO_SELECTED_TIMEZONE = "UTC";
 
     private final MentorAnalysisService mentorAnalysisService;
     private final IndicatorService indicatorService;
@@ -54,8 +57,8 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. Default OFF. */
-    private volatile boolean autoAnalysisEnabled = false;
+    /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
+    private volatile boolean autoAnalysisEnabled;
 
     public boolean isAutoAnalysisEnabled() { return autoAnalysisEnabled; }
     public void setAutoAnalysisEnabled(boolean enabled) { autoAnalysisEnabled = enabled; }
@@ -68,7 +71,8 @@ public class MentorSignalReviewService {
                                      ActiveContractRegistry contractRegistry,
                                      MentorSignalReviewRepositoryPort reviewRepository,
                                      SimpMessagingTemplate messagingTemplate,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
         this.mentorIntermarketService = mentorIntermarketService;
@@ -78,6 +82,7 @@ public class MentorSignalReviewService {
         this.reviewRepository = reviewRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
+        this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
     public void captureInitialReview(Alert alert) {
@@ -101,30 +106,12 @@ public class MentorSignalReviewService {
 
         for (Map.Entry<String, List<Alert>> entry : byDirection.entrySet()) {
             List<Alert> group = entry.getValue();
-            // Use the first alert as the "primary" for the review record,
-            // but include all indicator categories in the message
             Alert primary = group.get(0);
-            List<String> categories = group.stream()
-                .map(a -> a.category().name())
-                .distinct()
-                .toList();
-
-            String combinedMessage = primary.message();
-            if (categories.size() > 1) {
-                // Enrich message with all firing indicators
-                combinedMessage = primary.message() + " [+" + String.join(", ",
-                    categories.subList(1, categories.size())) + "]";
-            }
-
-            // Build a combined alert with enriched message
-            Alert combinedAlert = new Alert(
-                primary.key(),
-                primary.severity(),
-                combinedMessage,
-                primary.category(),
-                primary.instrument()
-            );
-            captureInitialReview(combinedAlert, focusSnapshot);
+            // Persist the review against the exact primary alert shown in the live feed.
+            // The UI correlates reviews back to alert groups through the original
+            // timestamp/category/message triple, so rewriting any of those fields
+            // breaks review attachment and makes fresh groups appear as "No Review".
+            captureInitialReview(primary, focusSnapshot);
         }
     }
 
@@ -144,7 +131,7 @@ public class MentorSignalReviewService {
         String snapshotJson = "{}";
         String snapshotError = null;
         try {
-            payload = buildPayload(candidate, alert, focusSnapshot);
+            payload = buildPayload(candidate, alert, focusSnapshot, AUTO_SELECTED_TIMEZONE);
             snapshotJson = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
             snapshotError = "Snapshot capture failed: " + errorMessage(e);
@@ -158,6 +145,7 @@ public class MentorSignalReviewService {
             alert,
             candidate,
             Instant.now(),
+            AUTO_SELECTED_TIMEZONE,
             snapshotJson
         );
         if (snapshotError != null) {
@@ -176,10 +164,18 @@ public class MentorSignalReviewService {
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert) {
-        return reanalyzeAlert(alert, null, null, null);
+        return reanalyzeAlert(alert, AUTO_SELECTED_TIMEZONE, null, null, null);
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert,
+                                             BigDecimal entryPrice,
+                                             BigDecimal stopLoss,
+                                             BigDecimal takeProfit) {
+        return reanalyzeAlert(alert, AUTO_SELECTED_TIMEZONE, entryPrice, stopLoss, takeProfit);
+    }
+
+    public MentorSignalReview reanalyzeAlert(Alert alert,
+                                             String selectedTimezone,
                                              BigDecimal entryPrice,
                                              BigDecimal stopLoss,
                                              BigDecimal takeProfit) {
@@ -202,6 +198,7 @@ public class MentorSignalReviewService {
             firstNonNull(takeProfit, previousPlan.takeProfit())
         );
         Instant createdAt = Instant.now();
+        String normalizedSelectedTimezone = normalizeSelectedTimezone(selectedTimezone);
         MentorSignalReviewRecord pending = newReviewRecord(
             alertKey,
             thread.get(thread.size() - 1).getRevision() + 1,
@@ -210,11 +207,12 @@ public class MentorSignalReviewService {
             alert,
             candidate,
             createdAt,
+            normalizedSelectedTimezone,
             "{}"
         );
         MentorSignalReviewRecord saved;
         try {
-            JsonNode payload = buildPayload(candidate, alert, null, TRIGGER_MANUAL_REANALYSIS, baseReview, requestedPlan);
+            JsonNode payload = buildPayload(candidate, alert, null, TRIGGER_MANUAL_REANALYSIS, baseReview, requestedPlan, normalizedSelectedTimezone);
             pending.setSnapshotJson(writeJson(payload));
             saved = reviewRepository.save(pending);
             publish(saved);
@@ -255,6 +253,7 @@ public class MentorSignalReviewService {
                                                      Alert alert,
                                                      AlertReviewCandidate candidate,
                                                      Instant createdAt,
+                                                     String selectedTimezone,
                                                      String snapshotJson) {
         MentorSignalReviewRecord review = new MentorSignalReviewRecord();
         review.setAlertKey(alertKey);
@@ -269,6 +268,7 @@ public class MentorSignalReviewService {
         review.setAction(candidate.action());
         review.setAlertTimestamp(alert.timestamp());
         review.setCreatedAt(createdAt);
+        review.setSelectedTimezone(normalizeSelectedTimezone(selectedTimezone));
         review.setSnapshotJson(defaultSnapshotJson(snapshotJson));
         review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.NOT_EVALUATED);
         review.setExecutionEligibilityReason("Mentor analysis pending.");
@@ -345,6 +345,7 @@ public class MentorSignalReviewService {
             review.getAction(),
             review.getAlertTimestamp() == null ? null : review.getAlertTimestamp().toString(),
             review.getCreatedAt() == null ? null : review.getCreatedAt().toString(),
+            review.getSelectedTimezone(),
             review.getExecutionEligibilityStatus(),
             review.getExecutionEligibilityReason(),
             review.getSimulationStatus(),
@@ -404,7 +405,8 @@ public class MentorSignalReviewService {
                                   IndicatorSnapshot precomputedFocusSnapshot,
                                   String triggerType,
                                   MentorSignalReviewRecord originalReview,
-                                  TradePlanValues requestedPlan) {
+                                  TradePlanValues requestedPlan,
+                                  String selectedTimezone) {
         IndicatorSnapshot focusSnapshot = precomputedFocusSnapshot != null
             ? precomputedFocusSnapshot
             : indicatorService.computeSnapshot(candidate.instrument(), candidate.timeframe());
@@ -442,7 +444,7 @@ public class MentorSignalReviewService {
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
             "dashboard_connection_status", "LIVE",
-            "selected_timezone", "UTC"
+            "selected_timezone", normalizeSelectedTimezone(selectedTimezone)
         ));
         payload.put("trade_intention", linkedMap(
             "action", candidate.action(),
@@ -519,8 +521,11 @@ public class MentorSignalReviewService {
         return objectMapper.valueToTree(payload);
     }
 
-    private JsonNode buildPayload(AlertReviewCandidate candidate, Alert alert, IndicatorSnapshot precomputedFocusSnapshot) {
-        return buildPayload(candidate, alert, precomputedFocusSnapshot, TRIGGER_INITIAL, null, null);
+    private JsonNode buildPayload(AlertReviewCandidate candidate,
+                                  Alert alert,
+                                  IndicatorSnapshot precomputedFocusSnapshot,
+                                  String selectedTimezone) {
+        return buildPayload(candidate, alert, precomputedFocusSnapshot, TRIGGER_INITIAL, null, null, selectedTimezone);
     }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
@@ -647,7 +652,9 @@ public class MentorSignalReviewService {
                 || message.contains("oversold")
                 || message.contains("overbought");
             case "RSI" -> message.contains("oversold") || message.contains("overbought");
-            case "ORDER_BLOCK" -> message.contains("VWAP inside");
+            case "ORDER_BLOCK", "ORDER_BLOCK_VWAP" -> message.contains("VWAP inside")
+                || message.contains("mitigated")
+                || message.contains("invalidated");
             default -> false;
         };
     }
@@ -949,6 +956,17 @@ public class MentorSignalReviewService {
 
     private String defaultSnapshotJson(String snapshotJson) {
         return snapshotJson == null || snapshotJson.isBlank() ? "{}" : snapshotJson;
+    }
+
+    private String normalizeSelectedTimezone(String selectedTimezone) {
+        if (selectedTimezone == null || selectedTimezone.isBlank()) {
+            return AUTO_SELECTED_TIMEZONE;
+        }
+        try {
+            return ZoneId.of(selectedTimezone).getId();
+        } catch (Exception ignored) {
+            return AUTO_SELECTED_TIMEZONE;
+        }
     }
 
     private String errorMessage(Exception e) {

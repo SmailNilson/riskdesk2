@@ -49,6 +49,29 @@ This is expected until internal IBKR/DB-backed inputs exist.
 
 ## Recent Technical Changes
 
+### 0. GitHub-hosted Docker image pipeline
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/.github/workflows/docker-image.yml`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/.dockerignore`
+
+What changed:
+
+- Docker image validation now runs in GitHub Actions for `push` to `main` and pull requests targeting `main`
+- Docker image publication now runs in GitHub Actions for Git tag pushes
+- manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
+- images are published to `ghcr.io/smailnilson/riskdesk2`
+- stable tags also refresh the `latest` container tag
+- tagged releases can now also be deployed from GitHub Actions over SSH via `docker-compose.release.yml` on the server
+- the deploy workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- the private IBKR `tws-api` dependency is vendored in `vendor/maven-repo` so Docker and GitHub Actions builds can resolve it without a developer-local Maven cache
+
+Why:
+
+- release publishing should not depend on running `docker build` locally
+- tag-based publishing keeps the release image aligned with an immutable Git ref
+
 ### 1. Native IBKR client stabilization
 
 File:
@@ -173,6 +196,7 @@ What changed:
 - `IndicatorAlertEvaluator` switched from state-based to transition-based detection: alerts only fire when a condition *changes*, not when it persists across polling cycles
 - uses a `ConcurrentHashMap<String, String>` to track last-known state per indicator/instrument/timeframe
 - `AlertService` now publishes individual alerts to WebSocket but batches Mentor reviews by direction for alerts that fire in the same polling cycle
+- indicator alert dedup is now key-based on the shared short cooldown only; it no longer blocks a full `10m` or `1h` window, so multiple same-timeframe alerts can surface when new transitions occur
 - `MentorSignalReviewService.captureGroupReview()` groups alerts by direction and creates one combined review per group
 - `MentorSignalPanel` groups alerts in the UI by instrument+timeframe+direction within a 90-second time window
 - added instrument filter dropdown to `MentorSignalPanel`

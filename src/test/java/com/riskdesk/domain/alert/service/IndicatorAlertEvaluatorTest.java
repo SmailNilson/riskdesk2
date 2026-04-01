@@ -10,6 +10,7 @@ import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 
@@ -17,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class IndicatorAlertEvaluatorTest {
 
+    private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-28T16:00:00Z");
+    private static final Instant NEXT_CANDLE = Instant.parse("2026-03-28T17:00:00Z");
     private final IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator();
 
     /**
@@ -30,7 +33,7 @@ class IndicatorAlertEvaluatorTest {
             BigDecimal vwap,
             List<OrderBlockZone> activeOrderBlocks) {
         return makeSnapshotWithEvents(emaCrossover, rsi, rsiSignal, macdCrossover,
-                lastBreakType, vwap, activeOrderBlocks, Collections.emptyList());
+                lastBreakType, vwap, activeOrderBlocks, Collections.emptyList(), CLOSED_CANDLE);
     }
 
     private static IndicatorAlertSnapshot makeSnapshotWithEvents(
@@ -41,6 +44,19 @@ class IndicatorAlertEvaluatorTest {
             BigDecimal vwap,
             List<OrderBlockZone> activeOrderBlocks,
             List<OrderBlockEvent> obEvents) {
+        return makeSnapshotWithEvents(emaCrossover, rsi, rsiSignal, macdCrossover,
+                lastBreakType, vwap, activeOrderBlocks, obEvents, CLOSED_CANDLE);
+    }
+
+    private static IndicatorAlertSnapshot makeSnapshotWithEvents(
+            String emaCrossover,
+            BigDecimal rsi, String rsiSignal,
+            String macdCrossover,
+            String lastBreakType,
+            BigDecimal vwap,
+            List<OrderBlockZone> activeOrderBlocks,
+            List<OrderBlockEvent> obEvents,
+            Instant lastCandleTimestamp) {
         return new IndicatorAlertSnapshot(
             emaCrossover,
             rsi, rsiSignal,
@@ -54,7 +70,30 @@ class IndicatorAlertEvaluatorTest {
             vwap,
             activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
             obEvents == null ? Collections.emptyList() : obEvents,
-            null
+            lastCandleTimestamp
+        );
+    }
+
+    private static IndicatorAlertSnapshot makeWaveTrendSnapshot(
+            BigDecimal wtWt1,
+            String wtCrossover,
+            String wtSignal,
+            Instant lastCandleTimestamp) {
+        return new IndicatorAlertSnapshot(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                wtWt1,
+                wtCrossover,
+                wtSignal,
+                null,
+                Collections.emptyList(),
+                Collections.emptyList(),
+                lastCandleTimestamp
         );
     }
 
@@ -226,5 +265,34 @@ class IndicatorAlertEvaluatorTest {
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", snap);
 
         assertTrue(alerts.isEmpty(), "VWAP-inside-OB must no longer generate an alert on its own");
+    }
+
+    @Test
+    void smcTransition_isNotConsumedBeforeCandleClose() {
+        IndicatorAlertSnapshot openCandleSnapshot = makeSnapshotWithEvents(
+                null, null, null, null, "BOS_UP", null, null, Collections.emptyList(), null);
+        IndicatorAlertSnapshot closedCandleSnapshot = makeSnapshotWithEvents(
+                null, null, null, null, "BOS_UP", null, null, Collections.emptyList(), CLOSED_CANDLE);
+
+        assertTrue(evaluator.evaluate(Instrument.MCL, "10m", openCandleSnapshot).isEmpty());
+
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "10m", closedCandleSnapshot);
+
+        assertEquals(2, alerts.size(), "confirmed BOS should still fire after the open-candle pass");
+    }
+
+    @Test
+    void waveTrendTransition_isNotConsumedBeforeCandleClose() {
+        IndicatorAlertSnapshot openCandleSnapshot = makeWaveTrendSnapshot(
+                new BigDecimal("61.2"), null, "OVERBOUGHT", null);
+        IndicatorAlertSnapshot closedCandleSnapshot = makeWaveTrendSnapshot(
+                new BigDecimal("61.2"), null, "OVERBOUGHT", NEXT_CANDLE);
+
+        assertTrue(evaluator.evaluate(Instrument.MNQ, "1h", openCandleSnapshot).isEmpty());
+
+        List<Alert> alerts = evaluator.evaluate(Instrument.MNQ, "1h", closedCandleSnapshot);
+
+        assertEquals(1, alerts.size(), "confirmed WaveTrend signal should still fire after the open-candle pass");
+        assertTrue(alerts.get(0).message().contains("overbought"));
     }
 }

@@ -69,6 +69,9 @@ public class MentorSignalReviewEntity {
     @Column(nullable = false)
     private Instant createdAt;
 
+    @Column(length = 64)
+    private String selectedTimezone;
+
     @Column
     private Instant completedAt;
 
@@ -206,6 +209,14 @@ public class MentorSignalReviewEntity {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getSelectedTimezone() {
+        return selectedTimezone;
+    }
+
+    public void setSelectedTimezone(String selectedTimezone) {
+        this.selectedTimezone = selectedTimezone;
     }
 
     public Instant getCompletedAt() {

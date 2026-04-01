@@ -44,6 +44,9 @@ public class MentorMemoryService {
 
     @EventListener(ApplicationReadyEvent.class)
     void initialize() {
+        if (!properties.isMemoryEnabled() || !properties.isEmbeddingsEnabled()) {
+            return;
+        }
         ensureSchemaInitialized();
     }
 
@@ -137,6 +140,9 @@ public class MentorMemoryService {
     }
 
     public String currentStorageMode() {
+        if (!properties.isMemoryEnabled() || !properties.isEmbeddingsEnabled()) {
+            return "disabled";
+        }
         ensureSchemaInitialized();
         return vectorColumnAvailable ? "pgvector" : "json_fallback";
     }

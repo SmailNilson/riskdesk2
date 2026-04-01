@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { MentorSignalReview } from '@/app/lib/api';
+import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
 
 export interface PriceUpdate {
   instrument: string;
@@ -20,8 +21,14 @@ export interface AlertMessage {
   timestamp: string;
 }
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8080/ws';
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined) {
+  const base = (wsBase || apiBase || '').replace(/\/$/, '');
+  if (!base) return '/ws';
+  return base.endsWith('/ws') ? base : `${base}/ws`;
+}
+
+const WS_URL = buildWsUrl(WS_BASE, API_BASE);
+const API_URL = API_BASE ?? '';
 const MENTOR_REVIEW_HISTORY_LIMIT = 1000;
 
 export function useWebSocket() {
@@ -31,31 +38,44 @@ export function useWebSocket() {
   const [mentorSignalReviews, setMentorSignalReviews] = useState<MentorSignalReview[]>([]);
   const [connected, setConnected] = useState(false);
 
+  const loadRecentAlerts = useCallback(() => {
+    fetch(`${API_URL}/api/alerts/recent`)
+      .then(r => r.ok ? r.json() : [])
+      .then((recent: AlertMessage[]) => {
+        setAlerts(prev => {
+          const existing = new Set(prev.map(a => a.timestamp + a.message));
+          const fresh = recent.filter(a => !existing.has(a.timestamp + a.message));
+          return [...prev, ...fresh].slice(0, 50);
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  const loadRecentMentorReviews = useCallback(() => {
+    fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((recent: MentorSignalReview[]) => {
+        setMentorSignalReviews(prev => {
+          const byId = new Map(prev.map(review => [review.id, review]));
+          for (const review of recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT)) {
+            byId.set(review.id, review);
+          }
+          return Array.from(byId.values())
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, MENTOR_REVIEW_HISTORY_LIMIT);
+        });
+      })
+      .catch(() => {});
+  }, []);
+
   const connect = useCallback(() => {
     const client = new Client({
       webSocketFactory: () => new SockJS(WS_URL),
       reconnectDelay: 5000,
       onConnect: () => {
         setConnected(true);
-
-        // Seed with recent alerts from REST (fired before WS connected)
-        fetch(`${API_URL}/api/alerts/recent`)
-          .then(r => r.ok ? r.json() : [])
-          .then((recent: AlertMessage[]) => {
-            setAlerts(prev => {
-              const existing = new Set(prev.map(a => a.timestamp + a.message));
-              const fresh = recent.filter(a => !existing.has(a.timestamp + a.message));
-              return [...prev, ...fresh].slice(0, 50);
-            });
-          })
-          .catch(() => {});
-
-        fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
-          .then(r => r.ok ? r.json() : [])
-          .then((recent: MentorSignalReview[]) => {
-            setMentorSignalReviews(recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT));
-          })
-          .catch(() => {});
+        loadRecentAlerts();
+        loadRecentMentorReviews();
 
         client.subscribe('/topic/prices', (msg: IMessage) => {
           const update: PriceUpdate = JSON.parse(msg.body);
@@ -81,14 +101,16 @@ export function useWebSocket() {
 
     client.activate();
     clientRef.current = client;
-  }, []);
+  }, [loadRecentAlerts, loadRecentMentorReviews]);
 
   useEffect(() => {
+    loadRecentAlerts();
+    loadRecentMentorReviews();
     connect();
     return () => {
       clientRef.current?.deactivate();
     };
-  }, [connect]);
+  }, [connect, loadRecentAlerts, loadRecentMentorReviews]);
 
   return { prices, alerts, mentorSignalReviews, connected };
 }

@@ -156,6 +156,15 @@ If a change touches several layers:
 - avoid shortcutting directly from `presentation` to `infrastructure`
 - prefer domain/application ports where the dependency direction matters
 
+### Container Release Rule
+
+- container image validation belongs in GitHub Actions, not as a required local developer step
+- release image publication must be driven by immutable Git tags
+- production compose deployment must consume immutable GHCR tags rather than rebuilding the app from source on the server
+- prefer GitHub Container Registry for repository-scoped image publishing because `GITHUB_TOKEN` can publish without storing an extra Docker registry secret
+- keep the Docker build context minimal with `.dockerignore` so CI does not upload local agent/runtime artifacts
+- if a required build dependency is not published to Maven Central, vendor it in a repo-local Maven repository so Docker and CI builds stay reproducible
+
 ### Frontend Workflow Rule
 
 When extending Mentor behavior in the UI:
@@ -176,6 +185,7 @@ Alert evaluation must use transition-based detection, not state-based:
 - `IndicatorAlertEvaluator` in `domain` tracks last-known state per indicator/instrument/timeframe
 - this is a domain concern and must stay in the domain layer
 - `AlertService` in `application` orchestrates publishing and mentor review batching
+- indicator alert dedup remains key-based with a short shared cooldown; do not reintroduce timeframe-length blocking windows that suppress otherwise valid multiple alerts on `10m` or `1h`
 - when multiple indicators fire in the same polling cycle for the same instrument/timeframe/direction, the application layer batches them into a single mentor review via `captureGroupReview`
 - individual alerts are still published to WebSocket separately for the UI
 

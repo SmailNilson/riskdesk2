@@ -141,6 +141,8 @@ Only these alert families are escalated into Mentor review:
 
 Alerts use transition-based detection: an alert fires only when a condition *changes* (e.g., RSI crosses into oversold), not when it persists across polling cycles. The `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe using a `ConcurrentHashMap`.
 
+`AlertService` still deduplicates by alert key on a short shared cooldown, but it no longer blocks an entire timeframe window (`10m` or `1h`). This means multiple alerts can be emitted on the same timeframe when distinct transitions happen before the bar period ends.
+
 #### Grouped reviews
 
 When multiple indicators fire simultaneously for the same instrument, timeframe, and direction (e.g., SMC + WAVETREND both signal LONG on MCL 10m), the backend batches them into a single combined Mentor review via `captureGroupReview`. Individual alerts are still published to WebSocket for the UI.
@@ -217,6 +219,17 @@ Current behavior:
 ```bash
 mvn -q -DskipTests compile
 ```
+
+## Container Release Workflow
+
+- Docker image validation now runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
+- Docker image publication now runs in GitHub Actions on Git tag pushes
+- published images are pushed to `ghcr.io/smailnilson/riskdesk2`
+- if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
+- release deployment can now run from GitHub Actions over SSH using `docker-compose.release.yml` on the target server
+- the deployment workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- local Docker is no longer required for the standard image release path
+- the private IBKR `tws-api` dependency is vendored under `vendor/maven-repo` so Docker/CI builds do not depend on a developer-local `~/.m2`
 
 ### Run backend
 

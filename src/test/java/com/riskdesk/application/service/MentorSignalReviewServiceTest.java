@@ -81,7 +81,8 @@ class MentorSignalReviewServiceTest {
             contractRegistry,
             reviewRepository,
             messagingTemplate,
-            objectMapper
+            objectMapper,
+            true
         );
 
         Alert alert = new Alert(
@@ -197,17 +198,19 @@ class MentorSignalReviewServiceTest {
             List.of()
         ));
 
-        var response = service.reanalyzeAlert(alert);
+        var response = service.reanalyzeAlert(alert, "Africa/Casablanca", null, null, null);
 
         assertThat(response.revision()).isEqualTo(2);
         assertThat(response.triggerType()).isEqualTo("MANUAL_REANALYSIS");
         assertThat(response.status()).isEqualTo("ANALYZING");
+        assertThat(response.selectedTimezone()).isEqualTo("Africa/Casablanca");
 
         ArgumentCaptor<JsonNode> payloadCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(mentorAnalysisService, timeout(1000)).analyze(payloadCaptor.capture(), startsWith(MentorAnalysisService.ALERT_SOURCE_PREFIX));
         assertThat(payloadCaptor.getValue().path("metadata").path("asset").asText()).isEqualTo("MNQ1!");
         assertThat(payloadCaptor.getValue().path("metadata").path("timestamp").asText()).isEqualTo("2026-03-26T02:31:05Z");
         assertThat(payloadCaptor.getValue().path("metadata").path("current_price").decimalValue()).isEqualByComparingTo("24430.75");
+        assertThat(payloadCaptor.getValue().path("metadata").path("selected_timezone").asText()).isEqualTo("Africa/Casablanca");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("action").asText()).isEqualTo("SHORT");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("review_type").asText()).isEqualTo("MANUAL_REANALYSIS");
         assertThat(payloadCaptor.getValue().path("original_alert_context").path("original_alert_time").asText()).isEqualTo("2026-03-26T02:30:39Z");
@@ -233,7 +236,8 @@ class MentorSignalReviewServiceTest {
             contractRegistry,
             reviewRepository,
             messagingTemplate,
-            objectMapper
+            objectMapper,
+            true
         );
 
         Alert alert = new Alert(
@@ -372,7 +376,7 @@ class MentorSignalReviewServiceTest {
         ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(latestAnalysis);
 
-        service.reanalyzeAlert(alert);
+        service.reanalyzeAlert(alert, "Africa/Casablanca", null, null, null);
 
         ArgumentCaptor<JsonNode> payloadCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(mentorAnalysisService, timeout(1000)).analyze(payloadCaptor.capture(), startsWith(MentorAnalysisService.ALERT_SOURCE_PREFIX));
@@ -380,6 +384,126 @@ class MentorSignalReviewServiceTest {
         assertThat(payloadCaptor.getValue().path("trade_intention").path("stop_loss").decimalValue()).isEqualByComparingTo("24445.25");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("take_profit").decimalValue()).isEqualByComparingTo("24280.25");
         assertThat(payloadCaptor.getValue().path("risk_and_emotional_check").path("reward_to_risk_ratio").decimalValue()).isEqualByComparingTo("2.00");
+        assertThat(payloadCaptor.getValue().path("metadata").path("selected_timezone").asText()).isEqualTo("Africa/Casablanca");
+    }
+
+    @Test
+    void captureInitialReview_storesUtcSelectedTimezoneForAutoReviews() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService,
+            indicatorService,
+            mentorIntermarketService,
+            marketDataServiceProvider,
+            candleRepositoryPort,
+            contractRegistry,
+            reviewRepository,
+            messagingTemplate,
+            objectMapper,
+            true
+        );
+        service.setAutoAnalysisEnabled(true);
+
+        Alert alert = new Alert(
+            "smc:MNQ:2026-03-26T02:30:39Z",
+            AlertSeverity.INFO,
+            "Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
+            AlertCategory.SMC,
+            "MNQ",
+            Instant.parse("2026-03-26T02:30:39Z")
+        );
+
+        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
+        when(reviewRepository.save(any())).thenAnswer(invocation -> {
+            MentorSignalReviewRecord record = invocation.getArgument(0);
+            if (record.getId() == null) {
+                record.setId(77L);
+            }
+            return record;
+        });
+        when(reviewRepository.findById(77L)).thenReturn(Optional.empty());
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(null);
+        when(indicatorService.computeSnapshot(Instrument.MNQ, "1h")).thenReturn(snapshot("1h", new BigDecimal("24405.00"), new BigDecimal("44.10"), "CHOCH_BEARISH"));
+        when(indicatorService.computeSeries(Instrument.MNQ, "10m", 500)).thenReturn(new IndicatorSeriesSnapshot(
+            "MNQ",
+            "10m",
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of()
+        ));
+        when(candleRepositoryPort.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
+            candle("2026-03-26T02:20:00Z", "24418.25", "24422.00", "24410.00", "24415.00"),
+            candle("2026-03-26T02:30:00Z", "24415.00", "24428.00", "24412.00", "24424.25")
+        ));
+        when(mentorIntermarketService.current(Instrument.MNQ)).thenReturn(new MentorIntermarketSnapshot(
+            0.35,
+            "BULLISH",
+            null,
+            null,
+            null,
+            "DXY_AVAILABLE"
+        ));
+
+        service.captureInitialReview(alert, snapshot("10m", new BigDecimal("24422.50"), new BigDecimal("47.20"), "CHOCH_BEARISH"));
+
+        ArgumentCaptor<MentorSignalReviewRecord> reviewCaptor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
+        verify(reviewRepository).save(reviewCaptor.capture());
+        assertThat(reviewCaptor.getValue().getSelectedTimezone()).isEqualTo("UTC");
+    }
+
+    @Test
+    void captureGroupReview_preservesPrimaryAlertKeyForGroupedAlerts() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService,
+            indicatorService,
+            mentorIntermarketService,
+            marketDataServiceProvider,
+            candleRepositoryPort,
+            contractRegistry,
+            reviewRepository,
+            messagingTemplate,
+            objectMapper,
+            true
+        );
+        service.setAutoAnalysisEnabled(true);
+
+        Instant primaryTimestamp = Instant.parse("2026-04-01T00:10:00Z");
+        Alert primary = new Alert(
+            "ob:mitigated:MCL:10m",
+            AlertSeverity.INFO,
+            "MCL [10m] Bearish order block mitigated",
+            AlertCategory.ORDER_BLOCK,
+            "MCL",
+            primaryTimestamp
+        );
+        Alert confirmation = new Alert(
+            "wt:bearish:MCL:10m",
+            AlertSeverity.INFO,
+            "MCL [10m] WaveTrend Bearish Cross",
+            AlertCategory.WAVETREND,
+            "MCL",
+            primaryTimestamp.plusSeconds(10)
+        );
+
+        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
+        when(reviewRepository.save(any())).thenAnswer(invocation -> {
+            MentorSignalReviewRecord record = invocation.getArgument(0);
+            if (record.getId() == null) {
+                record.setId(88L);
+            }
+            return record;
+        });
+
+        service.captureGroupReview(List.of(primary, confirmation), null);
+
+        ArgumentCaptor<MentorSignalReviewRecord> reviewCaptor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
+        verify(reviewRepository).save(reviewCaptor.capture());
+        assertThat(reviewCaptor.getValue().getAlertKey())
+            .isEqualTo("2026-04-01T00:10:00Z:MCL:ORDER_BLOCK:MCL [10m] Bearish order block mitigated");
+        assertThat(reviewCaptor.getValue().getMessage()).isEqualTo(primary.message());
+        assertThat(reviewCaptor.getValue().getAlertTimestamp()).isEqualTo(primaryTimestamp);
+        assertThat(reviewCaptor.getValue().getCategory()).isEqualTo("ORDER_BLOCK");
     }
 
     private static IndicatorSnapshot snapshot(String timeframe, BigDecimal vwap, BigDecimal rsi, String lastBreakType) {

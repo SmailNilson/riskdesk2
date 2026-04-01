@@ -29,7 +29,11 @@ public class VWAPIndicator implements TechnicalIndicator<VWAPIndicator.VWAPResul
         Instant currentSession = null;
 
         for (Candle c : candles) {
-            Instant candleSession = TradingSessionResolver.dailySessionStart(c.getTimestamp());
+            // Candle timestamps represent the bar close in this codebase.
+            // A bar stamped exactly at 17:00 ET is the final bar of the session that just ended,
+            // so we resolve the session using the instant immediately before that close.
+            Instant sessionReference = c.getTimestamp().minusNanos(1);
+            Instant candleSession = TradingSessionResolver.dailySessionStart(sessionReference);
             if (currentSession != null && !currentSession.equals(candleSession)) {
                 cumulativeTPV = BigDecimal.ZERO;
                 cumulativeVolume = 0;
