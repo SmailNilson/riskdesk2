@@ -61,9 +61,16 @@ public class MarketDataConfig {
 
     @Bean
     @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public SyntheticDxyCalculator syntheticDxyCalculator(IbGatewayNativeClient nativeClient) {
+        return new SyntheticDxyCalculator(nativeClient);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
     public IbGatewayMarketDataProvider ibGatewayMarketDataProvider(IbGatewayNativeClient nativeClient,
-                                                                   IbGatewayContractResolver contractResolver) {
-        return new IbGatewayMarketDataProvider(nativeClient, contractResolver);
+                                                                   IbGatewayContractResolver contractResolver,
+                                                                   SyntheticDxyCalculator dxyCalculator) {
+        return new IbGatewayMarketDataProvider(nativeClient, contractResolver, dxyCalculator);
     }
 
     @Bean

@@ -38,6 +38,11 @@ public enum Instrument {
         return this == MCL || this == MGC || this == E6 || this == MNQ;
     }
 
+    /** True for instruments whose price is calculated (not fetched from a single IBKR contract). */
+    public boolean isSynthetic() {
+        return this == DXY;
+    }
+
     public boolean isExchangeTradedFuture() {
         return this != DXY;
     }

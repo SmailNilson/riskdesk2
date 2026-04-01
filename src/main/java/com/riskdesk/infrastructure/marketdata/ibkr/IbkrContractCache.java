@@ -74,6 +74,7 @@ public class IbkrContractCache {
     }
 
     private void refreshInstrument(Instrument inst) {
+        if (inst.isSynthetic()) return; // DXY is computed from FX pairs
         try {
             // Step 1: search for available months
             String searchJson = restTemplate.postForObject(
