@@ -1,5 +1,8 @@
 package com.riskdesk.domain.marketdata.model;
 
+import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.DxyCalculationOutcome;
+import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.DxyCalculationOutcome.CompleteSnapshot;
+import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.DxyCalculationOutcome.IncompleteResult;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -25,17 +28,18 @@ class SyntheticDollarIndexCalculatorTest {
         quotes.put(FxPair.USDSEK, quote(FxPair.USDSEK, "10.4800", "10.4810", "10.4820", ts));
         quotes.put(FxPair.USDCHF, quote(FxPair.USDCHF, "0.9020", "0.9023", "0.9026", ts));
 
-        SyntheticDollarIndexCalculator.CalculationResult result = calculator.calculate(quotes);
+        DxyCalculationOutcome result = calculator.calculate(quotes);
 
-        assertTrue(result.complete());
-        assertEquals("MID", result.components().get(FxPair.EURUSD).pricingMethod());
-        assertEquals(new BigDecimal("1.08110000"), result.components().get(FxPair.EURUSD).effectivePrice());
+        assertInstanceOf(CompleteSnapshot.class, result);
+        CompleteSnapshot complete = (CompleteSnapshot) result;
+        assertEquals("MID", complete.components().get(FxPair.EURUSD).pricingMethod());
+        assertEquals(new BigDecimal("1.08110000"), complete.components().get(FxPair.EURUSD).effectivePrice());
 
         BigDecimal expected = expectedDxy(
             "1.08110000", "149.22000000", "1.26220000", "1.35120000", "10.48050000", "0.90215000"
         );
-        assertEquals(0, expected.compareTo(result.snapshot().orElseThrow().dxyValue()));
-        assertEquals(6, result.snapshot().orElseThrow().dxyValue().scale());
+        assertEquals(0, expected.compareTo(complete.snapshot().dxyValue()));
+        assertEquals(6, complete.snapshot().dxyValue().scale());
     }
 
     @Test
@@ -52,9 +56,9 @@ class SyntheticDollarIndexCalculatorTest {
             "LIVE_PROVIDER"
         ));
 
-        SyntheticDollarIndexCalculator.CalculationResult result = calculator.calculate(quotes);
+        DxyCalculationOutcome result = calculator.calculate(quotes);
 
-        assertTrue(result.complete());
+        assertInstanceOf(CompleteSnapshot.class, result);
         assertEquals("LAST", result.components().get(FxPair.USDJPY).pricingMethod());
         assertEquals(0, new BigDecimal("149.31").compareTo(result.components().get(FxPair.USDJPY).effectivePrice()));
     }
@@ -64,10 +68,9 @@ class SyntheticDollarIndexCalculatorTest {
         Map<FxPair, FxQuoteSnapshot> quotes = completeQuotes(Instant.parse("2026-04-01T10:00:00Z"));
         quotes.remove(FxPair.USDCHF);
 
-        SyntheticDollarIndexCalculator.CalculationResult result = calculator.calculate(quotes);
+        DxyCalculationOutcome result = calculator.calculate(quotes);
 
-        assertFalse(result.complete());
-        assertTrue(result.snapshot().isEmpty());
+        assertInstanceOf(IncompleteResult.class, result);
         assertEquals("missing quote", result.components().get(FxPair.USDCHF).message());
     }
 
@@ -84,10 +87,9 @@ class SyntheticDollarIndexCalculatorTest {
             "LIVE_PROVIDER"
         ));
 
-        SyntheticDollarIndexCalculator.CalculationResult result = calculator.calculate(quotes);
+        DxyCalculationOutcome result = calculator.calculate(quotes);
 
-        assertFalse(result.complete());
-        assertTrue(result.snapshot().isEmpty());
+        assertInstanceOf(IncompleteResult.class, result);
         assertEquals("no positive bid/ask midpoint or last price", result.components().get(FxPair.GBPUSD).message());
     }
 
@@ -102,11 +104,10 @@ class SyntheticDollarIndexCalculatorTest {
             Instant.parse("2026-04-01T10:00:20Z")
         ));
 
-        SyntheticDollarIndexCalculator.CalculationResult result = calculator.calculate(quotes);
+        DxyCalculationOutcome result = calculator.calculate(quotes);
 
-        assertFalse(result.complete());
+        assertInstanceOf(IncompleteResult.class, result);
         assertEquals(20L, result.maxSkewSeconds());
-        assertTrue(result.snapshot().isEmpty());
     }
 
     private Map<FxPair, FxQuoteSnapshot> completeQuotes(Instant ts) {

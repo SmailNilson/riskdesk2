@@ -9,7 +9,6 @@ import com.riskdesk.domain.marketdata.port.DxySnapshotRepositoryPort;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -30,8 +29,8 @@ class DxyMarketServiceTest {
         when(provider.getIfAvailable()).thenReturn(fxQuoteProvider);
 
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
-        SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, messagingTemplate, true);
+        DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, true);
 
         when(fxQuoteProvider.fetchQuotes()).thenReturn(completeQuotes(Instant.parse("2026-04-01T10:00:00Z")));
         when(repository.findLatestComplete()).thenReturn(Optional.empty());
@@ -41,7 +40,7 @@ class DxyMarketServiceTest {
         service.refreshSyntheticDxy();
 
         verify(repository, times(1)).save(any(DxySnapshot.class));
-        verify(messagingTemplate, times(1)).convertAndSend(eq("/topic/prices"), (Object) any());
+        verify(pricePublisher, times(2)).publishIfChanged(any(DxySnapshot.class));
         assertEquals("UP", service.health().status());
         assertEquals("IBKR_SYNTHETIC", service.latestView().orElseThrow().source());
     }
@@ -54,8 +53,8 @@ class DxyMarketServiceTest {
         when(provider.getIfAvailable()).thenReturn(fxQuoteProvider);
 
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
-        SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, messagingTemplate, true);
+        DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, true);
 
         Map<FxPair, FxQuoteSnapshot> incomplete = completeQuotes(Instant.parse("2026-04-01T10:00:00Z"));
         incomplete.remove(FxPair.USDCHF);
@@ -89,8 +88,8 @@ class DxyMarketServiceTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<FxQuoteProvider> provider = mock(ObjectProvider.class);
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
-        SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, messagingTemplate, false);
+        DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, false);
 
         service.refreshSyntheticDxy();
 
@@ -98,7 +97,7 @@ class DxyMarketServiceTest {
         assertEquals("DOWN", service.health().status());
         assertFalse(service.supported());
         verifyNoInteractions(repository);
-        verifyNoInteractions(messagingTemplate);
+        verifyNoInteractions(pricePublisher);
     }
 
     private Map<FxPair, FxQuoteSnapshot> completeQuotes(Instant timestamp) {

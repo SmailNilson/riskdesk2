@@ -24,7 +24,7 @@ class MentorIntermarketServiceTest {
         DxySnapshot baseline = snapshot("2026-03-25T23:50:00Z", "103.500000");
 
         when(dxyMarketService.latestSnapshot()).thenReturn(Optional.of(current));
-        when(dxyMarketService.latestStoredCompleteAtOrBefore(Instant.parse("2026-03-25T23:56:00Z")))
+        when(dxyMarketService.findBaselineSnapshot(Instant.parse("2026-03-26T00:06:00Z")))
             .thenReturn(Optional.of(baseline));
 
         MentorIntermarketSnapshot snapshot = service.current(Instrument.MGC);
@@ -40,9 +40,7 @@ class MentorIntermarketServiceTest {
         MentorIntermarketService service = new MentorIntermarketService(dxyMarketService);
 
         when(dxyMarketService.latestSnapshot()).thenReturn(Optional.of(snapshot("2026-03-26T00:06:00Z", "104.250000")));
-        when(dxyMarketService.latestStoredCompleteAtOrBefore(Instant.parse("2026-03-25T23:56:00Z")))
-            .thenReturn(Optional.empty());
-        when(dxyMarketService.latestStoredCompleteAtOrBefore(Instant.parse("2026-03-25T23:06:00Z")))
+        when(dxyMarketService.findBaselineSnapshot(Instant.parse("2026-03-26T00:06:00Z")))
             .thenReturn(Optional.empty());
 
         MentorIntermarketSnapshot snapshot = service.current(Instrument.MNQ);
