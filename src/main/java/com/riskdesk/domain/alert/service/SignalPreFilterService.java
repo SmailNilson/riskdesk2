@@ -65,7 +65,7 @@ public class SignalPreFilterService {
      */
     public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend) {
         if (alerts.isEmpty()) return alerts;
-        boolean isLtf = !"1h".equals(timeframe);
+        boolean isLtf = !"1h".equals(timeframe) && !"4h".equals(timeframe);
 
         return alerts.stream()
                 .filter(alert -> {
@@ -145,6 +145,37 @@ public class SignalPreFilterService {
         if (alert.category() == AlertCategory.RSI) {
             if (alert.message().contains("oversold"))   return "LONG";
             if (alert.message().contains("overbought")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.SUPERTREND) {
+            if (alert.message().contains("flipped bullish")) return "LONG";
+            if (alert.message().contains("flipped bearish")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.BOLLINGER) {
+            return null; // no directional bias
+        }
+        if (alert.category() == AlertCategory.VWAP_CROSS) {
+            if (alert.message().contains("above")) return "LONG";
+            if (alert.message().contains("below")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.FVG) {
+            if (alert.message().contains("Bullish")) return "LONG";
+            if (alert.message().contains("Bearish")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.EQUAL_LEVEL) {
+            if (alert.message().contains("EQH")) return "SHORT"; // liquidity grab above = bearish
+            if (alert.message().contains("EQL")) return "LONG";
+        }
+        if (alert.category() == AlertCategory.DELTA_FLOW) {
+            if (alert.message().contains("buying"))  return "LONG";
+            if (alert.message().contains("selling")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.CHAIKIN) {
+            if (alert.message().contains("above zero")) return "LONG";
+            if (alert.message().contains("below zero")) return "SHORT";
+        }
+        if (alert.category() == AlertCategory.MTF_LEVEL) {
+            if (alert.message().contains("above")) return "LONG";
+            if (alert.message().contains("below")) return "SHORT";
         }
         return null;
     }

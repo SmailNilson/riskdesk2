@@ -146,9 +146,9 @@ public class IndicatorAlertEvaluator {
         if (snap == null) return alerts;
         String tf = instrument.name() + ":" + timeframe;
 
-        // EMA crossover — only on transition
+        // EMA crossover — only on confirmed transition (Rule 4: candle close guard)
         EvalKey emaKey = key("ema", instrument, timeframe, null);
-        if (isTransition(emaKey, snap.emaCrossover())) {
+        if (isConfirmedTransition(emaKey, snap.emaCrossover(), candleKey(emaKey), snap.lastCandleTimestamp())) {
             if ("GOLDEN_CROSS".equals(snap.emaCrossover())) {
                 alerts.add(new Alert("ema:golden:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — EMA Golden Cross (9 x 50)",
@@ -160,9 +160,9 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // RSI extremes — only on transition
+        // RSI extremes — only on confirmed transition (Rule 4: candle close guard)
         EvalKey rsiKey = key("rsi", instrument, timeframe, null);
-        if (isTransition(rsiKey, snap.rsiSignal())) {
+        if (isConfirmedTransition(rsiKey, snap.rsiSignal(), candleKey(rsiKey), snap.lastCandleTimestamp())) {
             if ("OVERSOLD".equals(snap.rsiSignal())) {
                 alerts.add(new Alert("rsi:oversold:" + tf, AlertSeverity.INFO,
                     String.format("%s [%s] — RSI oversold at %.1f", instrument.getDisplayName(), timeframe,
@@ -176,9 +176,9 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // MACD crossover — only on transition
+        // MACD crossover — only on confirmed transition (Rule 4: candle close guard)
         EvalKey macdKey = key("macd", instrument, timeframe, null);
-        if (isTransition(macdKey, snap.macdCrossover())) {
+        if (isConfirmedTransition(macdKey, snap.macdCrossover(), candleKey(macdKey), snap.lastCandleTimestamp())) {
             if ("BULLISH_CROSS".equals(snap.macdCrossover())) {
                 alerts.add(new Alert("macd:bullish:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — MACD Bullish Cross",
@@ -286,6 +286,158 @@ public class IndicatorAlertEvaluator {
             }
         }
 
+        // ── V2 signal blocks ─────────────────────────────────────────────────
+
+        // 1. Supertrend — transition on supertrendDirection
+        EvalKey stKey = key("st", instrument, timeframe, null);
+        if (isConfirmedTransition(stKey, snap.supertrendDirection(), candleKey(stKey), snap.lastCandleTimestamp())) {
+            if ("UPTREND".equals(snap.supertrendDirection())) {
+                alerts.add(new Alert("st:up:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Supertrend flipped UPTREND",
+                    AlertCategory.SUPERTREND, instrument.name()));
+            } else if ("DOWNTREND".equals(snap.supertrendDirection())) {
+                alerts.add(new Alert("st:down:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Supertrend flipped DOWNTREND",
+                    AlertCategory.SUPERTREND, instrument.name()));
+            }
+        }
+
+        // 2. BB Squeeze — transition on bbTrendSignal
+        EvalKey bbKey = key("bb", instrument, timeframe, "trend");
+        if (isConfirmedTransition(bbKey, snap.bbTrendSignal(), candleKey(bbKey), snap.lastCandleTimestamp())) {
+            if ("TRENDING".equals(snap.bbTrendSignal())) {
+                alerts.add(new Alert("bb:trending:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — BB Squeeze breakout",
+                    AlertCategory.BOLLINGER, instrument.name()));
+            } else if ("CONSOLIDATING".equals(snap.bbTrendSignal())) {
+                alerts.add(new Alert("bb:consolidating:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — BB entering consolidation",
+                    AlertCategory.BOLLINGER, instrument.name()));
+            }
+        }
+
+        // 3. VWAP Cross — transition on vwapPosition
+        EvalKey vwapKey = key("vwap", instrument, timeframe, "cross");
+        if (isConfirmedTransition(vwapKey, snap.vwapPosition(), candleKey(vwapKey), snap.lastCandleTimestamp())) {
+            if ("ABOVE".equals(snap.vwapPosition())) {
+                alerts.add(new Alert("vwap:above:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Price crossed above VWAP",
+                    AlertCategory.VWAP_CROSS, instrument.name()));
+            } else if ("BELOW".equals(snap.vwapPosition())) {
+                alerts.add(new Alert("vwap:below:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Price crossed below VWAP",
+                    AlertCategory.VWAP_CROSS, instrument.name()));
+            }
+        }
+
+        // 4. FVG Events — one-shot events using shouldFireOrderBlockEvent pattern
+        if (snap.recentFvgEvents() != null && !snap.recentFvgEvents().isEmpty()) {
+            for (IndicatorAlertSnapshot.FvgEvent evt : snap.recentFvgEvents()) {
+                EvalKey fvgEventKey = key("fvg", instrument, timeframe, evt.bias(),
+                        evt.top(), evt.bottom());
+                if (shouldFireOrderBlockEvent(fvgEventKey, snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("fvg:" + evt.bias().toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — FVG %s [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, evt.bias(),
+                            evt.bottom().doubleValue(), evt.top().doubleValue()),
+                        AlertCategory.FVG, instrument.name()));
+                }
+            }
+        }
+
+        // 5. EQH/EQL Sweep — one-shot events using shouldFireOrderBlockEvent pattern
+        if (snap.recentSweepEvents() != null && !snap.recentSweepEvents().isEmpty()) {
+            for (IndicatorAlertSnapshot.SweepEvent evt : snap.recentSweepEvents()) {
+                EvalKey sweepEventKey = key("eql", instrument, timeframe, evt.type(),
+                        evt.price(), evt.price());
+                if (shouldFireOrderBlockEvent(sweepEventKey, snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("eql:" + evt.type().toLowerCase() + ":" + tf, AlertSeverity.WARNING,
+                        String.format("%s [%s] — %s sweep at %.5f",
+                            instrument.getDisplayName(), timeframe, evt.type(),
+                            evt.price().doubleValue()),
+                        AlertCategory.EQUAL_LEVEL, instrument.name()));
+                }
+            }
+        }
+
+        // 6. Delta Flow — transition on deltaFlowBias (skip NEUTRAL)
+        EvalKey dfKey = key("df", instrument, timeframe, null);
+        if (isConfirmedTransition(dfKey, snap.deltaFlowBias(), candleKey(dfKey), snap.lastCandleTimestamp())) {
+            if ("BUYING".equals(snap.deltaFlowBias())) {
+                alerts.add(new Alert("df:buying:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Delta Flow shifted to BUYING",
+                    AlertCategory.DELTA_FLOW, instrument.name()));
+            } else if ("SELLING".equals(snap.deltaFlowBias())) {
+                alerts.add(new Alert("df:selling:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Delta Flow shifted to SELLING",
+                    AlertCategory.DELTA_FLOW, instrument.name()));
+            }
+        }
+
+        // 7. Chaikin — transition on chaikinCrossover
+        EvalKey chkKey = key("chk", instrument, timeframe, null);
+        if (isConfirmedTransition(chkKey, snap.chaikinCrossover(), candleKey(chkKey), snap.lastCandleTimestamp())) {
+            if ("BULLISH_CROSS".equals(snap.chaikinCrossover())) {
+                alerts.add(new Alert("chk:bullish:" + tf, AlertSeverity.INFO,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Chaikin Oscillator Bullish Cross",
+                    AlertCategory.CHAIKIN, instrument.name()));
+            } else if ("BEARISH_CROSS".equals(snap.chaikinCrossover())) {
+                alerts.add(new Alert("chk:bearish:" + tf, AlertSeverity.WARNING,
+                    instrument.getDisplayName() + " [" + timeframe + "] — Chaikin Oscillator Bearish Cross",
+                    AlertCategory.CHAIKIN, instrument.name()));
+            }
+        }
+
+        // 8. MTF Level Cross — derive position relative to each MTF level pair, fire on transition
+        if (snap.close() != null) {
+            // Daily range
+            if (snap.mtfDailyHigh() != null && snap.mtfDailyLow() != null) {
+                String dailyPos = deriveMtfPosition(snap.close(), snap.mtfDailyHigh(), snap.mtfDailyLow());
+                EvalKey mtfDailyKey = key("mtf", instrument, timeframe, "1d:range");
+                if (isConfirmedTransition(mtfDailyKey, dailyPos, candleKey(mtfDailyKey), snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("mtf:1d:" + dailyPos.toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — Price %s daily range [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, dailyPos.replace("_", " ").toLowerCase(),
+                            snap.mtfDailyLow().doubleValue(), snap.mtfDailyHigh().doubleValue()),
+                        AlertCategory.MTF_LEVEL, instrument.name()));
+                }
+            }
+            // Weekly range
+            if (snap.mtfWeeklyHigh() != null && snap.mtfWeeklyLow() != null) {
+                String weeklyPos = deriveMtfPosition(snap.close(), snap.mtfWeeklyHigh(), snap.mtfWeeklyLow());
+                EvalKey mtfWeeklyKey = key("mtf", instrument, timeframe, "1w:range");
+                if (isConfirmedTransition(mtfWeeklyKey, weeklyPos, candleKey(mtfWeeklyKey), snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("mtf:1w:" + weeklyPos.toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — Price %s weekly range [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, weeklyPos.replace("_", " ").toLowerCase(),
+                            snap.mtfWeeklyLow().doubleValue(), snap.mtfWeeklyHigh().doubleValue()),
+                        AlertCategory.MTF_LEVEL, instrument.name()));
+                }
+            }
+            // Monthly range
+            if (snap.mtfMonthlyHigh() != null && snap.mtfMonthlyLow() != null) {
+                String monthlyPos = deriveMtfPosition(snap.close(), snap.mtfMonthlyHigh(), snap.mtfMonthlyLow());
+                EvalKey mtfMonthlyKey = key("mtf", instrument, timeframe, "1M:range");
+                if (isConfirmedTransition(mtfMonthlyKey, monthlyPos, candleKey(mtfMonthlyKey), snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("mtf:1M:" + monthlyPos.toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — Price %s monthly range [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, monthlyPos.replace("_", " ").toLowerCase(),
+                            snap.mtfMonthlyLow().doubleValue(), snap.mtfMonthlyHigh().doubleValue()),
+                        AlertCategory.MTF_LEVEL, instrument.name()));
+                }
+            }
+        }
+
         return alerts;
+    }
+
+    /**
+     * Derives the position of close relative to an MTF high/low range.
+     * Returns "ABOVE_HIGH" if close > high, "BELOW_LOW" if close < low, "INSIDE" otherwise.
+     */
+    private static String deriveMtfPosition(BigDecimal close, BigDecimal high, BigDecimal low) {
+        if (close.compareTo(high) > 0) return "ABOVE_HIGH";
+        if (close.compareTo(low) < 0) return "BELOW_LOW";
+        return "INSIDE";
     }
 }
