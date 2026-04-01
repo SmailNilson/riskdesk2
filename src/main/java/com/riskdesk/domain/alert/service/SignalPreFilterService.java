@@ -11,6 +11,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Pre-filters indicator alerts before they reach the mentor review pipeline.
@@ -119,65 +120,46 @@ public class SignalPreFilterService {
         return deque.stream().anyMatch(e -> direction.equals(e.direction()));
     }
 
-    // ── Direction inference ───────────────────────────────────────────────────
+    // ── Direction inference (data-driven) ───────────────────────────────────
+
+    /**
+     * A direction rule: if the alert message matches longPattern → LONG,
+     * if it matches shortPattern → SHORT, otherwise null.
+     */
+    private record DirectionRule(AlertCategory category, Pattern longPattern, Pattern shortPattern) {
+        String match(String message) {
+            if (longPattern.matcher(message).find())  return "LONG";
+            if (shortPattern.matcher(message).find()) return "SHORT";
+            return null;
+        }
+    }
+
+    private static Pattern p(String regex) { return Pattern.compile(regex); }
+
+    /** Ordered list of direction extraction rules. First match wins. */
+    private static final Map<AlertCategory, DirectionRule> DIRECTION_RULES = Map.ofEntries(
+        Map.entry(AlertCategory.SMC,          new DirectionRule(AlertCategory.SMC,          p("BULLISH"),                      p("BEARISH"))),
+        Map.entry(AlertCategory.EMA,          new DirectionRule(AlertCategory.EMA,          p("Golden Cross"),                 p("Death Cross"))),
+        Map.entry(AlertCategory.MACD,         new DirectionRule(AlertCategory.MACD,         p("Bullish"),                      p("Bearish"))),
+        Map.entry(AlertCategory.WAVETREND,    new DirectionRule(AlertCategory.WAVETREND,    p("Bullish Cross|oversold"),       p("Bearish Cross|overbought"))),
+        Map.entry(AlertCategory.RSI,          new DirectionRule(AlertCategory.RSI,          p("oversold"),                     p("overbought"))),
+        Map.entry(AlertCategory.SUPERTREND,   new DirectionRule(AlertCategory.SUPERTREND,   p("UPTREND"),                      p("DOWNTREND"))),
+        Map.entry(AlertCategory.VWAP_CROSS,   new DirectionRule(AlertCategory.VWAP_CROSS,   p("above"),                        p("below"))),
+        Map.entry(AlertCategory.FVG,          new DirectionRule(AlertCategory.FVG,          p("Bullish"),                      p("Bearish"))),
+        Map.entry(AlertCategory.EQUAL_LEVEL,  new DirectionRule(AlertCategory.EQUAL_LEVEL,  p("EQL"),                          p("EQH"))),
+        Map.entry(AlertCategory.DELTA_FLOW,   new DirectionRule(AlertCategory.DELTA_FLOW,   p("BUYING"),                       p("SELLING"))),
+        Map.entry(AlertCategory.CHAIKIN,      new DirectionRule(AlertCategory.CHAIKIN,      p("Bullish"),                      p("Bearish"))),
+        Map.entry(AlertCategory.MTF_LEVEL,    new DirectionRule(AlertCategory.MTF_LEVEL,    p("above"),                        p("below")))
+    );
 
     /**
      * Infers LONG / SHORT bias from an alert's category and message.
-     * Returns null for signals with no clear directional bias (e.g. pure volatility alerts).
+     * Returns null for signals with no clear directional bias (e.g. BOLLINGER).
      */
     static String extractDirection(Alert alert) {
-        if (alert.category() == AlertCategory.SMC) {
-            if (alert.message().contains("BULLISH")) return "LONG";
-            if (alert.message().contains("BEARISH")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.EMA) {
-            if (alert.message().contains("Golden Cross")) return "LONG";
-            if (alert.message().contains("Death Cross"))  return "SHORT";
-        }
-        if (alert.category() == AlertCategory.MACD) {
-            if (alert.message().contains("Bullish")) return "LONG";
-            if (alert.message().contains("Bearish")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.WAVETREND) {
-            if (alert.message().contains("Bullish Cross") || alert.message().contains("oversold"))  return "LONG";
-            if (alert.message().contains("Bearish Cross") || alert.message().contains("overbought")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.RSI) {
-            if (alert.message().contains("oversold"))   return "LONG";
-            if (alert.message().contains("overbought")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.SUPERTREND) {
-            if (alert.message().contains("flipped bullish")) return "LONG";
-            if (alert.message().contains("flipped bearish")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.BOLLINGER) {
-            return null; // no directional bias
-        }
-        if (alert.category() == AlertCategory.VWAP_CROSS) {
-            if (alert.message().contains("above")) return "LONG";
-            if (alert.message().contains("below")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.FVG) {
-            if (alert.message().contains("Bullish")) return "LONG";
-            if (alert.message().contains("Bearish")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.EQUAL_LEVEL) {
-            if (alert.message().contains("EQH")) return "SHORT"; // liquidity grab above = bearish
-            if (alert.message().contains("EQL")) return "LONG";
-        }
-        if (alert.category() == AlertCategory.DELTA_FLOW) {
-            if (alert.message().contains("buying"))  return "LONG";
-            if (alert.message().contains("selling")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.CHAIKIN) {
-            if (alert.message().contains("above zero")) return "LONG";
-            if (alert.message().contains("below zero")) return "SHORT";
-        }
-        if (alert.category() == AlertCategory.MTF_LEVEL) {
-            if (alert.message().contains("above")) return "LONG";
-            if (alert.message().contains("below")) return "SHORT";
-        }
-        return null;
+        DirectionRule rule = DIRECTION_RULES.get(alert.category());
+        if (rule == null) return null;
+        return rule.match(alert.message());
     }
 
     private record DirectionEntry(String direction, Instant timestamp) {}
