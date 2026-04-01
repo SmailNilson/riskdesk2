@@ -118,8 +118,8 @@ export function isMentorEligibleAlert(alert: AlertMessage) {
   if (alert.category === 'RSI') {
     return alert.message.includes('oversold') || alert.message.includes('overbought');
   }
-  if (alert.category === 'ORDER_BLOCK') {
-    return alert.message.includes('mitigated') || alert.message.includes('invalidated');
+  if (alert.category === 'ORDER_BLOCK' || alert.category === 'ORDER_BLOCK_VWAP') {
+    return ['mitigated', 'invalidated', 'VWAP inside'].some(fragment => alert.message.includes(fragment));
   }
   return false;
 }
@@ -170,8 +170,14 @@ export function buildMentorPayload(params: {
   const nearestSupport = findNearestOrderBlock(params.snapshot, referencePrice, 'BULLISH');
   const nearestResistance = findNearestOrderBlock(params.snapshot, referencePrice, 'BEARISH');
   const hasPlan = effectiveEntryPrice != null && params.tradeIntention.stopLoss != null && params.tradeIntention.takeProfit != null;
-  const stopLossSize = hasPlan ? Math.abs(effectiveEntryPrice - params.tradeIntention.stopLoss) : null;
-  const reward = hasPlan ? Math.abs(params.tradeIntention.takeProfit - effectiveEntryPrice) : null;
+  const stopLossSize =
+    hasPlan && effectiveEntryPrice != null && params.tradeIntention.stopLoss != null
+      ? Math.abs(effectiveEntryPrice - params.tradeIntention.stopLoss)
+      : null;
+  const reward =
+    hasPlan && effectiveEntryPrice != null && params.tradeIntention.takeProfit != null
+      ? Math.abs(params.tradeIntention.takeProfit - effectiveEntryPrice)
+      : null;
   const risk = stopLossSize && stopLossSize > 0 ? stopLossSize : null;
 
   return {
