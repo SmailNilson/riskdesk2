@@ -3,7 +3,9 @@ package com.riskdesk.application.service;
 import com.riskdesk.application.dto.DxyHealthComponentView;
 import com.riskdesk.application.dto.DxyHealthView;
 import com.riskdesk.application.dto.DxySnapshotView;
+import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.marketdata.model.DxySnapshot;
+import com.riskdesk.domain.marketdata.model.FxComponentContribution;
 import com.riskdesk.domain.marketdata.model.FxPair;
 import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator;
 import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.DxyCalculationOutcome;
@@ -12,19 +14,27 @@ import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.DxyCa
 import com.riskdesk.domain.marketdata.model.SyntheticDollarIndexCalculator.EvaluatedComponent;
 import com.riskdesk.domain.marketdata.port.DxySnapshotRepositoryPort;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
+import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Service
@@ -37,12 +47,35 @@ public class DxyMarketService {
     private static final Duration TEN_MINUTES = Duration.ofMinutes(10);
     private static final Duration ONE_HOUR = Duration.ofHours(1);
 
+    private static final Map<String, Long> CANDLE_TIMEFRAMES = Map.of(
+        "10m", 10L,
+        "1h", 60L,
+        "1d", 1440L
+    );
+
+    /** ICE DXY weights per FX pair — used for component contribution analysis. */
+    private static final Map<FxPair, BigDecimal> DXY_WEIGHTS = Map.of(
+        FxPair.EURUSD, new BigDecimal("0.576"),
+        FxPair.USDJPY, new BigDecimal("0.136"),
+        FxPair.GBPUSD, new BigDecimal("0.119"),
+        FxPair.USDCAD, new BigDecimal("0.091"),
+        FxPair.USDSEK, new BigDecimal("0.042"),
+        FxPair.USDCHF, new BigDecimal("0.036")
+    );
+
+    /** Pairs where base currency is USD (USD/XXX): DXY rises when pair rises. */
+    private static final java.util.Set<FxPair> USD_BASE_PAIRS =
+        java.util.Set.of(FxPair.USDJPY, FxPair.USDCAD, FxPair.USDSEK, FxPair.USDCHF);
+
     private final ObjectProvider<FxQuoteProvider> fxQuoteProvider;
     private final DxySnapshotRepositoryPort repository;
+    private final CandleRepositoryPort candlePort;
     private final DxyPricePublisher pricePublisher;
+    private final ApplicationEventPublisher eventPublisher;
     private final boolean supportedMode;
     private final SyntheticDollarIndexCalculator calculator = new SyntheticDollarIndexCalculator();
     private final ReentrantLock refreshLock = new ReentrantLock();
+    private final Map<String, DxyCandleAccumulator> candleAccumulators = new ConcurrentHashMap<>();
 
     private volatile DxySnapshot lastLiveSnapshot;
     private volatile DxySnapshot lastPersistedSnapshot;
@@ -53,18 +86,25 @@ public class DxyMarketService {
     @Autowired
     public DxyMarketService(ObjectProvider<FxQuoteProvider> fxQuoteProvider,
                             DxySnapshotRepositoryPort repository,
+                            CandleRepositoryPort candlePort,
                             DxyPricePublisher pricePublisher,
+                            ApplicationEventPublisher eventPublisher,
                             @Value("${riskdesk.ibkr.mode:IB_GATEWAY}") String ibkrMode) {
-        this(fxQuoteProvider, repository, pricePublisher, !"CLIENT_PORTAL".equalsIgnoreCase(ibkrMode));
+        this(fxQuoteProvider, repository, candlePort, pricePublisher, eventPublisher,
+            !"CLIENT_PORTAL".equalsIgnoreCase(ibkrMode));
     }
 
     DxyMarketService(ObjectProvider<FxQuoteProvider> fxQuoteProvider,
                      DxySnapshotRepositoryPort repository,
+                     CandleRepositoryPort candlePort,
                      DxyPricePublisher pricePublisher,
+                     ApplicationEventPublisher eventPublisher,
                      boolean supportedMode) {
         this.fxQuoteProvider = fxQuoteProvider;
         this.repository = repository;
+        this.candlePort = candlePort;
         this.pricePublisher = pricePublisher;
+        this.eventPublisher = eventPublisher;
         this.supportedMode = supportedMode;
     }
 
@@ -120,6 +160,7 @@ public class DxyMarketService {
         }
 
         pricePublisher.publishIfChanged(snapshot);
+        accumulateDxyCandles(snapshot);
     }
 
     private void handleIncomplete(IncompleteResult incomplete, List<DxyHealthComponentView> components) {
@@ -256,6 +297,121 @@ public class DxyMarketService {
                 );
             })
             .toList();
+    }
+
+    // -------------------------------------------------------------------------
+    // Candle accumulation (10m, 1h, 1d)
+    // -------------------------------------------------------------------------
+
+    private void accumulateDxyCandles(DxySnapshot snapshot) {
+        Instant now = snapshot.timestamp();
+        BigDecimal price = snapshot.dxyValue();
+
+        for (var entry : CANDLE_TIMEFRAMES.entrySet()) {
+            String timeframe = entry.getKey();
+            long periodMins = entry.getValue();
+            Instant periodStart = truncateToPeriod(now, periodMins);
+
+            DxyCandleAccumulator[] closed = {null};
+            candleAccumulators.compute(timeframe, (tf, acc) -> {
+                if (acc == null) {
+                    return new DxyCandleAccumulator(periodStart, price);
+                }
+                if (acc.periodStart.isBefore(periodStart)) {
+                    closed[0] = acc;
+                    return new DxyCandleAccumulator(periodStart, price);
+                }
+                acc.update(price);
+                return acc;
+            });
+
+            if (closed[0] != null) {
+                Candle candle = closed[0].build(timeframe);
+                candlePort.save(candle);
+                eventPublisher.publishEvent(
+                    new com.riskdesk.domain.marketdata.event.CandleClosed(Instrument.DXY.name(), timeframe, closed[0].periodStart));
+                log.debug("Saved DXY candle {} O={} H={} L={} C={}",
+                    timeframe, candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose());
+            }
+        }
+    }
+
+    private static Instant truncateToPeriod(Instant ts, long periodMinutes) {
+        if (periodMinutes >= 1440) {
+            return TradingSessionResolver.dailySessionStart(ts);
+        }
+        long epochMin = ts.getEpochSecond() / 60;
+        long periodStart = (epochMin / periodMinutes) * periodMinutes;
+        return Instant.ofEpochSecond(periodStart * 60);
+    }
+
+    private static class DxyCandleAccumulator {
+        final Instant periodStart;
+        final BigDecimal open;
+        BigDecimal high;
+        BigDecimal low;
+        BigDecimal close;
+        long volume = 1;
+
+        DxyCandleAccumulator(Instant periodStart, BigDecimal firstPrice) {
+            this.periodStart = periodStart;
+            this.open = firstPrice;
+            this.high = firstPrice;
+            this.low = firstPrice;
+            this.close = firstPrice;
+        }
+
+        void update(BigDecimal price) {
+            if (price.compareTo(high) > 0) high = price;
+            if (price.compareTo(low) < 0) low = price;
+            close = price;
+            volume++;
+        }
+
+        Candle build(String timeframe) {
+            return new Candle(Instrument.DXY, timeframe, periodStart, open, high, low, close, volume);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // FX component contribution breakdown
+    // -------------------------------------------------------------------------
+
+    public List<FxComponentContribution> computeComponentContributions(DxySnapshot current, DxySnapshot baseline) {
+        if (current == null || baseline == null) {
+            return List.of();
+        }
+
+        return Arrays.stream(FxPair.values())
+            .map(pair -> computeContribution(pair, current.component(pair), baseline.component(pair)))
+            .sorted(Comparator.comparing(c -> c.weightedImpact().abs(), Comparator.reverseOrder()))
+            .toList();
+    }
+
+    private FxComponentContribution computeContribution(FxPair pair, BigDecimal current, BigDecimal baseline) {
+        BigDecimal weight = DXY_WEIGHTS.getOrDefault(pair, BigDecimal.ZERO);
+
+        if (current == null || baseline == null || baseline.compareTo(BigDecimal.ZERO) <= 0) {
+            return new FxComponentContribution(pair, current, baseline,
+                null, weight, BigDecimal.ZERO, "NEUTRAL");
+        }
+
+        BigDecimal pctChange = current.subtract(baseline)
+            .divide(baseline, 6, RoundingMode.HALF_UP)
+            .multiply(BigDecimal.valueOf(100))
+            .setScale(3, RoundingMode.HALF_UP);
+
+        // For XXX/USD pairs (EUR, GBP): pair down = USD up → negate impact
+        // For USD/XXX pairs (JPY, CAD, SEK, CHF): pair up = USD up → keep impact
+        BigDecimal impact = USD_BASE_PAIRS.contains(pair)
+            ? pctChange.multiply(weight).setScale(3, RoundingMode.HALF_UP)
+            : pctChange.negate().multiply(weight).setScale(3, RoundingMode.HALF_UP);
+
+        String direction = impact.compareTo(BigDecimal.ZERO) > 0 ? "USD_BULLISH"
+            : impact.compareTo(BigDecimal.ZERO) < 0 ? "USD_BEARISH"
+            : "NEUTRAL";
+
+        return new FxComponentContribution(pair, current, baseline, pctChange, weight, impact, direction);
     }
 
     public record ResolvedSnapshot(DxySnapshot snapshot, String servedSource) {}

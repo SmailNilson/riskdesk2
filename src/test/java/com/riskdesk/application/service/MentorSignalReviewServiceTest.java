@@ -176,6 +176,7 @@ class MentorSignalReviewServiceTest {
             null,
             null,
             null,
+            null,
             "DXY_AVAILABLE"
         ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(new MentorAnalyzeResponse(
@@ -372,6 +373,7 @@ class MentorSignalReviewServiceTest {
             null,
             null,
             null,
+            null,
             "DXY_AVAILABLE"
         ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(latestAnalysis);
@@ -438,6 +440,7 @@ class MentorSignalReviewServiceTest {
         when(mentorIntermarketService.current(Instrument.MNQ)).thenReturn(new MentorIntermarketSnapshot(
             0.35,
             "BULLISH",
+            null,
             null,
             null,
             null,
