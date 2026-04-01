@@ -9,11 +9,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
-import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 /**
  * Live price provider using IBKR Client Portal Gateway market-data snapshot.
@@ -45,11 +43,11 @@ public class IbkrMarketDataProvider implements MarketDataProvider {
     public Map<Instrument, BigDecimal> fetchPrices() {
         Map<Instrument, BigDecimal> prices = new EnumMap<>(Instrument.class);
 
-        String conidParam = Arrays.stream(Instrument.values())
+        String conidParam = Instrument.exchangeTradedFutures().stream()
             .map(contractCache::getConid)
             .filter(conid -> conid > 0)
             .map(String::valueOf)
-            .collect(Collectors.joining(","));
+            .collect(java.util.stream.Collectors.joining(","));
 
         if (conidParam.isBlank()) {
             return prices;
@@ -76,7 +74,7 @@ public class IbkrMarketDataProvider implements MarketDataProvider {
                 double price = Double.parseDouble(rawText);
                 if (price <= 0) continue;
 
-                for (Instrument inst : Instrument.values()) {
+                for (Instrument inst : Instrument.exchangeTradedFutures()) {
                     if (contractCache.getConid(inst) > 0 && contractCache.getConid(inst) == conid) {
                         prices.put(inst, BigDecimal.valueOf(price));
                         break;

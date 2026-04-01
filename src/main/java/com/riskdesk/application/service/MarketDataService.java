@@ -55,6 +55,7 @@ public class MarketDataService {
     private final ActiveContractRegistry    contractRegistry;
     private final SimpMessagingTemplate     messagingTemplate;
     private final ApplicationEventPublisher eventPublisher;
+    private final DxyMarketService          dxyMarketService;
 
     private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
@@ -68,7 +69,8 @@ public class MarketDataService {
                              CandleRepositoryPort candlePort,
                              ActiveContractRegistry contractRegistry,
                              SimpMessagingTemplate messagingTemplate,
-                             ApplicationEventPublisher eventPublisher) {
+                             ApplicationEventPublisher eventPublisher,
+                             DxyMarketService dxyMarketService) {
         this.marketDataProvider = marketDataProvider;
         this.positionService    = positionService;
         this.alertService       = alertService;
@@ -76,6 +78,7 @@ public class MarketDataService {
         this.contractRegistry   = contractRegistry;
         this.messagingTemplate  = messagingTemplate;
         this.eventPublisher     = eventPublisher;
+        this.dxyMarketService   = dxyMarketService;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
@@ -84,7 +87,7 @@ public class MarketDataService {
         Instant now = Instant.now();
         boolean usedDatabaseFallback = false;
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             BigDecimal price = prices.get(instrument);
             Instant timestamp = now;
             boolean fallbackPrice = false;
@@ -118,6 +121,8 @@ public class MarketDataService {
                 alertService.evaluate(instrument);
             }
         }
+
+        dxyMarketService.refreshSyntheticDxy();
 
         if (usedDatabaseFallback && !databaseFallbackActive) {
             log.warn("IBKR unavailable: serving last known prices from the database.");
@@ -167,6 +172,9 @@ public class MarketDataService {
     }
 
     public StoredPrice latestPrice(Instrument instrument) {
+        if (instrument == Instrument.DXY) {
+            return dxyStoredPrice();
+        }
         BigDecimal live = lastPrice.get(instrument);
         Instant liveTimestamp = lastTimestamp.get(instrument);
         String source = lastSource.get(instrument);
@@ -181,6 +189,9 @@ public class MarketDataService {
     }
 
     public StoredPrice currentPrice(Instrument instrument) {
+        if (instrument == Instrument.DXY) {
+            return dxyStoredPrice();
+        }
         StoredPrice cached = latestPrice(instrument);
         if (cached != null
             && !"FALLBACK_DB".equals(cached.source())
@@ -204,6 +215,16 @@ public class MarketDataService {
             log.debug("Instant price fetch failed for {}: {}", instrument, e.getMessage());
         }
         return cached;
+    }
+
+    private StoredPrice dxyStoredPrice() {
+        return dxyMarketService.latestResolvedSnapshot()
+            .map(snapshot -> new StoredPrice(
+                snapshot.snapshot().dxyValue(),
+                snapshot.snapshot().timestamp(),
+                snapshot.servedSource()
+            ))
+            .orElse(null);
     }
 
     private boolean samePrice(BigDecimal left, BigDecimal right) {

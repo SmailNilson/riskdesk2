@@ -26,7 +26,7 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
     public Map<Instrument, BigDecimal> fetchPrices() {
         Map<Instrument, BigDecimal> prices = new EnumMap<>(Instrument.class);
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             try {
                 contractResolver.resolve(instrument).ifPresent(resolved -> {
                     nativeClient.ensureStreamingPriceSubscription(resolved.contract());
