@@ -1,0 +1,57 @@
+name: Deploy Tagged Release
+
+on:
+  push:
+    tags:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      git_tag:
+        description: "Tag Git deja cree a deployer (ex: v0.1.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve deployment tag
+        id: meta
+        shell: bash
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.git_tag || '' }}
+        run: |
+          TAG_NAME="$MANUAL_TAG"
+          if [[ -z "$TAG_NAME" ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_REPO}:${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy on remote host with docker compose
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: DEPLOY_PATH,GHCR_TOKEN,GHCR_USERNAME,IMAGE_REF
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+            export RISKDESK_API_IMAGE="$IMAGE_REF"
+            docker compose -f docker-compose.release.yml pull
+            docker compose -f docker-compose.release.yml up -d
+            docker compose -f docker-compose.release.yml ps

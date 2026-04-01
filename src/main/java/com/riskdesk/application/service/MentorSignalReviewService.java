@@ -17,6 +17,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -56,8 +57,8 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. Default OFF. */
-    private volatile boolean autoAnalysisEnabled = false;
+    /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
+    private volatile boolean autoAnalysisEnabled;
 
     public boolean isAutoAnalysisEnabled() { return autoAnalysisEnabled; }
     public void setAutoAnalysisEnabled(boolean enabled) { autoAnalysisEnabled = enabled; }
@@ -70,7 +71,8 @@ public class MentorSignalReviewService {
                                      ActiveContractRegistry contractRegistry,
                                      MentorSignalReviewRepositoryPort reviewRepository,
                                      SimpMessagingTemplate messagingTemplate,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
         this.mentorIntermarketService = mentorIntermarketService;
@@ -80,6 +82,7 @@ public class MentorSignalReviewService {
         this.reviewRepository = reviewRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
+        this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
     public void captureInitialReview(Alert alert) {
@@ -103,30 +106,12 @@ public class MentorSignalReviewService {
 
         for (Map.Entry<String, List<Alert>> entry : byDirection.entrySet()) {
             List<Alert> group = entry.getValue();
-            // Use the first alert as the "primary" for the review record,
-            // but include all indicator categories in the message
             Alert primary = group.get(0);
-            List<String> categories = group.stream()
-                .map(a -> a.category().name())
-                .distinct()
-                .toList();
-
-            String combinedMessage = primary.message();
-            if (categories.size() > 1) {
-                // Enrich message with all firing indicators
-                combinedMessage = primary.message() + " [+" + String.join(", ",
-                    categories.subList(1, categories.size())) + "]";
-            }
-
-            // Build a combined alert with enriched message
-            Alert combinedAlert = new Alert(
-                primary.key(),
-                primary.severity(),
-                combinedMessage,
-                primary.category(),
-                primary.instrument()
-            );
-            captureInitialReview(combinedAlert, focusSnapshot);
+            // Persist the review against the exact primary alert shown in the live feed.
+            // The UI correlates reviews back to alert groups through the original
+            // timestamp/category/message triple, so rewriting any of those fields
+            // breaks review attachment and makes fresh groups appear as "No Review".
+            captureInitialReview(primary, focusSnapshot);
         }
     }
 
@@ -667,7 +652,9 @@ public class MentorSignalReviewService {
                 || message.contains("oversold")
                 || message.contains("overbought");
             case "RSI" -> message.contains("oversold") || message.contains("overbought");
-            case "ORDER_BLOCK" -> message.contains("VWAP inside");
+            case "ORDER_BLOCK", "ORDER_BLOCK_VWAP" -> message.contains("VWAP inside")
+                || message.contains("mitigated")
+                || message.contains("invalidated");
             default -> false;
         };
     }

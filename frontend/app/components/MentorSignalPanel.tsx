@@ -45,15 +45,17 @@ export default function MentorSignalPanel({
     const fromReviews: AlertMessage[] = [];
 
     for (const review of reviews) {
-      if (!seenKeys.has(review.alertKey) && review.instrument) {
+      const reviewAlert: AlertMessage = {
+        severity: review.severity,
+        category: review.category,
+        message: review.message,
+        instrument: review.instrument,
+        timestamp: review.timestamp,
+      };
+
+      if (!seenKeys.has(review.alertKey) && review.instrument && isMentorEligibleAlert(reviewAlert)) {
         seenKeys.add(review.alertKey);
-        fromReviews.push({
-          severity: review.severity,
-          category: review.category,
-          message: review.message,
-          instrument: review.instrument,
-          timestamp: review.timestamp,
-        });
+        fromReviews.push(reviewAlert);
       }
     }
 

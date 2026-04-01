@@ -65,6 +65,27 @@ Then verify on the running app:
 curl http://localhost:8080/actuator/info
 ```
 
+### Tag deployment via GitHub Actions
+Release tags are published to GHCR by GitHub Actions, and production deployment
+can be driven by the `Deploy Tagged Release` workflow using
+`docker-compose.release.yml`.
+
+Required GitHub Actions secrets:
+
+- `DEPLOY_HOST`
+- `DEPLOY_USER`
+- `DEPLOY_SSH_KEY`
+- `DEPLOY_PATH`
+- `GHCR_USERNAME`
+- `GHCR_TOKEN`
+
+Server expectation:
+
+- the repo is checked out on the server at `DEPLOY_PATH`
+- Docker Compose V2 is installed
+- deployment runs with `docker compose -f docker-compose.release.yml up -d`
+- the workflow sets `RISKDESK_API_IMAGE=ghcr.io/smailnilson/riskdesk2:<tag>` remotely before compose starts
+
 ### Option 3: Named profile `local-ibkr-gcp`
 Use this when the local SaaS must run against the IBKR Gateway hosted on the
 GCP VM over an IAP tunnel.

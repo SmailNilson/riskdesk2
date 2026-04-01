@@ -6,6 +6,7 @@ if (!apiProxyTarget) {
 }
 
 const nextConfig = {
+  output: 'standalone',
   async rewrites() {
     return [
       {

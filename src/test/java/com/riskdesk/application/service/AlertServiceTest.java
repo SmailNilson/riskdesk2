@@ -71,7 +71,7 @@ class AlertServiceTest {
     }
 
     @Test
-    void orderBlockAlertsDoNotTriggerMentorReviewCapture() {
+    void orderBlockAlertsTriggerMentorReviewCapture() {
         Alert orderBlockAlert = new Alert(
             "ob:mitigated:MNQ:10m",
             AlertSeverity.INFO,
@@ -93,11 +93,13 @@ class AlertServiceTest {
 
         service.evaluate(Instrument.MNQ);
 
-        verify(mentorSignalReviewService, never()).captureGroupReview(anyList(), any());
+        ArgumentCaptor<List<Alert>> alertsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(mentorSignalReviewService).captureGroupReview(alertsCaptor.capture(), any());
+        assertEquals(List.of(orderBlockAlert), alertsCaptor.getValue());
     }
 
     @Test
-    void nonOrderBlockAlertsStillTriggerMentorReviewCapture() {
+    void publishedIndicatorAlertsShareTheSameMentorReviewCaptureBatch() {
         Alert orderBlockAlert = new Alert(
             "ob:mitigated:MNQ:10m",
             AlertSeverity.INFO,
@@ -128,7 +130,7 @@ class AlertServiceTest {
 
         ArgumentCaptor<List<Alert>> alertsCaptor = ArgumentCaptor.forClass(List.class);
         verify(mentorSignalReviewService).captureGroupReview(alertsCaptor.capture(), any());
-        assertEquals(List.of(macdAlert), alertsCaptor.getValue());
+        assertEquals(List.of(orderBlockAlert, macdAlert), alertsCaptor.getValue());
     }
 
     private void assertAlertCanRefireAfterSharedCooldown(String key) throws Exception {

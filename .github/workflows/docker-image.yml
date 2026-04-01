@@ -38,6 +38,11 @@ jobs:
           file: ./Dockerfile
           push: false
           tags: riskdesk-ci:${{ github.sha }}
+          build-args: |
+            APP_VERSION=ci-${{ github.sha }}
+            APP_GIT_SHA=${{ github.sha }}
+            APP_IMAGE_TAG=sha-${{ github.sha }}
+            APP_BUILD_TIME=${{ github.event.head_commit.timestamp || github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -115,6 +120,11 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.value }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.tag_name }}
+            APP_GIT_SHA=${{ steps.revision.outputs.full_sha }}
+            APP_IMAGE_TAG=${{ steps.meta.outputs.tag_name }}
+            APP_BUILD_TIME=${{ github.run_id }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.revision.outputs.full_sha }}

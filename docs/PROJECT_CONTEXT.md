@@ -226,6 +226,8 @@ mvn -q -DskipTests compile
 - Docker image publication now runs in GitHub Actions on Git tag pushes
 - published images are pushed to `ghcr.io/smailnilson/riskdesk2`
 - if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
+- release deployment can now run from GitHub Actions over SSH using `docker-compose.release.yml` on the target server
+- the deployment workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
 - local Docker is no longer required for the standard image release path
 - the private IBKR `tws-api` dependency is vendored under `vendor/maven-repo` so Docker/CI builds do not depend on a developer-local `~/.m2`
 
