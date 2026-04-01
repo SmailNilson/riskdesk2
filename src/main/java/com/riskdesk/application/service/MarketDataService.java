@@ -215,6 +215,13 @@ public class MarketDataService {
     // -------------------------------------------------------------------------
 
     private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
+        // Skip accumulation during the CME maintenance halt / weekend closure.
+        // Prices during these windows are stale or have extreme spreads and would
+        // produce misleading candles on the chart.
+        if (TradingSessionResolver.isMaintenanceWindow(now)) {
+            return;
+        }
+
         String  contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         CandleKey key         = new CandleKey(instrument, timeframe);
         long    periodMins    = TIMEFRAMES.get(timeframe);
