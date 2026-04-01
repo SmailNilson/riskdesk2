@@ -16,10 +16,14 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
 
     private final IbGatewayNativeClient nativeClient;
     private final IbGatewayContractResolver contractResolver;
+    private final SyntheticDxyCalculator dxyCalculator;
 
-    public IbGatewayMarketDataProvider(IbGatewayNativeClient nativeClient, IbGatewayContractResolver contractResolver) {
+    public IbGatewayMarketDataProvider(IbGatewayNativeClient nativeClient,
+                                       IbGatewayContractResolver contractResolver,
+                                       SyntheticDxyCalculator dxyCalculator) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
+        this.dxyCalculator = dxyCalculator;
     }
 
     @Override
@@ -27,6 +31,9 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
         Map<Instrument, BigDecimal> prices = new EnumMap<>(Instrument.class);
 
         for (Instrument instrument : Instrument.values()) {
+            if (instrument.isSynthetic()) {
+                continue; // DXY is computed below from FX pairs
+            }
             try {
                 contractResolver.resolve(instrument).ifPresent(resolved -> {
                     nativeClient.ensureStreamingPriceSubscription(resolved.contract());
@@ -38,11 +45,27 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
             }
         }
 
+        // Synthetic DXY from FX pairs
+        try {
+            dxyCalculator.calculate().ifPresent(dxy -> prices.put(Instrument.DXY, dxy));
+        } catch (Exception e) {
+            log.warn("Synthetic DXY calculation failed: {}", e.getMessage());
+        }
+
         return prices;
     }
 
     @Override
     public Optional<BigDecimal> fetchPrice(Instrument instrument) {
+        if (instrument.isSynthetic()) {
+            try {
+                return dxyCalculator.calculate();
+            } catch (Exception e) {
+                log.warn("Synthetic DXY single fetch failed: {}", e.getMessage());
+                return Optional.empty();
+            }
+        }
+
         try {
             return contractResolver.resolve(instrument)
                 .flatMap(resolved -> {

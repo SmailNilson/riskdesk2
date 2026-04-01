@@ -123,6 +123,7 @@ public class HistoricalDataService implements ApplicationRunner {
         int totalSaved = 0;
 
         for (Instrument instrument : Instrument.values()) {
+            if (instrument.isSynthetic()) continue; // DXY candles come from live accumulation, not IBKR history
             for (String timeframe : TIMEFRAMES) {
                 if (!historicalProvider.supports(instrument, timeframe)) continue;
                 try {

@@ -66,6 +66,14 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
         );
 
         for (Instrument instrument : Instrument.values()) {
+            if (instrument.isSynthetic()) {
+                String fallback = fallbacks.get(instrument);
+                if (fallback != null) {
+                    registry.initialize(instrument, fallback);
+                }
+                continue; // DXY is synthetic — no IBKR contract to resolve
+            }
+
             String resolved = ibkrProperties.isEnabled()
                 ? resolveFromIbkr(instrument)
                 : null;

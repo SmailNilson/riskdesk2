@@ -69,6 +69,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
     @Override
     public boolean supports(Instrument instrument, String timeframe) {
+        if (instrument.isSynthetic()) return false; // DXY candles come from live accumulation
         return switch (timeframe) {
             case "5m", "10m", "1h", "4h", "1d" -> true;
             default -> false;

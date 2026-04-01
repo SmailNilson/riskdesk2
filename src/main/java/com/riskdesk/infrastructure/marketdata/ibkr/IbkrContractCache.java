@@ -27,8 +27,8 @@ public class IbkrContractCache {
         Instrument.MCL, 661016514L,  // Micro WTI Crude Oil  MAY26
         Instrument.MGC, 706903676L,  // Micro Gold           APR26
         Instrument.E6,  496647057L,  // EUR/USD Futures (6E) JUN26
-        Instrument.MNQ, 770561201L,  // Micro E-mini Nasdaq  JUN26
-        Instrument.DXY, 0L
+        Instrument.MNQ, 770561201L   // Micro E-mini Nasdaq  JUN26
+        // DXY is synthetic — computed from FX pairs, no IBKR conid
     );
 
     // Base conids for contract search (stable across rolls)
@@ -44,8 +44,7 @@ public class IbkrContractCache {
         Instrument.MCL, "NYMEX",
         Instrument.MGC, "COMEX",
         Instrument.E6,  "CME",
-        Instrument.MNQ, "CME",
-        Instrument.DXY, "ICEUS"
+        Instrument.MNQ, "CME"
     );
 
     private final Map<Instrument, Long> conids    = new EnumMap<>(Instrument.class);
@@ -76,6 +75,7 @@ public class IbkrContractCache {
     }
 
     private void refreshInstrument(Instrument inst) {
+        if (inst.isSynthetic()) return; // DXY is computed from FX pairs
         try {
             // Step 1: search for available months
             String searchJson = restTemplate.postForObject(
@@ -125,9 +125,6 @@ public class IbkrContractCache {
     private String searchSymbol(Instrument instrument) {
         if (instrument == Instrument.E6) {
             return "EUR";
-        }
-        if (instrument == Instrument.DXY) {
-            return "DX";
         }
         return instrument.name();
     }

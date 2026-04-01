@@ -105,11 +105,7 @@ public class IbGatewayContractResolver {
                 buildQuery("EUR", "CME", "USD", null, "6E"),
                 buildQuery("6E", "GLOBEX", "USD", null, "6E")
             );
-            case DXY -> List.of(
-                buildQuery("DX", "ICEUS", "USD", "1000", "DX"),
-                buildQuery("DX", "ICEUS", "USD", null, "DX"),
-                buildQuery("DX", "ICEUS", "USD", null, null)
-            );
+            case DXY -> List.of(); // DXY is synthetic — computed from FX pairs, not an IBKR contract
         };
     }
 
