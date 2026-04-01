@@ -900,16 +900,23 @@ public class IbGatewayNativeClient {
             } else if (tickType == TickType.BID || tickType == TickType.DELAYED_BID) {
                 bid = price;
                 if (bestPrice == null && ask != null && ask > 0) {
-                    bestPrice = (bid + ask) / 2.0;
+                    bestPrice = spreadGuardedMid(bid, ask);
                 }
             } else if (tickType == TickType.ASK || tickType == TickType.DELAYED_ASK) {
                 ask = price;
                 if (bestPrice == null && bid != null && bid > 0) {
-                    bestPrice = (bid + ask) / 2.0;
+                    bestPrice = spreadGuardedMid(bid, ask);
                 }
             } else if (bestPrice == null && (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE)) {
                 bestPrice = price;
             }
+        }
+
+        private static Double spreadGuardedMid(double bidVal, double askVal) {
+            double mid = (bidVal + askVal) / 2.0;
+            if (mid <= 0) return null;
+            double spread = Math.abs(askVal - bidVal);
+            return (spread / mid < 0.005) ? mid : null;
         }
 
         @Override
@@ -989,6 +996,11 @@ public class IbGatewayNativeClient {
          */
         private volatile Instant lastPriceAt = null;
 
+        /** Maximum spread-to-mid ratio for mid-price to be used as bestPrice fallback. */
+        private static final double MAX_SPREAD_RATIO = 0.005; // 0.5%
+        /** Seconds of silence before stale bid/ask quotes are cleared on the next tick. */
+        private static final long SESSION_GAP_SECONDS = 30L;
+
         private StreamingPriceSubscription(Contract contract) {
             this.contract = contract;
         }
@@ -997,17 +1009,25 @@ public class IbGatewayNativeClient {
         public void tickPrice(TickType tickType, double price, TickAttrib attribs) {
             if (price <= 0) return;
 
+            // After a prolonged gap (maintenance halt, reconnect), clear stale
+            // bid/ask so we don't combine yesterday's quotes with today's trades.
+            Instant last = lastPriceAt;
+            if (last != null && Instant.now().getEpochSecond() - last.getEpochSecond() > SESSION_GAP_SECONDS) {
+                bid = null;
+                ask = null;
+            }
+
             if (tickType == TickType.LAST || tickType == TickType.DELAYED_LAST) {
                 bestPrice = price;
             } else if (tickType == TickType.BID || tickType == TickType.DELAYED_BID) {
                 bid = price;
                 if (bestPrice == null && ask != null && ask > 0) {
-                    bestPrice = (bid + ask) / 2.0;
+                    bestPrice = spreadGuardedMid(bid, ask);
                 }
             } else if (tickType == TickType.ASK || tickType == TickType.DELAYED_ASK) {
                 ask = price;
                 if (bestPrice == null && bid != null && bid > 0) {
-                    bestPrice = (bid + ask) / 2.0;
+                    bestPrice = spreadGuardedMid(bid, ask);
                 }
             } else if (bestPrice == null && (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE)) {
                 bestPrice = price;
@@ -1017,6 +1037,18 @@ public class IbGatewayNativeClient {
                 lastPriceAt = Instant.now();
                 logFirstPrice("tickPrice");
             }
+        }
+
+        /**
+         * Returns the mid-price only if the bid-ask spread is within {@value MAX_SPREAD_RATIO}
+         * of the mid.  At session open the spread can be extremely wide; using a wild mid-price
+         * would create spike candles on the chart.
+         */
+        private static Double spreadGuardedMid(double bidVal, double askVal) {
+            double mid = (bidVal + askVal) / 2.0;
+            if (mid <= 0) return null;
+            double spread = Math.abs(askVal - bidVal);
+            return (spread / mid < MAX_SPREAD_RATIO) ? mid : null;
         }
 
         @Override
