@@ -2,11 +2,13 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.marketdata.model.DxySnapshot;
+import com.riskdesk.domain.marketdata.model.FxComponentContribution;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -29,6 +31,7 @@ public class MentorIntermarketService {
                 null,
                 null,
                 null,
+                null,
                 "UNAVAILABLE"
             );
         }
@@ -37,6 +40,7 @@ public class MentorIntermarketService {
         return new MentorIntermarketSnapshot(
             dxySignal.pctChange(),
             dxySignal.trend(),
+            dxySignal.breakdown(),
             null,
             null,
             null,
@@ -63,9 +67,12 @@ public class MentorIntermarketService {
             .multiply(BigDecimal.valueOf(100))
             .setScale(3, RoundingMode.HALF_UP);
 
+        List<FxComponentContribution> breakdown = dxyMarketService.computeComponentContributions(current, baseline);
+
         return new DxySignal(
             pct.doubleValue(),
             trendFor(current.dxyValue().compareTo(baseline.dxyValue())),
+            breakdown,
             true
         );
     }
@@ -80,9 +87,9 @@ public class MentorIntermarketService {
         return "FLAT";
     }
 
-    private record DxySignal(Double pctChange, String trend, boolean available) {
+    private record DxySignal(Double pctChange, String trend, List<FxComponentContribution> breakdown, boolean available) {
         private static DxySignal unavailable() {
-            return new DxySignal(null, "UNAVAILABLE", false);
+            return new DxySignal(null, "UNAVAILABLE", null, false);
         }
     }
 }

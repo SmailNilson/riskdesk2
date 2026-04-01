@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.DxyHealthView;
 import com.riskdesk.application.dto.DxySnapshotView;
+import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.marketdata.model.DxySnapshot;
 import com.riskdesk.domain.marketdata.model.FxPair;
 import com.riskdesk.domain.marketdata.model.FxQuoteSnapshot;
@@ -9,6 +10,7 @@ import com.riskdesk.domain.marketdata.port.DxySnapshotRepositoryPort;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -29,8 +31,10 @@ class DxyMarketServiceTest {
         when(provider.getIfAvailable()).thenReturn(fxQuoteProvider);
 
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, true);
+        ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, candlePort, pricePublisher, eventPublisher, true);
 
         when(fxQuoteProvider.fetchQuotes()).thenReturn(completeQuotes(Instant.parse("2026-04-01T10:00:00Z")));
         when(repository.findLatestComplete()).thenReturn(Optional.empty());
@@ -53,8 +57,10 @@ class DxyMarketServiceTest {
         when(provider.getIfAvailable()).thenReturn(fxQuoteProvider);
 
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, true);
+        ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, candlePort, pricePublisher, eventPublisher, true);
 
         Map<FxPair, FxQuoteSnapshot> incomplete = completeQuotes(Instant.parse("2026-04-01T10:00:00Z"));
         incomplete.remove(FxPair.USDCHF);
@@ -88,8 +94,10 @@ class DxyMarketServiceTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<FxQuoteProvider> provider = mock(ObjectProvider.class);
         DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
-        DxyMarketService service = new DxyMarketService(provider, repository, pricePublisher, false);
+        ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, candlePort, pricePublisher, eventPublisher, false);
 
         service.refreshSyntheticDxy();
 
@@ -98,6 +106,65 @@ class DxyMarketServiceTest {
         assertFalse(service.supported());
         verifyNoInteractions(repository);
         verifyNoInteractions(pricePublisher);
+    }
+
+    @Test
+    void computeComponentContributions_calculatesWeightedImpacts() {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<FxQuoteProvider> provider = mock(ObjectProvider.class);
+        DxySnapshotRepositoryPort repository = mock(DxySnapshotRepositoryPort.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        DxyPricePublisher pricePublisher = mock(DxyPricePublisher.class);
+        ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        DxyMarketService service = new DxyMarketService(provider, repository, candlePort, pricePublisher, eventPublisher, true);
+
+        DxySnapshot current = new DxySnapshot(
+            Instant.parse("2026-04-01T10:00:00Z"),
+            new BigDecimal("1.07500"), // EURUSD down → USD_BULLISH
+            new BigDecimal("150.00000"), // USDJPY up → USD_BULLISH
+            new BigDecimal("1.26220"),
+            new BigDecimal("1.35120"),
+            new BigDecimal("10.48050"),
+            new BigDecimal("0.90215"),
+            new BigDecimal("104.500000"),
+            "IBKR_SYNTHETIC", true
+        );
+        DxySnapshot baseline = new DxySnapshot(
+            Instant.parse("2026-04-01T09:50:00Z"),
+            new BigDecimal("1.08110"), // EURUSD was higher
+            new BigDecimal("149.22000"), // USDJPY was lower
+            new BigDecimal("1.26220"),
+            new BigDecimal("1.35120"),
+            new BigDecimal("10.48050"),
+            new BigDecimal("0.90215"),
+            new BigDecimal("103.800000"),
+            "IBKR_SYNTHETIC", true
+        );
+
+        var contributions = service.computeComponentContributions(current, baseline);
+
+        assertFalse(contributions.isEmpty());
+        assertEquals(6, contributions.size());
+
+        // EURUSD down → USD_BULLISH (biggest weight)
+        var eurContrib = contributions.stream()
+            .filter(c -> c.pair() == FxPair.EURUSD)
+            .findFirst().orElseThrow();
+        assertEquals("USD_BULLISH", eurContrib.impactDirection());
+        assertTrue(eurContrib.pctChange().doubleValue() < 0); // EUR fell
+
+        // USDJPY up → USD_BULLISH
+        var jpyContrib = contributions.stream()
+            .filter(c -> c.pair() == FxPair.USDJPY)
+            .findFirst().orElseThrow();
+        assertEquals("USD_BULLISH", jpyContrib.impactDirection());
+        assertTrue(jpyContrib.pctChange().doubleValue() > 0); // JPY pair rose
+
+        // Sorted by |weightedImpact| descending
+        for (int i = 0; i < contributions.size() - 1; i++) {
+            assertTrue(contributions.get(i).weightedImpact().abs()
+                .compareTo(contributions.get(i + 1).weightedImpact().abs()) >= 0);
+        }
     }
 
     private Map<FxPair, FxQuoteSnapshot> completeQuotes(Instant timestamp) {

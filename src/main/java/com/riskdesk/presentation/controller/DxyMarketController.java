@@ -3,6 +3,8 @@ package com.riskdesk.presentation.controller;
 import com.riskdesk.application.dto.DxyHealthView;
 import com.riskdesk.application.dto.DxySnapshotView;
 import com.riskdesk.application.service.DxyMarketService;
+import com.riskdesk.domain.marketdata.model.DxySnapshot;
+import com.riskdesk.domain.marketdata.model.FxComponentContribution;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -52,6 +54,20 @@ public class DxyMarketController {
     @GetMapping("/health")
     public DxyHealthView health() {
         return dxyMarketService.health();
+    }
+
+    @GetMapping("/breakdown")
+    public ResponseEntity<List<FxComponentContribution>> breakdown() {
+        ensureSupported();
+        DxySnapshot current = dxyMarketService.latestSnapshot().orElse(null);
+        if (current == null) {
+            return ResponseEntity.notFound().build();
+        }
+        DxySnapshot baseline = dxyMarketService.findBaselineSnapshot(current.timestamp()).orElse(null);
+        if (baseline == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(dxyMarketService.computeComponentContributions(current, baseline));
     }
 
     private void ensureSupported() {
