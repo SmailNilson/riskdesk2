@@ -1,6 +1,6 @@
 # AI Handoff
 
-Last updated: 2026-03-28
+Last updated: 2026-04-01
 
 ## Goal of this file
 
@@ -49,7 +49,35 @@ This is expected until internal IBKR/DB-backed inputs exist.
 
 ## Recent Technical Changes
 
-### 0. GitHub-hosted Docker image pipeline
+### 0. Synthetic DXY replaced the delayed `DX/ICEUS` contract path
+
+Files:
+
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/application/service/DxyMarketService.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/domain/marketdata/model/SyntheticDollarIndexCalculator.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayFxQuoteProvider.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbGatewayFxContractResolver.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/infrastructure/persistence/entity/MarketDxySnapshotEntity.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/src/main/java/com/riskdesk/presentation/controller/DxyMarketController.java`
+- `/Users/ismailassri/.gemini/antigravity/scratch/riskdesk2/frontend/app/components/DxyPanel.tsx`
+
+What changed:
+
+- `DXY` is now computed internally from six IBKR FX quotes (`EURUSD`, `USDJPY`, `GBPUSD`, `USDCAD`, `USDSEK`, `USDCHF`) instead of resolving the delayed `DX` future on `ICEUS`
+- the calculator prefers `mid=(bid+ask)/2`, falls back to `last`, rejects missing/non-positive values, and rejects snapshots whose component timestamps drift by more than `15s`
+- complete snapshots are persisted into `market_dxy_snapshots` with all six FX inputs, the computed DXY value, source, and completeness flag
+- `MarketDataService` refreshes the synthetic DXY on the existing poll cycle and publishes `DXY` to `/topic/prices`
+- `MentorIntermarketService` now reads only from the synthetic DXY service and uses persisted DXY snapshots for its `10m` / `1h` baseline lookup
+- `DXY` is excluded from futures-specific loops such as active-contract resolution, rollover detection, and futures historical refresh
+- dedicated REST endpoints now exist at `/api/market/dxy/latest`, `/api/market/dxy/history`, and `/api/market/dxy/health`
+- `CLIENT_PORTAL` mode does not serve these DXY endpoints; synthetic DXY is only supported in `IB_GATEWAY` mode
+
+Why:
+
+- the `DX/ICEUS` path was delayed and unsuitable for an internal dollar-index signal used by trading workflows
+- the repo already had the required IBKR connectivity, so the correct fix was to stay inside the existing `IBKR Gateway -> PostgreSQL -> internal services` path
+
+### 1. GitHub-hosted Docker image pipeline
 
 Files:
 
@@ -72,7 +100,7 @@ Why:
 - release publishing should not depend on running `docker build` locally
 - tag-based publishing keeps the release image aligned with an immutable Git ref
 
-### 1. Native IBKR client stabilization
+### 2. Native IBKR client stabilization
 
 File:
 
@@ -89,7 +117,7 @@ Why:
 
 - IB Gateway logs showed repeated `client id already in use` and connection churn
 
-### 2. Direct preconfigured futures contract resolution
+### 3. Direct preconfigured futures contract resolution
 
 File:
 
@@ -100,7 +128,7 @@ What changed:
 - for known futures instruments, the resolver can use a preconfigured IBKR contract directly via `conid`
 - this reduces dependency on `reqContractDetails` on the live-path critical section
 
-### 3. Live provider path simplified
+### 4. Live provider path simplified
 
 File:
 
@@ -114,7 +142,7 @@ Why:
 
 - when IBKR itself is unhealthy, rediscovery only adds noise and timeouts
 
-### 4. Mentor persisted review threads for qualified alerts
+### 5. Mentor persisted review threads for qualified alerts
 
 Files:
 
@@ -150,7 +178,7 @@ Important behavior:
 - the initial review is snapshot-based and no longer depends on click-time market state
 - manual reanalysis does rebuild current indicators/candles/live price, but also passes the original alert time/reason/price to Gemini for comparison
 
-### 5. Mentor trade outcome tracker
+### 6. Mentor trade outcome tracker
 
 Files:
 
@@ -181,7 +209,7 @@ Operational note:
 - this uses the existing internal candle repository only
 - no external replay feed or provider is involved
 
-### 6. Transition-based alert evaluation and grouped reviews
+### 7. Transition-based alert evaluation and grouped reviews
 
 Files:
 
@@ -207,7 +235,7 @@ Why:
 - persistent conditions (e.g., RSI overbought, BOS) were re-firing every 300s (dedup cooldown) across all instruments simultaneously
 - multiple indicators reacting to the same market move at the same time should produce one combined review, not N separate reviews
 
-### 7. Execution foundation for real IBKR workflow
+### 8. Execution foundation for real IBKR workflow
 
 Files:
 

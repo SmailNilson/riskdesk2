@@ -40,6 +40,9 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
     @Override
     public List<Candle> fetchHistory(Instrument instrument, String timeframe, int count) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return List.of();
+        }
         return contractResolver.resolve(instrument)
             .map(resolved -> {
                 if (supportsDeepBackfill(timeframe)) {
@@ -69,6 +72,9 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
     @Override
     public boolean supports(Instrument instrument, String timeframe) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return false;
+        }
         return switch (timeframe) {
             case "5m", "10m", "1h", "4h", "1d" -> true;
             default -> false;

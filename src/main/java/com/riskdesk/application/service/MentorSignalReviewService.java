@@ -840,7 +840,7 @@ public class MentorSignalReviewService {
             case MGC -> "MGC1!";
             case E6 -> "6E1!";
             case MNQ -> "MNQ1!";
-            case DXY -> "DX1!";
+            case DXY -> "DXY";
         };
     }
 

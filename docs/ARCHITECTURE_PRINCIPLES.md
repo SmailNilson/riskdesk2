@@ -195,6 +195,25 @@ Do not:
 - create separate mentor reviews for alerts that fire simultaneously for the same trading signal
 - move transition detection logic out of the domain layer
 
+### Synthetic DXY Rule
+
+When working with the dollar index inside RiskDesk:
+
+- treat `DXY` as an internal synthetic series, not as the exchange-traded `DX` future
+- source the six FX inputs only from the existing native IBKR Gateway quote path
+- keep the calculation rule in `domain`
+- keep orchestration, fallback, WebSocket publication, and REST exposure in `application`
+- keep FX contract resolution and quote collection in `infrastructure`
+- persist complete snapshots in a dedicated DXY persistence model instead of overloading the generic candle history
+- exclude `DXY` from futures-only workflows such as active-contract rollover, exchange-traded contract discovery, and futures historical refresh
+- preserve explicit source attribution between live synthetic output and DB-served fallback
+
+Do not:
+
+- reintroduce `DX/ICEUS` as the source of truth for internal DXY logic
+- hide whether a served DXY value is live synthetic data or a persisted DB fallback
+- push FX quote parsing or DXY formula rules into controllers or persistence adapters
+
 ### Mentor Outcome Tracking Rule
 
 When evaluating whether a saved Mentor trade plan was correct:
