@@ -24,6 +24,12 @@ public class AlertController {
         return alertService.getRecentAlerts();
     }
 
+    @DeleteMapping("/recent")
+    public Map<String, Object> clearRecentAlerts() {
+        int cleared = alertService.clearRecentAlerts();
+        return Map.of("cleared", cleared);
+    }
+
     /**
      * Snoozes a specific alert key for the given duration.
      * Body: { "key": "ema:golden:MCL:10m", "durationSeconds": 300 }

@@ -229,6 +229,10 @@ public class MentorSignalReviewService {
         return toDto(saved);
     }
 
+    public long deleteByStatuses(List<String> statuses) {
+        return reviewRepository.deleteByStatuses(statuses);
+    }
+
     public List<MentorSignalReview> getRecentReviews() {
         return getRecentReviews(DEFAULT_RECENT_REVIEWS);
     }

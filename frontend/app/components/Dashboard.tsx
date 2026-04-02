@@ -32,7 +32,7 @@ export default function Dashboard() {
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
 
-  const { prices, alerts, mentorSignalReviews, connected } = useWebSocket();
+  const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
@@ -178,6 +178,7 @@ export default function Dashboard() {
           alerts={alerts}
           reviews={mentorSignalReviews}
           selectedBrokerAccountId={selectedIbkrAccountId}
+          onRefresh={refresh}
         />
 
         {/* Backtest */}
