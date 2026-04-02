@@ -1,8 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
-import { API_BASE } from '@/app/lib/runtimeConfig';
 
 interface Props { alerts: AlertMessage[] }
 
@@ -24,65 +22,15 @@ const SEV_LABEL = {
   DANGER: 'text-red-500',
 };
 
-const TIMEFRAMES = ['5m', '10m', '1H'] as const;
-const TF_API: Record<string, string> = { '5m': '5m', '10m': '10m', '1H': '1h' };
-
-const API_URL = API_BASE ?? '';
-
 export default function AlertsFeed({ alerts }: Props) {
-  const [mutedTfs, setMutedTfs] = useState<Set<string>>(new Set());
-
-  // Load muted state from backend on mount
-  useEffect(() => {
-    fetch(`${API_URL}/api/alerts/muted-timeframes`)
-      .then(r => r.ok ? r.json() : [])
-      .then((muted: string[]) => setMutedTfs(new Set(muted)))
-      .catch(() => {});
-  }, []);
-
-  const toggleTimeframe = useCallback(async (tf: string) => {
-    const apiTf = TF_API[tf];
-    const isMuted = mutedTfs.has(apiTf);
-    const next = new Set(mutedTfs);
-    if (isMuted) {
-      next.delete(apiTf);
-    } else {
-      next.add(apiTf);
-    }
-    setMutedTfs(next);
-    await fetch(`${API_URL}/api/alerts/muted-timeframes/${apiTf}?muted=${!isMuted}`, {
-      method: 'PUT',
-    }).catch(() => {});
-  }, [mutedTfs]);
-
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/95 backdrop-blur border-t border-zinc-800 flex items-center gap-0">
-      {/* Label + timeframe mute buttons */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 border-r border-zinc-800 h-full self-stretch py-1.5">
+      {/* Label */}
+      <div className="flex-shrink-0 flex items-center gap-2 px-3 border-r border-zinc-800 h-full self-stretch">
         <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Alerts</span>
         {alerts.length > 0 && (
           <span className="text-[9px] bg-zinc-800 text-zinc-400 rounded px-1">{alerts.length}</span>
         )}
-        <div className="flex items-center gap-1 ml-1">
-          {TIMEFRAMES.map(tf => {
-            const apiTf = TF_API[tf];
-            const muted = mutedTfs.has(apiTf);
-            return (
-              <button
-                key={tf}
-                onClick={() => toggleTimeframe(tf)}
-                title={muted ? `Réactiver les alertes ${tf}` : `Désactiver les alertes ${tf}`}
-                className={`text-[9px] font-bold px-1.5 py-0.5 rounded border transition-all ${
-                  muted
-                    ? 'border-zinc-700 bg-zinc-800/40 text-zinc-600 line-through'
-                    : 'border-zinc-600 bg-zinc-700/60 text-zinc-300 hover:border-zinc-400'
-                }`}
-              >
-                {tf}
-              </button>
-            );
-          })}
-        </div>
       </div>
 
       {/* Scrollable alert chips */}
