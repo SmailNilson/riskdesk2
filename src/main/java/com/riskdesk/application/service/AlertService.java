@@ -148,6 +148,14 @@ public class AlertService {
         }
     }
 
+    public int clearRecentAlerts() {
+        synchronized (recentAlerts) {
+            int count = recentAlerts.size();
+            recentAlerts.clear();
+            return count;
+        }
+    }
+
     // -----------------------------------------------------------------------
 
     private Map<String, Object> toPayload(Alert alert) {

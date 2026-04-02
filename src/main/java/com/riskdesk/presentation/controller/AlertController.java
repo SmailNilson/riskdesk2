@@ -21,4 +21,10 @@ public class AlertController {
     public List<Map<String, Object>> getRecentAlerts() {
         return alertService.getRecentAlerts();
     }
+
+    @DeleteMapping("/recent")
+    public Map<String, Object> clearRecentAlerts() {
+        int cleared = alertService.clearRecentAlerts();
+        return Map.of("cleared", cleared);
+    }
 }
