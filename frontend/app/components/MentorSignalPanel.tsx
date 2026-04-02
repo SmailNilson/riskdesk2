@@ -180,7 +180,10 @@ export default function MentorSignalPanel({
     setThreadsByAlertKey(prev => {
       const next = { ...prev };
       for (const review of reviews) {
-        const frontendKey = `${review.timestamp}:${review.instrument ?? 'GLOBAL'}:${review.category}:${review.message}`;
+        // IMPORTANT: must use buildMentorAlertKey — the canonical key function.
+        // Do NOT use review.alertKey (backend format) here; it differs from the
+        // frontend lookup key and will cause all groups to appear as No Review.
+        const frontendKey = buildMentorAlertKey(review);
         next[frontendKey] = mergeReviews(next[frontendKey] ?? [], [review]);
       }
       return next;
