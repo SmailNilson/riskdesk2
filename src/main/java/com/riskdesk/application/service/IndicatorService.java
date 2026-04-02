@@ -8,6 +8,7 @@ import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -400,6 +401,9 @@ public class IndicatorService {
         }
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
+        // Match CandleController: drop maintenance-window candles so indicator
+        // series timestamps stay aligned with the candle series on the chart.
+        ordered.removeIf(c -> TradingSessionResolver.isMaintenanceWindow(c.getTimestamp()));
         return ordered;
     }
 

@@ -16,6 +16,9 @@ import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -38,6 +41,7 @@ import java.util.stream.Stream;
 @Service
 public class MentorSignalReviewService {
 
+    private static final Logger log = LoggerFactory.getLogger(MentorSignalReviewService.class);
     private static final int DEFAULT_RECENT_REVIEWS = 500;
     private static final int MAX_RECENT_REVIEWS = 1000;
     private static final String STATUS_ANALYZING = "ANALYZING";
@@ -83,6 +87,14 @@ public class MentorSignalReviewService {
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
+    }
+
+    @PostConstruct
+    void cleanupStaleAnalyzingReviews() {
+        int cleaned = reviewRepository.markAnalyzingAsError("Server restarted while analysis was in progress.");
+        if (cleaned > 0) {
+            log.info("MentorSignalReviewService: marked {} stale ANALYZING reviews as ERROR on startup.", cleaned);
+        }
     }
 
     public void captureInitialReview(Alert alert) {
@@ -198,6 +210,12 @@ public class MentorSignalReviewService {
         List<MentorSignalReviewRecord> thread = reviewRepository.findByAlertKeyOrderByRevisionAsc(alertKey);
         if (thread.isEmpty()) {
             throw new IllegalArgumentException("no saved mentor review exists for this alert");
+        }
+
+        // Guard: reject if latest revision is still ANALYZING (prevents duplicate API calls)
+        MentorSignalReviewRecord latest = thread.get(thread.size() - 1);
+        if (STATUS_ANALYZING.equals(latest.getStatus())) {
+            return toDto(latest);
         }
 
         MentorSignalReviewRecord baseReview = thread.get(0);

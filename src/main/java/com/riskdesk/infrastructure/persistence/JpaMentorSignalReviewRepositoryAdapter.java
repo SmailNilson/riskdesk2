@@ -8,6 +8,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -67,5 +68,11 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     @Transactional
     public long deleteByStatuses(List<String> statuses) {
         return repository.deleteByStatusIn(statuses);
+    }
+
+    @Override
+    @Transactional
+    public int markAnalyzingAsError(String errorMessage) {
+        return repository.markAnalyzingAsError(errorMessage, Instant.now());
     }
 }
