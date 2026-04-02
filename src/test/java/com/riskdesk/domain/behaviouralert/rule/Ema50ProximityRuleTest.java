@@ -89,7 +89,8 @@ class Ema50ProximityRuleTest {
                 ema50  != null ? new BigDecimal(ema50)  : null,
                 ema200 != null ? new BigDecimal(ema200) : null,
                 Collections.emptyList(),
-                candle
+                candle,
+                null, null
         );
     }
 }

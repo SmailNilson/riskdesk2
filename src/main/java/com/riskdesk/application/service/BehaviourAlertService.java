@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -68,28 +69,31 @@ public class BehaviourAlertService {
     private BehaviourAlertContext toContext(Instrument instrument, String tf, IndicatorSnapshot snap) {
         List<SrLevel> srLevels = new ArrayList<>();
 
-        if (snap.equalHighs() != null) {
-            for (var eq : snap.equalHighs()) {
-                if (eq.price() != null) srLevels.add(new SrLevel("EQH", eq.price()));
-            }
-        }
-        if (snap.equalLows() != null) {
-            for (var eq : snap.equalLows()) {
-                if (eq.price() != null) srLevels.add(new SrLevel("EQL", eq.price()));
-            }
-        }
+        Optional.ofNullable(snap.equalHighs()).orElse(List.of()).stream()
+                .filter(eq -> eq.price() != null)
+                .map(eq -> new SrLevel("EQH", eq.price()))
+                .forEach(srLevels::add);
+
+        Optional.ofNullable(snap.equalLows()).orElse(List.of()).stream()
+                .filter(eq -> eq.price() != null)
+                .map(eq -> new SrLevel("EQL", eq.price()))
+                .forEach(srLevels::add);
+
         addIfNotNull(srLevels, "STRONG_HIGH", snap.strongHigh());
         addIfNotNull(srLevels, "STRONG_LOW",  snap.strongLow());
         addIfNotNull(srLevels, "WEAK_HIGH",   snap.weakHigh());
         addIfNotNull(srLevels, "WEAK_LOW",    snap.weakLow());
 
         return new BehaviourAlertContext(
-                instrument.name(), tf,
+                instrument.name(),
+                tf,
                 snap.lastPrice(),
                 snap.ema50(),
                 snap.ema200(),
                 srLevels,
-                snap.lastCandleTimestamp()
+                snap.lastCandleTimestamp(),
+                snap.chaikinOscillator(),
+                snap.cmf()
         );
     }
 
