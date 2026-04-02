@@ -38,11 +38,13 @@ export default function MentorSignalPanel({
   alerts,
   reviews,
   selectedBrokerAccountId,
+  onRefresh,
 }: {
   timezone: TzEntry;
   alerts: AlertMessage[];
   reviews: MentorSignalReview[];
   selectedBrokerAccountId?: string;
+  onRefresh?: () => void;
 }) {
   const liveEligibleAlerts = useMemo(() => alerts.filter(isMentorEligibleAlert), [alerts]);
 
@@ -299,6 +301,7 @@ export default function MentorSignalPanel({
         fetch(`${API_URL}/api/alerts/recent`, { method: 'DELETE' }),
         fetch(`${API_URL}/api/mentor/auto-alerts?statuses=ERROR`, { method: 'DELETE' }),
       ]);
+      onRefresh?.();
     } finally {
       setCleaningUp(false);
     }

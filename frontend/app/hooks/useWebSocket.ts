@@ -113,5 +113,16 @@ export function useWebSocket() {
     };
   }, [connect, loadRecentAlerts, loadRecentMentorReviews]);
 
-  return { prices, alerts, mentorSignalReviews, connected };
+  const refresh = useCallback(() => {
+    fetch(`${API_URL}/api/alerts/recent`)
+      .then(r => r.ok ? r.json() : [])
+      .then((recent: AlertMessage[]) => setAlerts(recent.slice(0, 50)))
+      .catch(() => {});
+    fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((recent: MentorSignalReview[]) => setMentorSignalReviews(recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT)))
+      .catch(() => {});
+  }, []);
+
+  return { prices, alerts, mentorSignalReviews, connected, refresh };
 }
