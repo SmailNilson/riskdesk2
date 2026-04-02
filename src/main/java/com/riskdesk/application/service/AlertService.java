@@ -47,7 +47,7 @@ public class AlertService {
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
 
     // Timeframes whose alert evaluation is globally muted (e.g. "10m", "1h", "5m")
-    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet();
+    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet(Set.of("5m"));
 
     public AlertService(PositionService positionService,
                         IndicatorService indicatorService,
