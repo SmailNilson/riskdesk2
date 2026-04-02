@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { API_BASE } from '@/app/lib/runtimeConfig';
 
@@ -24,114 +24,89 @@ const SEV_LABEL = {
   DANGER: 'text-red-500',
 };
 
-const SNOOZE_OPTIONS = [
-  { label: '5m',  seconds: 300 },
-  { label: '10m', seconds: 600 },
-  { label: '1H',  seconds: 3600 },
-];
+const TIMEFRAMES = ['5m', '10m', '1H'] as const;
+const TF_API: Record<string, string> = { '5m': '5m', '10m': '10m', '1H': '1h' };
 
 const API_URL = API_BASE ?? '';
 
-async function callSnooze(key: string, durationSeconds: number) {
-  await fetch(`${API_URL}/api/alerts/snooze`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, durationSeconds }),
-  });
-}
-
 export default function AlertsFeed({ alerts }: Props) {
-  const [snoozedKeys, setSnoozedKeys] = useState<Set<string>>(new Set());
-  const [openKey, setOpenKey] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const [mutedTfs, setMutedTfs] = useState<Set<string>>(new Set());
 
-  // Close dropdown when clicking outside
+  // Load muted state from backend on mount
   useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpenKey(null);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
+    fetch(`${API_URL}/api/alerts/muted-timeframes`)
+      .then(r => r.ok ? r.json() : [])
+      .then((muted: string[]) => setMutedTfs(new Set(muted)))
+      .catch(() => {});
   }, []);
 
-  const handleSnooze = async (key: string, seconds: number) => {
-    await callSnooze(key, seconds);
-    setSnoozedKeys(prev => new Set(prev).add(key));
-    setOpenKey(null);
-  };
-
-  const visibleAlerts = alerts.filter(a => !a.key || !snoozedKeys.has(a.key));
+  const toggleTimeframe = useCallback(async (tf: string) => {
+    const apiTf = TF_API[tf];
+    const isMuted = mutedTfs.has(apiTf);
+    const next = new Set(mutedTfs);
+    if (isMuted) {
+      next.delete(apiTf);
+    } else {
+      next.add(apiTf);
+    }
+    setMutedTfs(next);
+    await fetch(`${API_URL}/api/alerts/muted-timeframes/${apiTf}?muted=${!isMuted}`, {
+      method: 'PUT',
+    }).catch(() => {});
+  }, [mutedTfs]);
 
   return (
-    /* Fixed bottom bar */
     <div className="fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/95 backdrop-blur border-t border-zinc-800 flex items-center gap-0">
-      {/* Label */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 border-r border-zinc-800 h-full self-stretch">
+      {/* Label + timeframe mute buttons */}
+      <div className="flex-shrink-0 flex items-center gap-2 px-3 border-r border-zinc-800 h-full self-stretch py-1.5">
         <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Alerts</span>
-        {visibleAlerts.length > 0 && (
-          <span className="text-[9px] bg-zinc-800 text-zinc-400 rounded px-1">{visibleAlerts.length}</span>
+        {alerts.length > 0 && (
+          <span className="text-[9px] bg-zinc-800 text-zinc-400 rounded px-1">{alerts.length}</span>
         )}
+        <div className="flex items-center gap-1 ml-1">
+          {TIMEFRAMES.map(tf => {
+            const apiTf = TF_API[tf];
+            const muted = mutedTfs.has(apiTf);
+            return (
+              <button
+                key={tf}
+                onClick={() => toggleTimeframe(tf)}
+                title={muted ? `Réactiver les alertes ${tf}` : `Désactiver les alertes ${tf}`}
+                className={`text-[9px] font-bold px-1.5 py-0.5 rounded border transition-all ${
+                  muted
+                    ? 'border-zinc-700 bg-zinc-800/40 text-zinc-600 line-through'
+                    : 'border-zinc-600 bg-zinc-700/60 text-zinc-300 hover:border-zinc-400'
+                }`}
+              >
+                {tf}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Scrollable alert chips */}
       <div className="flex-1 overflow-x-auto overflow-y-hidden">
-        {visibleAlerts.length === 0 ? (
+        {alerts.length === 0 ? (
           <p className="text-[10px] text-zinc-600 px-4 py-2.5">Aucune alerte</p>
         ) : (
           <div className="flex items-center gap-2 px-3 py-2 w-max">
-            {visibleAlerts.map((a, i) => {
-              const chipKey = a.key ?? `${a.timestamp}:${a.message}`;
-              const isOpen = openKey === chipKey;
-              return (
-                <div key={i} className="relative flex-shrink-0" ref={isOpen ? menuRef : undefined}>
-                  <div
-                    className={`flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] ${SEV_CHIP[a.severity]}`}
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${SEV_DOT[a.severity]}`} />
-                    <span className={`font-semibold ${SEV_LABEL[a.severity]}`}>{a.category}</span>
-                    {a.instrument && (
-                      <span className="bg-zinc-700/60 text-zinc-400 text-[9px] px-1 rounded">{a.instrument}</span>
-                    )}
-                    <span className="text-zinc-300 max-w-[220px] truncate">{a.message}</span>
-                    <span className="text-[9px] text-zinc-600 ml-1 flex-shrink-0">
-                      {new Date(a.timestamp).toLocaleTimeString()}
-                    </span>
-                    {/* Snooze toggle — only when key is available */}
-                    {a.key && (
-                      <button
-                        onClick={() => setOpenKey(isOpen ? null : chipKey)}
-                        title="Snooze cet alert"
-                        className="ml-1 flex-shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                          <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zM7.25 4v4.31l2.72 2.72.75-.75-2.47-2.47V4h-1z"/>
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Snooze dropdown */}
-                  {isOpen && (
-                    <div className="absolute bottom-full mb-1 right-0 bg-zinc-900 border border-zinc-700 rounded shadow-lg z-50 min-w-[90px]">
-                      <div className="px-2 pt-1.5 pb-0.5 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
-                        Snooze
-                      </div>
-                      {SNOOZE_OPTIONS.map(opt => (
-                        <button
-                          key={opt.label}
-                          onClick={() => handleSnooze(a.key!, opt.seconds)}
-                          className="w-full text-left px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-zinc-700 transition-colors"
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {alerts.map((a, i) => (
+              <div
+                key={i}
+                className={`flex-shrink-0 flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] ${SEV_CHIP[a.severity]}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${SEV_DOT[a.severity]}`} />
+                <span className={`font-semibold ${SEV_LABEL[a.severity]}`}>{a.category}</span>
+                {a.instrument && (
+                  <span className="bg-zinc-700/60 text-zinc-400 text-[9px] px-1 rounded">{a.instrument}</span>
+                )}
+                <span className="text-zinc-300 max-w-[220px] truncate">{a.message}</span>
+                <span className="text-[9px] text-zinc-600 ml-1 flex-shrink-0">
+                  {new Date(a.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>

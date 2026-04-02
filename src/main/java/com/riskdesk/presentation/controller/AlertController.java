@@ -6,6 +6,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/alerts")
@@ -32,6 +33,23 @@ public class AlertController {
         String key = (String) body.get("key");
         long durationSeconds = ((Number) body.get("durationSeconds")).longValue();
         alertService.snoozeAlert(key, durationSeconds);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/muted-timeframes")
+    public Set<String> getMutedTimeframes() {
+        return alertService.getMutedTimeframes();
+    }
+
+    @PutMapping("/muted-timeframes/{timeframe}")
+    public ResponseEntity<Void> setTimeframeMute(
+            @PathVariable String timeframe,
+            @RequestParam boolean muted) {
+        if (muted) {
+            alertService.muteTimeframe(timeframe);
+        } else {
+            alertService.unmuteTimeframe(timeframe);
+        }
         return ResponseEntity.noContent().build();
     }
 }
