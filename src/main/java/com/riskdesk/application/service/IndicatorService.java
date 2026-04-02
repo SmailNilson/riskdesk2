@@ -314,7 +314,8 @@ public class IndicatorService {
                 recentBreaks,
                 // UC-SMC-005: MTF levels
                 mtfLevels,
-                lastCandleTimestamp
+                lastCandleTimestamp,
+                candles.get(candles.size() - 1).getClose()
         );
     }
 
@@ -562,6 +563,7 @@ public class IndicatorService {
                 Collections.emptyList(),
                 Collections.emptyList(),
                 // UC-SMC-005: MTF levels
+                null,
                 null,
                 null
         );

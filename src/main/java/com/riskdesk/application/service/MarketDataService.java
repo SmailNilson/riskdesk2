@@ -51,6 +51,7 @@ public class MarketDataService {
     private final MarketDataProvider        marketDataProvider;
     private final PositionService           positionService;
     private final AlertService              alertService;
+    private final BehaviourAlertService     behaviourAlertService;
     private final CandleRepositoryPort      candlePort;
     private final ActiveContractRegistry    contractRegistry;
     private final SimpMessagingTemplate     messagingTemplate;
@@ -65,17 +66,19 @@ public class MarketDataService {
     public MarketDataService(MarketDataProvider marketDataProvider,
                              PositionService positionService,
                              AlertService alertService,
+                             BehaviourAlertService behaviourAlertService,
                              CandleRepositoryPort candlePort,
                              ActiveContractRegistry contractRegistry,
                              SimpMessagingTemplate messagingTemplate,
                              ApplicationEventPublisher eventPublisher) {
-        this.marketDataProvider = marketDataProvider;
-        this.positionService    = positionService;
-        this.alertService       = alertService;
-        this.candlePort         = candlePort;
-        this.contractRegistry   = contractRegistry;
-        this.messagingTemplate  = messagingTemplate;
-        this.eventPublisher     = eventPublisher;
+        this.marketDataProvider   = marketDataProvider;
+        this.positionService      = positionService;
+        this.alertService         = alertService;
+        this.behaviourAlertService = behaviourAlertService;
+        this.candlePort           = candlePort;
+        this.contractRegistry     = contractRegistry;
+        this.messagingTemplate    = messagingTemplate;
+        this.eventPublisher       = eventPublisher;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
@@ -116,6 +119,7 @@ public class MarketDataService {
                 }
 
                 alertService.evaluate(instrument);
+                behaviourAlertService.evaluate(instrument);
             }
         }
 
