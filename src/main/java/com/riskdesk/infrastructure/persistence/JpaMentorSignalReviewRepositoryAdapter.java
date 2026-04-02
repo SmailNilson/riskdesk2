@@ -61,4 +61,9 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
             .map(MentorSignalReviewEntityMapper::toDomain)
             .toList();
     }
+
+    @Override
+    public long deleteByStatuses(List<String> statuses) {
+        return repository.deleteByStatusIn(statuses);
+    }
 }
