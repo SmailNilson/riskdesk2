@@ -4,7 +4,6 @@ import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.domain.shared.TradingSessionResolver;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.http.ResponseEntity;
@@ -64,10 +63,6 @@ public class CandleController {
 
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
-
-        // Drop candles that fall inside the CME maintenance window
-        // (stale/wide-spread prices that would create visual spikes on the chart)
-        ordered.removeIf(c -> TradingSessionResolver.isMaintenanceWindow(c.getTimestamp()));
 
         List<Map<String, Object>> result = ordered.stream().map(c -> Map.<String, Object>of(
             "time",   c.getTimestamp().getEpochSecond(),
