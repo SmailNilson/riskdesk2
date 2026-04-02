@@ -43,11 +43,14 @@ public class IbkrHistoricalProvider implements HistoricalDataProvider {
 
     @Override
     public boolean supports(Instrument instrument, String timeframe) {
-        return true;
+        return instrument.isExchangeTradedFuture();
     }
 
     @Override
     public List<Candle> fetchHistory(Instrument instrument, String timeframe, int count) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return List.of();
+        }
         long   conid        = contractCache.getConid(instrument);
         if (conid <= 0) {
             return List.of();
@@ -78,6 +81,7 @@ public class IbkrHistoricalProvider implements HistoricalDataProvider {
                 double c = bar2.path("c").asDouble(0);
                 long   v = bar2.path("v").asLong(0);
                 if (o == 0 || c == 0) continue;
+                if (o == h && h == l && l == c && v == 0) continue;
 
                 candles.add(new Candle(instrument, timeframe,
                     Instant.ofEpochMilli(t),

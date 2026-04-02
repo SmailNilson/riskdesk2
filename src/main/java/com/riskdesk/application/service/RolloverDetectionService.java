@@ -82,7 +82,7 @@ public class RolloverDetectionService {
 
     public Map<String, RolloverInfo> getCurrentStatus() {
         Map<String, RolloverInfo> result = new LinkedHashMap<>();
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             result.put(instrument.name(), computeInfo(instrument));
         }
         return result;
@@ -135,7 +135,7 @@ public class RolloverDetectionService {
     public void checkRollovers() {
         if (!ibkrProperties.isEnabled()) return;
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             RolloverInfo info = computeInfo(instrument);
             if (info.status() == RolloverStatus.WARNING || info.status() == RolloverStatus.CRITICAL) {
                 log.warn("Rollover {} — {} {} ({} days to expiry {})",

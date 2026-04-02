@@ -488,6 +488,7 @@ public class MentorSignalReviewService {
         payload.put("intermarket_correlations_the_edge", linkedMap(
             "dxy_pct_change", intermarket.dxyPctChange(),
             "dxy_trend", intermarket.dxyTrend(),
+            "dxy_component_breakdown", intermarket.dxyComponentBreakdown(),
             "silver_si1_pct_change", intermarket.silverSi1PctChange(),
             "gold_mgc1_pct_change", intermarket.goldMgc1PctChange(),
             "plat_pl1_pct_change", intermarket.platPl1PctChange(),
@@ -840,7 +841,7 @@ public class MentorSignalReviewService {
             case MGC -> "MGC1!";
             case E6 -> "6E1!";
             case MNQ -> "MNQ1!";
-            case DXY -> "DX1!";
+            case DXY -> "DXY";
         };
     }
 

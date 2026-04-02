@@ -87,6 +87,7 @@ public class IbGatewayNativeClient {
     private volatile Instant reconnectBlockedUntil = Instant.EPOCH;
     private volatile String lastConnectionFailure = "uninitialized";
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
+    private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
@@ -449,6 +450,21 @@ public class IbGatewayNativeClient {
         return collector.volume();
     }
 
+    public Optional<NativeMarketQuote> requestSnapshotQuote(Contract contract) {
+        if (!ensureConnected()) {
+            return Optional.empty();
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        QuoteCollector collector = new QuoteCollector(latch);
+
+        controller.reqTopMktData(contract, "", true, false, collector);
+        awaitLatch(latch, "market quote snapshot", SNAPSHOT_TIMEOUT);
+        controller.cancelTopMktData(collector);
+
+        return collector.quote();
+    }
+
     // -------------------------------------------------------------------------
     // Market data: streaming subscriptions
     // -------------------------------------------------------------------------
@@ -494,6 +510,41 @@ public class IbGatewayNativeClient {
         }
         StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
         return subscription == null ? Optional.empty() : subscription.bestPrice();
+    }
+
+    public void ensureStreamingQuoteSubscription(Contract contract) {
+        if (contract == null || !ensureConnected()) {
+            return;
+        }
+
+        String key = subscriptionKey(contract);
+        synchronized (streamingLock) {
+            StreamingQuoteSubscription existing = streamingQuoteSubscriptions.get(key);
+            if (existing != null && existing.isActive()) {
+                return;
+            }
+
+            if (existing != null) {
+                ApiController ctrl = controller;
+                if (ctrl != null) {
+                    try { ctrl.cancelTopMktData(existing); } catch (Exception ignored) {}
+                }
+                log.warn("IB Gateway detected stale quote stream for {} — re-subscribing", describeContract(contract));
+            }
+
+            StreamingQuoteSubscription subscription = new StreamingQuoteSubscription(contract);
+            controller.reqTopMktData(contract, "", false, false, subscription);
+            streamingQuoteSubscriptions.put(key, subscription);
+            log.info("IB Gateway live quote stream subscribed for {}", describeContract(contract));
+        }
+    }
+
+    public Optional<NativeMarketQuote> latestStreamingQuote(Contract contract) {
+        if (contract == null) {
+            return Optional.empty();
+        }
+        StreamingQuoteSubscription subscription = streamingQuoteSubscriptions.get(subscriptionKey(contract));
+        return subscription == null ? Optional.empty() : subscription.quote();
     }
 
     // -------------------------------------------------------------------------
@@ -578,10 +629,12 @@ public class IbGatewayNativeClient {
     private DisconnectContext clearStateLocked() {
         ApiController prev = controller;
         List<StreamingPriceSubscription> subs = List.copyOf(streamingSubscriptions.values());
+        List<StreamingQuoteSubscription> quoteSubs = List.copyOf(streamingQuoteSubscriptions.values());
         controller = null;
         managedAccounts = List.of();
         streamingSubscriptions.clear();
-        return new DisconnectContext(prev, subs);
+        streamingQuoteSubscriptions.clear();
+        return new DisconnectContext(prev, subs, quoteSubs);
     }
 
     /**
@@ -599,6 +652,9 @@ public class IbGatewayNativeClient {
                 for (StreamingPriceSubscription sub : ctx.subscriptions()) {
                     try { ctx.controller().cancelTopMktData(sub); } catch (Exception ignored) {}
                     try { ctx.controller().cancelRealtimeBars(sub); } catch (Exception ignored) {}
+                }
+                for (StreamingQuoteSubscription sub : ctx.quoteSubscriptions()) {
+                    try { ctx.controller().cancelTopMktData(sub); } catch (Exception ignored) {}
                 }
             }
             try { ctx.controller().disconnect(); } catch (Exception ignored) {}
@@ -752,7 +808,9 @@ public class IbGatewayNativeClient {
     // Internal record: cleanup context
     // -------------------------------------------------------------------------
 
-    private record DisconnectContext(ApiController controller, List<StreamingPriceSubscription> subscriptions) {}
+    private record DisconnectContext(ApiController controller,
+                                     List<StreamingPriceSubscription> subscriptions,
+                                     List<StreamingQuoteSubscription> quoteSubscriptions) {}
 
     public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
 
@@ -889,6 +947,55 @@ public class IbGatewayNativeClient {
 
         private Optional<BigDecimal> bestPrice() {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+    }
+
+    private static final class QuoteCollector extends ApiController.TopMktDataAdapter {
+        private final CountDownLatch latch;
+        private volatile Double bid;
+        private volatile Double ask;
+        private volatile Double last;
+        private volatile Double close;
+        private volatile Instant timestamp;
+
+        private QuoteCollector(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @Override
+        public void tickPrice(TickType tickType, double price, TickAttrib attribs) {
+            if (price <= 0) return;
+            if (tickType == TickType.LAST || tickType == TickType.DELAYED_LAST) {
+                last = price;
+                timestamp = Instant.now();
+            } else if (tickType == TickType.BID || tickType == TickType.DELAYED_BID) {
+                bid = price;
+                timestamp = Instant.now();
+            } else if (tickType == TickType.ASK || tickType == TickType.DELAYED_ASK) {
+                ask = price;
+                timestamp = Instant.now();
+            } else if (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE) {
+                close = price;
+                timestamp = Instant.now();
+            }
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            latch.countDown();
+        }
+
+        private Optional<NativeMarketQuote> quote() {
+            if (bid == null && ask == null && last == null && close == null) {
+                return Optional.empty();
+            }
+            return Optional.of(new NativeMarketQuote(
+                toBigDecimal(bid),
+                toBigDecimal(ask),
+                toBigDecimal(last),
+                toBigDecimal(close),
+                timestamp
+            ));
         }
     }
 
@@ -1062,5 +1169,111 @@ public class IbGatewayNativeClient {
                 log.info("IB Gateway first live price for {} received via {}", describeContract(contract), source);
             }
         }
+    }
+
+    private final class StreamingQuoteSubscription implements ApiController.ITopMktDataHandler {
+        private final Contract contract;
+        private volatile Double bid;
+        private volatile Double ask;
+        private volatile Double last;
+        private volatile Double close;
+        private volatile boolean active = true;
+        private volatile boolean loggedFirstQuote = false;
+        private volatile Instant lastQuoteAt = null;
+
+        private StreamingQuoteSubscription(Contract contract) {
+            this.contract = contract;
+        }
+
+        @Override
+        public void tickPrice(TickType tickType, double price, TickAttrib attribs) {
+            if (price <= 0) {
+                return;
+            }
+
+            if (tickType == TickType.LAST || tickType == TickType.DELAYED_LAST) {
+                last = price;
+            } else if (tickType == TickType.BID || tickType == TickType.DELAYED_BID) {
+                bid = price;
+            } else if (tickType == TickType.ASK || tickType == TickType.DELAYED_ASK) {
+                ask = price;
+            } else if (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE) {
+                close = price;
+            }
+
+            lastQuoteAt = Instant.now();
+            logFirstQuote();
+        }
+
+        @Override
+        public void marketDataType(int marketDataType) {
+            active = true;
+            log.info("IB Gateway quote market data type {} for {}", marketDataType, describeContract(contract));
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            // no-op
+        }
+
+        @Override
+        public void tickString(TickType tickType, String value) {
+            // no-op
+        }
+
+        @Override
+        public void tickReqParams(int tickerId, double minTick, String bboExchange, int snapshotPermissions) {
+            // no-op
+        }
+
+        @Override
+        public void tickReqParamsProtoBuf(com.ib.client.protobuf.TickReqParamsProto.TickReqParams ignored) {
+            // no-op
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            // no-op
+        }
+
+        private Optional<NativeMarketQuote> quote() {
+            if (bid == null && ask == null && last == null && close == null) {
+                return Optional.empty();
+            }
+            return Optional.of(new NativeMarketQuote(
+                toBigDecimal(bid),
+                toBigDecimal(ask),
+                toBigDecimal(last),
+                toBigDecimal(close),
+                lastQuoteAt
+            ));
+        }
+
+        private boolean isActive() {
+            if (!active) return false;
+            Instant last = lastQuoteAt;
+            if (last == null) {
+                return true;
+            }
+            return last.isAfter(Instant.now().minusSeconds(STALE_PRICE_SECONDS));
+        }
+
+        private void logFirstQuote() {
+            if (!loggedFirstQuote) {
+                loggedFirstQuote = true;
+                log.info("IB Gateway first live quote for {} received", describeContract(contract));
+            }
+        }
+    }
+
+    private static BigDecimal toBigDecimal(Double value) {
+        return value == null ? null : BigDecimal.valueOf(value);
+    }
+
+    public record NativeMarketQuote(BigDecimal bid,
+                                    BigDecimal ask,
+                                    BigDecimal last,
+                                    BigDecimal close,
+                                    Instant timestamp) {
     }
 }

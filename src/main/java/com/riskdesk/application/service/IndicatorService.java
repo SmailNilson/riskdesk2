@@ -432,7 +432,7 @@ public class IndicatorService {
     private int liquidityToleranceTicks(String timeframe) {
         return switch (timeframe) {
             case "5m" -> 3;
-            case "10m", "1h" -> 4;
+            case "10m", "30m", "1h" -> 4;
             case "4h", "1d", "1w", "1M" -> 5;
             default -> 4;
         };

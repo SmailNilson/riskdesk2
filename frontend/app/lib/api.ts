@@ -318,6 +318,39 @@ export interface LivePriceView {
   source: string;
 }
 
+export interface DxySnapshotView {
+  timestamp: string;
+  eurusd: number;
+  usdjpy: number;
+  gbpusd: number;
+  usdcad: number;
+  usdsek: number;
+  usdchf: number;
+  dxyValue: number;
+  source: string;
+  isComplete: boolean;
+}
+
+export interface DxyHealthComponentView {
+  pair: string;
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  effectivePrice: number | null;
+  pricingMethod: string | null;
+  timestamp: string | null;
+  status: string;
+  message: string | null;
+}
+
+export interface DxyHealthView {
+  status: 'UP' | 'DEGRADED' | 'DOWN';
+  latestTimestamp: string | null;
+  source: string;
+  maxSkewSeconds: number;
+  components: DxyHealthComponentView[];
+}
+
 export interface BacktestTrade {
   tradeNo: number;
   side: 'LONG' | 'SHORT';
@@ -559,6 +592,10 @@ export const api = {
     get<CandleBar[]>(`/api/candles/${instrument}/${timeframe}?limit=${limit}`),
   getRecentAlerts: () => get<AlertPayload[]>('/api/alerts/recent'),
   getLivePrice: (instrument: string) => get<LivePriceView>(`/api/live-price/${instrument}`),
+  getDxyLatest: () => get<DxySnapshotView>('/api/market/dxy/latest'),
+  getDxyHistory: (from: string, to: string) =>
+    get<DxySnapshotView[]>(`/api/market/dxy/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  getDxyHealth: () => get<DxyHealthView>('/api/market/dxy/health'),
   openPosition: (req: CreatePositionRequest) => post<PositionView>('/api/positions', req),
   closePosition: (id: number, exitPrice: number) =>
     post<PositionView>(`/api/positions/${id}/close`, { exitPrice }),

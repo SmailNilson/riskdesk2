@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.marketdata.port.VolumeProvider;
@@ -61,9 +62,16 @@ public class MarketDataConfig {
 
     @Bean
     @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public SyntheticDxyCalculator syntheticDxyCalculator(IbGatewayNativeClient nativeClient) {
+        return new SyntheticDxyCalculator(nativeClient);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
     public IbGatewayMarketDataProvider ibGatewayMarketDataProvider(IbGatewayNativeClient nativeClient,
-                                                                   IbGatewayContractResolver contractResolver) {
-        return new IbGatewayMarketDataProvider(nativeClient, contractResolver);
+                                                                   IbGatewayContractResolver contractResolver,
+                                                                   SyntheticDxyCalculator dxyCalculator) {
+        return new IbGatewayMarketDataProvider(nativeClient, contractResolver, dxyCalculator);
     }
 
     @Bean
@@ -71,6 +79,13 @@ public class MarketDataConfig {
     public IbGatewayHistoricalProvider ibGatewayHistoricalProvider(IbGatewayNativeClient nativeClient,
                                                                    IbGatewayContractResolver contractResolver) {
         return new IbGatewayHistoricalProvider(nativeClient, contractResolver);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public FxQuoteProvider ibGatewayFxQuoteProvider(IbGatewayNativeClient nativeClient,
+                                                    IbGatewayFxContractResolver contractResolver) {
+        return new IbGatewayFxQuoteProvider(nativeClient, contractResolver);
     }
 
     @Bean

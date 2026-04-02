@@ -14,6 +14,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 /**
  * Evaluates indicator snapshots and produces domain Alert objects.
@@ -146,9 +147,9 @@ public class IndicatorAlertEvaluator {
         if (snap == null) return alerts;
         String tf = instrument.name() + ":" + timeframe;
 
-        // EMA crossover — only on transition
+        // EMA crossover — only on confirmed transition (Rule 4: candle close guard)
         EvalKey emaKey = key("ema", instrument, timeframe, null);
-        if (isTransition(emaKey, snap.emaCrossover())) {
+        if (isConfirmedTransition(emaKey, snap.emaCrossover(), candleKey(emaKey), snap.lastCandleTimestamp())) {
             if ("GOLDEN_CROSS".equals(snap.emaCrossover())) {
                 alerts.add(new Alert("ema:golden:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — EMA Golden Cross (9 x 50)",
@@ -160,9 +161,9 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // RSI extremes — only on transition
+        // RSI extremes — only on confirmed transition (Rule 4: candle close guard)
         EvalKey rsiKey = key("rsi", instrument, timeframe, null);
-        if (isTransition(rsiKey, snap.rsiSignal())) {
+        if (isConfirmedTransition(rsiKey, snap.rsiSignal(), candleKey(rsiKey), snap.lastCandleTimestamp())) {
             if ("OVERSOLD".equals(snap.rsiSignal())) {
                 alerts.add(new Alert("rsi:oversold:" + tf, AlertSeverity.INFO,
                     String.format("%s [%s] — RSI oversold at %.1f", instrument.getDisplayName(), timeframe,
@@ -176,9 +177,9 @@ public class IndicatorAlertEvaluator {
             }
         }
 
-        // MACD crossover — only on transition
+        // MACD crossover — only on confirmed transition (Rule 4: candle close guard)
         EvalKey macdKey = key("macd", instrument, timeframe, null);
-        if (isTransition(macdKey, snap.macdCrossover())) {
+        if (isConfirmedTransition(macdKey, snap.macdCrossover(), candleKey(macdKey), snap.lastCandleTimestamp())) {
             if ("BULLISH_CROSS".equals(snap.macdCrossover())) {
                 alerts.add(new Alert("macd:bullish:" + tf, AlertSeverity.INFO,
                     instrument.getDisplayName() + " [" + timeframe + "] — MACD Bullish Cross",
@@ -286,6 +287,123 @@ public class IndicatorAlertEvaluator {
             }
         }
 
+        // ── V2 transition signals (data-driven) ────────────────────────────
+        for (TransitionSignalDef def : V2_TRANSITION_SIGNALS) {
+            String signal = def.signalExtractor().apply(snap);
+            EvalKey sk = key(def.family(), instrument, timeframe, def.qualifier());
+            if (isConfirmedTransition(sk, signal, candleKey(sk), snap.lastCandleTimestamp())) {
+                SignalVariant variant = def.variants().get(signal);
+                if (variant != null) {
+                    alerts.add(new Alert(
+                        def.family() + ":" + variant.keySlug() + ":" + tf,
+                        variant.severity(),
+                        instrument.getDisplayName() + " [" + timeframe + "] — " + variant.label(),
+                        def.category(), instrument.name()));
+                }
+            }
+        }
+
+        // ── V2 one-shot events: FVG ──────────────────────────────────────────
+        if (snap.recentFvgEvents() != null) {
+            for (IndicatorAlertSnapshot.FvgEvent evt : snap.recentFvgEvents()) {
+                EvalKey fvgKey = key("fvg", instrument, timeframe, evt.bias(), evt.top(), evt.bottom());
+                if (shouldFireOrderBlockEvent(fvgKey, snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("fvg:" + evt.bias().toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — FVG %s [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe, evt.bias(),
+                            evt.bottom().doubleValue(), evt.top().doubleValue()),
+                        AlertCategory.FVG, instrument.name()));
+                }
+            }
+        }
+
+        // ── V2 one-shot events: EQH/EQL Sweep ───────────────────────────────
+        if (snap.recentSweepEvents() != null) {
+            for (IndicatorAlertSnapshot.SweepEvent evt : snap.recentSweepEvents()) {
+                EvalKey sweepKey = key("eql", instrument, timeframe, evt.type(), evt.price(), evt.price());
+                if (shouldFireOrderBlockEvent(sweepKey, snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert("eql:" + evt.type().toLowerCase() + ":" + tf, AlertSeverity.WARNING,
+                        String.format("%s [%s] — %s sweep at %.5f",
+                            instrument.getDisplayName(), timeframe, evt.type(), evt.price().doubleValue()),
+                        AlertCategory.EQUAL_LEVEL, instrument.name()));
+                }
+            }
+        }
+
+        // ── V2 MTF Level Cross (data-driven) ────────────────────────────────
+        if (snap.close() != null) {
+            for (MtfLevelDef mtf : MTF_LEVEL_DEFS) {
+                BigDecimal high = mtf.highExtractor().apply(snap);
+                BigDecimal low  = mtf.lowExtractor().apply(snap);
+                if (high == null || low == null) continue;
+                String pos = deriveMtfPosition(snap.close(), high, low);
+                EvalKey mk = key("mtf", instrument, timeframe, mtf.qualifier());
+                if (isConfirmedTransition(mk, pos, candleKey(mk), snap.lastCandleTimestamp())) {
+                    alerts.add(new Alert(
+                        "mtf:" + mtf.label() + ":" + pos.toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                        String.format("%s [%s] — Price %s %s range [%.5f – %.5f]",
+                            instrument.getDisplayName(), timeframe,
+                            pos.replace("_", " ").toLowerCase(), mtf.label(),
+                            low.doubleValue(), high.doubleValue()),
+                        AlertCategory.MTF_LEVEL, instrument.name()));
+                }
+            }
+        }
+
         return alerts;
+    }
+
+    // ── V2 signal definitions (data-driven, no if/else per signal) ────────
+
+    private record SignalVariant(String keySlug, AlertSeverity severity, String label) {}
+
+    private record TransitionSignalDef(
+        String family,
+        String qualifier,
+        AlertCategory category,
+        Function<IndicatorAlertSnapshot, String> signalExtractor,
+        Map<String, SignalVariant> variants
+    ) {}
+
+    private static final List<TransitionSignalDef> V2_TRANSITION_SIGNALS = List.of(
+        new TransitionSignalDef("st", null, AlertCategory.SUPERTREND,
+            IndicatorAlertSnapshot::supertrendDirection, Map.of(
+                "UPTREND",   new SignalVariant("up",   AlertSeverity.INFO,    "Supertrend flipped UPTREND"),
+                "DOWNTREND", new SignalVariant("down", AlertSeverity.WARNING, "Supertrend flipped DOWNTREND"))),
+        new TransitionSignalDef("bb", "trend", AlertCategory.BOLLINGER,
+            IndicatorAlertSnapshot::bbTrendSignal, Map.of(
+                "TRENDING",      new SignalVariant("trending",      AlertSeverity.INFO, "BB Squeeze breakout"),
+                "CONSOLIDATING", new SignalVariant("consolidating", AlertSeverity.INFO, "BB entering consolidation"))),
+        new TransitionSignalDef("vwap", "cross", AlertCategory.VWAP_CROSS,
+            IndicatorAlertSnapshot::vwapPosition, Map.of(
+                "ABOVE", new SignalVariant("above", AlertSeverity.INFO,    "Price crossed above VWAP"),
+                "BELOW", new SignalVariant("below", AlertSeverity.WARNING, "Price crossed below VWAP"))),
+        new TransitionSignalDef("df", null, AlertCategory.DELTA_FLOW,
+            IndicatorAlertSnapshot::deltaFlowBias, Map.of(
+                "BUYING",  new SignalVariant("buying",  AlertSeverity.INFO,    "Delta Flow shifted to BUYING"),
+                "SELLING", new SignalVariant("selling", AlertSeverity.WARNING, "Delta Flow shifted to SELLING"))),
+        new TransitionSignalDef("chk", null, AlertCategory.CHAIKIN,
+            IndicatorAlertSnapshot::chaikinCrossover, Map.of(
+                "BULLISH_CROSS", new SignalVariant("bullish", AlertSeverity.INFO,    "Chaikin Oscillator Bullish Cross"),
+                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Chaikin Oscillator Bearish Cross")))
+    );
+
+    private record MtfLevelDef(
+        String label,
+        String qualifier,
+        Function<IndicatorAlertSnapshot, BigDecimal> highExtractor,
+        Function<IndicatorAlertSnapshot, BigDecimal> lowExtractor
+    ) {}
+
+    private static final List<MtfLevelDef> MTF_LEVEL_DEFS = List.of(
+        new MtfLevelDef("1d", "1d:range", IndicatorAlertSnapshot::mtfDailyHigh,   IndicatorAlertSnapshot::mtfDailyLow),
+        new MtfLevelDef("1w", "1w:range", IndicatorAlertSnapshot::mtfWeeklyHigh,  IndicatorAlertSnapshot::mtfWeeklyLow),
+        new MtfLevelDef("1M", "1M:range", IndicatorAlertSnapshot::mtfMonthlyHigh, IndicatorAlertSnapshot::mtfMonthlyLow)
+    );
+
+    private static String deriveMtfPosition(BigDecimal close, BigDecimal high, BigDecimal low) {
+        if (close.compareTo(high) > 0) return "ABOVE_HIGH";
+        if (close.compareTo(low) < 0) return "BELOW_LOW";
+        return "INSIDE";
     }
 }
