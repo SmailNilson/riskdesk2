@@ -308,8 +308,8 @@ class TradingSessionResolverTest {
 
     @Test
     void isMaintenanceWindow_sundayBeforeOpen_returnsTrue() {
-        // Sunday 2026-03-22 10:00 ET — before 17:00 ET open
-        Instant tick = ZonedDateTime.of(2026, 3, 22, 10, 0, 0, 0,
+        // Sunday 2026-03-22 17:59 ET — just before 18:00 ET open
+        Instant tick = ZonedDateTime.of(2026, 3, 22, 17, 59, 0, 0,
                 TradingSessionResolver.CME_ZONE).toInstant();
         assertTrue(TradingSessionResolver.isMaintenanceWindow(tick));
     }

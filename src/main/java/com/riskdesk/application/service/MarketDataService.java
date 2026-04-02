@@ -117,10 +117,8 @@ public class MarketDataService {
             eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
 
             if (!fallbackPrice) {
-                if (TradingSessionResolver.isInTradingSession(now)) {
-                    for (String tf : TIMEFRAMES.keySet()) {
-                        accumulate(instrument, tf, price, now);
-                    }
+                for (String tf : TIMEFRAMES.keySet()) {
+                    accumulate(instrument, tf, price, now);
                 }
 
                 alertService.evaluate(instrument);

@@ -68,67 +68,6 @@ function resolveBarTime(update: PriceUpdate, timeframe: string): Time {
   return (Math.floor(priceTs / periodSec) * periodSec) as Time;
 }
 
-// ── CME maintenance-window & spike filter ──────────────────────────────────
-// CME daily maintenance halt: 17:00–18:00 ET (Mon–Thu).
-// Weekend closure: Fri 17:00 ET → Sun 17:00 ET.
-// Candles in these windows carry stale/wide-spread prices that create visual
-// spikes on the chart.  We also clip any remaining spike candles whose range
-// is abnormally large compared to their neighbours.
-
-const CME_OFFSET_EST = -5 * 3600; // EST offset (seconds)
-const CME_OFFSET_EDT = -4 * 3600; // EDT offset (seconds)
-
-/** Very rough EST/EDT switch: EDT March–November, EST otherwise. */
-function etOffsetForEpoch(epoch: number): number {
-  const m = new Date(epoch * 1000).getUTCMonth(); // 0-indexed
-  return m >= 2 && m <= 10 ? CME_OFFSET_EDT : CME_OFFSET_EST;
-}
-
-function isMaintenanceWindow(epochSec: number): boolean {
-  const off = etOffsetForEpoch(epochSec);
-  const d = new Date((epochSec + off) * 1000);
-  const hour = d.getUTCHours();
-  const dow = d.getUTCDay(); // 0=Sun … 6=Sat
-
-  // Weekend: Sat all day, Fri after 17h ET, Sun before 17h ET
-  if (dow === 6) return true;
-  if (dow === 5 && hour >= 17) return true;
-  if (dow === 0 && hour < 17) return true;
-
-  // Daily halt 17:00–18:00 ET (Mon–Thu)
-  if (dow >= 1 && dow <= 4 && hour === 17) return true;
-
-  return false;
-}
-
-/** Remove maintenance-window candles and clip remaining spike wicks. */
-function sanitizeCandles(candles: CandlePoint[]): CandlePoint[] {
-  // 1. Drop candles inside the CME maintenance window
-  const filtered = candles.filter(c => !isMaintenanceWindow(c.time as number));
-  if (filtered.length < 10) return filtered;
-
-  // 2. Clip spike candles whose range > 5× the median range
-  const ranges = filtered.map(c => c.high - c.low).sort((a, b) => a - b);
-  const medianRange = ranges[Math.floor(ranges.length / 2)];
-  if (medianRange <= 0) return filtered;
-
-  const maxRange = medianRange * 5;
-
-  return filtered.map(c => {
-    const range = c.high - c.low;
-    if (range <= maxRange) return c;
-
-    // Keep the body intact, clip the wicks symmetrically
-    const bodyHigh = Math.max(c.open, c.close);
-    const bodyLow = Math.min(c.open, c.close);
-    return {
-      ...c,
-      high: Math.min(c.high, bodyHigh + maxRange / 2),
-      low: Math.max(c.low, bodyLow - maxRange / 2),
-    };
-  });
-}
-
 function mergeLivePrice(previous: CandlePoint | null, update: PriceUpdate, timeframe: string): CandlePoint {
   const barTime = resolveBarTime(update, timeframe);
   const price = update.price;
@@ -263,7 +202,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
 
       if (candles.length === 0) return;
 
-      const rawCandleData = candles
+      const candleData = candles
         .map(c => ({
           time: toUnixSeconds(c.time) as Time,
           open: c.open,
@@ -274,9 +213,6 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         .sort((a, b) => (a.time as number) - (b.time as number))
         // Remove duplicate timestamps — keep last occurrence (most recent data wins)
         .filter((item, idx, arr) => idx === arr.length - 1 || item.time !== arr[idx + 1].time);
-
-      // Filter maintenance-window candles & clip spike wicks
-      const candleData = sanitizeCandles(rawCandleData);
 
       candleSeries.setData(candleData);
       lastCandleRef.current = candleData[candleData.length - 1];
