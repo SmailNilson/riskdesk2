@@ -18,7 +18,7 @@ import java.util.Map;
  * Resolution strategy (in order):
  *   1. Ask IBKR for the front-month contract via IbGatewayContractResolver.refresh().
  *   2. If IBKR is unavailable or disabled, fall back to application properties
- *      (riskdesk.active-contracts.MCL, .MGC, .MNQ, .E6, .DXY).
+ *      (riskdesk.active-contracts.MCL, .MGC, .MNQ, .E6).
  *
  * This guarantees the registry is populated before any service fetches or tags candles.
  */
@@ -44,9 +44,6 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     @Value("${riskdesk.active-contracts.E6:202506}")
     private String fallbackE6;
 
-    @Value("${riskdesk.active-contracts.DXY:202506}")
-    private String fallbackDxy;
-
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
                                              IbkrProperties ibkrProperties) {
@@ -61,11 +58,10 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             Instrument.MCL, fallbackMcl,
             Instrument.MGC, fallbackMgc,
             Instrument.MNQ, fallbackMnq,
-            Instrument.E6,  fallbackE6,
-            Instrument.DXY, fallbackDxy
+            Instrument.E6,  fallbackE6
         );
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             String resolved = ibkrProperties.isEnabled()
                 ? resolveFromIbkr(instrument)
                 : null;

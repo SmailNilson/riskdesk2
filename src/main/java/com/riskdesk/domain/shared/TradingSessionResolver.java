@@ -22,8 +22,37 @@ public final class TradingSessionResolver {
 
     public static final ZoneId CME_ZONE = ZoneId.of("America/New_York");
     public static final LocalTime CME_SESSION_CLOSE = LocalTime.of(17, 0);
+    public static final LocalTime CME_SESSION_OPEN = LocalTime.of(18, 0);
 
     private TradingSessionResolver() {}
+
+    /**
+     * Returns {@code true} if the given timestamp falls within an active CME
+     * futures trading session.
+     * <p>
+     * CME futures trade Sunday 18:00 ET through Friday 17:00 ET, with a daily
+     * maintenance window from 17:00 ET to 18:00 ET (Monday–Thursday).
+     * Weekend closure runs from Friday 17:00 ET to Sunday 18:00 ET.
+     *
+     * @return {@code true} if the market is open at the given instant
+     */
+    public static boolean isInTradingSession(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        if (dow == DayOfWeek.SATURDAY) {
+            return false;
+        }
+        if (dow == DayOfWeek.SUNDAY) {
+            return !time.isBefore(CME_SESSION_OPEN);
+        }
+        if (dow == DayOfWeek.FRIDAY) {
+            return time.isBefore(CME_SESSION_CLOSE);
+        }
+        // Monday–Thursday: closed during daily maintenance 17:00–18:00 ET
+        return time.isBefore(CME_SESSION_CLOSE) || !time.isBefore(CME_SESSION_OPEN);
+    }
 
     /**
      * Returns the start of the daily CME session containing the given timestamp.
@@ -73,6 +102,34 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    /**
+     * Returns {@code true} if the given timestamp falls inside the CME daily
+     * maintenance window (17:00–18:00 ET, Monday–Thursday) or during the
+     * weekend closure (Friday 17:00 ET through Sunday 17:00 ET).
+     * <p>
+     * During these windows no trading occurs and price data is unreliable
+     * (wide spreads, stale quotes).  Callers should skip candle accumulation
+     * and treat streaming prices with caution.
+     */
+    public static boolean isMaintenanceWindow(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        // Weekend closure: Friday 17:00 ET → Sunday 18:00 ET
+        if (dow == DayOfWeek.SATURDAY) return true;
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return true;
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_OPEN)) return true;
+
+        // Daily maintenance halt: 17:00–18:00 ET (Mon–Thu)
+        int hour = zdt.getHour();
+        if (dow != DayOfWeek.FRIDAY && dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY) {
+            return hour == 17;
+        }
+
+        return false;
     }
 
     /**

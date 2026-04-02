@@ -68,7 +68,14 @@ jobs:
         run: docker pull ghcr.io/gnzsnz/ib-gateway:stable
 
       - name: Build backend image
-        run: docker build -t "${{ steps.images.outputs.backend_image }}" -f Dockerfile .
+        run: |
+          docker build \
+            --build-arg APP_VERSION="${IMAGE_TAG}" \
+            --build-arg APP_GIT_SHA="${GITHUB_SHA::7}" \
+            --build-arg APP_IMAGE_TAG="${IMAGE_TAG}" \
+            --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "${{ steps.images.outputs.backend_image }}" \
+            -f Dockerfile .
 
       - name: Build frontend image
         working-directory: frontend

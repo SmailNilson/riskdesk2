@@ -125,6 +125,19 @@ public class MentorController {
         return Map.of("enabled", next);
     }
 
+    @DeleteMapping("/auto-alerts")
+    public Map<String, Object> deleteAutoAlertsByStatus(@RequestParam List<String> statuses) {
+        List<String> allowed = List.of("ERROR", "ANALYZING");
+        List<String> invalid = statuses.stream().filter(s -> !allowed.contains(s.toUpperCase())).toList();
+        if (!invalid.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "Only ERROR and ANALYZING statuses can be deleted. Invalid: " + invalid);
+        }
+        List<String> normalized = statuses.stream().map(String::toUpperCase).toList();
+        long deleted = mentorSignalReviewService.deleteByStatuses(normalized);
+        return Map.of("deleted", deleted, "statuses", normalized);
+    }
+
     @PostMapping("/auto-alerts/reanalyze")
     public MentorSignalReview reanalyzeExistingAlert(@Valid @RequestBody MentorAlertReviewRequest request) {
         try {

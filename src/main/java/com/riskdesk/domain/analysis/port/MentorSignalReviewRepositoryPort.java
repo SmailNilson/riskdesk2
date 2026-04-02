@@ -21,4 +21,9 @@ public interface MentorSignalReviewRepositoryPort {
     List<MentorSignalReviewRecord> findRecent(int limit);
 
     List<MentorSignalReviewRecord> findBySimulationStatuses(List<TradeSimulationStatus> statuses);
+
+    long deleteByStatuses(List<String> statuses);
+
+    /** Mark all reviews stuck in ANALYZING as ERROR (orphaned by server restart). */
+    int markAnalyzingAsError(String errorMessage);
 }

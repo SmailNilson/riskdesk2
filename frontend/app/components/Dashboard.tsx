@@ -6,15 +6,18 @@ import { useWebSocket } from '@/app/hooks/useWebSocket';
 import MetricsBar from './MetricsBar';
 import RolloverBanner from './RolloverBanner';
 import Chart from './Chart';
+import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
 import MentorSignalPanel from './MentorSignalPanel';
 import PositionForm from './PositionForm';
+import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
+const TICKER_INSTRUMENTS = [...INSTRUMENTS, 'DXY'] as const;
 type Instrument = typeof INSTRUMENTS[number];
 const TIMEFRAMES = ['5m', '10m', '1h', '1d'] as const;
 type Timeframe = typeof TIMEFRAMES[number];
@@ -29,7 +32,7 @@ export default function Dashboard() {
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
 
-  const { prices, alerts, mentorSignalReviews, connected } = useWebSocket();
+  const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
@@ -133,13 +136,14 @@ export default function Dashboard() {
 
       {/* Live price ticker */}
       <div className="flex gap-4 px-4 py-1.5 bg-zinc-900/50 border-b border-zinc-800/50 overflow-x-auto">
-        {INSTRUMENTS.map(inst => {
+        {TICKER_INSTRUMENTS.map(inst => {
           const p = prices[inst];
+          const decimals = inst === 'E6' ? 5 : inst === 'DXY' ? 3 : 2;
           return (
             <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
               <span className="text-[10px] text-zinc-500">{inst}</span>
               <span className="text-xs font-mono text-white">
-                {p ? p.price.toFixed(inst === 'E6' ? 5 : 2) : '—'}
+                {p ? p.price.toFixed(decimals) : '—'}
               </span>
             </div>
           );
@@ -161,6 +165,8 @@ export default function Dashboard() {
         {/* Indicators */}
         <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
 
+        <DxyPanel />
+
         <IbkrPortfolioPanel
           selectedAccountId={selectedIbkrAccountId}
           onAccountChange={setSelectedIbkrAccountId}
@@ -172,6 +178,7 @@ export default function Dashboard() {
           alerts={alerts}
           reviews={mentorSignalReviews}
           selectedBrokerAccountId={selectedIbkrAccountId}
+          onRefresh={refresh}
         />
 
         {/* Backtest */}
@@ -188,6 +195,8 @@ export default function Dashboard() {
           alerts={alerts}
         />
       </div>
+
+      <AlertsFeed alerts={alerts} />
     </div>
   );
 }

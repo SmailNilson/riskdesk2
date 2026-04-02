@@ -141,7 +141,10 @@ export function deriveMentorSignalCandidate(alert: AlertMessage): MentorSignalCa
   };
 }
 
-export function buildMentorAlertKey(alert: AlertMessage) {
+// Canonical key function — used both to index threadsByAlertKey and to look it up.
+// MUST be the single source of truth: never build this key inline elsewhere.
+// Accepts AlertMessage or any object with the same shape (e.g. MentorSignalReview).
+export function buildMentorAlertKey(alert: { timestamp: string; instrument: string | null | undefined; category: string; message: string }) {
   return `${alert.timestamp}:${alert.instrument ?? 'GLOBAL'}:${alert.category}:${alert.message}`;
 }
 

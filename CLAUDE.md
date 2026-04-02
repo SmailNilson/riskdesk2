@@ -2,77 +2,114 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Read AGENTS.md first — it contains the full project rules.
+Read AGENTS.md first — it contains absolute prohibitions and non-negotiable rules.
 
-## Multi-Agent Rules (summary for Claude Code)
+## Multi-Agent Rules
 
-- Your working directories are the auto-managed worktrees under `.claude/worktrees/`
+- Your working directories are auto-managed worktrees under `.claude/worktrees/`
 - Always branch from `main` with prefix `claude/`
 - Open a PR after each task — never merge another agent's branch
 - Never force-add `.claude/`, `.codex*`, `.gemini/`, `.maq/` to git
 - Before starting a task, check open PRs to avoid file conflicts with Codex or MAQ
+- Your assigned server port is **8090**, IBKR client-id is **8**
 
-## Commands
+## Build & Test Commands
 
-### Backend (Spring Boot / Maven)
+### Backend (Maven, run from repo root)
 ```bash
-mvn -q -DskipTests compile                              # Compile only
-mvn -q test                                             # Run all tests
-mvn -q verify                                           # Full verify (used by CI)
-mvn -q test -Dtest=ClassName                            # Run a single test class
-mvn -q test -Dtest=ClassName#methodName                 # Run a single test method
-mvn spring-boot:run -Dspring-boot.run.profiles=local    # Run backend (Claude port 8090)
+mvn -q -DskipTests compile          # Fast compile check
+mvn -q test                          # All tests
+mvn -q -Dtest=MyTestClass test       # Single test class
+mvn -q verify                        # Full CI (compile + test + JaCoCo)
+mvn -q spring-boot:run -Dspring-boot.run.profiles=local  # Run locally
 ```
 
-### Frontend (Next.js)
+### Frontend (run from `frontend/`)
 ```bash
-cd frontend
-npm install          # Install dependencies
-npm run lint         # Lint check (ESLint)
-npm run dev          # Dev server on port 3001
-npm run build        # Production build
+npm install
+npm run lint                          # Required before commit
+npm run build
+npm run dev                           # Dev server on port 3001
+```
+
+### Docker (local dev)
+```bash
+docker-compose up -d                  # PostgreSQL + services
+docker-compose -f docker-compose.release.yml up -d  # Production images
 ```
 
 ## Architecture
 
-**Stack:** Spring Boot 3.2 / Java 21 backend + Next.js 14 / TypeScript frontend + PostgreSQL 16 + WebSocket (STOMP).
+RiskDesk is a futures trading risk dashboard. The backend root is the Maven project; `frontend/` is a Next.js 14 subdirectory.
 
-### Backend — Hexagonal / DDD
+### Hexagonal Layering (enforced by ArchUnit)
 
-The backend enforces strict layer isolation verified by ArchUnit tests:
+```
+presentation/   → HTTP/WebSocket controllers and DTOs only — no business logic
+application/    → Use-case orchestration (*Service.java)
+domain/         → Pure business rules — NO Spring, NO JPA, NO IBKR SDK
+infrastructure/ → Adapters implementing domain ports (IBKR, JPA, config)
+```
 
-- **`domain/`** — Pure Java, zero Spring/JPA. Contains aggregates, value objects, domain services, and ports (interfaces). Sub-domains: `alert/`, `analysis/`, `contract/`, `engine/indicators/`, `engine/smc/`, `execution/`, `marketdata/`, `trading/`, `shared/`.
-- **`application/`** — Orchestrates use cases via application services (`AlertService`, `MarketDataService`, `PositionService`, `MentorAnalysisService`, `RolloverDetectionService`). Uses domain ports, emits domain events.
-- **`infrastructure/`** — Adapters: IBKR native socket client (`IbGatewayNativeClient` on port 4001), JPA repositories, Spring configuration, WebSocket broker config.
-- **`presentation/`** — REST controllers + WebSocket message handlers. DTOs are transport-only and never leak into domain.
+Domain layer is completely isolated. Infrastructure implements `domain/port/` interfaces.
 
-### Market Data Flow
+### Key Domain Packages
 
-IBKR Gateway (port 4001) → `IbGatewayNativeClient` → PostgreSQL → application services → WebSocket (STOMP) → frontend. **No external data providers** (Yahoo, Polygon, etc.) are allowed.
+- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend
+- `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks
+- `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
+- `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
+- `domain/behaviouralert/` — **Level/proximity-based** alert evaluation (EMA proximity, S/R touch, etc.)
+- `domain/trading/` — Position, risk, and portfolio models
+- `domain/analysis/` — AI/Mentor analysis models
+- `domain/shared/TradingSessionResolver` — All timezone/session logic lives here
 
-### Alert System
+### Data Flow
 
-Alerts are **transition-based** only — they fire when an indicator's state changes, not when price reaches a level. Key components:
+```
+IBKR IB Gateway (port 4001)
+  → IbGatewayNativeClient (infrastructure/marketdata/ibkr)
+  → MarketDataService / HistoricalDataService (application)
+  → PostgreSQL
+  → IndicatorAlertEvaluator (domain, transition-based)
+  → BehaviourAlertEvaluator (domain, level/proximity-based)
+  → MentorAnalysisService + Google Gemini API
+  → WebSocket /topic/alerts, /topic/mentor-alerts
+  → Next.js Frontend (STOMP over SockJS)
+```
 
-- `IndicatorAlertEvaluator` — fires EMA crossovers, RSI extremes, MACD/WaveTrend crosses, SMC structure breaks (CHoCH/BOS), order block lifecycle events.
-- `SignalPreFilterService` — guard rules: HTF trend filter (Rule 1), anti-chop 60s window (Rule 3), candle-close only (Rule 4).
-- `AlertDeduplicator` — 5-minute cooldown per instrument+timeframe (hardcoded in `AlertConfig`).
-- `AlertService` — only EMA and risk category alerts are published to WebSocket; MACD, RSI, WaveTrend, SMC, OrderBlock alerts are routed to mentor review only.
+### Market Data — Critical Constraint
 
-**Not implemented:** support/resistance level touches, price proximity to EMA50 (only crossover exists), VWAP bounce, FVG fills, BB alerts, Supertrend alerts.
+**Only source: IBKR Gateway → PostgreSQL.** Never add Yahoo Finance, Stooq, Alpha Vantage, Polygon, Binance, CSV imports, or any scraping. Backtest simulations use internal 1m candles from PostgreSQL only.
 
-### Frontend
+### Instruments
 
-Next.js 14 App Router. Real-time prices via STOMP (`@stomp/stompjs`). Charts via `lightweight-charts`. State via React hooks in `app/hooks/`. API utilities in `app/lib/`.
+MCL (Micro WTI Crude), MGC (Micro Gold), 6E (Euro FX), MNQ (Micro E-mini Nasdaq-100)
 
-### Agent Port / IBKR Client-ID Map
+### IBKR SDK
 
-| Agent  | Port | Client-ID |
-|--------|------|-----------|
-| Human  | 8080 | 1         |
-| Claude | 8090 | 8         |
-| Codex  | 8085 | 7         |
-| MAQ    | 8070 | 9         |
-| Gemini | 8060 | 6         |
+`tws-api` v10.39.1 is vendored in `vendor/maven-repo/` — not fetched from Maven Central. This is intentional for CI/Docker reproducibility.
 
-Claude always runs on port 8090 with client-id 8 (`application-local.properties`).
+## Runtime Configuration
+
+The `local` Spring profile is **required** when running locally. Override in `src/main/resources/application-local.properties`:
+
+```properties
+server.port=8090
+riskdesk.ibkr.native-client-id=8
+```
+
+Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, IBKR native socket on `127.0.0.1:4001`, market data poll every 3000ms.
+
+## Testing
+
+- Unit + ArchUnit tests: `src/test/java/com/riskdesk/`
+- BDD scenarios (Cucumber 7): `src/test/resources/features/*.feature`
+- Alert evaluation tests must verify **transition** (not steady-state) behavior
+- Mentor review tests use frozen payloads — not live market context
+
+## Key Docs to Read
+
+- `docs/AI_HANDOFF.md` — Latest engineering state, recent changes, known issues
+- `docs/ARCHITECTURE_PRINCIPLES.md` — Layer constraints, date/time rules, alert rules
+- `docs/PROJECT_CONTEXT.md` — Service map, environment variables, execution state machine

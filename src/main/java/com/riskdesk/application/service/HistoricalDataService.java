@@ -122,7 +122,7 @@ public class HistoricalDataService implements ApplicationRunner {
         log.info("HistoricalDataService [{}]: fetching real OHLCV candles...", context);
         int totalSaved = 0;
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             for (String timeframe : TIMEFRAMES) {
                 if (!historicalProvider.supports(instrument, timeframe)) continue;
                 try {
@@ -154,6 +154,9 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     private int refreshSingleInstrumentTimeframe(Instrument instrument, String timeframe, String context) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return 0;
+        }
         if (!historicalProvider.supports(instrument, timeframe)) {
             return 0;
         }
@@ -221,6 +224,7 @@ public class HistoricalDataService implements ApplicationRunner {
         }
         return candles;
     }
+
 
     private List<Candle> deduplicate(List<Candle> candles) {
         Map<String, Candle> unique = new LinkedHashMap<>();

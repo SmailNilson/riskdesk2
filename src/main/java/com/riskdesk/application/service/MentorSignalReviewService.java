@@ -16,6 +16,9 @@ import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -38,6 +41,7 @@ import java.util.stream.Stream;
 @Service
 public class MentorSignalReviewService {
 
+    private static final Logger log = LoggerFactory.getLogger(MentorSignalReviewService.class);
     private static final int DEFAULT_RECENT_REVIEWS = 500;
     private static final int MAX_RECENT_REVIEWS = 1000;
     private static final String STATUS_ANALYZING = "ANALYZING";
@@ -85,6 +89,14 @@ public class MentorSignalReviewService {
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
+    @PostConstruct
+    void cleanupStaleAnalyzingReviews() {
+        int cleaned = reviewRepository.markAnalyzingAsError("Server restarted while analysis was in progress.");
+        if (cleaned > 0) {
+            log.info("MentorSignalReviewService: marked {} stale ANALYZING reviews as ERROR on startup.", cleaned);
+        }
+    }
+
     public void captureInitialReview(Alert alert) {
         captureInitialReview(alert, null);
     }
@@ -115,8 +127,18 @@ public class MentorSignalReviewService {
         }
     }
 
+    /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
+    private static final long MAX_ALERT_AGE_SECONDS = 600;
+
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
         if (!autoAnalysisEnabled) return;
+
+        // Reject stale alerts (e.g. data bursts replaying old signals)
+        if (alert.timestamp() != null &&
+                alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
+            return;
+        }
+
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {
             return;
@@ -190,6 +212,12 @@ public class MentorSignalReviewService {
             throw new IllegalArgumentException("no saved mentor review exists for this alert");
         }
 
+        // Guard: reject if latest revision is still ANALYZING (prevents duplicate API calls)
+        MentorSignalReviewRecord latest = thread.get(thread.size() - 1);
+        if (STATUS_ANALYZING.equals(latest.getStatus())) {
+            return toDto(latest);
+        }
+
         MentorSignalReviewRecord baseReview = thread.get(0);
         TradePlanValues previousPlan = resolveLatestTradePlan(thread);
         TradePlanValues requestedPlan = new TradePlanValues(
@@ -227,6 +255,10 @@ public class MentorSignalReviewService {
             publish(saved);
         }
         return toDto(saved);
+    }
+
+    public long deleteByStatuses(List<String> statuses) {
+        return reviewRepository.deleteByStatuses(statuses);
     }
 
     public List<MentorSignalReview> getRecentReviews() {
@@ -488,6 +520,7 @@ public class MentorSignalReviewService {
         payload.put("intermarket_correlations_the_edge", linkedMap(
             "dxy_pct_change", intermarket.dxyPctChange(),
             "dxy_trend", intermarket.dxyTrend(),
+            "dxy_component_breakdown", intermarket.dxyComponentBreakdown(),
             "silver_si1_pct_change", intermarket.silverSi1PctChange(),
             "gold_mgc1_pct_change", intermarket.goldMgc1PctChange(),
             "plat_pl1_pct_change", intermarket.platPl1PctChange(),
@@ -840,7 +873,7 @@ public class MentorSignalReviewService {
             case MGC -> "MGC1!";
             case E6 -> "6E1!";
             case MNQ -> "MNQ1!";
-            case DXY -> "DX1!";
+            case DXY -> "DXY";
         };
     }
 

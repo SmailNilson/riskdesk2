@@ -101,6 +101,29 @@ public class ChaikinIndicator {
         return result;
     }
 
+    /**
+     * Detects zero-line crossover of the Chaikin Oscillator.
+     * Returns "BULLISH_CROSS" if the oscillator crossed from negative to positive,
+     * "BEARISH_CROSS" if positive to negative, null otherwise.
+     * Requires at least 2 oscillator values.
+     */
+    public String crossover(List<Candle> candles) {
+        List<BigDecimal> osc = calculateOscillator(candles);
+        if (osc.size() < 2) return null;
+
+        BigDecimal prev = osc.get(osc.size() - 2);
+        BigDecimal curr = osc.get(osc.size() - 1);
+
+        boolean prevNeg = prev.compareTo(BigDecimal.ZERO) < 0;
+        boolean prevPos = prev.compareTo(BigDecimal.ZERO) > 0;
+        boolean currPos = curr.compareTo(BigDecimal.ZERO) > 0;
+        boolean currNeg = curr.compareTo(BigDecimal.ZERO) < 0;
+
+        if (prevNeg && currPos) return "BULLISH_CROSS";
+        if (prevPos && currNeg) return "BEARISH_CROSS";
+        return null;
+    }
+
     private List<BigDecimal> emaOfSeries(List<BigDecimal> data, int period) {
         if (data.size() < period) return Collections.emptyList();
         BigDecimal multiplier = BigDecimal.valueOf(2.0 / (period + 1));

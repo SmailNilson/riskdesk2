@@ -32,6 +32,7 @@ class MarketDataServiceTest {
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
         ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
+        DxyMarketService dxyMarketService = mock(DxyMarketService.class);
 
         Candle older10m = candle(Instrument.MCL, "10m", "2026-03-23T10:00:00Z", "101.25");
         Candle newer5m = candle(Instrument.MCL, "5m", "2026-03-23T10:05:00Z", "101.75");
@@ -50,7 +51,8 @@ class MarketDataServiceTest {
             candlePort,
             contractRegistry,
             messagingTemplate,
-            eventPublisher
+            eventPublisher,
+            dxyMarketService
         );
 
         service.pollPrices();
@@ -58,6 +60,7 @@ class MarketDataServiceTest {
         verify(positionService).updateMarketPrice(Instrument.MCL, new BigDecimal("101.75"));
         verify(alertService, never()).evaluate(any());
         verify(candlePort, never()).save(any());
+        verify(dxyMarketService).refreshSyntheticDxy();
         verify(messagingTemplate).convertAndSend(eq("/topic/prices"), (Object) argThat(payload -> {
             if (!(payload instanceof Map<?, ?> map)) return false;
             return "MCL".equals(map.get("instrument"))
@@ -75,6 +78,7 @@ class MarketDataServiceTest {
         SimpMessagingTemplate messagingTemplate = mock(SimpMessagingTemplate.class);
         ApplicationEventPublisher eventPublisher = mock(ApplicationEventPublisher.class);
         ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        DxyMarketService dxyMarketService = mock(DxyMarketService.class);
         when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(Optional.empty());
 
         MarketDataService service = new MarketDataService(
@@ -85,7 +89,8 @@ class MarketDataServiceTest {
             candlePort,
             contractRegistry,
             messagingTemplate,
-            eventPublisher
+            eventPublisher,
+            dxyMarketService
         );
 
         Instant periodOne = Instant.parse("2026-03-30T10:04:00Z");
