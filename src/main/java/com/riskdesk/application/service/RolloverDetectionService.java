@@ -18,6 +18,8 @@ import org.springframework.stereotype.Service;
 
 import com.riskdesk.domain.shared.TradingSessionResolver;
 
+import jakarta.annotation.PostConstruct;
+
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -25,6 +27,9 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Monitors contract expiry and liquidity for automatic rollover.
@@ -145,11 +150,22 @@ public class RolloverDetectionService {
         }
     }
 
+    /** Triggers the first volume check 2 minutes after startup. */
+    @PostConstruct
+    void scheduleInitialVolumeCheck() {
+        ScheduledExecutorService starter = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "rollover-init");
+            t.setDaemon(true);
+            return t;
+        });
+        starter.schedule(this::checkVolumeRollover, 2, TimeUnit.MINUTES);
+        starter.shutdown();
+    }
+
     // ── Scheduled: volume-based auto-rollover ────────────────────────────────
-    // Runs daily at 15:00 ET (peak CME volume) + 2 minutes after startup.
+    // Runs daily at 15:00 ET (peak CME volume).
 
     @Scheduled(cron = "0 0 15 * * MON-FRI", zone = "America/New_York")
-    @Scheduled(initialDelay = 2 * 60 * 1000L, fixedDelay = Long.MAX_VALUE)
     public void checkVolumeRollover() {
         if (!ibkrProperties.isEnabled() || !autoRolloverEnabled) return;
 

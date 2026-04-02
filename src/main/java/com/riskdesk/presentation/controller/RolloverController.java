@@ -2,6 +2,7 @@ package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.RolloverDetectionService;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.RolloverDecision;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -81,6 +82,33 @@ public class RolloverController {
             "instrument",    inst.name(),
             "contractMonth", contractMonth,
             "status",        "ROLLOVER_CONFIRMED"
+        ));
+    }
+
+    /**
+     * Triggers a volume-based rollover check for all instruments immediately.
+     * Returns the evaluation result for each instrument.
+     */
+    @PostMapping("/check-volume")
+    public ResponseEntity<Map<String, Object>> checkVolumeRollover() {
+        detectionService.checkVolumeRollover();
+
+        Map<String, Object> results = new java.util.LinkedHashMap<>();
+        for (Instrument inst : Instrument.exchangeTradedFutures()) {
+            RolloverDecision decision = detectionService.evaluateVolumeRollover(inst);
+            results.put(inst.name(), Map.of(
+                "frontMonth", decision.front() != null ? decision.front().contractMonth() : "?",
+                "frontVolume", decision.front() != null ? decision.front().volume() : 0,
+                "nextMonth", decision.next() != null ? decision.next().contractMonth() : "?",
+                "nextVolume", decision.next() != null ? decision.next().volume() : 0,
+                "shouldRoll", decision.shouldRoll()
+            ));
+        }
+
+        return ResponseEntity.ok(Map.of(
+            "activeContracts", contractRegistry.snapshot().entrySet().stream()
+                .collect(java.util.stream.Collectors.toMap(e -> e.getKey().name(), Map.Entry::getValue)),
+            "volumeEvaluation", results
         ));
     }
 }
