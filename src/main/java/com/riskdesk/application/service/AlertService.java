@@ -152,6 +152,14 @@ public class AlertService {
     }
 
     /**
+     * Snoozes all future alerts matching the given key for the specified duration.
+     * Delegates to AlertDeduplicator so the key is blocked until the snooze expires.
+     */
+    public void snoozeAlert(String key, long durationSeconds) {
+        deduplicator.snooze(key, durationSeconds);
+    }
+
+    /**
      * Returns recent alerts for REST consumers (newest first).
      */
     public List<Map<String, Object>> getRecentAlerts() {
@@ -164,6 +172,7 @@ public class AlertService {
 
     private Map<String, Object> toPayload(Alert alert) {
         var map = new java.util.LinkedHashMap<String, Object>();
+        map.put("key",        alert.key());
         map.put("severity",   alert.severity().name());
         map.put("category",   alert.category().name());
         map.put("message",    alert.message());
