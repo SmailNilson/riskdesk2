@@ -14,6 +14,8 @@ import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -23,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * Fetches real historical OHLCV candles on startup and persists them.
@@ -128,6 +131,7 @@ public class HistoricalDataService implements ApplicationRunner {
                 try {
                     int limit = candlesTargetFor(timeframe);
                     List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
+                    candles = filterToTradingSessions(candles, timeframe);
                     candles = tagWithContractMonth(candles, instrument);
                     candles = deduplicate(candles);
                     if (candles.isEmpty()) {
@@ -164,7 +168,9 @@ public class HistoricalDataService implements ApplicationRunner {
         try {
             int limit = candlesTargetFor(timeframe);
             List<Candle> candles = deduplicate(
-                tagWithContractMonth(historicalProvider.fetchHistory(instrument, timeframe, limit), instrument));
+                tagWithContractMonth(
+                    filterToTradingSessions(historicalProvider.fetchHistory(instrument, timeframe, limit), timeframe),
+                    instrument));
             if (candles.isEmpty()) {
                 log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
                 return 0;
@@ -223,6 +229,17 @@ public class HistoricalDataService implements ApplicationRunner {
             candle.setContractMonth(contractMonth);
         }
         return candles;
+    }
+
+    private List<Candle> filterToTradingSessions(List<Candle> candles, String timeframe) {
+        if (isDailyOrLarger(timeframe)) return candles;
+        return candles.stream()
+            .filter(c -> TradingSessionResolver.isInTradingSession(c.getTimestamp()))
+            .collect(Collectors.toList());
+    }
+
+    private static boolean isDailyOrLarger(String tf) {
+        return "1d".equals(tf) || "1w".equals(tf) || "1M".equals(tf);
     }
 
     private List<Candle> deduplicate(List<Candle> candles) {
