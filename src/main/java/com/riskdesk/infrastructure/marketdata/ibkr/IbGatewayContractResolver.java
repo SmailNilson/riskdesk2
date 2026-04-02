@@ -26,6 +26,9 @@ public class IbGatewayContractResolver {
     }
 
     public Optional<IbGatewayResolvedContract> resolve(Instrument instrument) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return Optional.empty();
+        }
         IbGatewayResolvedContract cached = cache.get(instrument);
         if (cached != null) {
             return Optional.of(cached);
@@ -41,6 +44,9 @@ public class IbGatewayContractResolver {
     }
 
     public Optional<IbGatewayResolvedContract> refresh(Instrument instrument) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return Optional.empty();
+        }
         cache.remove(instrument);
 
         List<ContractDetails> details = List.of();
@@ -78,8 +84,6 @@ public class IbGatewayContractResolver {
         if (symbol.equals("MGC") || localSymbol.startsWith("MGC") || tradingClass.equals("MGC")) return Optional.of(Instrument.MGC);
         if (symbol.equals("MNQ") || localSymbol.startsWith("MNQ") || tradingClass.equals("MNQ")) return Optional.of(Instrument.MNQ);
         if (symbol.equals("6E") || localSymbol.startsWith("6E") || tradingClass.equals("6E")) return Optional.of(Instrument.E6);
-        if (symbol.equals("DX") || localSymbol.startsWith("DX") || tradingClass.equals("DX")) return Optional.of(Instrument.DXY);
-
         return Optional.empty();
     }
 
@@ -105,11 +109,7 @@ public class IbGatewayContractResolver {
                 buildQuery("EUR", "CME", "USD", null, "6E"),
                 buildQuery("6E", "GLOBEX", "USD", null, "6E")
             );
-            case DXY -> List.of(
-                buildQuery("DX", "ICEUS", "USD", "1000", "DX"),
-                buildQuery("DX", "ICEUS", "USD", null, "DX"),
-                buildQuery("DX", "ICEUS", "USD", null, null)
-            );
+            case DXY -> List.of();
         };
     }
 

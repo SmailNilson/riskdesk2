@@ -67,6 +67,10 @@ public class RolloverController {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }
 
+        if (!inst.isExchangeTradedFuture()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Synthetic instruments do not support rollover: " + instrument));
+        }
+
         if (!contractMonth.matches("\\d{6}")) {
             return ResponseEntity.badRequest().body(Map.of("error", "contractMonth must be YYYYMM format"));
         }

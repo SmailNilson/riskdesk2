@@ -52,6 +52,17 @@ class AlertDeduplicatorTest {
     }
 
     @Test
+    void snooze_blocksFutureAlertsForDuration() {
+        AlertDeduplicator dedup = new AlertDeduplicator(300);
+        Alert alert = makeAlert("ema:golden:MCL:10m");
+
+        dedup.snooze(alert.key(), 60);
+
+        assertFalse(dedup.shouldFire(alert), "Alert should be blocked while snoozed");
+        assertTrue(dedup.isDuplicate(alert), "isDuplicate should return true while snoozed");
+    }
+
+    @Test
     void shouldFire_afterCooldownExpires_returnsTrue() throws Exception {
         // Use a very short cooldown (1 second) to test expiry
         AlertDeduplicator dedup = new AlertDeduplicator(1);

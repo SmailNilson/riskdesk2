@@ -54,6 +54,8 @@ services:
     restart: unless-stopped
     env_file:
       - /etc/riskdesk/ibkr.env
+    ports:
+      - "5900:5900"
     volumes:
       - /var/lib/riskdesk/ibkr-settings:/home/ibgateway/tws_settings
       - /var/log/riskdesk/ibkr:/home/ibgateway/logs
