@@ -6,6 +6,7 @@ import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Optional;
@@ -63,6 +64,7 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     }
 
     @Override
+    @Transactional
     public long deleteByStatuses(List<String> statuses) {
         return repository.deleteByStatusIn(statuses);
     }
