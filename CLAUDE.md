@@ -59,6 +59,7 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 - `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks
 - `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
 - `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
+- `domain/behaviouralert/` — **Level/proximity-based** alert evaluation (EMA proximity, S/R touch, etc.)
 - `domain/trading/` — Position, risk, and portfolio models
 - `domain/analysis/` — AI/Mentor analysis models
 - `domain/shared/TradingSessionResolver` — All timezone/session logic lives here
@@ -71,6 +72,7 @@ IBKR IB Gateway (port 4001)
   → MarketDataService / HistoricalDataService (application)
   → PostgreSQL
   → IndicatorAlertEvaluator (domain, transition-based)
+  → BehaviourAlertEvaluator (domain, level/proximity-based)
   → MentorAnalysisService + Google Gemini API
   → WebSocket /topic/alerts, /topic/mentor-alerts
   → Next.js Frontend (STOMP over SockJS)
