@@ -180,7 +180,8 @@ export default function MentorSignalPanel({
     setThreadsByAlertKey(prev => {
       const next = { ...prev };
       for (const review of reviews) {
-        next[review.alertKey] = mergeReviews(next[review.alertKey] ?? [], [review]);
+        const frontendKey = `${review.timestamp}:${review.instrument ?? 'GLOBAL'}:${review.category}:${review.message}`;
+        next[frontendKey] = mergeReviews(next[frontendKey] ?? [], [review]);
       }
       return next;
     });
