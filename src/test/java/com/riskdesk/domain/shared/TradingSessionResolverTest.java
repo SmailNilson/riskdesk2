@@ -201,4 +201,74 @@ class TradingSessionResolverTest {
         Instant tick = Instant.parse(utcTimestamp);
         assertEquals(LocalDate.parse(expectedDate), TradingSessionResolver.tradingDate(tick));
     }
+
+    // -- isInTradingSession ---------------------------------------------------
+
+    @ParameterizedTest(name = "isInTradingSession({0}) = {1}")
+    @CsvSource({
+        // Monday mid-session
+        "2026-03-23T14:00:00Z, true",   // Mon 10:00 ET (EDT) — mid-session
+        // Monday daily maintenance window (17:00–18:00 ET)
+        "2026-03-23T21:00:00Z, false",  // Mon 17:00 ET — maintenance starts
+        "2026-03-23T21:30:00Z, false",  // Mon 17:30 ET — mid-maintenance
+        "2026-03-23T22:00:00Z, true",   // Mon 18:00 ET — session reopens
+        "2026-03-23T22:01:00Z, true",   // Mon 18:01 ET — clearly open
+        // Friday close → weekend
+        "2026-03-27T20:59:00Z, true",   // Fri 16:59 ET — just before close
+        "2026-03-27T21:00:00Z, false",  // Fri 17:00 ET — weekend starts
+        "2026-03-27T23:00:00Z, false",  // Fri 19:00 ET — weekend
+        // Saturday — always closed
+        "2026-03-28T12:00:00Z, false",  // Sat 08:00 ET
+        "2026-03-28T22:00:00Z, false",  // Sat 18:00 ET
+        // Sunday — closed until 18:00 ET
+        "2026-03-29T17:00:00Z, false",  // Sun 13:00 ET — before open
+        "2026-03-29T21:59:00Z, false",  // Sun 17:59 ET — just before open
+        "2026-03-29T22:00:00Z, true",   // Sun 18:00 ET — weekly open
+        "2026-03-29T23:00:00Z, true",   // Sun 19:00 ET — session active
+    })
+    void isInTradingSession_variousTimes(String utcTimestamp, boolean expected) {
+        assertEquals(expected, TradingSessionResolver.isInTradingSession(Instant.parse(utcTimestamp)));
+    }
+
+    @Test
+    void isInTradingSession_springForwardDST_handlesCorrectly() {
+        // 2026 Spring Forward: March 8 at 02:00 EST -> 03:00 EDT
+        // March 9 (Monday) maintenance: 17:00 EDT = 21:00 UTC
+        Instant maintenance = ZonedDateTime.of(2026, 3, 9, 17, 30, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isInTradingSession(maintenance));
+
+        Instant afterMaint = ZonedDateTime.of(2026, 3, 9, 18, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isInTradingSession(afterMaint));
+    }
+
+    @Test
+    void isInTradingSession_fallBackDST_handlesCorrectly() {
+        // 2026 Fall Back: Nov 1 at 02:00 EDT -> 01:00 EST
+        // Nov 2 (Monday) maintenance: 17:00 EST = 22:00 UTC
+        Instant maintenance = ZonedDateTime.of(2026, 11, 2, 17, 30, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isInTradingSession(maintenance));
+
+        Instant afterMaint = ZonedDateTime.of(2026, 11, 2, 18, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isInTradingSession(afterMaint));
+    }
+
+    @Test
+    void isInTradingSession_thursdayMaintenance_closedThenReopens() {
+        // Thursday March 26, 2026
+        Instant beforeClose = ZonedDateTime.of(2026, 3, 26, 16, 59, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isInTradingSession(beforeClose));
+
+        Instant atClose = ZonedDateTime.of(2026, 3, 26, 17, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isInTradingSession(atClose));
+
+        Instant atReopen = ZonedDateTime.of(2026, 3, 26, 18, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isInTradingSession(atReopen));
+    }
 }
