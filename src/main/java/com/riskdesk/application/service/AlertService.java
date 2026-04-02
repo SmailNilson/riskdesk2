@@ -47,7 +47,7 @@ public class AlertService {
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
 
     // Timeframes whose alert evaluation is globally muted (e.g. "10m", "1h", "5m")
-    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet(Set.of("5m"));
+    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet();
 
     public AlertService(PositionService positionService,
                         IndicatorService indicatorService,
@@ -65,6 +65,7 @@ public class AlertService {
         this.signalPreFilterService    = signalPreFilterService;
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.messagingTemplate         = messagingTemplate;
+        mutedTimeframes.add("5m"); // 5m alerts disabled by default
     }
 
     /**
