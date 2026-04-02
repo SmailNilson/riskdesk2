@@ -273,6 +273,7 @@ export default function MentorSignalPanel({
 
   const [autoAnalysis, setAutoAnalysis] = useState<boolean>(false);
   const [togglingAuto, setTogglingAuto] = useState(false);
+  const [cleaningUp, setCleaningUp] = useState(false);
   const [mutedTfs, setMutedTfs] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -290,6 +291,18 @@ export default function MentorSignalPanel({
     setMutedTfs(next);
     await fetch(`${API_URL}/api/alerts/muted-timeframes/${apiTf}?muted=${!isMuted}`, { method: 'PUT' }).catch(() => {});
   }, [mutedTfs]);
+
+  const cleanUp = async () => {
+    setCleaningUp(true);
+    try {
+      await Promise.all([
+        fetch(`${API_URL}/api/alerts/recent`, { method: 'DELETE' }),
+        fetch(`${API_URL}/api/mentor/auto-alerts?statuses=ERROR`, { method: 'DELETE' }),
+      ]);
+    } finally {
+      setCleaningUp(false);
+    }
+  };
 
   const toggleAutoAnalysis = async () => {
     setTogglingAuto(true);
@@ -413,6 +426,14 @@ export default function MentorSignalPanel({
           >
             <span className={`inline-block h-1.5 w-1.5 rounded-full ${autoAnalysis ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
             AUTO {autoAnalysis ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={() => void cleanUp()}
+            disabled={cleaningUp}
+            title="Supprimer les alertes ERROR (base) et vider le buffer No Review (mémoire)"
+            className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900/60 px-2 py-1 font-semibold text-zinc-500 transition-colors hover:border-zinc-500 hover:text-zinc-400 disabled:cursor-not-allowed"
+          >
+            {cleaningUp ? '...' : 'Clean Up'}
           </button>
           {TIMEFRAME_MUTE_OPTIONS.map(({ label, api: apiTf }) => {
             const muted = mutedTfs.has(apiTf);
