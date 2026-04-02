@@ -15,9 +15,12 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrates alert evaluation, deduplication, and publishing.
@@ -42,6 +45,9 @@ public class AlertService {
 
     // Recent alerts buffer (last 50) for REST endpoint
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
+
+    // Timeframes whose alert evaluation is globally muted (e.g. "10m", "1h", "5m")
+    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet();
 
     public AlertService(PositionService positionService,
                         IndicatorService indicatorService,
@@ -99,6 +105,7 @@ public class AlertService {
 
         // Indicator evaluation via domain service (all timeframes)
         for (String timeframe : List.of("5m", "10m", "30m", "1h", "4h")) {
+            if (mutedTimeframes.contains(timeframe)) continue;
             try {
                 // Reuse pre-computed snapshots for H1 and H4; compute fresh for others
                 IndicatorSnapshot snap;
@@ -152,6 +159,28 @@ public class AlertService {
     }
 
     /**
+     * Snoozes all future alerts matching the given key for the specified duration.
+     * Delegates to AlertDeduplicator so the key is blocked until the snooze expires.
+     */
+    public void snoozeAlert(String key, long durationSeconds) {
+        deduplicator.snooze(key, durationSeconds);
+    }
+
+    public void muteTimeframe(String timeframe) {
+        mutedTimeframes.add(timeframe);
+        log.info("Timeframe muted: {}", timeframe);
+    }
+
+    public void unmuteTimeframe(String timeframe) {
+        mutedTimeframes.remove(timeframe);
+        log.info("Timeframe unmuted: {}", timeframe);
+    }
+
+    public Set<String> getMutedTimeframes() {
+        return Collections.unmodifiableSet(mutedTimeframes);
+    }
+
+    /**
      * Returns recent alerts for REST consumers (newest first).
      */
     public List<Map<String, Object>> getRecentAlerts() {
@@ -164,6 +193,7 @@ public class AlertService {
 
     private Map<String, Object> toPayload(Alert alert) {
         var map = new java.util.LinkedHashMap<String, Object>();
+        map.put("key",        alert.key());
         map.put("severity",   alert.severity().name());
         map.put("category",   alert.category().name());
         map.put("message",    alert.message());

@@ -14,6 +14,7 @@ export interface PriceUpdate {
 }
 
 export interface AlertMessage {
+  key?: string;
   severity: 'INFO' | 'WARNING' | 'DANGER';
   category: string;
   message: string;

@@ -24,7 +24,6 @@ const SEV_LABEL = {
 
 export default function AlertsFeed({ alerts }: Props) {
   return (
-    /* Fixed bottom bar */
     <div className="fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/95 backdrop-blur border-t border-zinc-800 flex items-center gap-0">
       {/* Label */}
       <div className="flex-shrink-0 flex items-center gap-2 px-3 border-r border-zinc-800 h-full self-stretch">

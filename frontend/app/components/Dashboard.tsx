@@ -11,6 +11,7 @@ import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
 import MentorSignalPanel from './MentorSignalPanel';
 import PositionForm from './PositionForm';
+import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
@@ -193,6 +194,8 @@ export default function Dashboard() {
           alerts={alerts}
         />
       </div>
+
+      <AlertsFeed alerts={alerts} />
     </div>
   );
 }
