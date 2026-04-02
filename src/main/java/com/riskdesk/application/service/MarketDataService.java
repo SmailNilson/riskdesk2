@@ -320,15 +320,3 @@ public class MarketDataService {
 
     public record StoredPrice(BigDecimal price, Instant timestamp, String source) {}
 }
-rice;
-            close = price;
-            volume++;
-        }
-
-        Candle build() {
-            return new Candle(instrument, timeframe, contractMonth, periodStart, open, high, low, close, volume);
-        }
-    }
-
-    public record StoredPrice(BigDecimal price, Instant timestamp, String source) {}
-}
