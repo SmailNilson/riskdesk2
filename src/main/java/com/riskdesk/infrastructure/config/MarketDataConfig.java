@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
+import com.riskdesk.domain.marketdata.port.VolumeProvider;
 import com.riskdesk.infrastructure.marketdata.ibkr.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,6 +71,19 @@ public class MarketDataConfig {
     public IbGatewayHistoricalProvider ibGatewayHistoricalProvider(IbGatewayNativeClient nativeClient,
                                                                    IbGatewayContractResolver contractResolver) {
         return new IbGatewayHistoricalProvider(nativeClient, contractResolver);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "riskdesk.ibkr.enabled", havingValue = "true")
+    public VolumeProvider ibkrVolumeProvider(IbGatewayNativeClient nativeClient,
+                                             IbGatewayContractResolver contractResolver) {
+        return new IbkrVolumeProvider(nativeClient, contractResolver);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' != 'true'")
+    public VolumeProvider noopVolumeProvider() {
+        return (instrument, contractMonth) -> java.util.OptionalLong.empty();
     }
 
     // -------------------------------------------------------------------------

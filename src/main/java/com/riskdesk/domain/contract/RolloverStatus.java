@@ -11,5 +11,7 @@ package com.riskdesk.domain.contract;
 public enum RolloverStatus {
     STABLE,
     WARNING,
-    CRITICAL
+    CRITICAL,
+    /** The active contract was automatically switched to a more liquid next-month. */
+    AUTO_ROLLED
 }

@@ -29,15 +29,18 @@ public class ExecutionManagerService {
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final IbkrOrderService ibkrOrderService;
+    private final RolloverDetectionService rolloverDetectionService;
     private final ObjectMapper objectMapper;
 
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
                                    IbkrOrderService ibkrOrderService,
+                                   RolloverDetectionService rolloverDetectionService,
                                    ObjectMapper objectMapper) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.ibkrOrderService = ibkrOrderService;
+        this.rolloverDetectionService = rolloverDetectionService;
         this.objectMapper = objectMapper;
     }
 
@@ -67,6 +70,10 @@ public class ExecutionManagerService {
 
         MentorProposedTradePlan tradePlan = extractTradePlan(review);
         Instrument instrument = Instrument.valueOf(review.getInstrument());
+
+        // Hard expiry guard: block position if contract expires within N days
+        rolloverDetectionService.assertNotNearExpiry(instrument);
+
         Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
 
         TradeExecutionRecord candidate = new TradeExecutionRecord();

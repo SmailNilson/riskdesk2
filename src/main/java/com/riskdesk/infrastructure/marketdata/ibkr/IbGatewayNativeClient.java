@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -426,6 +427,26 @@ public class IbGatewayNativeClient {
         controller.cancelTopMktData(collector);
 
         return collector.bestPrice();
+    }
+
+    /**
+     * Requests a one-shot market-data snapshot and returns the daily trading
+     * volume for the given contract.  Returns empty if the connection is down
+     * or IBKR does not supply a volume tick within the snapshot timeout.
+     */
+    public OptionalLong requestSnapshotVolume(Contract contract) {
+        if (!ensureConnected()) {
+            return OptionalLong.empty();
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        VolumeCollector collector = new VolumeCollector(latch);
+
+        controller.reqTopMktData(contract, "", true, false, collector);
+        awaitLatch(latch, "volume snapshot", SNAPSHOT_TIMEOUT);
+        controller.cancelTopMktData(collector);
+
+        return collector.volume();
     }
 
     // -------------------------------------------------------------------------
@@ -868,6 +889,35 @@ public class IbGatewayNativeClient {
 
         private Optional<BigDecimal> bestPrice() {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Volume snapshot collector (one-shot)
+    // -------------------------------------------------------------------------
+
+    private static final class VolumeCollector extends ApiController.TopMktDataAdapter {
+        private final CountDownLatch latch;
+        private volatile long volume = -1;
+
+        private VolumeCollector(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            if (tickType == TickType.VOLUME && size != null && size.isValid()) {
+                volume = size.longValue();
+            }
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            latch.countDown();
+        }
+
+        private OptionalLong volume() {
+            return volume >= 0 ? OptionalLong.of(volume) : OptionalLong.empty();
         }
     }
 

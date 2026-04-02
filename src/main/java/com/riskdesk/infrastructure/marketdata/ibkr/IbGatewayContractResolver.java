@@ -3,6 +3,8 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
+import com.riskdesk.domain.contract.RolloverCandidate;
+import com.riskdesk.domain.marketdata.port.ContractCalendar;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Service;
 
@@ -16,7 +18,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
-public class IbGatewayContractResolver {
+public class IbGatewayContractResolver implements ContractCalendar {
 
     private final IbGatewayNativeClient nativeClient;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
@@ -63,6 +65,36 @@ public class IbGatewayContractResolver {
         IbGatewayResolvedContract resolved = new IbGatewayResolvedContract(instrument, selected.contract(), selected);
         cache.put(instrument, resolved);
         return Optional.of(resolved);
+    }
+
+    @Override
+    public List<RolloverCandidate> nearestContracts(Instrument instrument, int count) {
+        List<ContractDetails> details = List.of();
+        for (Contract query : buildQueries(instrument)) {
+            details = nativeClient.requestContractDetails(query);
+            if (!details.isEmpty()) break;
+        }
+
+        LocalDate today = LocalDate.now();
+        return details.stream()
+            .filter(d -> expiryKey(d) != null)
+            .filter(d -> !expiryKey(d).isBefore(today))
+            .sorted(Comparator.comparing(this::expiryKey))
+            .limit(count)
+            .map(d -> toCandidate(instrument, d))
+            .toList();
+    }
+
+    private RolloverCandidate toCandidate(Instrument instrument, ContractDetails details) {
+        String month = extractContractMonth(details.contract().lastTradeDateOrContractMonth());
+        LocalDate expiry = expiryKey(details);
+        return new RolloverCandidate(instrument, month, 0L, expiry);
+    }
+
+    private String extractContractMonth(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String digits = raw.replaceAll("[^0-9]", "");
+        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 
     public void clearCache() {

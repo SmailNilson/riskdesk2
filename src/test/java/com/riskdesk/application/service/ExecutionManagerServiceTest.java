@@ -40,6 +40,9 @@ class ExecutionManagerServiceTest {
     @Mock
     private IbkrOrderService ibkrOrderService;
 
+    @Mock
+    private RolloverDetectionService rolloverDetectionService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -48,6 +51,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
@@ -91,6 +95,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
@@ -116,6 +121,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
@@ -157,6 +163,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
@@ -196,6 +203,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
@@ -230,6 +238,7 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
+            rolloverDetectionService,
             objectMapper
         );
 
