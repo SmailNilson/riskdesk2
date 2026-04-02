@@ -15,7 +15,9 @@ public record BehaviourAlertContext(
     BigDecimal ema50,
     BigDecimal ema200,
     List<SrLevel> srLevels,
-    Instant lastCandleTimestamp
+    Instant lastCandleTimestamp,
+    BigDecimal chaikinOscillator,
+    BigDecimal cmf
 ) {
     /**
      * A named support/resistance level for proximity evaluation.

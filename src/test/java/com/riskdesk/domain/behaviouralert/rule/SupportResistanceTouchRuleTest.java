@@ -97,7 +97,8 @@ class SupportResistanceTouchRuleTest {
                 new BigDecimal(price),
                 null, null,
                 srLevels,
-                candle
+                candle,
+                null, null
         );
     }
 }

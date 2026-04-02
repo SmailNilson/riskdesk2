@@ -89,7 +89,9 @@ public class BehaviourAlertService {
                 snap.ema50(),
                 snap.ema200(),
                 srLevels,
-                snap.lastCandleTimestamp()
+                snap.lastCandleTimestamp(),
+                snap.chaikinOscillator(),
+                snap.cmf()
         );
     }
 
