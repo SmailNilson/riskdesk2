@@ -118,10 +118,10 @@ public final class TradingSessionResolver {
         DayOfWeek dow = zdt.getDayOfWeek();
         LocalTime time = zdt.toLocalTime();
 
-        // Weekend closure: Friday 17:00 ET → Sunday 17:00 ET
+        // Weekend closure: Friday 17:00 ET → Sunday 18:00 ET
         if (dow == DayOfWeek.SATURDAY) return true;
         if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return true;
-        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_CLOSE)) return true;
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_OPEN)) return true;
 
         // Daily maintenance halt: 17:00–18:00 ET (Mon–Thu)
         int hour = zdt.getHour();

@@ -90,10 +90,10 @@ function isMaintenanceWindow(epochSec: number): boolean {
   const hour = d.getUTCHours();
   const dow = d.getUTCDay(); // 0=Sun … 6=Sat
 
-  // Weekend: Sat all day, Fri after 17h ET, Sun before 17h ET
+  // Weekend: Sat all day, Fri after 17h ET, Sun before 18h ET
   if (dow === 6) return true;
   if (dow === 5 && hour >= 17) return true;
-  if (dow === 0 && hour < 17) return true;
+  if (dow === 0 && hour < 18) return true;
 
   // Daily halt 17:00–18:00 ET (Mon–Thu)
   if (dow >= 1 && dow <= 4 && hour === 17) return true;
