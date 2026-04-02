@@ -115,8 +115,18 @@ public class MentorSignalReviewService {
         }
     }
 
+    /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
+    private static final long MAX_ALERT_AGE_SECONDS = 600;
+
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
         if (!autoAnalysisEnabled) return;
+
+        // Reject stale alerts (e.g. data bursts replaying old signals)
+        if (alert.timestamp() != null &&
+                alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
+            return;
+        }
+
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {
             return;

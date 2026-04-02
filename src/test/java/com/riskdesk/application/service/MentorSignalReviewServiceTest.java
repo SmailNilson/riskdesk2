@@ -405,13 +405,14 @@ class MentorSignalReviewServiceTest {
         );
         service.setAutoAnalysisEnabled(true);
 
+        Instant alertTime = Instant.now();
         Alert alert = new Alert(
-            "smc:MNQ:2026-03-26T02:30:39Z",
+            "smc:MNQ:" + alertTime,
             AlertSeverity.INFO,
             "Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
             AlertCategory.SMC,
             "MNQ",
-            Instant.parse("2026-03-26T02:30:39Z")
+            alertTime
         );
 
         when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
@@ -470,7 +471,7 @@ class MentorSignalReviewServiceTest {
         );
         service.setAutoAnalysisEnabled(true);
 
-        Instant primaryTimestamp = Instant.parse("2026-04-01T00:10:00Z");
+        Instant primaryTimestamp = Instant.now();
         Alert primary = new Alert(
             "ob:mitigated:MCL:10m",
             AlertSeverity.INFO,
@@ -502,7 +503,7 @@ class MentorSignalReviewServiceTest {
         ArgumentCaptor<MentorSignalReviewRecord> reviewCaptor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
         verify(reviewRepository).save(reviewCaptor.capture());
         assertThat(reviewCaptor.getValue().getAlertKey())
-            .isEqualTo("2026-04-01T00:10:00Z:MCL:ORDER_BLOCK:MCL [10m] Bearish order block mitigated");
+            .isEqualTo(primaryTimestamp + ":MCL:ORDER_BLOCK:MCL [10m] Bearish order block mitigated");
         assertThat(reviewCaptor.getValue().getMessage()).isEqualTo(primary.message());
         assertThat(reviewCaptor.getValue().getAlertTimestamp()).isEqualTo(primaryTimestamp);
         assertThat(reviewCaptor.getValue().getCategory()).isEqualTo("ORDER_BLOCK");
