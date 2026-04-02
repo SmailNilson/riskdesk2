@@ -401,9 +401,6 @@ public class IndicatorService {
         }
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
-        // Match CandleController: drop maintenance-window candles so indicator
-        // series timestamps stay aligned with the candle series on the chart.
-        ordered.removeIf(c -> TradingSessionResolver.isMaintenanceWindow(c.getTimestamp()));
         return ordered;
     }
 

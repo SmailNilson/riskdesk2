@@ -58,21 +58,11 @@ class IndicatorServiceTest {
         assertEquals(history.get(history.size() - 1).getTimestamp().getEpochSecond(), series.ema9().get(series.ema9().size() - 1).time());
     }
 
-    /**
-     * Build synthetic candles spaced 10 min apart, skipping timestamps that
-     * fall inside the CME daily maintenance window (17:00–18:00 ET) or the
-     * weekend closure.  This mirrors the production pipeline where
-     * {@code isMaintenanceWindow} candles are now filtered out.
-     */
     private static List<Candle> buildHistory(int count) {
         List<Candle> candles = new ArrayList<>(count);
-        // Start on a Sunday 18:00 ET (session open) = 23:00 UTC in March EDT
         Instant cursor = Instant.parse("2026-03-01T23:00:00Z");
         for (int i = 0; candles.size() < count; i++) {
             Instant ts = cursor.plusSeconds(i * 600L);
-            if (com.riskdesk.domain.shared.TradingSessionResolver.isMaintenanceWindow(ts)) {
-                continue; // skip maintenance/weekend candles
-            }
             BigDecimal price = BigDecimal.valueOf(90 + (candles.size() * 0.05));
             candles.add(new Candle(
                     Instrument.MCL,
