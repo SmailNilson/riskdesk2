@@ -21,4 +21,6 @@ public interface MentorSignalReviewRepositoryPort {
     List<MentorSignalReviewRecord> findRecent(int limit);
 
     List<MentorSignalReviewRecord> findBySimulationStatuses(List<TradeSimulationStatus> statuses);
+
+    long deleteByStatuses(List<String> statuses);
 }

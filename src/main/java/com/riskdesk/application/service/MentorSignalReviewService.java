@@ -115,8 +115,18 @@ public class MentorSignalReviewService {
         }
     }
 
+    /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
+    private static final long MAX_ALERT_AGE_SECONDS = 600;
+
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
         if (!autoAnalysisEnabled) return;
+
+        // Reject stale alerts (e.g. data bursts replaying old signals)
+        if (alert.timestamp() != null &&
+                alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
+            return;
+        }
+
         AlertReviewCandidate candidate = classify(alert);
         if (candidate == null) {
             return;
@@ -227,6 +237,10 @@ public class MentorSignalReviewService {
             publish(saved);
         }
         return toDto(saved);
+    }
+
+    public long deleteByStatuses(List<String> statuses) {
+        return reviewRepository.deleteByStatuses(statuses);
     }
 
     public List<MentorSignalReview> getRecentReviews() {
@@ -488,6 +502,7 @@ public class MentorSignalReviewService {
         payload.put("intermarket_correlations_the_edge", linkedMap(
             "dxy_pct_change", intermarket.dxyPctChange(),
             "dxy_trend", intermarket.dxyTrend(),
+            "dxy_component_breakdown", intermarket.dxyComponentBreakdown(),
             "silver_si1_pct_change", intermarket.silverSi1PctChange(),
             "gold_mgc1_pct_change", intermarket.goldMgc1PctChange(),
             "plat_pl1_pct_change", intermarket.platPl1PctChange(),
@@ -840,7 +855,7 @@ public class MentorSignalReviewService {
             case MGC -> "MGC1!";
             case E6 -> "6E1!";
             case MNQ -> "MNQ1!";
-            case DXY -> "DX1!";
+            case DXY -> "DXY";
         };
     }
 

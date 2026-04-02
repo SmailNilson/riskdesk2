@@ -16,4 +16,6 @@ public interface MentorSignalReviewJpaRepository extends JpaRepository<MentorSig
     Optional<MentorSignalReviewEntity> findFirstByAlertKeyOrderByRevisionDesc(String alertKey);
 
     List<MentorSignalReviewEntity> findBySimulationStatusInOrderByCreatedAtAsc(List<TradeSimulationStatus> statuses);
+
+    long deleteByStatusIn(List<String> statuses);
 }

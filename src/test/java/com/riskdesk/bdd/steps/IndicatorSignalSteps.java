@@ -101,7 +101,9 @@ public class IndicatorSignalSteps {
                 null,
                 Collections.emptyList(),
                 Collections.emptyList(),
-                CLOSED_CANDLE
+                CLOSED_CANDLE,
+                null, null, null, null, Collections.emptyList(), Collections.emptyList(),
+                null, null, null, null, null, null, null, null
         );
     }
 

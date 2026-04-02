@@ -15,9 +15,12 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrates alert evaluation, deduplication, and publishing.
@@ -42,6 +45,9 @@ public class AlertService {
 
     // Recent alerts buffer (last 50) for REST endpoint
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
+
+    // Timeframes whose alert evaluation is globally muted (e.g. "10m", "1h", "5m")
+    private final Set<String> mutedTimeframes = ConcurrentHashMap.newKeySet();
 
     public AlertService(PositionService positionService,
                         IndicatorService indicatorService,
@@ -87,12 +93,25 @@ public class AlertService {
             log.debug("H1 snapshot error for {}: {}", instrument, e.getMessage());
         }
 
-        // Indicator evaluation via domain service (both timeframes)
-        for (String timeframe : List.of("10m", "1h")) {
+        // Compute H4 snapshot for HTF filter on 1h signals
+        IndicatorSnapshot h4Snap = null;
+        String h4Trend = "UNDEFINED";
+        try {
+            h4Snap = indicatorService.computeSnapshot(instrument, "4h");
+            if (h4Snap != null) h4Trend = h4Snap.marketStructureTrend();
+        } catch (Exception e) {
+            log.debug("H4 snapshot error for {}: {}", instrument, e.getMessage());
+        }
+
+        // Indicator evaluation via domain service (all timeframes)
+        for (String timeframe : List.of("5m", "10m", "30m", "1h", "4h")) {
+            if (mutedTimeframes.contains(timeframe)) continue;
             try {
-                // Reuse already-computed H1 snapshot; compute fresh snapshot for 10m
-                IndicatorSnapshot snap = "1h".equals(timeframe) ? h1Snap
-                        : indicatorService.computeSnapshot(instrument, timeframe);
+                // Reuse pre-computed snapshots for H1 and H4; compute fresh for others
+                IndicatorSnapshot snap;
+                if ("1h".equals(timeframe)) snap = h1Snap;
+                else if ("4h".equals(timeframe)) snap = h4Snap;
+                else snap = indicatorService.computeSnapshot(instrument, timeframe);
                 if (snap == null) continue;
 
                 List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
@@ -140,6 +159,28 @@ public class AlertService {
     }
 
     /**
+     * Snoozes all future alerts matching the given key for the specified duration.
+     * Delegates to AlertDeduplicator so the key is blocked until the snooze expires.
+     */
+    public void snoozeAlert(String key, long durationSeconds) {
+        deduplicator.snooze(key, durationSeconds);
+    }
+
+    public void muteTimeframe(String timeframe) {
+        mutedTimeframes.add(timeframe);
+        log.info("Timeframe muted: {}", timeframe);
+    }
+
+    public void unmuteTimeframe(String timeframe) {
+        mutedTimeframes.remove(timeframe);
+        log.info("Timeframe unmuted: {}", timeframe);
+    }
+
+    public Set<String> getMutedTimeframes() {
+        return Collections.unmodifiableSet(mutedTimeframes);
+    }
+
+    /**
      * Returns recent alerts for REST consumers (newest first).
      */
     public List<Map<String, Object>> getRecentAlerts() {
@@ -148,10 +189,19 @@ public class AlertService {
         }
     }
 
+    public int clearRecentAlerts() {
+        synchronized (recentAlerts) {
+            int count = recentAlerts.size();
+            recentAlerts.clear();
+            return count;
+        }
+    }
+
     // -----------------------------------------------------------------------
 
     private Map<String, Object> toPayload(Alert alert) {
         var map = new java.util.LinkedHashMap<String, Object>();
+        map.put("key",        alert.key());
         map.put("severity",   alert.severity().name());
         map.put("category",   alert.category().name());
         map.put("message",    alert.message());
@@ -179,7 +229,22 @@ public class AlertService {
             snapshot.recentOrderBlockEvents() == null ? List.of() : snapshot.recentOrderBlockEvents().stream()
                 .map(evt -> new IndicatorAlertSnapshot.OrderBlockEvent(evt.eventType(), evt.obType(), evt.high(), evt.low()))
                 .toList(),
-            snapshot.lastCandleTimestamp()
+            snapshot.lastCandleTimestamp(),
+            // ── V2 expansion fields (wired in Phase 6) ──
+            snapshot.supertrendBullish() ? "UPTREND" : "DOWNTREND",
+            snapshot.bbTrendSignal(),
+            null,  // close — wired in Phase 6
+            null,  // vwapPosition — wired in Phase 6
+            List.of(),  // recentFvgEvents
+            List.of(),  // recentSweepEvents
+            snapshot.deltaFlowBias(),
+            null,  // chaikinCrossover — wired in Phase 6
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().daily() != null ? snapshot.mtfLevels().daily().low() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().low() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().high() : null,
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null
         );
     }
 

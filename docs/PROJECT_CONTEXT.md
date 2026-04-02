@@ -46,6 +46,21 @@ This rule is intentional and strict.
 - PostgreSQL fallback is acceptable when IBKR is temporarily unavailable
 - external providers must not be introduced as “temporary fixes”
 
+### Synthetic Dollar Index
+
+`DXY` is no longer sourced from the `DX` future on `ICEUS`.
+
+Current behavior:
+
+- `DXY` is an internal synthetic market series computed from six IBKR FX quotes on `IDEALPRO`
+- the pricing inputs are `EURUSD`, `USDJPY`, `GBPUSD`, `USDCAD`, `USDSEK`, and `USDCHF`
+- live computation prefers `mid=(bid+ask)/2`, then falls back to `last` when bid/ask are incomplete
+- only complete, valid, time-coherent snapshots are persisted
+- persisted snapshots live in `market_dxy_snapshots`
+- historical DXY reads now come from that dedicated snapshot table, not from the generic `candles` table
+- `DXY` remains a business instrument symbol but must be excluded from futures contract rollover, active-contract fallback, and IBKR futures contract resolution
+- `CLIENT_PORTAL` mode does not support synthetic DXY; the dedicated DXY endpoints are intentionally unavailable there
+
 ## Main Runtime Config
 
 See:
@@ -100,6 +115,8 @@ These coordinate use cases and should not become infrastructure adapters.
 - `infrastructure/marketdata/ibkr/IbGatewayContractResolver.java`
 - `infrastructure/marketdata/ibkr/IbGatewayMarketDataProvider.java`
 - `infrastructure/marketdata/ibkr/IbGatewayHistoricalProvider.java`
+- `infrastructure/marketdata/ibkr/IbGatewayFxContractResolver.java`
+- `infrastructure/marketdata/ibkr/IbGatewayFxQuoteProvider.java`
 - `application/service/IbGatewayBrokerGateway.java`
 
 ### Persistence
@@ -107,6 +124,11 @@ These coordinate use cases and should not become infrastructure adapters.
 - `infrastructure/persistence/*`
 
 These are adapters, not business-rule owners.
+
+Relevant DXY persistence now includes:
+
+- `infrastructure/persistence/entity/MarketDxySnapshotEntity.java`
+- `infrastructure/persistence/JpaDxySnapshotRepositoryAdapter.java`
 
 ## Frontend Map
 
@@ -125,6 +147,7 @@ These are adapters, not business-rule owners.
 - show mentor payload and result
 - expose positions, indicators, alerts, and IBKR portfolio state
 - auto-route selected trading alerts into a dedicated Mentor review panel
+- display the synthetic DXY latest snapshot and 24h persisted history on the dashboard
 
 ### Mentor Alert Workflow
 

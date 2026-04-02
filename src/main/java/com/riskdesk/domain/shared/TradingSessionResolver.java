@@ -105,6 +105,34 @@ public final class TradingSessionResolver {
     }
 
     /**
+     * Returns {@code true} if the given timestamp falls inside the CME daily
+     * maintenance window (17:00–18:00 ET, Monday–Thursday) or during the
+     * weekend closure (Friday 17:00 ET through Sunday 17:00 ET).
+     * <p>
+     * During these windows no trading occurs and price data is unreliable
+     * (wide spreads, stale quotes).  Callers should skip candle accumulation
+     * and treat streaming prices with caution.
+     */
+    public static boolean isMaintenanceWindow(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        // Weekend closure: Friday 17:00 ET → Sunday 17:00 ET
+        if (dow == DayOfWeek.SATURDAY) return true;
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return true;
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_CLOSE)) return true;
+
+        // Daily maintenance halt: 17:00–18:00 ET (Mon–Thu)
+        int hour = zdt.getHour();
+        if (dow != DayOfWeek.FRIDAY && dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY) {
+            return hour == 17;
+        }
+
+        return false;
+    }
+
+    /**
      * Returns the CME trading date for a given timestamp.
      * <p>
      * The trading date is the calendar date on which the session <em>closes</em>.

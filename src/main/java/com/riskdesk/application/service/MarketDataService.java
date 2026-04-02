@@ -39,10 +39,13 @@ public class MarketDataService {
     private static final Logger log = LoggerFactory.getLogger(MarketDataService.class);
 
     private static final Map<String, Long> TIMEFRAMES = Map.of(
+        "5m",  5L,
         "10m", 10L,
-        "1h",  60L
+        "30m", 30L,
+        "1h",  60L,
+        "4h",  240L
     );
-    private static final String[] FALLBACK_TIMEFRAMES = {"5m", "10m", "1h", "4h", "1d"};
+    private static final String[] FALLBACK_TIMEFRAMES = {"5m", "10m", "30m", "1h", "4h", "1d"};
     private static final long FRESH_CACHE_SECONDS = 15L;
     private static final long INSTANT_FETCH_TIMEOUT_MS = 1200L;
 
@@ -55,6 +58,7 @@ public class MarketDataService {
     private final ActiveContractRegistry    contractRegistry;
     private final SimpMessagingTemplate     messagingTemplate;
     private final ApplicationEventPublisher eventPublisher;
+    private final DxyMarketService          dxyMarketService;
 
     private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
@@ -68,7 +72,8 @@ public class MarketDataService {
                              CandleRepositoryPort candlePort,
                              ActiveContractRegistry contractRegistry,
                              SimpMessagingTemplate messagingTemplate,
-                             ApplicationEventPublisher eventPublisher) {
+                             ApplicationEventPublisher eventPublisher,
+                             DxyMarketService dxyMarketService) {
         this.marketDataProvider = marketDataProvider;
         this.positionService    = positionService;
         this.alertService       = alertService;
@@ -76,6 +81,7 @@ public class MarketDataService {
         this.contractRegistry   = contractRegistry;
         this.messagingTemplate  = messagingTemplate;
         this.eventPublisher     = eventPublisher;
+        this.dxyMarketService   = dxyMarketService;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
@@ -84,7 +90,7 @@ public class MarketDataService {
         Instant now = Instant.now();
         boolean usedDatabaseFallback = false;
 
-        for (Instrument instrument : Instrument.values()) {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             BigDecimal price = prices.get(instrument);
             Instant timestamp = now;
             boolean fallbackPrice = false;
@@ -120,6 +126,8 @@ public class MarketDataService {
                 alertService.evaluate(instrument);
             }
         }
+
+        dxyMarketService.refreshSyntheticDxy();
 
         if (usedDatabaseFallback && !databaseFallbackActive) {
             log.warn("IBKR unavailable: serving last known prices from the database.");
@@ -169,6 +177,9 @@ public class MarketDataService {
     }
 
     public StoredPrice latestPrice(Instrument instrument) {
+        if (instrument == Instrument.DXY) {
+            return dxyStoredPrice();
+        }
         BigDecimal live = lastPrice.get(instrument);
         Instant liveTimestamp = lastTimestamp.get(instrument);
         String source = lastSource.get(instrument);
@@ -183,6 +194,9 @@ public class MarketDataService {
     }
 
     public StoredPrice currentPrice(Instrument instrument) {
+        if (instrument == Instrument.DXY) {
+            return dxyStoredPrice();
+        }
         StoredPrice cached = latestPrice(instrument);
         if (cached != null
             && !"FALLBACK_DB".equals(cached.source())
@@ -208,6 +222,16 @@ public class MarketDataService {
         return cached;
     }
 
+    private StoredPrice dxyStoredPrice() {
+        return dxyMarketService.latestResolvedSnapshot()
+            .map(snapshot -> new StoredPrice(
+                snapshot.snapshot().dxyValue(),
+                snapshot.snapshot().timestamp(),
+                snapshot.servedSource()
+            ))
+            .orElse(null);
+    }
+
     private boolean samePrice(BigDecimal left, BigDecimal right) {
         return left != null && right != null && left.compareTo(right) == 0;
     }
@@ -217,6 +241,13 @@ public class MarketDataService {
     // -------------------------------------------------------------------------
 
     private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
+        // Skip accumulation during the CME maintenance halt / weekend closure.
+        // Prices during these windows are stale or have extreme spreads and would
+        // produce misleading candles on the chart.
+        if (TradingSessionResolver.isMaintenanceWindow(now)) {
+            return;
+        }
+
         String  contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         CandleKey key         = new CandleKey(instrument, timeframe);
         long    periodMins    = TIMEFRAMES.get(timeframe);

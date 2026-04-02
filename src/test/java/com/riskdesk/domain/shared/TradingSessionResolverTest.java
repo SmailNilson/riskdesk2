@@ -271,4 +271,78 @@ class TradingSessionResolverTest {
                 TradingSessionResolver.CME_ZONE).toInstant();
         assertTrue(TradingSessionResolver.isInTradingSession(atReopen));
     }
+
+    // -- isMaintenanceWindow ---------------------------------------------------
+
+    @Test
+    void isMaintenanceWindow_duringDailyHalt_returnsTrue() {
+        // Wednesday 2026-03-25 17:30 ET — inside the 17:00-18:00 ET maintenance halt
+        Instant tick = ZonedDateTime.of(2026, 3, 25, 17, 30, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_justBeforeHalt_returnsFalse() {
+        // Wednesday 2026-03-25 16:59 ET — just before the halt
+        Instant tick = ZonedDateTime.of(2026, 3, 25, 16, 59, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_justAfterHalt_returnsFalse() {
+        // Wednesday 2026-03-25 18:00 ET — session just reopened
+        Instant tick = ZonedDateTime.of(2026, 3, 25, 18, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_saturday_returnsTrue() {
+        // Saturday anytime
+        Instant tick = ZonedDateTime.of(2026, 3, 28, 12, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_sundayBeforeOpen_returnsTrue() {
+        // Sunday 2026-03-22 10:00 ET — before 17:00 ET open
+        Instant tick = ZonedDateTime.of(2026, 3, 22, 10, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_sundayAfterOpen_returnsFalse() {
+        // Sunday 2026-03-22 18:00 ET — market open, trading active
+        Instant tick = ZonedDateTime.of(2026, 3, 22, 18, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_fridayAfterClose_returnsTrue() {
+        // Friday 2026-03-27 17:30 ET — after Friday close at 17:00
+        Instant tick = ZonedDateTime.of(2026, 3, 27, 17, 30, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_regularTradingHours_returnsFalse() {
+        // Wednesday 2026-03-25 10:00 ET — regular session
+        Instant tick = ZonedDateTime.of(2026, 3, 25, 10, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
+
+    @Test
+    void isMaintenanceWindow_nightSession_returnsFalse() {
+        // Wednesday 2026-03-25 22:00 ET — electronic session overnight
+        Instant tick = ZonedDateTime.of(2026, 3, 25, 22, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(tick));
+    }
 }
