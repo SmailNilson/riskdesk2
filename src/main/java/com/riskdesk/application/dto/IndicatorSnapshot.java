@@ -92,6 +92,12 @@ public record IndicatorSnapshot(
     // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ───
     MtfLevelsView mtfLevels,
 
+    // ── Session PD Array (intraday range-based) ─────────────────────────
+    BigDecimal sessionHigh,
+    BigDecimal sessionLow,
+    BigDecimal sessionEquilibrium,
+    String sessionPdZone,
+
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
     Instant lastCandleTimestamp
 ) {

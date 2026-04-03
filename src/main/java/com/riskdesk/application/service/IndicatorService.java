@@ -315,6 +315,8 @@ public class IndicatorService {
                 recentBreaks,
                 // UC-SMC-005: MTF levels
                 mtfLevels,
+                // Session PD Array (intraday range-based)
+                null, null, null, null,
                 lastCandleTimestamp
         );
     }
@@ -567,6 +569,8 @@ public class IndicatorService {
                 Collections.emptyList(),
                 // UC-SMC-005: MTF levels
                 null,
+                // Session PD Array (intraday range-based)
+                null, null, null, null,
                 null
         );
     }

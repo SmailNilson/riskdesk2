@@ -5,11 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.marketdata.model.TickAggregation;
+import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -60,6 +63,7 @@ public class MentorSignalReviewService {
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<TickDataPort> tickDataPortProvider;
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
     private volatile boolean autoAnalysisEnabled;
@@ -76,6 +80,7 @@ public class MentorSignalReviewService {
                                      MentorSignalReviewRepositoryPort reviewRepository,
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper,
+                                     ObjectProvider<TickDataPort> tickDataPortProvider,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -86,6 +91,7 @@ public class MentorSignalReviewService {
         this.reviewRepository = reviewRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
+        this.tickDataPortProvider = tickDataPortProvider;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -448,6 +454,8 @@ public class MentorSignalReviewService {
         IndicatorSeriesSnapshot indicatorSeries = indicatorService.computeSeries(candidate.instrument(), candidate.timeframe(), 500);
         List<Candle> candles = loadCandles(candidate.instrument(), candidate.timeframe(), 120);
         MentorIntermarketSnapshot intermarket = mentorIntermarketService.current(candidate.instrument());
+        MacroCorrelationSnapshot macroCorrelation = mentorIntermarketService.currentForAssetClass(
+            candidate.instrument(), candidate.instrument().assetClass());
         boolean manualReanalysis = TRIGGER_MANUAL_REANALYSIS.equals(triggerType);
         MarketDataService.StoredPrice livePrice = livePrice(candidate.instrument());
         Instant contextTimestamp = liveTimestamp(livePrice, candles);
@@ -472,6 +480,7 @@ public class MentorSignalReviewService {
         payload.put("metadata", linkedMap(
             "timestamp", contextTimestamp.toString(),
             "asset", assetAlias(candidate.instrument()),
+            "asset_class", candidate.instrument().assetClass() != null ? candidate.instrument().assetClass().name() : null,
             "current_price", roundNullable(currentPrice, candidate.instrument()),
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
@@ -492,45 +501,57 @@ public class MentorSignalReviewService {
         if (originalAlertContext != null) {
             payload.put("original_alert_context", originalAlertContext);
         }
-        payload.put("market_structure_the_king", linkedMap(
+        payload.put("market_structure_smc", linkedMap(
             "trend_H1", h1Snapshot.marketStructureTrend(),
             "trend_focus", focusSnapshot.marketStructureTrend(),
             "focus_timeframe", toMentorTimeframe(candidate.timeframe()),
+            "pd_array_zone_session", focusSnapshot.sessionPdZone(),
+            "pd_array_zone_structural", focusSnapshot.currentZone(),
             "last_event", focusSnapshot.lastBreakType(),
             "last_event_price", focusSnapshot.recentBreaks().isEmpty() ? null : focusSnapshot.recentBreaks().get(0).level(),
             "nearest_support_ob", nearestSupport,
             "nearest_resistance_ob", nearestResistance,
+            "liquidity_pools", buildLiquidityPools(focusSnapshot),
             "key_psychological_level_proximity", nearestPsychologicalLevel(currentPrice, candidate.instrument())
         ));
-        payload.put("dynamic_levels_and_vwap", linkedMap(
+        payload.put("dynamic_levels_and_mean_reversion", linkedMap(
             "vwap_value", focusSnapshot.vwap(),
             "distance_to_vwap_points", distance(currentPrice, focusSnapshot.vwap(), candidate.instrument()),
-            "ma_fast_red_value", focusSnapshot.ema50(),
-            "ma_slow_blue_value", focusSnapshot.ema200(),
-            "distance_to_ma_slow_points", distance(currentPrice, focusSnapshot.ema200(), candidate.instrument())
+            "ema_9_value", focusSnapshot.ema9(),
+            "ema_50_value", focusSnapshot.ema50(),
+            "ema_200_value", focusSnapshot.ema200(),
+            "distance_to_ema_50_points", distance(currentPrice, focusSnapshot.ema50(), candidate.instrument()),
+            "distance_to_ema_200_points", distance(currentPrice, focusSnapshot.ema200(), candidate.instrument()),
+            "bollinger_state", focusSnapshot.bbTrendExpanding() ? "EXPANDING" : (focusSnapshot.bbWidth() != null && focusSnapshot.bbWidth().doubleValue() < 0.02 ? "SQUEEZE" : "CONTRACTING")
         ));
-        payload.put("momentum_and_flow_the_trigger", linkedMap(
+        payload.put("momentum_oscillators", linkedMap(
+            "wavetrend_signal", focusSnapshot.wtCrossover(),
+            "wavetrend_is_overbought", focusSnapshot.wtWt1() != null && focusSnapshot.wtWt1().doubleValue() > 53,
+            "wavetrend_is_oversold", focusSnapshot.wtWt1() != null && focusSnapshot.wtWt1().doubleValue() < -53,
+            "rsi_value", focusSnapshot.rsi(),
+            "rsi_signal", focusSnapshot.rsiSignal(),
+            "chaikin_money_flow_cmf", focusSnapshot.cmf(),
             "money_flow_state", inferMoneyFlowState(focusSnapshot),
-            "money_flow_trend", inferMoneyFlowTrend(focusSnapshot),
-            "oscillator_value", focusSnapshot.rsi(),
-            "oscillator_signal", focusSnapshot.rsiSignal(),
-            "divergence_detected", false,
-            "divergence_type", null
+            "money_flow_trend", inferMoneyFlowTrend(focusSnapshot)
         ));
-        payload.put("intermarket_correlations_the_edge", linkedMap(
-            "dxy_pct_change", intermarket.dxyPctChange(),
-            "dxy_trend", intermarket.dxyTrend(),
-            "dxy_component_breakdown", intermarket.dxyComponentBreakdown(),
-            "silver_si1_pct_change", intermarket.silverSi1PctChange(),
-            "gold_mgc1_pct_change", intermarket.goldMgc1PctChange(),
-            "plat_pl1_pct_change", intermarket.platPl1PctChange(),
-            "metals_convergence_status", intermarket.metalsConvergenceStatus()
+        payload.put("order_flow_and_volume", buildOrderFlowSection(candidate.instrument(), focusSnapshot));
+        payload.put("macro_correlations_dynamic", linkedMap(
+            "dxy_pct_change", macroCorrelation.dxyPctChange(),
+            "dxy_trend", macroCorrelation.dxyTrend(),
+            "dxy_component_breakdown", macroCorrelation.dxyComponentBreakdown(),
+            "sector_leader_symbol", macroCorrelation.sectorLeaderSymbol(),
+            "sector_leader_pct_change", macroCorrelation.sectorLeaderPctChange(),
+            "sector_leader_trend", macroCorrelation.sectorLeaderTrend(),
+            "vix_pct_change", macroCorrelation.vixPctChange(),
+            "us10y_yield_pct_change", macroCorrelation.us10yYieldPctChange(),
+            "correlation_alignment", macroCorrelation.correlationAlignment(),
+            "data_availability", macroCorrelation.dataAvailability()
         ));
-        payload.put("risk_and_emotional_check", linkedMap(
+        payload.put("risk_management_gatekeeper", linkedMap(
             "current_atr_focus", atr,
             "stop_loss_size_points", roundNullable(stopLossSizePoints, candidate.instrument()),
             "reward_to_risk_ratio", rewardToRiskRatio,
-            "is_sl_structurally_protected", null,
+            "is_stop_protected_by_structure", isStopProtectedByStructure(effectiveStopLoss, candidate.action(), nearestSupport, nearestResistance),
             "price_extension_warning", isPriceExtended(currentPrice, focusSnapshot, atr)
         ));
         payload.put("riskdesk_context", linkedMap(
@@ -865,6 +886,65 @@ public class MentorSignalReviewService {
         };
         BigDecimal rounded = price.divide(step, 0, RoundingMode.HALF_UP).multiply(step);
         return round(rounded, instrument);
+    }
+
+    private Map<String, Object> buildLiquidityPools(IndicatorSnapshot snapshot) {
+        Map<String, Object> pools = new LinkedHashMap<>();
+        boolean hasEqh = snapshot.equalHighs() != null && !snapshot.equalHighs().isEmpty();
+        boolean hasEql = snapshot.equalLows() != null && !snapshot.equalLows().isEmpty();
+        pools.put("eqh_present", hasEqh);
+        pools.put("eqh_level", hasEqh ? snapshot.equalHighs().get(0).price() : null);
+        pools.put("eql_present", hasEql);
+        pools.put("eql_level", hasEql ? snapshot.equalLows().get(0).price() : null);
+        return pools;
+    }
+
+    private Map<String, Object> buildOrderFlowSection(Instrument instrument, IndicatorSnapshot focusSnapshot) {
+        // Try real tick data first
+        TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
+        if (tickDataPort != null && tickDataPort.isRealTickDataAvailable(instrument)) {
+            var tickAgg = tickDataPort.currentAggregation(instrument);
+            if (tickAgg.isPresent()) {
+                TickAggregation agg = tickAgg.get();
+                return linkedMap(
+                    "delta_flow_current", agg.delta(),
+                    "cumulative_delta_trend", agg.deltaTrend(),
+                    "buy_ratio_pct", agg.buyRatioPct(),
+                    "delta_divergence_detected", agg.divergenceDetected(),
+                    "delta_divergence_type", agg.divergenceType(),
+                    "source", TickAggregation.SOURCE_REAL_TICKS
+                );
+            }
+        }
+        // Fallback to CLV estimation from candle-based indicators
+        return linkedMap(
+            "delta_flow_current", focusSnapshot.deltaFlow(),
+            "cumulative_delta_trend", focusSnapshot.deltaFlowBias(),
+            "buy_ratio_pct", focusSnapshot.buyRatio(),
+            "delta_divergence_detected", false,
+            "source", TickAggregation.SOURCE_CLV_ESTIMATED
+        );
+    }
+
+    private boolean isStopProtectedByStructure(BigDecimal stopLoss, String action,
+                                                Map<String, Object> nearestSupport,
+                                                Map<String, Object> nearestResistance) {
+        if (stopLoss == null) return false;
+        // For LONG: SL should be below the nearest support OB bottom
+        if ("LONG".equals(action) && nearestSupport != null) {
+            Object obBottom = nearestSupport.get("price_bottom");
+            if (obBottom instanceof BigDecimal bd) {
+                return stopLoss.compareTo(bd) <= 0;
+            }
+        }
+        // For SHORT: SL should be above the nearest resistance OB top
+        if ("SHORT".equals(action) && nearestResistance != null) {
+            Object obTop = nearestResistance.get("price_top");
+            if (obTop instanceof BigDecimal bd) {
+                return stopLoss.compareTo(bd) >= 0;
+            }
+        }
+        return false;
     }
 
     private String assetAlias(Instrument instrument) {

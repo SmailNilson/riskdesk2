@@ -1,8 +1,10 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.marketdata.model.DxySnapshot;
 import com.riskdesk.domain.marketdata.model.FxComponentContribution;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Service;
 
@@ -45,6 +47,46 @@ public class MentorIntermarketService {
             null,
             null,
             dxySignal.available() ? "DXY_AVAILABLE" : "UNAVAILABLE"
+        );
+    }
+
+    /**
+     * Returns an asset-class-aware macro correlation snapshot.
+     * Currently only DXY data is populated; other correlations return null with
+     * dataAvailability = "DXY_ONLY" until IBKR subscriptions for VIX/SI/US10Y are added.
+     */
+    public MacroCorrelationSnapshot currentForAssetClass(Instrument instrument, AssetClass assetClass) {
+        if (assetClass == null || !instrument.isDollarSensitive()) {
+            return new MacroCorrelationSnapshot(
+                null, "NOT_REQUIRED", null,
+                null, null, null,
+                null, null,
+                "NOT_REQUIRED", "NOT_REQUIRED"
+            );
+        }
+
+        DxySignal dxy = loadDxySignal();
+
+        String sectorLeaderSymbol = assetClass.sectorLeaderSymbol().orElse(null);
+        // VIX and sector leader data will be populated in a future slice when IBKR subscriptions are added
+        Double vixPctChange = null;
+        Double sectorLeaderPctChange = null;
+        String sectorLeaderTrend = null;
+        Double us10yYieldPctChange = null;
+
+        String dataAvailability = dxy.available() ? "DXY_ONLY" : "UNAVAILABLE";
+
+        return new MacroCorrelationSnapshot(
+            dxy.available() ? dxy.pctChange().doubleValue() : null,
+            dxy.available() ? dxy.trend() : "UNAVAILABLE",
+            dxy.available() ? dxy.breakdown() : null,
+            sectorLeaderSymbol != null ? sectorLeaderSymbol + "1!" : null,
+            sectorLeaderPctChange,
+            sectorLeaderTrend,
+            vixPctChange,
+            us10yYieldPctChange,
+            "UNAVAILABLE",
+            dataAvailability
         );
     }
 

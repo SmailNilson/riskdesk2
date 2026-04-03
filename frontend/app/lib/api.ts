@@ -574,6 +574,19 @@ export interface MentorIntermarketSnapshot {
   metalsConvergenceStatus: string;
 }
 
+export interface MacroCorrelationSnapshot {
+  dxyPctChange: number | null;
+  dxyTrend: string | null;
+  dxyComponentBreakdown: unknown[] | null;
+  sectorLeaderSymbol: string | null;
+  sectorLeaderPctChange: number | null;
+  sectorLeaderTrend: string | null;
+  vixPctChange: number | null;
+  us10yYieldPctChange: number | null;
+  correlationAlignment: string;
+  dataAvailability: string;
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),

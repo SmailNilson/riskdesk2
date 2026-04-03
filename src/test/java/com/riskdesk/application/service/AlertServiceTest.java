@@ -254,6 +254,8 @@ class AlertServiceTest {
             List.of(),
             List.of(),
             null,
+            // Session PD Array (intraday range-based)
+            null, null, null, null,
             null
         );
     }

@@ -37,6 +37,16 @@ const ASSET_ALIAS: Record<Instrument, string> = {
   MNQ: 'MNQ1!',
 };
 
+function assetClassFor(instrument: Instrument): string | null {
+  switch (instrument) {
+    case 'MCL': return 'ENERGY';
+    case 'MGC': return 'METALS';
+    case 'E6': return 'FOREX';
+    case 'MNQ': return 'EQUITY_INDEX';
+    default: return null;
+  }
+}
+
 export async function runMentorAnalysis(params: {
   instrument: Instrument;
   timeframe: Timeframe;
@@ -187,6 +197,7 @@ export function buildMentorPayload(params: {
     metadata: {
       timestamp,
       asset: ASSET_ALIAS[params.instrument],
+      asset_class: assetClassFor(params.instrument),
       current_price: currentPrice != null ? round(currentPrice, params.instrument) : null,
       timeframe_focus: toMentorTimeframe(params.timeframe),
       market_session: inferMarketSession(timestamp),
@@ -203,7 +214,7 @@ export function buildMentorPayload(params: {
       is_market_order: params.tradeIntention.isMarketOrder,
       mentor_should_propose_plan: !hasPlan,
     },
-    market_structure_the_king: {
+    market_structure_smc: {
       trend_H1: params.h1Snapshot.marketStructureTrend,
       trend_focus: params.snapshot.marketStructureTrend,
       internal_bias: params.snapshot.internalBias,
@@ -216,15 +227,36 @@ export function buildMentorPayload(params: {
       nearest_support_ob: nearestSupport,
       nearest_resistance_ob: nearestResistance,
       key_psychological_level_proximity: nearestPsychologicalLevel(currentPrice, params.instrument),
+      pd_array_zone_session: (params.snapshot as Record<string, unknown>).sessionPdZone ?? null,
+      pd_array_zone_structural: params.snapshot.currentZone ?? null,
+      liquidity_pools: {
+        eqh_present: (params.snapshot.equalHighs?.length ?? 0) > 0,
+        eqh_level: params.snapshot.equalHighs?.[0]?.price ?? null,
+        eql_present: (params.snapshot.equalLows?.length ?? 0) > 0,
+        eql_level: params.snapshot.equalLows?.[0]?.price ?? null,
+      },
     },
-    dynamic_levels_and_vwap: {
+    dynamic_levels_and_mean_reversion: {
       vwap_value: params.snapshot.vwap,
       distance_to_vwap_points: currentPrice != null && params.snapshot.vwap != null ? round(Math.abs(currentPrice - params.snapshot.vwap), params.instrument) : null,
       ma_fast_red_value: params.snapshot.ema50,
       ma_slow_blue_value: params.snapshot.ema200,
       distance_to_ma_slow_points: currentPrice != null && params.snapshot.ema200 != null ? round(Math.abs(currentPrice - params.snapshot.ema200), params.instrument) : null,
+      ema_9_value: params.snapshot.ema9 ?? null,
+      ema_50_value: params.snapshot.ema50 ?? null,
+      ema_200_value: params.snapshot.ema200 ?? null,
+      distance_to_ema_50_points: currentPrice && params.snapshot.ema50
+        ? Math.round((currentPrice - params.snapshot.ema50) * 100) / 100
+        : null,
+      bollinger_state: params.snapshot.bbTrendExpanding ? 'EXPANDING' : (params.snapshot.bbWidth && params.snapshot.bbWidth < 0.02 ? 'SQUEEZE' : 'CONTRACTING'),
     },
-    momentum_and_flow_the_trigger: {
+    momentum_oscillators: {
+      wavetrend_signal: params.snapshot.wtCrossover ?? null,
+      wavetrend_is_overbought: params.snapshot.wtWt1 != null ? params.snapshot.wtWt1 > 53 : false,
+      wavetrend_is_oversold: params.snapshot.wtWt1 != null ? params.snapshot.wtWt1 < -53 : false,
+      rsi_value: params.snapshot.rsi ?? null,
+      rsi_signal: params.snapshot.rsiSignal ?? null,
+      chaikin_money_flow_cmf: params.snapshot.cmf ?? null,
       money_flow_state: inferMoneyFlowState(params.snapshot),
       money_flow_trend: inferMoneyFlowTrend(params.snapshot),
       oscillator_value: params.snapshot.rsi,
@@ -232,7 +264,14 @@ export function buildMentorPayload(params: {
       divergence_detected: false,
       divergence_type: null,
     },
-    intermarket_correlations_the_edge: {
+    order_flow_and_volume: {
+      delta_flow_current: params.snapshot.deltaFlow ?? null,
+      cumulative_delta_trend: params.snapshot.deltaFlowBias ?? null,
+      buy_ratio_pct: params.snapshot.buyRatio ?? null,
+      delta_divergence_detected: false,
+      source: 'CLV_ESTIMATED',
+    },
+    macro_correlations_dynamic: {
       dxy_pct_change: params.intermarket.dxyPctChange,
       dxy_trend: params.intermarket.dxyTrend,
       silver_si1_pct_change: params.intermarket.silverSi1PctChange,
@@ -240,7 +279,7 @@ export function buildMentorPayload(params: {
       plat_pl1_pct_change: params.intermarket.platPl1PctChange,
       metals_convergence_status: params.intermarket.metalsConvergenceStatus,
     },
-    risk_and_emotional_check: {
+    risk_management_gatekeeper: {
       current_atr_focus: atr,
       stop_loss_size_points: stopLossSize != null ? round(stopLossSize, params.instrument) : null,
       reward_to_risk_ratio: risk && reward != null ? round(reward / risk, params.instrument) : null,

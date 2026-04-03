@@ -47,6 +47,19 @@ public enum Instrument {
         return this != DXY;
     }
 
+    /**
+     * Returns the asset class for this instrument, or null for synthetic instruments (DXY).
+     */
+    public AssetClass assetClass() {
+        return switch (this) {
+            case MCL -> AssetClass.ENERGY;
+            case MGC -> AssetClass.METALS;
+            case E6 -> AssetClass.FOREX;
+            case MNQ -> AssetClass.EQUITY_INDEX;
+            case DXY -> null;
+        };
+    }
+
     private static final List<Instrument> EXCHANGE_TRADED_FUTURES =
         Arrays.stream(values()).filter(Instrument::isExchangeTradedFuture).toList();
 

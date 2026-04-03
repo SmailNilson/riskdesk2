@@ -68,6 +68,9 @@ class MentorSignalReviewServiceTest {
     @Mock
     private SimpMessagingTemplate messagingTemplate;
 
+    @Mock
+    private ObjectProvider<com.riskdesk.domain.marketdata.port.TickDataPort> tickDataPortProvider;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -82,6 +85,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
 
@@ -238,6 +242,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
 
@@ -401,6 +406,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -467,6 +473,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -588,6 +595,8 @@ class MentorSignalReviewServiceTest {
             List.of(),
             List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
             null,   // mtfLevels (UC-SMC-005)
+            // Session PD Array (intraday range-based)
+            null, null, null, null,
             null
         );
     }
