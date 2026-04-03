@@ -227,7 +227,7 @@ export function buildMentorPayload(params: {
       nearest_support_ob: nearestSupport,
       nearest_resistance_ob: nearestResistance,
       key_psychological_level_proximity: nearestPsychologicalLevel(currentPrice, params.instrument),
-      pd_array_zone_session: (params.snapshot as Record<string, unknown>).sessionPdZone ?? null,
+      pd_array_zone_session: params.snapshot.sessionPdZone ?? null,
       pd_array_zone_structural: params.snapshot.currentZone ?? null,
       liquidity_pools: {
         eqh_present: (params.snapshot.equalHighs?.length ?? 0) > 0,

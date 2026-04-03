@@ -221,6 +221,11 @@ export interface IndicatorSnapshot {
   recentBreaks:              StructureBreakView[];
   // UC-SMC-005: Multi-timeframe levels
   mtfLevels: MtfLevelsView | null;
+  // Session PD Array (intraday range-based)
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  sessionEquilibrium: number | null;
+  sessionPdZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
 }
 
 export interface CreatePositionRequest {
