@@ -278,7 +278,9 @@ Operational note:
 ### Current good news
 
 - the reconnect storm around `clientId=7` appears fixed at the application level
-- a single stable TCP session to `127.0.0.1:4001` was observed during testing
+- IB Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale — NOT on localhost
+- local `application-local.properties` must set `riskdesk.ibkr.native-host=100.113.139.64` and `riskdesk.ibkr.native-port=4003`
+- verify Tailscale connectivity: `tailscale status | grep riskdesk-prod` and `nc -z 100.113.139.64 4003`
 
 ### Current remaining issue
 

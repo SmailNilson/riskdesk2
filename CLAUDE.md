@@ -139,9 +139,13 @@ The `local` Spring profile is **required** when running locally. Override in `sr
 ```properties
 server.port=8090
 riskdesk.ibkr.native-client-id=8
+riskdesk.ibkr.native-host=100.113.139.64
+riskdesk.ibkr.native-port=4003
 ```
 
-Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, IBKR native socket on `127.0.0.1:4001`, market data poll every 3000ms.
+**IBKR Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale** — NOT on localhost. The `ibkr-tailscale` profile also exists for this (`application-ibkr-tailscale.properties`). Always verify Tailscale is active: `tailscale status | grep riskdesk-prod`.
+
+Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, market data poll every 3000ms.
 
 Environment variables (must stay out of Git): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`.
 

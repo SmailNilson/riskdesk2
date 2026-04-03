@@ -72,9 +72,11 @@ Important settings today:
 - backend port: `8080`
 - PostgreSQL DB: `riskdesk`
 - IBKR mode: `IB_GATEWAY`
-- native host: `127.0.0.1`
-- native port: `4001`
+- native host: `100.113.139.64` (riskdesk-prod via Tailscale — NOT localhost)
+- native port: `4003`
 - native client id: `7`
+
+Note: IB Gateway runs on the `riskdesk-prod` server, reachable via Tailscale at `100.113.139.64:4003`. Verify with `tailscale status | grep riskdesk-prod`.
 
 ## Environment Variables Used
 
