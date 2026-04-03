@@ -14,6 +14,7 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.alert.model.Alert;
+import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -64,6 +65,7 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
     private volatile boolean autoAnalysisEnabled;
@@ -163,6 +165,7 @@ public class MentorSignalReviewService {
             snapshotJson = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
             snapshotError = "Snapshot capture failed: " + errorMessage(e);
+            log.error("buildPayload failed for {}/{}", candidate.instrument(), candidate.timeframe(), e);
         }
 
         MentorSignalReviewRecord pending = newReviewRecord(
@@ -257,6 +260,7 @@ public class MentorSignalReviewService {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
             pending.setErrorMessage("Reanalysis snapshot capture failed: " + errorMessage(e));
+            log.error("Reanalysis buildPayload failed for {}", pending.getInstrument(), e);
             saved = reviewRepository.save(pending);
             publish(saved);
         }
@@ -334,6 +338,7 @@ public class MentorSignalReviewService {
                 publish(updated);
             });
         } catch (Exception e) {
+            log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
         }
     }
@@ -512,6 +517,7 @@ public class MentorSignalReviewService {
             "nearest_support_ob", nearestSupport,
             "nearest_resistance_ob", nearestResistance,
             "liquidity_pools", buildLiquidityPools(focusSnapshot),
+            "nearest_fvg", buildNearestFvg(focusSnapshot, currentPrice),
             "key_psychological_level_proximity", nearestPsychologicalLevel(currentPrice, candidate.instrument())
         ));
         payload.put("dynamic_levels_and_mean_reversion", linkedMap(
@@ -522,7 +528,11 @@ public class MentorSignalReviewService {
             "ema_200_value", focusSnapshot.ema200(),
             "distance_to_ema_50_points", distance(currentPrice, focusSnapshot.ema50(), candidate.instrument()),
             "distance_to_ema_200_points", distance(currentPrice, focusSnapshot.ema200(), candidate.instrument()),
-            "bollinger_state", focusSnapshot.bbTrendExpanding() ? "EXPANDING" : (focusSnapshot.bbWidth() != null && focusSnapshot.bbWidth().doubleValue() < 0.02 ? "SQUEEZE" : "CONTRACTING")
+            "bollinger_state", focusSnapshot.bbTrendExpanding() ? "EXPANDING" : (focusSnapshot.bbWidth() != null && focusSnapshot.bbWidth().doubleValue() < 0.02 ? "SQUEEZE" : "CONTRACTING"),
+            "vwap_upper_band", focusSnapshot.vwapUpperBand(),
+            "vwap_lower_band", focusSnapshot.vwapLowerBand(),
+            "distance_to_vwap_upper", distance(currentPrice, focusSnapshot.vwapUpperBand(), candidate.instrument()),
+            "distance_to_vwap_lower", distance(currentPrice, focusSnapshot.vwapLowerBand(), candidate.instrument())
         ));
         payload.put("momentum_oscillators", linkedMap(
             "wavetrend_signal", focusSnapshot.wtCrossover(),
@@ -534,7 +544,20 @@ public class MentorSignalReviewService {
             "money_flow_state", inferMoneyFlowState(focusSnapshot),
             "money_flow_trend", inferMoneyFlowTrend(focusSnapshot)
         ));
-        payload.put("order_flow_and_volume", buildOrderFlowSection(candidate.instrument(), focusSnapshot));
+        Map<String, Object> orderFlow = new LinkedHashMap<>(buildOrderFlowSection(candidate.instrument(), focusSnapshot));
+        VolumeProfileCalculator.VolumeProfileResult vpResult = volumeProfileCalculator.compute(
+            candles, candidate.instrument().getTickSize(), 10);
+        if (vpResult != null) {
+            orderFlow.put("volume_profile", linkedMap(
+                "daily_poc_price", vpResult.pocPrice(),
+                "value_area_high", vpResult.valueAreaHigh(),
+                "value_area_low", vpResult.valueAreaLow(),
+                "is_price_in_value_area", currentPrice != null
+                    && currentPrice.compareTo(vpResult.valueAreaLow()) >= 0
+                    && currentPrice.compareTo(vpResult.valueAreaHigh()) <= 0
+            ));
+        }
+        payload.put("order_flow_and_volume", orderFlow);
         payload.put("macro_correlations_dynamic", linkedMap(
             "dxy_pct_change", macroCorrelation.dxyPctChange(),
             "dxy_trend", macroCorrelation.dxyTrend(),
@@ -897,6 +920,30 @@ public class MentorSignalReviewService {
         pools.put("eql_present", hasEql);
         pools.put("eql_level", hasEql ? snapshot.equalLows().get(0).price() : null);
         return pools;
+    }
+
+    private Map<String, Object> buildNearestFvg(IndicatorSnapshot snapshot, BigDecimal currentPrice) {
+        if (snapshot.activeFairValueGaps() == null || snapshot.activeFairValueGaps().isEmpty() || currentPrice == null) {
+            return null;
+        }
+        // Find the FVG closest to current price
+        IndicatorSnapshot.FairValueGapView nearest = null;
+        BigDecimal minDistance = null;
+        for (var fvg : snapshot.activeFairValueGaps()) {
+            BigDecimal mid = fvg.top().add(fvg.bottom()).divide(BigDecimal.valueOf(2), RoundingMode.HALF_UP);
+            BigDecimal dist = currentPrice.subtract(mid).abs();
+            if (minDistance == null || dist.compareTo(minDistance) < 0) {
+                minDistance = dist;
+                nearest = fvg;
+            }
+        }
+        if (nearest == null) return null;
+        return linkedMap(
+            "type", nearest.bias(),
+            "price_top", nearest.top(),
+            "price_bottom", nearest.bottom(),
+            "is_mitigated", false
+        );
     }
 
     private Map<String, Object> buildOrderFlowSection(Instrument instrument, IndicatorSnapshot focusSnapshot) {
