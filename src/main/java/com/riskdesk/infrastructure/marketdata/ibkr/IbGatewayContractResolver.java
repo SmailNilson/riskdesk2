@@ -4,6 +4,11 @@ import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingHoursParser;
+import com.riskdesk.domain.shared.TradingInterval;
+import com.riskdesk.domain.shared.TradingSessionResolver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -17,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class IbGatewayContractResolver {
+
+    private static final Logger log = LoggerFactory.getLogger(IbGatewayContractResolver.class);
 
     private final IbGatewayNativeClient nativeClient;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
@@ -68,6 +75,7 @@ public class IbGatewayContractResolver {
 
         IbGatewayResolvedContract resolved = new IbGatewayResolvedContract(instrument, selected.contract(), selected);
         cache.put(instrument, resolved);
+        registerTradingHours(instrument, selected);
         return Optional.of(resolved);
     }
 
@@ -85,6 +93,23 @@ public class IbGatewayContractResolver {
         if (symbol.equals("MNQ") || localSymbol.startsWith("MNQ") || tradingClass.equals("MNQ")) return Optional.of(Instrument.MNQ);
         if (symbol.equals("6E") || localSymbol.startsWith("6E") || tradingClass.equals("6E")) return Optional.of(Instrument.E6);
         return Optional.empty();
+    }
+
+    private void registerTradingHours(Instrument instrument, ContractDetails details) {
+        try {
+            String tradingHours = details.tradingHours();
+            String timeZoneId = details.timeZoneId();
+            if (tradingHours == null || tradingHours.isBlank()) return;
+
+            List<TradingInterval> intervals = TradingHoursParser.parse(tradingHours, timeZoneId);
+            if (!intervals.isEmpty()) {
+                TradingSessionResolver.registerSchedule(instrument, intervals);
+                log.debug("Registered {} trading-hours intervals for {} (tz={})",
+                        intervals.size(), instrument, timeZoneId);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to parse trading hours for {}: {}", instrument, e.getMessage());
+        }
     }
 
     private List<Contract> buildQueries(Instrument instrument) {

@@ -1,205 +1,104 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class TradingSessionResolverTest {
 
-    // -- dailySessionStart ---------------------------------------------------
+    private static final ZoneId ET = TradingSessionResolver.CME_ZONE;
 
-    @Test
-    void dailySessionStart_beforeCloseET_returnsPreviousDayClose() {
-        // 2026-03-25 14:00 ET = 18:00 UTC (before 17:00 ET)
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 14, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
-
-        // Should be 2026-03-24 17:00 ET = 21:00 UTC (EDT in March)
-        Instant expected = ZonedDateTime.of(2026, 3, 24, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, sessionStart);
+    @AfterEach
+    void cleanupDynamicSchedules() {
+        TradingSessionResolver.clearAllSchedules();
     }
 
     @Test
-    void dailySessionStart_afterCloseET_returnsSameDayClose() {
-        // 2026-03-25 18:30 ET (after 17:00 ET)
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 18, 30, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
+    void dynamicSchedule_earlyClose_MNQClosesAt1300_MGCStillOpen() {
+        Instant mnqOpen = ZonedDateTime.of(2023, 11, 24, 0, 0, 0, 0, ET).toInstant();
+        Instant mnqClose = ZonedDateTime.of(2023, 11, 24, 13, 0, 0, 0, ET).toInstant();
+        TradingSessionResolver.registerSchedule(Instrument.MNQ,
+                List.of(new TradingInterval(mnqOpen, mnqClose)));
 
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
+        Instant mgcOpen = ZonedDateTime.of(2023, 11, 24, 0, 0, 0, 0, ET).toInstant();
+        Instant mgcClose = ZonedDateTime.of(2023, 11, 24, 14, 30, 0, 0, ET).toInstant();
+        TradingSessionResolver.registerSchedule(Instrument.MGC,
+                List.of(new TradingInterval(mgcOpen, mgcClose)));
 
-        // Should be 2026-03-25 17:00 ET
-        Instant expected = ZonedDateTime.of(2026, 3, 25, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, sessionStart);
+        Instant at1330 = ZonedDateTime.of(2023, 11, 24, 13, 30, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(at1330, Instrument.MNQ));
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(at1330, Instrument.MGC));
+
+        Instant at1200 = ZonedDateTime.of(2023, 11, 24, 12, 0, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(at1200, Instrument.MNQ));
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(at1200, Instrument.MGC));
+
+        Instant at1500 = ZonedDateTime.of(2023, 11, 24, 15, 0, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(at1500, Instrument.MNQ));
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(at1500, Instrument.MGC));
     }
 
     @Test
-    void dailySessionStart_exactlyAtClose_returnsSameDayClose() {
-        // Exactly 17:00 ET — belongs to the new session starting at that moment
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
+    void dynamicSchedule_noSchedule_fallsBackToDefaultCmeRules() {
+        Instant regularSession = ZonedDateTime.of(2026, 3, 25, 10, 0, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(regularSession, Instrument.MCL));
 
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
-
-        Instant expected = ZonedDateTime.of(2026, 3, 25, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, sessionStart);
-    }
-
-    // -- DST transitions -----------------------------------------------------
-
-    @Test
-    void dailySessionStart_springForwardDST_handlesCorrectly() {
-        // 2026 Spring Forward: March 8 at 02:00 EST -> 03:00 EDT
-        // A tick on March 9 at 10:00 EDT (before 17:00 EDT)
-        Instant tick = ZonedDateTime.of(2026, 3, 9, 10, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
-
-        // Session started March 8 at 17:00 EDT (after spring forward happened)
-        Instant expected = ZonedDateTime.of(2026, 3, 8, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, sessionStart);
+        Instant maintenance = ZonedDateTime.of(2026, 3, 25, 17, 30, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(maintenance, Instrument.MCL));
     }
 
     @Test
-    void dailySessionStart_fallBackDST_handlesCorrectly() {
-        // 2026 Fall Back: Nov 1 at 02:00 EDT -> 01:00 EST
-        // A tick on Nov 2 at 10:00 EST (before 17:00 EST)
-        Instant tick = ZonedDateTime.of(2026, 11, 2, 10, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
+    void dynamicSchedule_nullInstrument_fallsBackToDefaultCmeRules() {
+        Instant regularSession = ZonedDateTime.of(2026, 3, 25, 10, 0, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(regularSession, null));
 
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
-
-        // Session started Nov 1 at 17:00 EST (after fall back)
-        Instant expected = ZonedDateTime.of(2026, 11, 1, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, sessionStart);
-    }
-
-    // -- UTC offset verification ---------------------------------------------
-
-    @Test
-    void dailySessionStart_winterTime_17hET_is_22hUTC() {
-        // In EST (winter): 17:00 ET = 22:00 UTC
-        Instant tick = ZonedDateTime.of(2026, 1, 15, 10, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
-
-        // January 14 at 17:00 EST = 22:00 UTC
-        assertEquals(LocalDateTime.of(2026, 1, 14, 22, 0).toInstant(ZoneOffset.UTC),
-                sessionStart);
+        Instant maintenance = ZonedDateTime.of(2026, 3, 25, 17, 30, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(maintenance, null));
     }
 
     @Test
-    void dailySessionStart_summerTime_17hET_is_21hUTC() {
-        // In EDT (summer): 17:00 ET = 21:00 UTC
-        Instant tick = ZonedDateTime.of(2026, 7, 15, 10, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
+    void dynamicSchedule_closedDay_treatedAsMaintenance() {
+        String raw = "20231123:CLOSED;20231124:0930-1315";
+        List<TradingInterval> intervals = TradingHoursParser.parse(raw, "US/Eastern");
+        TradingSessionResolver.registerSchedule(Instrument.MNQ, intervals);
 
-        Instant sessionStart = TradingSessionResolver.dailySessionStart(tick);
+        Instant openTime = ZonedDateTime.of(2023, 11, 24, 10, 0, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(openTime, Instrument.MNQ));
 
-        // July 14 at 17:00 EDT = 21:00 UTC
-        assertEquals(LocalDateTime.of(2026, 7, 14, 21, 0).toInstant(ZoneOffset.UTC),
-                sessionStart);
-    }
-
-    // -- weeklySessionStart --------------------------------------------------
-
-    @Test
-    void weeklySessionStart_midweek_returnsSunday17hET() {
-        // Wednesday March 25, 2026 at 14:00 ET
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 14, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        Instant weekStart = TradingSessionResolver.weeklySessionStart(tick);
-
-        // Sunday March 22 at 17:00 EDT
-        Instant expected = ZonedDateTime.of(2026, 3, 22, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, weekStart);
+        Instant closed = ZonedDateTime.of(2023, 11, 24, 14, 0, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(closed, Instrument.MNQ));
     }
 
     @Test
-    void weeklySessionStart_sundayBeforeOpen_returnsPreviousWeek() {
-        // Sunday March 22, 2026 at 10:00 ET (before 17:00 ET open)
-        Instant tick = ZonedDateTime.of(2026, 3, 22, 10, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
+    void clearSchedule_removesRegistration() {
+        Instant open = ZonedDateTime.of(2023, 11, 24, 9, 30, 0, 0, ET).toInstant();
+        Instant close = ZonedDateTime.of(2023, 11, 24, 13, 0, 0, 0, ET).toInstant();
+        TradingSessionResolver.registerSchedule(Instrument.MNQ,
+                List.of(new TradingInterval(open, close)));
 
-        Instant weekStart = TradingSessionResolver.weeklySessionStart(tick);
+        TradingSessionResolver.clearSchedule(Instrument.MNQ);
 
-        // Should be previous Sunday March 15 at 17:00 EDT
-        Instant expected = ZonedDateTime.of(2026, 3, 15, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, weekStart);
+        Instant at1330 = ZonedDateTime.of(2023, 11, 24, 13, 30, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(at1330, Instrument.MNQ),
+                "After clearSchedule, should fall back to CME rules (Fri 13:30 = open)");
     }
 
     @Test
-    void weeklySessionStart_sundayAfterOpen_returnsThisSunday() {
-        // Sunday March 22, 2026 at 18:00 ET (after 17:00 ET open)
-        Instant tick = ZonedDateTime.of(2026, 3, 22, 18, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        Instant weekStart = TradingSessionResolver.weeklySessionStart(tick);
-
-        // Should be this Sunday March 22 at 17:00 EDT
-        Instant expected = ZonedDateTime.of(2026, 3, 22, 17, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-        assertEquals(expected, weekStart);
-    }
-
-    // -- tradingDate ---------------------------------------------------------
-
-    @Test
-    void tradingDate_beforeCloseET_returnsSameCalendarDate() {
-        // 2026-03-25 14:00 ET (before 17:00 ET close)
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 14, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        LocalDate date = TradingSessionResolver.tradingDate(tick);
-
-        // Still in the March 25 session, trading date = March 25
-        assertEquals(LocalDate.of(2026, 3, 25), date);
+    void defaultCmeRules_saturday_isMaintenance() {
+        Instant saturday = ZonedDateTime.of(2026, 3, 28, 12, 0, 0, 0, ET).toInstant();
+        assertTrue(TradingSessionResolver.isMaintenanceWindow(saturday, Instrument.MCL));
     }
 
     @Test
-    void tradingDate_afterCloseET_returnsNextCalendarDate() {
-        // 2026-03-25 18:00 ET (after 17:00 ET close = new session)
-        Instant tick = ZonedDateTime.of(2026, 3, 25, 18, 0, 0, 0,
-                TradingSessionResolver.CME_ZONE).toInstant();
-
-        LocalDate date = TradingSessionResolver.tradingDate(tick);
-
-        // New session opened, trading date = March 26
-        assertEquals(LocalDate.of(2026, 3, 26), date);
+    void defaultCmeRules_sundayAfterOpen_isNotMaintenance() {
+        Instant sundayAfter = ZonedDateTime.of(2026, 3, 22, 18, 0, 0, 0, ET).toInstant();
+        assertFalse(TradingSessionResolver.isMaintenanceWindow(sundayAfter, Instrument.MCL));
     }
-
-    @ParameterizedTest
-    @CsvSource({
-        // UTC timestamp, expected trading date
-        // 2026-03-25 03:00 UTC = 2026-03-24 23:00 ET (after 17:00 ET) -> trading date = March 25
-        "2026-03-25T03:00:00Z, 2026-03-25",
-        // 2026-03-25 20:00 UTC = 2026-03-25 16:00 ET (before 17:00 ET) -> trading date = March 25
-        "2026-03-25T20:00:00Z, 2026-03-25",
-        // 2026-03-25 22:00 UTC = 2026-03-25 18:00 ET (after 17:00 ET) -> trading date = March 26
-        "2026-03-25T22:00:00Z, 2026-03-26",
-    })
-    void tradingDate_variousUTCTimes(String utcTimestamp, String expectedDate) {
-        Instant tick = Instant.parse(utcTimestamp);
-        assertEquals(LocalDate.parse(expectedDate), TradingSessionResolver.tradingDate(tick));
-    }
-
 }

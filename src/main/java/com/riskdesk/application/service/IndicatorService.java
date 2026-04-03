@@ -8,6 +8,7 @@ import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.CandleSeriesNormalizer;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -401,6 +402,10 @@ public class IndicatorService {
         }
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
+        // Purge hors-session candles and forward-fill intra-session gaps so
+        // indicator lookback windows span a predictable wall-clock duration.
+        ordered = CandleSeriesNormalizer.purgeHorsSession(ordered);
+        ordered = CandleSeriesNormalizer.forwardFill(ordered, timeframe);
         return ordered;
     }
 

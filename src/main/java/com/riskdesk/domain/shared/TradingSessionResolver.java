@@ -1,11 +1,16 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
+
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves CME trading session boundaries.
@@ -22,6 +27,16 @@ public final class TradingSessionResolver {
 
     public static final ZoneId CME_ZONE = ZoneId.of("America/New_York");
     public static final LocalTime CME_SESSION_CLOSE = LocalTime.of(17, 0);
+    public static final LocalTime CME_SESSION_OPEN = LocalTime.of(18, 0);
+
+    /**
+     * Per-instrument dynamic trading schedules populated from IBKR
+     * {@code ContractDetails.tradingHours()}.  When a schedule exists for an
+     * instrument, {@link #isMaintenanceWindow(Instant, Instrument)} uses it
+     * to determine whether the market is closed.
+     */
+    private static final Map<Instrument, List<TradingInterval>> dynamicSchedules =
+            new ConcurrentHashMap<>();
 
     private TradingSessionResolver() {}
 
@@ -73,6 +88,86 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    // -------------------------------------------------------------------------
+    // Dynamic per-instrument session filtering
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns {@code true} if the given timestamp falls outside every registered
+     * open interval for the given instrument.
+     *
+     * <p>If a dynamic schedule has been {@linkplain #registerSchedule registered}
+     * for the instrument and covers the timestamp's date range, it is the sole
+     * authority.  If no schedule exists or the timestamp falls outside the
+     * schedule's coverage, falls back to the default CME rules (weekend + daily
+     * maintenance 17:00–18:00 ET).
+     *
+     * @param timestamp  the instant to check
+     * @param instrument the instrument whose schedule to consult (may be {@code null})
+     */
+    public static boolean isMaintenanceWindow(Instant timestamp, Instrument instrument) {
+        if (instrument != null) {
+            List<TradingInterval> schedule = dynamicSchedules.get(instrument);
+            if (schedule != null && !schedule.isEmpty()) {
+                Instant coverageStart = schedule.get(0).open();
+                Instant coverageEnd = schedule.get(schedule.size() - 1).close()
+                        .plusSeconds(86_400);
+                if (!timestamp.isBefore(coverageStart) && timestamp.isBefore(coverageEnd)) {
+                    for (TradingInterval interval : schedule) {
+                        if (interval.contains(timestamp)) {
+                            return false; // inside an open window → NOT maintenance
+                        }
+                    }
+                    return true; // not inside any open window → IS maintenance
+                }
+            }
+        }
+        // No dynamic data — fall back to hardcoded CME rules
+        return isMaintenanceWindowDefault(timestamp);
+    }
+
+    /**
+     * Default CME maintenance-window check used when no dynamic schedule is
+     * registered.  Weekend closure (Fri 17:00 → Sun 18:00 ET) and daily
+     * maintenance halt (17:00–18:00 ET Mon–Thu).
+     */
+    private static boolean isMaintenanceWindowDefault(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        if (dow == DayOfWeek.SATURDAY) return true;
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return true;
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_OPEN)) return true;
+
+        int hour = zdt.getHour();
+        if (dow != DayOfWeek.FRIDAY && dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY) {
+            return hour == 17;
+        }
+        return false;
+    }
+
+    /**
+     * Registers a dynamic trading schedule for an instrument, replacing any
+     * previous schedule.  The intervals must be sorted by
+     * {@link TradingInterval#open open} (as returned by
+     * {@link TradingHoursParser#parse}).
+     */
+    public static void registerSchedule(Instrument instrument, List<TradingInterval> intervals) {
+        if (instrument == null || intervals == null || intervals.isEmpty()) return;
+        dynamicSchedules.put(instrument, List.copyOf(intervals));
+    }
+
+    /** Removes a previously registered schedule (useful for tests). */
+    public static void clearSchedule(Instrument instrument) {
+        dynamicSchedules.remove(instrument);
+    }
+
+    /** Removes all dynamic schedules (useful for tests). */
+    public static void clearAllSchedules() {
+        dynamicSchedules.clear();
     }
 
     /**
