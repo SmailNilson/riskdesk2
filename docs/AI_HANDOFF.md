@@ -319,13 +319,59 @@ lsof -nP -iTCP:4001
 5. Confirm no external market data provider was reintroduced
 6. Re-run backend compile and frontend lint before deeper edits
 
+### 9. Mentor IA v2 — per-asset-class payloads, tick data, decision hierarchy
+
+Files:
+
+- `src/main/java/com/riskdesk/domain/model/AssetClass.java` (new)
+- `src/main/java/com/riskdesk/domain/engine/smc/SessionPdArrayCalculator.java` (new)
+- `src/main/java/com/riskdesk/domain/engine/indicators/MarketRegimeDetector.java` (new)
+- `src/main/java/com/riskdesk/domain/marketdata/port/TickDataPort.java` (new)
+- `src/main/java/com/riskdesk/domain/marketdata/model/TickAggregation.java` (new)
+- `src/main/java/com/riskdesk/application/dto/MacroCorrelationSnapshot.java` (new)
+- `src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/TickByTickAggregator.java` (new)
+- `src/main/java/com/riskdesk/infrastructure/marketdata/ibkr/IbkrTickDataAdapter.java` (new)
+- `src/main/java/com/riskdesk/application/service/MentorSignalReviewService.java` (modified)
+- `src/main/java/com/riskdesk/application/service/GeminiMentorClient.java` (modified)
+- `src/main/java/com/riskdesk/application/service/MentorIntermarketService.java` (modified)
+- `frontend/app/lib/mentor.ts` (modified)
+- `frontend/app/components/MentorSignalPanel.tsx` (modified)
+- `frontend/app/lib/api.ts` (modified)
+
+What changed:
+
+- `AssetClass` enum (METALS, ENERGY, FOREX, EQUITY_INDEX) added to domain layer with per-class macro correlation kinds and sector leader mappings
+- `Instrument.assetClass()` maps each instrument to its asset class (DXY returns null)
+- `SessionPdArrayCalculator` computes intraday Premium/Discount/Equilibrium zones from session high/low
+- `MarketRegimeDetector` detects TRENDING_UP/DOWN, RANGING, CHOPPY from EMA alignment + BB width
+- `TickDataPort` + `TickAggregation` provide a domain abstraction for real-time order flow
+- `TickByTickAggregator` aggregates classified ticks in a rolling 5-minute window with Lee-Ready buy/sell classification and delta divergence detection
+- `IbkrTickDataAdapter` implements TickDataPort; falls back to CLV estimation when tick data unavailable
+- Mentor payload restructured: sections renamed (market_structure_smc, momentum_oscillators, etc.), enriched with PD Array (session + structural), liquidity pools (EQH/EQL), Bollinger state, CMF, order flow with source tracking
+- `MacroCorrelationSnapshot` replaces per-instrument intermarket fields with per-asset-class fields (sector leader, VIX, US10Y)
+- `GeminiMentorClient` system prompt is now dynamic per asset class with strict decision hierarchy (Structure 50% > Order Flow 30% > Momentum 20%), rejection rules, winning patterns (Catch-up Trade, Kill Zone, CHoCH Pullback), and Entry/SL/TP formulas
+- Frontend updated: mentor.ts payload mirrors backend structure, MentorSignalPanel shows color-coded asset class badges
+
+Important behavior:
+
+- the `order_flow_and_volume` payload section includes a `source` field ("REAL_TICKS" or "CLV_ESTIMATED") so Gemini knows the data quality
+- macro correlation fields for VIX, US10Y, Silver are null with `data_availability: "DXY_ONLY"` until IBKR subscriptions for those instruments are added
+- the decision hierarchy is enforced only in the Gemini system prompt, not as Java pre-scoring gates
+- `IbGatewayNativeClient` does NOT yet call `reqTickByTickData()` — the TickByTickAggregator and IbkrTickDataAdapter are ready to receive ticks but the subscription wiring in the native client is a future slice
+
+Why:
+
+- universal payload with no asset class differentiation produced generic Gemini verdicts that didn't account for metals-specific correlations (Silver leader) or equity-index-specific risks (VIX spikes)
+- CLV-based delta estimation lacks precision for real order flow analysis; the tick infrastructure prepares for real data
+- the decision hierarchy prevents Gemini from weighting contradictory indicators equally
+
 ## Suggested Next Improvements
 
+- wire `reqTickByTickData("AllLast")` into `IbGatewayNativeClient` and connect to `IbkrTickDataAdapter.onTickByTickTrade()`
+- add IBKR subscriptions for VIX (IND/CBOE), ZN/US10Y (FUT/CBOT), SI (FUT/COMEX) to populate macro correlation fields
+- compute session PD Array in `IndicatorService.computeSnapshot()` using session candles from `TradingSessionResolver`
+- wire `MarketRegimeDetector` into the payload (add `market_regime_context` section to `buildPayload()`)
 - surface the reason for `FALLBACK_DB` in API/UI
 - add explicit health/status around IBKR live market data farm availability
-- document and automate the expected IB Gateway startup sequence
-- optionally add integration tests around source attribution for live price vs DB fallback
-- add more explicit tests around layer boundaries and use-case behavior
 - expose the simulation outcome in the UI once the product design is ready
 - add tests for transition-based alert evaluation edge cases
-- add tests for grouped review batching logic
