@@ -153,8 +153,24 @@ Environment variables (must stay out of Git): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CH
 - Mentor review tests use frozen payloads — not live market context
 - Time-sensitive changes must cover: normal case, session boundary (17:00 ET), DST spring/fall, weekend boundary, cross-midnight UTC
 
+## Use Case Documentation (obligatoire)
+
+Toute modification de code qui touche un use case existant ou crée une nouvelle feature DOIT :
+
+1. **Identifier le UC-ID** concerné — chercher dans Notion 📚 Documentation (filtrer Type = "📋 Use Case")
+2. **Mettre à jour la page Notion** correspondante : Statut, Impact Backend, Critères d'Acceptation
+3. **Si nouveau use case** : créer la page dans Notion AVANT d'ouvrir le PR
+   - Format ID : `UC-[DOMAINE]-[NNN]` (ex: `UC-MKT-003`, `UC-MENTOR-006`)
+   - Template local : `docs/use-cases/TEMPLATE.md`
+   - Parent Notion : 📚 Documentation → Type = 📋 Use Case
+
+**Ne jamais fermer un PR sans que le UC associé soit à jour dans Notion.**
+
+Domaines valides : `MKT` (market data) · `POS` (positions) · `RISK` · `INDICATOR` · `MENTOR` · `SIM` (backtesting) · `IBKR` · `PORT` (portfolio) · `ROLL` (rollover) · `DXY` · `IMPORT` · `ALERT` · `EXEC` · `BEHAV`
+
 ## Key Docs to Read
 
 - `docs/AI_HANDOFF.md` — Latest engineering state, recent changes, known issues
 - `docs/ARCHITECTURE_PRINCIPLES.md` — Layer constraints, date/time rules, alert rules
 - `docs/PROJECT_CONTEXT.md` — Service map, environment variables, execution state machine
+- `docs/use-cases/TEMPLATE.md` — Template UC local (miroir du template Notion)
