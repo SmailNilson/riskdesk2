@@ -8,7 +8,6 @@ import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
-import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -317,7 +316,8 @@ public class IndicatorService {
                 mtfLevels,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
-                lastCandleTimestamp
+                lastCandleTimestamp,
+                candles.get(candles.size() - 1).getClose()
         );
     }
 
@@ -403,9 +403,6 @@ public class IndicatorService {
         }
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
-        // Match CandleController: drop maintenance-window candles so indicator
-        // series timestamps stay aligned with the candle series on the chart.
-        ordered.removeIf(c -> TradingSessionResolver.isMaintenanceWindow(c.getTimestamp()));
         return ordered;
     }
 
@@ -571,6 +568,7 @@ public class IndicatorService {
                 null,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                null,
                 null
         );
     }

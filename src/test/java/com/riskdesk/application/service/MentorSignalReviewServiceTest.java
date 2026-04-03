@@ -597,7 +597,8 @@ class MentorSignalReviewServiceTest {
             null,   // mtfLevels (UC-SMC-005)
             // Session PD Array (intraday range-based)
             null, null, null, null,
-            null
+            null,
+            null    // lastPrice
         );
     }
 

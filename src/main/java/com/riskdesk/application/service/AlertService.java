@@ -65,6 +65,7 @@ public class AlertService {
         this.signalPreFilterService    = signalPreFilterService;
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.messagingTemplate         = messagingTemplate;
+        this.mutedTimeframes.add("5m");
     }
 
     /**

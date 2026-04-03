@@ -256,7 +256,8 @@ class AlertServiceTest {
             null,
             // Session PD Array (intraday range-based)
             null, null, null, null,
-            null
+            null,
+            null  // lastPrice
         );
     }
 

@@ -99,7 +99,10 @@ public record IndicatorSnapshot(
     String sessionPdZone,
 
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
-    Instant lastCandleTimestamp
+    Instant lastCandleTimestamp,
+
+    /** Close price of the last candle — used by behaviour alert rules for proximity evaluation. */
+    BigDecimal lastPrice
 ) {
     public record OrderBlockView(
         String type,
