@@ -141,9 +141,14 @@ server.port=8090
 riskdesk.ibkr.native-client-id=8
 riskdesk.ibkr.native-host=100.113.139.64
 riskdesk.ibkr.native-port=4003
+riskdesk.mentor.api-key=${GEMINI_API_KEY}
+riskdesk.mentor.model=gemini-3.1-pro-preview
+riskdesk.mentor.embeddings-model=gemini-embedding-001
 ```
 
-**IBKR Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale** — NOT on localhost. The `ibkr-tailscale` profile also exists for this (`application-ibkr-tailscale.properties`). Always verify Tailscale is active: `tailscale status | grep riskdesk-prod`.
+**IBKR Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale** — NOT on localhost. Always verify Tailscale is active: `tailscale status | grep riskdesk-prod`.
+
+**Gemini API Key** must be in `application-local.properties` as `riskdesk.mentor.api-key=<key>`. The `.env.local` at repo root has the key but Spring does NOT auto-load it. Without this, Mentor IA calls will fail silently.
 
 Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, market data poll every 3000ms.
 
