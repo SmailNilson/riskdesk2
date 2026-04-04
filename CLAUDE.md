@@ -68,7 +68,7 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 ### Data Flow
 
 ```
-IBKR IB Gateway (port 4001)
+IBKR IB Gateway (riskdesk-prod:4003 via Tailscale)
   → IbGatewayNativeClient (infrastructure/marketdata/ibkr)
   → MarketDataService / HistoricalDataService (application)
   → PostgreSQL
@@ -76,6 +76,13 @@ IBKR IB Gateway (port 4001)
   → MentorAnalysisService + Google Gemini API
   → WebSocket → Next.js Frontend (STOMP over SockJS)
 ```
+
+### Domain Events
+
+The domain layer publishes events consumed by application services:
+- `CandleClosed` / `MarketPriceUpdated` — trigger indicator recalculation
+- `AlertTriggered` — triggers mentor review capture
+- `PositionPnLUpdated` — updates portfolio risk state
 
 ### WebSocket Topics
 
@@ -97,6 +104,28 @@ MCL (Micro WTI Crude), MGC (Micro Gold), 6E (Euro FX), MNQ (Micro E-mini Nasdaq-
 ### Synthetic DXY
 
 Computed internally from 6 IBKR FX quotes (EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK, USDCHF). Not the exchange-traded `DX` future. Excluded from futures-specific workflows (rollover, contract resolution). Only available in `IB_GATEWAY` mode.
+
+### Frontend Architecture
+
+State management uses React hooks only (no Redux/Zustand). Key files:
+- `frontend/app/components/Dashboard.tsx` — central orchestrator, owns instrument/timeframe state, polls portfolio (5s) and indicators (30s)
+- `frontend/app/lib/api.ts` — all REST calls via native `fetch` (no axios), 30+ endpoints
+- `frontend/app/hooks/useWebSocket.ts` — STOMP/SockJS client, subscribes to `/topic/{prices,alerts,mentor-alerts}`
+- `frontend/app/hooks/useRollover.ts` — polls rollover status every 5 min
+- `frontend/app/components/Chart.tsx` — TradingView `lightweight-charts` with SMC overlays (order blocks, liquidity, structure breaks)
+- `frontend/app/components/MentorSignalPanel.tsx` — largest component (~47KB), AI signal review UI with execution arming
+
+Styling: Tailwind CSS with dark (default) / light theme toggle. `output: 'standalone'` in `next.config.mjs` for Docker.
+
+Frontend dev proxy: `next.config.mjs` rewrites `/api/*` to `RISKDESK_API_PROXY_TARGET` (defaults needed in `.env.example`).
+
+### Database Schema
+
+No Flyway/Liquibase — schema managed by Hibernate DDL auto (`spring.jpa.hibernate.ddl-auto=update`). Tests use H2 with `create-drop`.
+
+### API Documentation
+
+Swagger UI at `/swagger-ui.html`, OpenAPI spec at `/v3/api-docs`.
 
 ### IBKR SDK
 
@@ -160,6 +189,10 @@ Environment variables (must stay out of Git): `GEMINI_API_KEY`, `GEMINI_MODEL`, 
 - Alert evaluation tests must verify **transition** (not steady-state) behavior
 - Mentor review tests use frozen payloads — not live market context
 - Time-sensitive tests must cover: normal case, session boundary (17:00 ET), DST spring/fall, weekend boundary, cross-midnight UTC
+
+## CI/CD
+
+GitHub Actions builds and validates Docker images on push to `main` and PRs. Tag pushes publish to `ghcr.io/smailnilson/riskdesk2`. Deployment runs over SSH via `docker-compose.release.yml`. Secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, `GHCR_TOKEN`.
 
 ## Key Docs to Read
 
