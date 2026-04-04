@@ -13,6 +13,13 @@ Read AGENTS.md first — it contains absolute prohibitions and non-negotiable ru
 - Before starting a task, check open PRs to avoid file conflicts with Codex or MAQ
 - Your assigned server port is **8090**, IBKR client-id is **8**
 
+## Pre-Edit / Post-Edit Discipline
+
+- **Before editing**: check `git status`, inspect touched files, preserve uncommitted user changes. Never rewrite unrelated files opportunistically.
+- **After editing**: if your branch alters architecture, contracts, startup behavior, or operational assumptions, update `docs/AI_HANDOFF.md` in the same branch.
+- **Commits**: imperative messages, focused scope. Never mix unrelated refactors in one commit.
+- **Logging**: use `INFO` for summary logs, `DEBUG` for repetitive fetch/detail logs. Never downgrade real failures that block trading/persistence/connectivity.
+
 ## Build & Test Commands
 
 ### Backend (Maven, Java 21, run from repo root)
