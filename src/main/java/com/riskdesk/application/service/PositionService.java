@@ -1,15 +1,11 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.application.dto.ClosePositionCommand;
-import com.riskdesk.application.dto.CreatePositionCommand;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.application.dto.PositionView;
 import com.riskdesk.domain.model.*;
 import com.riskdesk.domain.shared.vo.Money;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
-import com.riskdesk.domain.trading.event.PositionClosed;
-import com.riskdesk.domain.trading.event.PositionOpened;
 import com.riskdesk.domain.trading.event.PositionPnLUpdated;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.port.PositionRepositoryPort;
@@ -39,36 +35,6 @@ public class PositionService {
         this.positionPort    = positionPort;
         this.eventPublisher  = eventPublisher;
         this.ibkrPortfolioService = ibkrPortfolioService;
-    }
-
-    @Transactional
-    public Position openPosition(CreatePositionCommand req) {
-        Position pos = new Position(req.instrument(), req.side(), req.quantity(), req.entryPrice());
-        pos.setStopLoss(req.stopLoss());
-        pos.setTakeProfit(req.takeProfit());
-        pos.setNotes(req.notes());
-        pos.setCurrentPrice(req.entryPrice());
-        pos.setUnrealizedPnL(BigDecimal.ZERO);
-        Position saved = positionPort.save(pos);
-        eventPublisher.publishEvent(new PositionOpened(
-                saved.getId(), saved.getInstrument().name(), saved.getSide().name(),
-                saved.getQuantity(), saved.getEntryPrice(), Instant.now()));
-        return saved;
-    }
-
-    @Transactional
-    public Position closePosition(Long id, ClosePositionCommand req) {
-        Position pos = positionPort.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Position not found: " + id));
-        if (!pos.isOpen()) {
-            throw new IllegalStateException("Position already closed: " + id);
-        }
-        pos.close(req.exitPrice());
-        Position saved = positionPort.save(pos);
-        eventPublisher.publishEvent(new PositionClosed(
-                saved.getId(), saved.getInstrument().name(),
-                req.exitPrice(), saved.getRealizedPnL(), Instant.now()));
-        return saved;
     }
 
     @Transactional

@@ -10,7 +10,6 @@ import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import MentorPanel from './MentorPanel';
 import MentorSignalPanel from './MentorSignalPanel';
-import PositionForm from './PositionForm';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -122,8 +121,6 @@ export default function Dashboard() {
           >
             {theme === 'dark' ? '☀️' : '🌙'}
           </button>
-
-          <PositionForm onCreated={loadSummary} />
 
         </div>
       </header>

@@ -223,15 +223,6 @@ export interface IndicatorSnapshot {
   mtfLevels: MtfLevelsView | null;
 }
 
-export interface CreatePositionRequest {
-  instrument: string;
-  side: 'LONG' | 'SHORT';
-  quantity: number;
-  entryPrice: number;
-  stopLoss?: number;
-  takeProfit?: number;
-  notes?: string;
-}
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { cache: 'no-store' });
@@ -596,9 +587,6 @@ export const api = {
   getDxyHistory: (from: string, to: string) =>
     get<DxySnapshotView[]>(`/api/market/dxy/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   getDxyHealth: () => get<DxyHealthView>('/api/market/dxy/health'),
-  openPosition: (req: CreatePositionRequest) => post<PositionView>('/api/positions', req),
-  closePosition: (id: number, exitPrice: number) =>
-    post<PositionView>(`/api/positions/${id}/close`, { exitPrice }),
   analyzeMentor: (payload: unknown) =>
     post<MentorAnalyzeResponse>('/api/mentor/analyze', { payload }),
   refreshMentorContext: (instrument: string, timeframe: string) =>
