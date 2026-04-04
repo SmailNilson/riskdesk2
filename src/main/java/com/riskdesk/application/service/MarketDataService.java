@@ -124,8 +124,12 @@ public class MarketDataService {
                     accumulate(instrument, tf, price, now);
                 }
 
-                alertService.evaluate(instrument);
-                behaviourAlertService.evaluate(instrument);
+                // Skip alert evaluation when the market is closed (weekend)
+                // to avoid spurious alerts on stale IBKR prices.
+                if (TradingSessionResolver.isMarketOpen(now)) {
+                    alertService.evaluate(instrument);
+                    behaviourAlertService.evaluate(instrument);
+                }
             }
         }
 

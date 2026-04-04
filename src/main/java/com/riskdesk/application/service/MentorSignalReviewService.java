@@ -115,10 +115,10 @@ public class MentorSignalReviewService {
     /**
      * Batch-capture: groups alerts by direction and creates ONE combined review
      * per direction instead of one per indicator.
-     * No-op when auto-analysis is disabled.
+     * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
+     * so the semantic dedup prevents re-review after restart.
      */
     public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
         // Group by direction (LONG/SHORT)
         Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
         for (Alert alert : alerts) {
@@ -142,8 +142,6 @@ public class MentorSignalReviewService {
     private static final long MAX_ALERT_AGE_SECONDS = 600;
 
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
-
         // Reject stale alerts (e.g. data bursts replaying old signals)
         if (alert.timestamp() != null &&
                 alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
@@ -167,6 +165,21 @@ public class MentorSignalReviewService {
                 candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
             log.info("Semantic dedup: skipping {} {} {} — already analyzed within {}s window",
                      candidate.instrument(), alert.category(), candidate.action(), dedupWindowSeconds);
+            return;
+        }
+
+        // When auto-analysis is disabled, record as ERROR so the semantic dedup
+        // prevents this alert from being reviewed after a restart or reconnect.
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                alert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}"
+            );
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            log.info("Auto-analysis OFF: recorded ERROR placeholder for {} {} {}",
+                     candidate.instrument(), alert.category(), candidate.action());
             return;
         }
 
@@ -214,8 +227,6 @@ public class MentorSignalReviewService {
     public void captureBehaviourReview(BehaviourAlertSignal signal,
                                        String timeframe,
                                        IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
-
         Instrument instrument;
         try {
             instrument = Instrument.valueOf(signal.instrument().toUpperCase(java.util.Locale.ROOT));
@@ -232,6 +243,19 @@ public class MentorSignalReviewService {
         String alertKey = alertKey(syntheticAlert);
         if (reviewRepository.existsByAlertKey(alertKey)) return;
         AlertReviewCandidate candidate = new AlertReviewCandidate(instrument, timeframe, "MONITOR");
+
+        // When auto-analysis is disabled, record as ERROR for dedup protection
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}"
+            );
+            skipped.setSourceType("BEHAVIOUR");
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            return;
+        }
 
         JsonNode payload = null;
         String snapshotJson = "{}";
