@@ -4,7 +4,7 @@ import { useState, useMemo } from 'react';
 import type { AlertMessage, PriceUpdate } from '@/app/hooks/useWebSocket';
 import type { TzEntry } from '@/app/lib/timezones';
 import type { PortfolioSummary, IndicatorSnapshot, MentorSignalReview } from '@/app/lib/api';
-import { isSignalReview, isBehaviourReview } from '@/app/lib/mentor';
+import { isSignalReview, isBehaviourReview, BEHAVIOUR_CATEGORIES } from '@/app/lib/mentor';
 import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
@@ -61,6 +61,16 @@ export default function AiMentorDesk({
   const behaviourReviews = useMemo(
     () => reviews.filter(isBehaviourReview),
     [reviews]
+  );
+
+  const signalAlerts = useMemo(
+    () => alerts.filter(a => !BEHAVIOUR_CATEGORIES.has(a.category)),
+    [alerts]
+  );
+
+  const behaviourAlerts = useMemo(
+    () => alerts.filter(a => BEHAVIOUR_CATEGORIES.has(a.category)),
+    [alerts]
   );
 
   const tabCounts: Record<TabKey, number> = useMemo(() => ({
@@ -121,7 +131,7 @@ export default function AiMentorDesk({
             )}
             <MentorSignalPanel
               timezone={timezone}
-              alerts={alerts}
+              alerts={activeTab === 'ALL' ? alerts : signalAlerts}
               reviews={activeTab === 'ALL' ? reviews : signalReviews}
               selectedBrokerAccountId={selectedBrokerAccountId}
               onRefresh={onRefresh}
@@ -142,7 +152,7 @@ export default function AiMentorDesk({
             ) : (
               <MentorSignalPanel
                 timezone={timezone}
-                alerts={alerts}
+                alerts={behaviourAlerts}
                 reviews={behaviourReviews}
                 selectedBrokerAccountId={selectedBrokerAccountId}
                 onRefresh={onRefresh}
