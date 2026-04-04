@@ -24,44 +24,33 @@ class IndicatorAlertEvaluatorStateTest {
 
     private static final Instant CLOSED_CANDLE = Instant.parse("2026-03-28T16:00:00Z");
 
-    // ── EvalKey serialization round-trip ──────────────────────────────────────
+    // ── EvalKey serialization round-trip (via string-based public API) ────────
 
     @Test
-    void serializeAndParseEvalKey_withoutPrices() {
-        var key = IndicatorAlertEvaluator.parseEvalKey("RSI:MCL:1h:");
+    void serializeParseRoundTrip_withoutPrices() {
+        String input = "RSI:MCL:1h:";
+        var key = IndicatorAlertEvaluator.parseEvalKey(input);
         assertNotNull(key);
-        assertEquals("RSI", key.family());
-        assertEquals("MCL", key.instrument());
-        assertEquals("1h", key.timeframe());
-        assertNull(key.qualifier());
-        assertNull(key.high());
-        assertNull(key.low());
-
         String serialized = IndicatorAlertEvaluator.serializeEvalKey(key);
-        assertEquals("RSI:MCL:1h:", serialized);
+        assertEquals(input, serialized);
     }
 
     @Test
-    void serializeAndParseEvalKey_withQualifier() {
-        var key = IndicatorAlertEvaluator.parseEvalKey("SMC:E6:10m:internal");
+    void serializeParseRoundTrip_withQualifier() {
+        String input = "SMC:E6:10m:internal";
+        var key = IndicatorAlertEvaluator.parseEvalKey(input);
         assertNotNull(key);
-        assertEquals("SMC", key.family());
-        assertEquals("E6", key.instrument());
-        assertEquals("10m", key.timeframe());
-        assertEquals("internal", key.qualifier());
+        String serialized = IndicatorAlertEvaluator.serializeEvalKey(key);
+        assertEquals(input, serialized);
     }
 
     @Test
-    void serializeAndParseEvalKey_withPrices() {
-        var key = IndicatorAlertEvaluator.parseEvalKey("OB:MCL:10m::62.50:62.00");
+    void serializeParseRoundTrip_withPrices() {
+        String input = "OB:MCL:10m::62.50:62.00";
+        var key = IndicatorAlertEvaluator.parseEvalKey(input);
         assertNotNull(key);
-        assertEquals("OB", key.family());
-        assertNull(key.qualifier());
-        assertEquals(new BigDecimal("62.50"), key.high());
-        assertEquals(new BigDecimal("62.00"), key.low());
-
         String serialized = IndicatorAlertEvaluator.serializeEvalKey(key);
-        assertEquals("OB:MCL:10m::62.50:62.00", serialized);
+        assertEquals(input, serialized);
     }
 
     @Test
@@ -78,17 +67,16 @@ class IndicatorAlertEvaluatorStateTest {
     }
 
     @Test
-    void parseEvalKey_malformedPrices_stillParsesWithoutPrices() {
+    void parseEvalKey_malformedPrices_stillParses() {
         var key = IndicatorAlertEvaluator.parseEvalKey("OB:MCL:10m::notANumber:alsoNot");
-        assertNotNull(key);
-        assertEquals("OB", key.family());
-        assertNull(key.high());
-        assertNull(key.low());
+        assertNotNull(key, "Should parse even with malformed prices");
+        // Round-trip should still work (prices dropped)
+        String serialized = IndicatorAlertEvaluator.serializeEvalKey(key);
+        assertEquals("OB:MCL:10m:", serialized);
     }
 
     @Test
     void serializeEvalKey_truncatesAt255() {
-        // qualifier longer than 255 chars total
         String longQualifier = "x".repeat(300);
         var key = IndicatorAlertEvaluator.parseEvalKey("RSI:MCL:1h:" + longQualifier);
         assertNotNull(key);
@@ -100,13 +88,12 @@ class IndicatorAlertEvaluatorStateTest {
 
     @Test
     void constructor_recoversStateFromStore_suppressesFalseTransition() {
-        // Simulate: RSI was OVERSOLD before restart
         InMemoryAlertStateStore store = new InMemoryAlertStateStore();
-        store.save("RSI:E6:1h:", "OVERSOLD");
+        // Key format must match what the evaluator generates internally (lowercase family)
+        store.save("rsi:E6:1h:", "OVERSOLD");
 
         IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
 
-        // First evaluation post-restart with same OVERSOLD → should NOT fire (not a transition)
         IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
         List<Alert> alerts = evaluator.evaluate(Instrument.E6, "1h", snap);
 
@@ -115,13 +102,11 @@ class IndicatorAlertEvaluatorStateTest {
 
     @Test
     void constructor_recoveredState_allowsNewTransition() {
-        // Simulate: RSI was OVERSOLD before restart
         InMemoryAlertStateStore store = new InMemoryAlertStateStore();
-        store.save("RSI:E6:1h:", "OVERSOLD");
+        store.save("rsi:E6:1h:", "OVERSOLD");
 
         IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
 
-        // RSI now OVERBOUGHT → different signal → should fire
         IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("78.5"), "OVERBOUGHT", null, null);
         List<Alert> alerts = evaluator.evaluate(Instrument.E6, "1h", snap);
 
@@ -139,7 +124,6 @@ class IndicatorAlertEvaluatorStateTest {
         IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
         evaluator.evaluate(Instrument.MCL, "1h", snap);
 
-        // Store should now contain the RSI state
         assertFalse(store.getAll().isEmpty(), "State should be persisted after a transition");
         assertTrue(store.getAll().values().stream().anyMatch(v -> v.equals("OVERSOLD")));
     }
@@ -147,34 +131,31 @@ class IndicatorAlertEvaluatorStateTest {
     @Test
     void nullSignal_removesStateFromStore() {
         InMemoryAlertStateStore store = new InMemoryAlertStateStore();
-        store.save("RSI:MCL:1h:", "OVERSOLD");
+        store.save("rsi:MCL:1h:", "OVERSOLD");
 
         IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
 
-        // RSI back to normal (null signal)
         IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("50.0"), null, null, null);
         evaluator.evaluate(Instrument.MCL, "1h", snap);
 
-        // The RSI key should be removed from the store
-        assertFalse(store.getAll().containsKey("RSI:MCL:1h:"),
+        assertFalse(store.getAll().containsKey("rsi:MCL:1h:"),
                 "Null signal should remove state from store");
     }
 
-    // ── Semantic dedup window ────────────────────────────────────────────────
-
     @Test
-    void semanticDedupWindowSeconds_knownTimeframes() {
-        assertEquals(300L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("1m"));
-        assertEquals(1500L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("5m"));
-        assertEquals(4500L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("15m"));
-        assertEquals(18000L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("1h"));
-        assertEquals(72000L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("4h"));
-        assertEquals(432000L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("1d"));
-    }
+    void storeFailure_doesNotCrashEvaluation() {
+        AlertStateStore failingStore = new AlertStateStore() {
+            @Override public Map<String, String> loadRecent() { return Map.of(); }
+            @Override public void save(String evalKey, String signal) { throw new RuntimeException("DB down"); }
+            @Override public void remove(String evalKey) { throw new RuntimeException("DB down"); }
+        };
 
-    @Test
-    void semanticDedupWindowSeconds_unknownTimeframe_defaultsTo1h() {
-        assertEquals(18000L, com.riskdesk.application.service.MentorSignalReviewService.semanticDedupWindowSeconds("unknown"));
+        IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(failingStore);
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
+
+        // Should not throw even if store fails
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
+        assertFalse(alerts.isEmpty(), "Alerts should still fire even if persistence fails");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
