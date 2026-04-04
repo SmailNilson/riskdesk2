@@ -22,16 +22,18 @@ public record ForwardTestConfig(
         Map<String, Long> ttlSecondsByTimeframe
 ) {
 
+    private static final BigDecimal DEFAULT_COMMISSION = new BigDecimal("0.62");
+
     /** Standard defaults: 1% risk, 1 tick slippage, CME micro commissions. */
     public static ForwardTestConfig defaults() {
         return new ForwardTestConfig(
                 new BigDecimal("0.01"),
                 1,
                 Map.of(
-                        Instrument.MCL, new BigDecimal("0.62"),
-                        Instrument.MGC, new BigDecimal("0.62"),
-                        Instrument.E6,  new BigDecimal("0.62"),
-                        Instrument.MNQ, new BigDecimal("0.62")
+                        Instrument.MCL, DEFAULT_COMMISSION,
+                        Instrument.MGC, DEFAULT_COMMISSION,
+                        Instrument.E6,  DEFAULT_COMMISSION,
+                        Instrument.MNQ, DEFAULT_COMMISSION
                 ),
                 Map.of(
                         "1m",  7200L,    // 2h
@@ -48,7 +50,7 @@ public record ForwardTestConfig(
 
     /** Commission per side for an instrument, defaults to $0.62 if not configured. */
     public BigDecimal commissionFor(Instrument instrument) {
-        return commissionPerSide.getOrDefault(instrument, new BigDecimal("0.62"));
+        return commissionPerSide.getOrDefault(instrument, DEFAULT_COMMISSION);
     }
 
     /** TTL in seconds for a given timeframe, defaults to 8h if not configured. */
