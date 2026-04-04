@@ -157,6 +157,16 @@ public class MentorSignalReviewService {
             return;
         }
 
+        // Semantic dedup: same instrument + category + direction recently analyzed?
+        long dedupWindowSeconds = semanticDedupWindowSeconds(candidate.timeframe());
+        if (reviewRepository.existsRecentReview(
+                candidate.instrument().name(), alert.category().name(),
+                candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
+            log.info("Semantic dedup: skipping {} {} {} — already analyzed within {}s window",
+                     candidate.instrument(), alert.category(), candidate.action(), dedupWindowSeconds);
+            return;
+        }
+
         JsonNode payload = null;
         String snapshotJson = "{}";
         String snapshotError = null;
@@ -678,6 +688,22 @@ public class MentorSignalReviewService {
     private String alertKey(Alert alert) {
         return alert.timestamp() + ":" + (alert.instrument() == null || alert.instrument().isBlank() ? "GLOBAL" : alert.instrument())
             + ":" + alert.category().name() + ":" + alert.message();
+    }
+
+    /** Timeframe-aware semantic dedup window: base duration × 5. */
+    static long semanticDedupWindowSeconds(String timeframe) {
+        long base = switch (timeframe) {
+            case "1m"  -> 60;
+            case "5m"  -> 300;
+            case "10m" -> 600;
+            case "15m" -> 900;
+            case "30m" -> 1800;
+            case "1h"  -> 3600;
+            case "4h"  -> 14400;
+            case "1d"  -> 86400;
+            default    -> 3600;
+        };
+        return base * 5;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {
