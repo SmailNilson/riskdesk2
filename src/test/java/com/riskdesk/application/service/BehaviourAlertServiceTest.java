@@ -30,12 +30,13 @@ class BehaviourAlertServiceTest {
     @Mock private IndicatorService       indicatorService;
     @Mock private BehaviourAlertEvaluator evaluator;
     @Mock private SimpMessagingTemplate  messagingTemplate;
+    @Mock private MentorSignalReviewService mentorSignalReviewService;
 
     private BehaviourAlertService service;
 
     @BeforeEach
     void setUp() {
-        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate);
+        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate, mentorSignalReviewService);
     }
 
     @Test
