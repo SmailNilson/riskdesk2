@@ -8,6 +8,7 @@ import {
   IndicatorSeriesSnapshot,
   IndicatorSnapshot,
   MentorIntermarketSnapshot,
+  MentorSignalReview,
   PortfolioSummary,
 } from '@/app/lib/api';
 
@@ -109,6 +110,14 @@ export async function runMentorAnalysis(params: {
 
   const response = await api.analyzeMentor(payload);
   return { payload, response };
+}
+
+export function isBehaviourReview(review: MentorSignalReview): boolean {
+  return (review.sourceType ?? 'SIGNAL') === 'BEHAVIOUR';
+}
+
+export function isSignalReview(review: MentorSignalReview): boolean {
+  return (review.sourceType ?? 'SIGNAL') === 'SIGNAL';
 }
 
 export function isMentorEligibleAlert(alert: AlertMessage) {

@@ -14,6 +14,9 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.alert.model.Alert;
+import com.riskdesk.domain.alert.model.AlertCategory;
+import com.riskdesk.domain.alert.model.AlertSeverity;
+import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
 import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -194,6 +197,66 @@ public class MentorSignalReviewService {
         }
     }
 
+    /**
+     * Captures a Mentor review for a behaviour alert (EMA proximity, S/R touch, CMF).
+     * Behaviour reviews are vigilance-only: always INELIGIBLE for execution arming.
+     */
+    public void captureBehaviourReview(BehaviourAlertSignal signal,
+                                       String timeframe,
+                                       IndicatorSnapshot focusSnapshot) {
+        if (!autoAnalysisEnabled) return;
+
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(signal.instrument().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+
+        String alertKey = signal.timestamp() + ":" + signal.instrument()
+            + ":BEHAVIOUR:" + signal.category().name() + ":" + signal.message();
+        if (reviewRepository.existsByAlertKey(alertKey)) return;
+
+        // Convert to a synthetic Alert so we can reuse the existing payload builder
+        AlertCategory category = AlertCategory.valueOf(signal.category().name());
+        Alert syntheticAlert = new Alert(
+            signal.key(), AlertSeverity.WARNING, signal.message(),
+            category, signal.instrument(), signal.timestamp()
+        );
+        AlertReviewCandidate candidate = new AlertReviewCandidate(instrument, timeframe, "MONITOR");
+
+        JsonNode payload = null;
+        String snapshotJson = "{}";
+        String snapshotError = null;
+        try {
+            payload = buildPayload(candidate, syntheticAlert, focusSnapshot, AUTO_SELECTED_TIMEZONE);
+            snapshotJson = objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            snapshotError = "Behaviour review snapshot capture failed: " + errorMessage(e);
+        }
+
+        MentorSignalReviewRecord pending = newReviewRecord(
+            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+            syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
+        );
+        pending.setSourceType("BEHAVIOUR");
+        pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+        pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+        if (snapshotError != null) {
+            pending.setStatus(STATUS_ERROR);
+            pending.setCompletedAt(Instant.now());
+            pending.setErrorMessage(snapshotError);
+        }
+
+        MentorSignalReviewRecord saved = reviewRepository.save(pending);
+        publish(saved);
+
+        if (snapshotError == null && payload != null) {
+            JsonNode reviewPayload = payload;
+            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
+        }
+    }
+
     public MentorSignalReview reanalyzeAlert(Alert alert) {
         return reanalyzeAlert(alert, AUTO_SELECTED_TIMEZONE, null, null, null);
     }
@@ -228,6 +291,7 @@ public class MentorSignalReviewService {
         }
 
         MentorSignalReviewRecord baseReview = thread.get(0);
+        boolean isBehaviourSource = "BEHAVIOUR".equals(baseReview.getSourceType());
         TradePlanValues previousPlan = resolveLatestTradePlan(thread);
         TradePlanValues requestedPlan = new TradePlanValues(
             firstNonNull(entryPrice, previousPlan.entryPrice()),
@@ -247,6 +311,11 @@ public class MentorSignalReviewService {
             normalizedSelectedTimezone,
             "{}"
         );
+        if (isBehaviourSource) {
+            pending.setSourceType("BEHAVIOUR");
+            pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+            pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+        }
         MentorSignalReviewRecord saved;
         try {
             JsonNode payload = buildPayload(candidate, alert, null, TRIGGER_MANUAL_REANALYSIS, baseReview, requestedPlan, normalizedSelectedTimezone);
@@ -330,10 +399,16 @@ public class MentorSignalReviewService {
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(analysis));
                 review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
-                review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(analysis));
-                review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(analysis));
+                if ("BEHAVIOUR".equals(review.getSourceType())) {
+                    review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+                    review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+                    review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+                } else {
+                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(analysis));
+                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(analysis));
+                    initializeSimulationState(review, analysis);
+                }
                 review.setErrorMessage(null);
-                initializeSimulationState(review, analysis);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
                 publish(updated);
             });
@@ -386,6 +461,7 @@ public class MentorSignalReviewService {
             review.getInstrument(),
             review.getTimeframe(),
             review.getAction(),
+            review.getSourceType(),
             review.getAlertTimestamp() == null ? null : review.getAlertTimestamp().toString(),
             review.getCreatedAt() == null ? null : review.getCreatedAt().toString(),
             review.getSelectedTimezone(),
@@ -732,6 +808,7 @@ public class MentorSignalReviewService {
             case "ORDER_BLOCK", "ORDER_BLOCK_VWAP" -> message.contains("VWAP inside")
                 || message.contains("mitigated")
                 || message.contains("invalidated");
+            case "EMA_PROXIMITY", "SUPPORT_RESISTANCE", "CHAIKIN_BEHAVIOUR" -> true;
             default -> false;
         };
     }
