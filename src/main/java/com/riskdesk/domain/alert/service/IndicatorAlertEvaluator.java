@@ -4,7 +4,10 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
+import com.riskdesk.domain.alert.port.AlertStateStore;
 import com.riskdesk.domain.model.Instrument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -23,7 +26,10 @@ import java.util.function.Function;
  */
 public class IndicatorAlertEvaluator {
 
+    private static final Logger log = LoggerFactory.getLogger(IndicatorAlertEvaluator.class);
     private static final int MAX_ORDER_BLOCK_EVENT_KEYS = 5_000;
+
+    private final AlertStateStore stateStore;
 
     /**
      * Tracks the last known state for each indicator per instrument+timeframe.
@@ -45,6 +51,71 @@ public class IndicatorAlertEvaluator {
     private final Map<EvalKey, Instant> seenOrderBlockEvents = new ConcurrentHashMap<>();
     private final Deque<EvalKey> orderBlockEventOrder = new ArrayDeque<>();
     private final Object orderBlockEventLock = new Object();
+
+    /** No-op store for tests — no persistence, no recovery. */
+    private static final AlertStateStore NOOP_STORE = new AlertStateStore() {
+        @Override public Map<String, String> loadRecent() { return Map.of(); }
+        @Override public void save(String evalKey, String signal) { }
+        @Override public void remove(String evalKey) { }
+    };
+
+    /** Creates an evaluator without persistent state (for tests). */
+    public IndicatorAlertEvaluator() {
+        this(NOOP_STORE);
+    }
+
+    /**
+     * Creates an evaluator with persistent state recovery.
+     * Loads recent states from the store (only states < 12h old to avoid stale weekend data).
+     */
+    public IndicatorAlertEvaluator(AlertStateStore stateStore) {
+        this.stateStore = stateStore;
+        Map<String, String> recovered = stateStore.loadRecent();
+        for (Map.Entry<String, String> entry : recovered.entrySet()) {
+            EvalKey key = parseEvalKey(entry.getKey());
+            if (key != null) {
+                lastState.put(key, entry.getValue());
+            }
+        }
+        if (!recovered.isEmpty()) {
+            log.info("IndicatorAlertEvaluator: recovered {} signal states from DB.", recovered.size());
+        }
+    }
+
+    static String serializeEvalKey(EvalKey k) {
+        StringBuilder sb = new StringBuilder(128);
+        sb.append(k.family()).append(':').append(k.instrument()).append(':').append(k.timeframe());
+        sb.append(':').append(k.qualifier() == null ? "" : k.qualifier());
+        if (k.high() != null) {
+            sb.append(':').append(k.high().toPlainString()).append(':').append(k.low() == null ? "" : k.low().toPlainString());
+        }
+        String result = sb.toString();
+        if (result.length() > 255) {
+            result = result.substring(0, 255);
+        }
+        return result;
+    }
+
+    static EvalKey parseEvalKey(String serialized) {
+        if (serialized == null || serialized.isBlank()) return null;
+        String[] parts = serialized.split(":", -1);
+        if (parts.length < 4) return null;
+        String family = parts[0];
+        String instrument = parts[1];
+        String timeframe = parts[2];
+        String qualifier = parts[3].isEmpty() ? null : parts[3];
+        BigDecimal high = null;
+        BigDecimal low = null;
+        if (parts.length >= 6) {
+            try {
+                high = parts[4].isEmpty() ? null : new BigDecimal(parts[4]);
+                low = parts[5].isEmpty() ? null : new BigDecimal(parts[5]);
+            } catch (NumberFormatException e) {
+                // Ignore malformed price data — key still usable without price
+            }
+        }
+        return new EvalKey(family, instrument, timeframe, qualifier, high, low);
+    }
 
     private record EvalKey(
             String family,
@@ -90,14 +161,20 @@ public class IndicatorAlertEvaluator {
     /**
      * Returns true if the signal is new (different from last known state)
      * and updates the tracking map. Returns false if signal is unchanged or null.
+     * Persists state changes to the store for restart recovery.
      */
     private boolean isTransition(EvalKey stateKey, String currentSignal) {
         if (currentSignal == null) {
             lastState.remove(stateKey);
+            persistRemove(stateKey);
             return false;
         }
         String previous = lastState.put(stateKey, currentSignal);
-        return !currentSignal.equals(previous);
+        if (!currentSignal.equals(previous)) {
+            persistSave(stateKey, currentSignal);
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -108,6 +185,7 @@ public class IndicatorAlertEvaluator {
                                           EvalKey candleKey, Instant lastCandleTimestamp) {
         if (currentSignal == null) {
             lastState.remove(stateKey);
+            persistRemove(stateKey);
             return false;
         }
         String previous = lastState.get(stateKey);
@@ -118,6 +196,7 @@ public class IndicatorAlertEvaluator {
             return false;
         }
         lastState.put(stateKey, currentSignal);
+        persistSave(stateKey, currentSignal);
         return true;
     }
 
@@ -405,5 +484,21 @@ public class IndicatorAlertEvaluator {
         if (close.compareTo(high) > 0) return "ABOVE_HIGH";
         if (close.compareTo(low) < 0) return "BELOW_LOW";
         return "INSIDE";
+    }
+
+    private void persistSave(EvalKey key, String signal) {
+        try {
+            stateStore.save(serializeEvalKey(key), signal);
+        } catch (Exception e) {
+            log.debug("Failed to persist alert state for {}: {}", key, e.getMessage());
+        }
+    }
+
+    private void persistRemove(EvalKey key) {
+        try {
+            stateStore.remove(serializeEvalKey(key));
+        } catch (Exception e) {
+            log.debug("Failed to remove alert state for {}: {}", key, e.getMessage());
+        }
     }
 }

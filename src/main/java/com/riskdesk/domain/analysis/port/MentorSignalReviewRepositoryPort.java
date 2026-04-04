@@ -24,6 +24,13 @@ public interface MentorSignalReviewRepositoryPort {
 
     long deleteByStatuses(List<String> statuses);
 
+    /**
+     * Semantic dedup: checks if a recent review exists for the same instrument, category
+     * and action (direction), regardless of timestamp. Used as a safety net to prevent
+     * duplicate Gemini API calls after restarts.
+     */
+    boolean existsRecentReview(String instrument, String category, String action, java.time.Instant since);
+
     /** Mark all reviews stuck in ANALYZING as ERROR (orphaned by server restart). */
     int markAnalyzingAsError(String errorMessage);
 }
