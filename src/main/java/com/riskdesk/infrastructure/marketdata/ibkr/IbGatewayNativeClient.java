@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -427,6 +428,28 @@ public class IbGatewayNativeClient {
         controller.cancelTopMktData(collector);
 
         return collector.bestPrice();
+    }
+
+    /**
+     * One-shot snapshot request for Futures Open Interest.
+     * Uses reqTopMktData with snapshot=true and captures TickType.FUTURES_OPEN_INTEREST
+     * via the tickSize() callback.
+     */
+    public OptionalLong requestSnapshotOpenInterest(Contract contract) {
+        if (!ensureConnected()) {
+            return OptionalLong.empty();
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        OpenInterestCollector collector = new OpenInterestCollector(latch);
+
+        // Request with generic tick "588" (FUTURES_OPEN_INTEREST) in non-snapshot mode
+        // so IBKR sends the OI tick. We cancel after receiving it or after timeout.
+        controller.reqTopMktData(contract, "588", false, false, collector);
+        awaitLatch(latch, "open interest snapshot", REQUEST_TIMEOUT);
+        controller.cancelTopMktData(collector);
+
+        return collector.openInterest();
     }
 
     public Optional<NativeMarketQuote> requestSnapshotQuote(Contract contract) {
@@ -926,6 +949,37 @@ public class IbGatewayNativeClient {
 
         private Optional<BigDecimal> bestPrice() {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Snapshot Open Interest collector (one-shot)
+    // -------------------------------------------------------------------------
+
+    private static final class OpenInterestCollector extends ApiController.TopMktDataAdapter {
+        private final CountDownLatch latch;
+        private volatile Long oi;
+
+        private OpenInterestCollector(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            if ((tickType == TickType.FUTURES_OPEN_INTEREST || tickType == TickType.OPEN_INTEREST)
+                    && size != null && size.longValue() >= 0) {
+                oi = size.longValue();
+                latch.countDown();
+            }
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            latch.countDown();
+        }
+
+        private OptionalLong openInterest() {
+            return oi == null ? OptionalLong.empty() : OptionalLong.of(oi);
         }
     }
 

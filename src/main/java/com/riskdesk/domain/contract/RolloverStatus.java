@@ -11,5 +11,6 @@ package com.riskdesk.domain.contract;
 public enum RolloverStatus {
     STABLE,
     WARNING,
-    CRITICAL
+    CRITICAL,
+    RECOMMEND_ROLL
 }
