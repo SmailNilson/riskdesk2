@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, MentorSignalReview, TradeExecutionView } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
 import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
-import { formatTime } from '@/app/lib/datetime';
+import { formatTime, formatInTimezone } from '@/app/lib/datetime';
 import { API_BASE } from '@/app/lib/runtimeConfig';
 
 const API_URL = API_BASE ?? '';
@@ -26,7 +26,6 @@ function assetClassColor(instrument: string): string {
   return colors[instrument] ?? 'bg-gray-900/30 text-gray-300';
 }
 const TIMEFRAME_MUTE_OPTIONS = [
-  { label: '5m',  api: '5m' },
   { label: '10m', api: '10m' },
   { label: '1H',  api: '1h' },
 ] as const;
@@ -557,7 +556,7 @@ export default function MentorSignalPanel({
                     ))}
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-zinc-600">
-                    <span>{formatTime(group.timestamp, timezone.tz)}</span>
+                    <span>{formatInTimezone(group.timestamp, timezone.tz, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</span>
                     <span>{reviewCount} review{reviewCount > 1 ? 's' : ''} · {group.alerts.length} signal{group.alerts.length > 1 ? 's' : ''}</span>
                   </div>
                 </button>
