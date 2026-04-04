@@ -3,12 +3,15 @@ package com.riskdesk.infrastructure.persistence.entity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
 
 @Entity
-@Table(name = "alert_evaluator_state")
+@Table(name = "alert_evaluator_state", indexes = {
+    @Index(name = "idx_alert_eval_state_updated_at", columnList = "updatedAt")
+})
 public class AlertEvaluatorStateEntity {
 
     @Id
