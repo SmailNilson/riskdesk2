@@ -1,9 +1,9 @@
 package com.riskdesk.bdd.steps;
 
-import com.riskdesk.application.dto.CreatePositionCommand;
 import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.model.*;
 import com.riskdesk.application.service.PositionService;
+import com.riskdesk.domain.trading.port.PositionRepositoryPort;
 import io.cucumber.datatable.DataTable;
 import io.cucumber.java.en.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,20 +19,22 @@ public class PortfolioSteps {
     @Autowired
     private PositionService positionService;
 
+    @Autowired
+    private PositionRepositoryPort positionRepository;
+
     private PortfolioSummary lastSummary;
 
     @Given("these positions are open:")
     public void thesePositionsAreOpen(DataTable dataTable) {
-        // Cleanup is handled by PositionSteps @Before
+        positionRepository.deleteAll();
         List<Map<String, String>> rows = dataTable.asMaps(String.class, String.class);
         for (Map<String, String> row : rows) {
-            CreatePositionCommand req = new CreatePositionCommand(
+            Position pos = new Position(
                     Instrument.valueOf(row.get("instrument")),
                     Side.valueOf(row.get("side")),
                     Integer.parseInt(row.get("quantity")),
-                    new BigDecimal(row.get("entryPrice")),
-                    null, null, null);
-            positionService.openPosition(req);
+                    new BigDecimal(row.get("entryPrice")));
+            positionRepository.save(pos);
         }
     }
 
@@ -43,7 +45,7 @@ public class PortfolioSteps {
 
     @When("I request the portfolio summary via API with no positions")
     public void requestPortfolioSummaryWithNoPositions() {
-        // Positions are already cleaned by @Before in PositionSteps
+        positionRepository.deleteAll();
         lastSummary = positionService.getPortfolioSummary();
     }
 
