@@ -221,6 +221,11 @@ export interface IndicatorSnapshot {
   recentBreaks:              StructureBreakView[];
   // UC-SMC-005: Multi-timeframe levels
   mtfLevels: MtfLevelsView | null;
+  // Session PD Array (intraday range-based)
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  sessionEquilibrium: number | null;
+  sessionPdZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
 }
 
 
@@ -563,6 +568,19 @@ export interface MentorIntermarketSnapshot {
   goldMgc1PctChange: number | null;
   platPl1PctChange: number | null;
   metalsConvergenceStatus: string;
+}
+
+export interface MacroCorrelationSnapshot {
+  dxyPctChange: number | null;
+  dxyTrend: string | null;
+  dxyComponentBreakdown: unknown[] | null;
+  sectorLeaderSymbol: string | null;
+  sectorLeaderPctChange: number | null;
+  sectorLeaderTrend: string | null;
+  vixPctChange: number | null;
+  us10yYieldPctChange: number | null;
+  correlationAlignment: string;
+  dataAvailability: string;
 }
 
 export const api = {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
+import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
@@ -68,6 +69,9 @@ class MentorSignalReviewServiceTest {
     @Mock
     private SimpMessagingTemplate messagingTemplate;
 
+    @Mock
+    private ObjectProvider<com.riskdesk.domain.marketdata.port.TickDataPort> tickDataPortProvider;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -82,6 +86,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
 
@@ -179,6 +184,9 @@ class MentorSignalReviewServiceTest {
             null,
             "DXY_AVAILABLE"
         ));
+        when(mentorIntermarketService.currentForAssetClass(any(), any())).thenReturn(new MacroCorrelationSnapshot(
+            0.35, "BULLISH", null, null, null, null, null, null, "UNAVAILABLE", "DXY_ONLY"
+        ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(new MentorAnalyzeResponse(
             99L,
             "gemini-test",
@@ -217,8 +225,8 @@ class MentorSignalReviewServiceTest {
         assertThat(payloadCaptor.getValue().path("original_alert_context").path("original_alert_time").asText()).isEqualTo("2026-03-26T02:30:39Z");
         assertThat(payloadCaptor.getValue().path("original_alert_context").path("original_alert_reason").asText()).isEqualTo("CHOCH_BEARISH");
         assertThat(payloadCaptor.getValue().path("original_alert_context").path("original_alert_price").decimalValue()).isEqualByComparingTo("24411.25");
-        assertThat(payloadCaptor.getValue().path("dynamic_levels_and_vwap").path("vwap_value").decimalValue()).isEqualByComparingTo("24422.50");
-        assertThat(payloadCaptor.getValue().path("momentum_and_flow_the_trigger").path("oscillator_value").decimalValue()).isEqualByComparingTo("47.20");
+        assertThat(payloadCaptor.getValue().path("dynamic_levels_and_mean_reversion").path("vwap_value").decimalValue()).isEqualByComparingTo("24422.50");
+        assertThat(payloadCaptor.getValue().path("momentum_oscillators").path("rsi_value").decimalValue()).isEqualByComparingTo("47.20");
 
         verify(indicatorService).computeSnapshot(Instrument.MNQ, "10m");
         verify(indicatorService).computeSnapshot(Instrument.MNQ, "1h");
@@ -238,6 +246,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
 
@@ -376,6 +385,9 @@ class MentorSignalReviewServiceTest {
             null,
             "DXY_AVAILABLE"
         ));
+        when(mentorIntermarketService.currentForAssetClass(any(), any())).thenReturn(new MacroCorrelationSnapshot(
+            0.35, "BULLISH", null, null, null, null, null, null, "UNAVAILABLE", "DXY_ONLY"
+        ));
         when(mentorAnalysisService.analyze(any(), any())).thenReturn(latestAnalysis);
 
         service.reanalyzeAlert(alert, "Africa/Casablanca", null, null, null);
@@ -385,7 +397,7 @@ class MentorSignalReviewServiceTest {
         assertThat(payloadCaptor.getValue().path("trade_intention").path("entry_price").decimalValue()).isEqualByComparingTo("24390.25");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("stop_loss").decimalValue()).isEqualByComparingTo("24445.25");
         assertThat(payloadCaptor.getValue().path("trade_intention").path("take_profit").decimalValue()).isEqualByComparingTo("24280.25");
-        assertThat(payloadCaptor.getValue().path("risk_and_emotional_check").path("reward_to_risk_ratio").decimalValue()).isEqualByComparingTo("2.00");
+        assertThat(payloadCaptor.getValue().path("risk_management_gatekeeper").path("reward_to_risk_ratio").decimalValue()).isEqualByComparingTo("2.00");
         assertThat(payloadCaptor.getValue().path("metadata").path("selected_timezone").asText()).isEqualTo("Africa/Casablanca");
     }
 
@@ -401,6 +413,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -447,6 +460,9 @@ class MentorSignalReviewServiceTest {
             null,
             "DXY_AVAILABLE"
         ));
+        when(mentorIntermarketService.currentForAssetClass(any(), any())).thenReturn(new MacroCorrelationSnapshot(
+            0.35, "BULLISH", null, null, null, null, null, null, "UNAVAILABLE", "DXY_ONLY"
+        ));
 
         service.captureInitialReview(alert, snapshot("10m", new BigDecimal("24422.50"), new BigDecimal("47.20"), "CHOCH_BEARISH"));
 
@@ -467,6 +483,7 @@ class MentorSignalReviewServiceTest {
             reviewRepository,
             messagingTemplate,
             objectMapper,
+            tickDataPortProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -588,6 +605,8 @@ class MentorSignalReviewServiceTest {
             List.of(),
             List.of(new IndicatorSnapshot.StructureBreakView("CHOCH", "BEARISH", new BigDecimal("24412.00"), 1L, "INTERNAL")),
             null,   // mtfLevels (UC-SMC-005)
+            // Session PD Array (intraday range-based)
+            null, null, null, null,
             null,
             null    // lastPrice
         );

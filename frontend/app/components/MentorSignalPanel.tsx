@@ -8,6 +8,23 @@ import { formatTime, formatInTimezone } from '@/app/lib/datetime';
 import { API_BASE } from '@/app/lib/runtimeConfig';
 
 const API_URL = API_BASE ?? '';
+
+function assetClassLabel(instrument: string): string {
+  const map: Record<string, string> = {
+    MCL: 'ENERGY', MGC: 'METALS', E6: 'FOREX', MNQ: 'EQUITY_INDEX',
+  };
+  return map[instrument] ?? instrument;
+}
+
+function assetClassColor(instrument: string): string {
+  const colors: Record<string, string> = {
+    MCL: 'bg-orange-900/30 text-orange-300',
+    MGC: 'bg-yellow-900/30 text-yellow-300',
+    E6: 'bg-blue-900/30 text-blue-300',
+    MNQ: 'bg-purple-900/30 text-purple-300',
+  };
+  return colors[instrument] ?? 'bg-gray-900/30 text-gray-300';
+}
 const TIMEFRAME_MUTE_OPTIONS = [
   { label: '10m', api: '10m' },
   { label: '1H',  api: '1h' },
@@ -517,6 +534,9 @@ export default function MentorSignalPanel({
                     <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
                       {group.instrument}
                     </span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${assetClassColor(group.instrument)}`}>
+                      {assetClassLabel(group.instrument)}
+                    </span>
                     <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
                       {group.timeframe}
                     </span>
@@ -555,6 +575,9 @@ export default function MentorSignalPanel({
                   </span>
                   <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300">
                     {selectedGroup.instrument}
+                  </span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${assetClassColor(selectedGroup.instrument)}`}>
+                    {assetClassLabel(selectedGroup.instrument)}
                   </span>
                   <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500">
                     {selectedGroup.timeframe}

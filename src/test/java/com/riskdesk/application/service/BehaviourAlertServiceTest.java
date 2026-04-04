@@ -124,6 +124,8 @@ class BehaviourAlertServiceTest {
                 Collections.emptyList(),
                 // MTF
                 null,
+                // Session PD Array (intraday range-based)
+                null, null, null, null,
                 null,
                 null  // lastPrice
         );
