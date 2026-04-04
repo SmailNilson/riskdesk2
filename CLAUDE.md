@@ -15,27 +15,23 @@ Read AGENTS.md first — it contains absolute prohibitions and non-negotiable ru
 
 ## Build & Test Commands
 
-### Backend (Maven, run from repo root)
+### Backend (Maven, Java 21, run from repo root)
 ```bash
 mvn -q -DskipTests compile          # Fast compile check
 mvn -q test                          # All tests
 mvn -q -Dtest=MyTestClass test       # Single test class
+mvn -q -Dtest="MyTestClass#methodName" test  # Single test method
 mvn -q verify                        # Full CI (compile + test + JaCoCo)
 mvn -q spring-boot:run -Dspring-boot.run.profiles=local  # Run locally
 ```
 
-### Frontend (run from `frontend/`)
+### Frontend (Next.js 14, run from `frontend/`)
 ```bash
 npm install
 npm run lint                          # Required before commit
 npm run build
 npm run dev                           # Dev server on port 3001
 ```
-
-### Validation before commit
-- Backend changes: `mvn -q -DskipTests compile` + relevant tests
-- Frontend changes: `cd frontend && npm run lint`
-- Cross-stack changes: both
 
 ### Docker (local dev)
 ```bash
@@ -45,7 +41,7 @@ docker-compose -f docker-compose.release.yml up -d  # Production images
 
 ## Architecture
 
-RiskDesk is a futures trading risk dashboard. The backend is a Spring Boot 3.2 / Java 21 Maven project; `frontend/` is a Next.js 14 (React 18, TypeScript, Tailwind CSS) subdirectory.
+RiskDesk is a futures trading risk dashboard. Backend is a Spring Boot 3.2 / Java 21 Maven project; `frontend/` is a Next.js 14 / React 18 / TypeScript subdirectory.
 
 ### Hexagonal Layering (enforced by ArchUnit)
 
@@ -56,7 +52,7 @@ domain/         → Pure business rules — NO Spring, NO JPA, NO IBKR SDK
 infrastructure/ → Adapters implementing domain ports (IBKR, JPA, config)
 ```
 
-Domain layer is completely isolated. Infrastructure implements `domain/port/` interfaces.
+Domain layer is completely isolated. Infrastructure implements `domain/port/` interfaces. Layer violations are caught by `HexagonalArchitectureTest`.
 
 ### Key Domain Packages
 
@@ -64,10 +60,10 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 - `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks
 - `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
 - `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
-- `domain/behaviouralert/` — **Level/proximity-based** alert evaluation (EMA proximity, S/R touch, etc.)
 - `domain/trading/` — Position, risk, and portfolio models
 - `domain/analysis/` — AI/Mentor analysis models
 - `domain/shared/TradingSessionResolver` — All timezone/session logic lives here
+- `domain/marketdata/model/SyntheticDollarIndexCalculator` — Synthetic DXY from 6 FX pairs
 
 ### Data Flow
 
@@ -77,11 +73,18 @@ IBKR IB Gateway (port 4001)
   → MarketDataService / HistoricalDataService (application)
   → PostgreSQL
   → IndicatorAlertEvaluator (domain, transition-based)
-  → BehaviourAlertEvaluator (domain, level/proximity-based)
   → MentorAnalysisService + Google Gemini API
-  → WebSocket /topic/alerts, /topic/mentor-alerts
-  → Next.js Frontend (STOMP over SockJS)
+  → WebSocket → Next.js Frontend (STOMP over SockJS)
 ```
+
+### WebSocket Topics
+
+| Topic | Content |
+|---|---|
+| `/topic/prices` | Live market data snapshots |
+| `/topic/alerts` | Individual indicator alerts |
+| `/topic/mentor-alerts` | AI mentor review updates |
+| `/topic/rollover` | Contract rollover events |
 
 ### Market Data — Critical Constraint
 
@@ -89,48 +92,43 @@ IBKR IB Gateway (port 4001)
 
 ### Instruments
 
-MCL (Micro WTI Crude), MGC (Micro Gold), 6E (Euro FX), MNQ (Micro E-mini Nasdaq-100). DXY is a synthetic index — see below.
+MCL (Micro WTI Crude), MGC (Micro Gold), 6E (Euro FX), MNQ (Micro E-mini Nasdaq-100)
 
 ### Synthetic DXY
 
-`DXY` is an internal synthetic series computed from six IBKR FX quotes (`EURUSD`, `USDJPY`, `GBPUSD`, `USDCAD`, `USDSEK`, `USDCHF`), NOT the exchange-traded `DX` future. It is excluded from futures-only workflows (rollover, contract resolution, historical refresh). `CLIENT_PORTAL` mode does not serve DXY endpoints. Snapshots persist in `market_dxy_snapshots`.
+Computed internally from 6 IBKR FX quotes (EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK, USDCHF). Not the exchange-traded `DX` future. Excluded from futures-specific workflows (rollover, contract resolution). Only available in `IB_GATEWAY` mode.
 
 ### IBKR SDK
 
 `tws-api` v10.39.1 is vendored in `vendor/maven-repo/` — not fetched from Maven Central. This is intentional for CI/Docker reproducibility.
 
-## Alert System
-
-### Transition-based evaluation (domain layer)
-
-Alerts fire only when a condition *changes* (e.g., RSI crosses into oversold), not when it persists. `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe via `ConcurrentHashMap`. Do not revert to state-based evaluation.
-
-### Grouped Mentor reviews (application layer)
-
-When multiple indicators fire in the same polling cycle for the same instrument/timeframe/direction, `AlertService` batches them into a single Mentor review via `captureGroupReview`. Individual alerts are still published to WebSocket separately.
-
-### Qualified alert families for Mentor review
-
-- Structure: `BOS`, `CHoCH`
-- Momentum: `MACD Bullish/Bearish Cross`, `WaveTrend Bullish/Bearish Cross`
-- Extremes: `RSI oversold/overbought`, `WaveTrend oversold/overbought`
-- Structure/price: `VWAP inside BULLISH/BEARISH Order Block`
-
-### Mentor review threads
-
-First review uses a frozen snapshot at alert time (not click-time market state). `Reanalyse` creates a new revision with live data + `original_alert_context`. Manual `Ask Mentor` analyses are stored separately in `mentor_audits`.
-
 ## Date, Time & Timezone Rules
 
-CME trading day runs **17:00 ET to 17:00 ET** — not midnight UTC.
+These are critical — violating them causes subtle bugs across half the year.
 
-- **Storage is always UTC.** JPA entities use `Instant`, PostgreSQL columns use `TIMESTAMPTZ`.
-- **Business projection is `America/New_York`.** Use `TradingSessionResolver` for all session boundary logic.
-- **Never use `LocalDateTime` for persistence.** Use `Instant` or `ZonedDateTime`.
-- **Never use `ZoneId.systemDefault()` or `LocalDate.now()` without explicit zone.**
-- **VWAP resets at midnight ET** (not 17:00 ET) — consistent with TradingView/Bloomberg.
-- **Intraday candles:** truncate to UTC epoch boundary. **Daily candles:** aggregate via `TradingSessionResolver.dailySessionStart()/End()`.
-- **IBKR intraday bars:** prefer `bar.time()` (epoch seconds, UTC). String fallback `bar.timeStr()` is in `America/New_York`.
+- **Storage is always UTC.** JPA entities use `Instant`. PostgreSQL columns use `TIMESTAMPTZ`. Never `LocalDateTime` for persistence.
+- **Business projection is `America/New_York`.** A CME "trading day" runs 17:00 ET → 17:00 ET next day — not midnight UTC.
+- **Use `TradingSessionResolver`** for all session boundary logic (daily start/end, trading date, market session inference).
+- **Never use** `ZoneId.systemDefault()`, `LocalDate.now()` without zone, `SimpleDateFormat`, or `TIMESTAMP` (without TZ) in DDL.
+- **VWAP resets at midnight ET**, not 17:00 ET (matches TradingView/Bloomberg convention).
+- **IBKR intraday bars**: prefer `bar.time()` (epoch seconds, UTC). String fallback `bar.timeStr()` is in `America/New_York` — parse accordingly.
+- **DST-aware**: never hardcode UTC hour boundaries for session detection. Use `ZoneId.of("America/New_York")`.
+
+Full rules in `docs/ARCHITECTURE_PRINCIPLES.md` § "Date, Time & Timezone Rules".
+
+## Alert System
+
+- **Transition-based**: alerts fire only on state *change*, not persistence. `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe.
+- **Grouped reviews**: when multiple indicators fire simultaneously for the same instrument/timeframe/direction, they produce one combined Mentor review via `captureGroupReview`.
+- **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP.
+- **Mentor reviews are snapshot-based**: first review uses a frozen payload at alert time. `Reanalyse` creates a new revision with live data + original context.
+
+## Execution Workflow
+
+- Live execution state lives in a dedicated `trade_executions` table — not on `MentorSignalReview`.
+- Idempotence key: `mentorSignalReviewId`. One review → max one execution.
+- Reviews carry `executionEligibilityStatus` / `executionEligibilityReason` — don't parse verdict strings.
+- Slice 2: IBKR limit entry orders via `POST /api/mentor/executions/{id}/submit-entry`.
 
 ## Runtime Configuration
 
@@ -143,34 +141,19 @@ riskdesk.ibkr.native-client-id=8
 
 Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, IBKR native socket on `127.0.0.1:4001`, market data poll every 3000ms.
 
-Environment variables (must stay out of Git): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`.
+Environment variables (must stay out of Git): `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 ## Testing
 
 - Unit + ArchUnit tests: `src/test/java/com/riskdesk/`
-- BDD scenarios (Cucumber 7): `src/test/resources/features/*.feature` / `src/test/java/com/riskdesk/bdd/`
+- ArchUnit layer enforcement: `src/test/java/com/riskdesk/architecture/HexagonalArchitectureTest.java`
+- BDD scenarios (Cucumber 7): `src/test/resources/features/*.feature`
 - Alert evaluation tests must verify **transition** (not steady-state) behavior
 - Mentor review tests use frozen payloads — not live market context
-- Time-sensitive changes must cover: normal case, session boundary (17:00 ET), DST spring/fall, weekend boundary, cross-midnight UTC
-
-## Use Case Documentation (obligatoire)
-
-Toute modification de code qui touche un use case existant ou crée une nouvelle feature DOIT :
-
-1. **Identifier le UC-ID** concerné — chercher dans Notion 📚 Documentation (filtrer Type = "📋 Use Case")
-2. **Mettre à jour la page Notion** correspondante : Statut, Impact Backend, Critères d'Acceptation
-3. **Si nouveau use case** : créer la page dans Notion AVANT d'ouvrir le PR
-   - Format ID : `UC-[DOMAINE]-[NNN]` (ex: `UC-MKT-003`, `UC-MENTOR-006`)
-   - Template local : `docs/use-cases/TEMPLATE.md`
-   - Parent Notion : 📚 Documentation → Type = 📋 Use Case
-
-**Ne jamais fermer un PR sans que le UC associé soit à jour dans Notion.**
-
-Domaines valides : `MKT` (market data) · `POS` (positions) · `RISK` · `INDICATOR` · `MENTOR` · `SIM` (backtesting) · `IBKR` · `PORT` (portfolio) · `ROLL` (rollover) · `DXY` · `IMPORT` · `ALERT` · `EXEC` · `BEHAV`
+- Time-sensitive tests must cover: normal case, session boundary (17:00 ET), DST spring/fall, weekend boundary, cross-midnight UTC
 
 ## Key Docs to Read
 
 - `docs/AI_HANDOFF.md` — Latest engineering state, recent changes, known issues
 - `docs/ARCHITECTURE_PRINCIPLES.md` — Layer constraints, date/time rules, alert rules
 - `docs/PROJECT_CONTEXT.md` — Service map, environment variables, execution state machine
-- `docs/use-cases/TEMPLATE.md` — Template UC local (miroir du template Notion)

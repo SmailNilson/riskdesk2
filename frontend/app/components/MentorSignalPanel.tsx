@@ -9,7 +9,6 @@ import { API_BASE } from '@/app/lib/runtimeConfig';
 
 const API_URL = API_BASE ?? '';
 const TIMEFRAME_MUTE_OPTIONS = [
-  { label: '5m',  api: '5m' },
   { label: '10m', api: '10m' },
   { label: '1H',  api: '1h' },
 ] as const;
