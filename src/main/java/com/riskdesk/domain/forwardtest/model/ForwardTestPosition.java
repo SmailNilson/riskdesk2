@@ -107,6 +107,8 @@ public record ForwardTestPosition(
                 : drawdown.compareTo(maxDrawdownPoints) > 0 ? drawdown : maxDrawdownPoints;
         BigDecimal newFav = maxFavorablePoints == null ? favorable
                 : favorable.compareTo(maxFavorablePoints) > 0 ? favorable : maxFavorablePoints;
+        // Skip allocation if neither value changed
+        if (newDd == maxDrawdownPoints && newFav == maxFavorablePoints) return this;
         return new ForwardTestPosition(id, accountId, mentorSignalReviewId, instrument, side,
                 timeframe, status, entryStandard, safeDeepEntry, stopLoss, takeProfit,
                 leg1, leg2, exitPrice, realizedPnl, commissionTotal, netPnl,

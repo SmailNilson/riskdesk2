@@ -33,12 +33,8 @@ public class JpaAlertStateStoreAdapter implements AlertStateStore {
 
     @Override
     public void save(String evalKey, String signal) {
-        AlertEvaluatorStateEntity entity = repository.findById(evalKey)
-            .orElse(new AlertEvaluatorStateEntity());
-        entity.setEvalKey(evalKey);
-        entity.setSignal(signal);
-        entity.setUpdatedAt(Instant.now());
-        repository.save(entity);
+        // evalKey is the @Id — JPA merge handles insert-or-update without a prior SELECT
+        repository.save(new AlertEvaluatorStateEntity(evalKey, signal, Instant.now()));
     }
 
     @Override

@@ -39,18 +39,11 @@ public class ForwardTestEvaluator {
         for (Candle candle : candles) {
             if (current.status().isTerminal()) break;
 
-            // Check TTL expiration before processing candle
             if (current.expiresAt() != null && !candle.getTimestamp().isBefore(current.expiresAt())) {
-                current = current.withStatus(ForwardTestStatus.EXPIRED)
-                        .withResolution(ForwardTestStatus.EXPIRED, candle.getOpen(),
-                                computePartialPnl(current, candle.getOpen()),
-                                computeCommission(current),
-                                null, candle.getTimestamp());
-                // Recalculate net after we have pnl and commission
-                current = current.withResolution(current.status(), current.exitPrice(),
-                        current.realizedPnl(), current.commissionTotal(),
-                        netPnl(current.realizedPnl(), current.commissionTotal()),
-                        current.resolvedAt());
+                BigDecimal pnl = computePartialPnl(current, candle.getOpen());
+                BigDecimal commission = computeCommission(current);
+                current = current.withResolution(ForwardTestStatus.EXPIRED, candle.getOpen(),
+                        pnl, commission, netPnl(pnl, commission), candle.getTimestamp());
                 break;
             }
 
@@ -104,14 +97,12 @@ public class ForwardTestEvaluator {
             ForwardTestPosition activated = pos.withLeg1(filledLeg1)
                     .withActivation(candle.getTimestamp(), ForwardTestStatus.LEG1_FILLED);
 
-            // Check Leg 2 fill on the same candle
             if (pos.hasDualLegs() && touchesEntry(pos.side(), pos.safeDeepEntry(), candle)) {
                 BigDecimal fill2 = applySlippage(pos.safeDeepEntry(), pos.side(), pos.instrument(), true);
                 PositionLeg filledLeg2 = pos.leg2().fill(fill2, candle.getTimestamp(), config.slippageTicks());
                 activated = activated.withLeg2(filledLeg2).withStatus(ForwardTestStatus.FULLY_FILLED);
             }
 
-            // Same candle may also hit SL/TP — check after fill
             return evaluateActive(activated, candle);
         }
         return pos;
@@ -120,7 +111,6 @@ public class ForwardTestEvaluator {
     // ── Active position evaluation (LEG1_FILLED or FULLY_FILLED) ─────────────
 
     private ForwardTestPosition evaluateActive(ForwardTestPosition pos, Candle candle) {
-        // Try Leg 2 fill if not yet filled
         if (pos.status() == ForwardTestStatus.LEG1_FILLED && pos.hasDualLegs()
                 && !pos.leg2().isFilled()
                 && touchesEntry(pos.side(), pos.safeDeepEntry(), candle)) {
@@ -129,10 +119,8 @@ public class ForwardTestEvaluator {
             pos = pos.withLeg2(filledLeg2).withStatus(ForwardTestStatus.FULLY_FILLED);
         }
 
-        // Track adverse/favorable excursion
         pos = trackExcursion(pos, candle);
 
-        // Check SL/TP
         boolean hitsSl = touchesStop(pos, candle);
         boolean hitsTp = touchesTarget(pos, candle);
 
