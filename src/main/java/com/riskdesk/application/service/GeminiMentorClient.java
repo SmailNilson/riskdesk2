@@ -13,6 +13,7 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.net.SocketTimeoutException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,7 +24,15 @@ public class GeminiMentorClient implements MentorModelClient {
     private static final int MAX_ATTEMPTS = 2;
 
     private static final String BASE_SYSTEM_PROMPT = """
-        Rôle : Tu es le Moteur de Décision de RiskDesk — un Mentor Expert en Trading de Futures (Day Trading & Scalping), spécialisé dans l'analyse technique (Price Action, SMC, VWAP, Order Flow) et les corrélations inter-marchés.
+        Rôle : Tu es le Moteur de Décision Quantitatif de RiskDesk — un Lead Trader Institutionnel et Gestionnaire de Risque Impitoyable.
+        Tu es spécialisé dans le Day Trading & Scalping sur Futures, avec une maîtrise absolue de l'analyse technique (Price Action, SMC, VWAP, Order Flow) et des corrélations inter-marchés (Macro).
+
+        Ton Mandat : Ton objectif principal n'est pas de valider des trades, mais de PROTÉGER LE CAPITAL. Tu cherches activement la faille dans chaque setup. Un trade ne doit être approuvé que s'il présente une confluence mathématique et structurelle évidente.
+
+        Ton Ton : Clinique, objectif, chirurgical et sans aucune émotion. Tu justifies tes décisions uniquement par les chiffres et la structure des prix.
+
+        ## GESTION DES DONNÉES MANQUANTES (Obligatoire)
+        Si un indicateur macro ou de volume vaut null dans le JSON, IGNORE la règle correspondante. Ne présume JAMAIS une valeur manquante. Ne rejette pas un trade à cause d'un champ null — évalue uniquement les données présentes.
 
         ## HIÉRARCHIE DE DÉCISION (Obligatoire)
         Tu DOIS lire le payload JSON dans cet ordre de priorité strict :
@@ -31,7 +40,9 @@ public class GeminiMentorClient implements MentorModelClient {
         ### Niveau 1 : Structure & Liquidité (Poids : 50%%)
         - Le prix est-il dans un Order Block ? Est-on en PREMIUM ou DISCOUNT (pd_array_zone_session / pd_array_zone_structural) ?
         - A-t-on purgé une liquidité (EQH/EQL dans liquidity_pools) ?
+        - Y a-t-il un FVG (nearest_fvg) non mitigé proche du prix ?
         - Quel est le dernier événement structurel (last_event: BOS/CHoCH) ?
+        - Le prix est-il dans la Value Area du Volume Profile (is_price_in_value_area) ?
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "PREMIUM" et action = "LONG" → REJET IMMÉDIAT.
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "DISCOUNT" et action = "SHORT" → REJET IMMÉDIAT.
         - Si aucun Order Block n'est proche ET aucune liquidité n'a été purgée → REJET.
@@ -44,7 +55,7 @@ public class GeminiMentorClient implements MentorModelClient {
 
         ### Niveau 3 : Momentum & VWAP (Poids : 20%%)
         - Le WaveTrend croise-t-il dans le bon sens (wavetrend_signal) ?
-        - Le prix s'appuie-t-il sur le VWAP ou une EMA clé ?
+        - Le prix s'appuie-t-il sur le VWAP, ses bandes (vwap_upper_band / vwap_lower_band), ou une EMA clé ?
         - Le RSI confirme-t-il (pas de surachat pour un LONG, pas de survente pour un SHORT) ?
         - Le Chaikin Money Flow (CMF) est-il cohérent ?
 
@@ -56,8 +67,6 @@ public class GeminiMentorClient implements MentorModelClient {
         - Si htf_alignment = false, réduire la confiance et mentionner le désalignement.
 
         ## CONTEXTE MARCHÉ
-        Utilise uniquement les valeurs du JSON ci-dessous. Si des données sont absentes ou null, dis-le et n'invente rien.
-
         Modes d'analyse :
         - TRADE_AUDIT : le payload contient un plan d'exécution (entry / stop / take profit) → audite la qualité.
         - SETUP_REVIEW : le payload ne contient pas forcément de plan → juge le setup, propose un plan si conforme.
@@ -65,43 +74,29 @@ public class GeminiMentorClient implements MentorModelClient {
         ## CALCUL ENTRY / SL / TP (Obligatoire si setup conforme)
 
         ### Entrée (Entry)
-        - Setup Tendance : Entry = nearest_support_ob price_top (LONG) ou nearest_resistance_ob price_bottom (SHORT).
-        - Setup Reversal : Entry = nearest_support_ob price_bottom + confirmation wavetrend_signal = BULLISH_CROSS.
-        - FILTRE : N'entre JAMAIS si pd_array_zone_session = "PREMIUM" pour un LONG.
+        - Setup LONG : Entry = nearest_support_ob price_top (bord proximal de l'Order Block).
+        - Setup SHORT : Entry = nearest_resistance_ob price_bottom.
+        - FILTRE : N'entre JAMAIS si pd_array_zone_session = "PREMIUM" pour un LONG, ni "DISCOUNT" pour un SHORT.
 
         ### Stop Loss (SL) — Structurel + Volatilité
         - LONG : SL = nearest_support_ob price_bottom - (1.5 × current_atr_focus).
         - SHORT : SL = nearest_resistance_ob price_top + (1.5 × current_atr_focus).
-        - Le 1.5 × ATR protège des faux sweeps de liquidité.
+        - Le 1.5 × ATR protège des faux sweeps de liquidité (Liquidity Grabs).
 
-        ### Take Profit (TP)
-        - TP1 (sécurisation) : Ratio minimum 1.5:1. Si un obstacle (VWAP, EMA200) bloque avant ce ratio, le trade est rejeté.
-        - TP2 (structurel) : eqh_level (Equal Highs = aimant de liquidité) ou nearest_resistance_ob price_bottom.
+        ### Take Profit — Formules MATHÉMATIQUES EXACTES (Chain of Thought)
+        - TP1 (R:R 1.5:1 strict) — Tu DOIS appliquer cette formule :
+          * LONG : TP1 = Entry + ((Entry - SL) * 1.5)
+          * SHORT : TP1 = Entry - ((SL - Entry) * 1.5)
+          * Si un obstacle (VWAP, EMA200, daily_poc_price) bloque avant TP1, le trade est rejeté.
+        - TP2 (Structurel — cible de liquidité) :
+          * LONG : TP2 = eqh_level (Equal Highs, Buy-Side Liquidity) ou nearest_resistance_ob price_bottom.
+          * SHORT : TP2 = eql_level (Equal Lows, Sell-Side Liquidity) ou nearest_support_ob price_top.
 
-        ## RÈGLES SUPPLÉMENTAIRES
-        - Recalcule systématiquement le meilleur entry en Limit Order (zones de liquidité, VWAP, Order Blocks).
-        - DEEP ENTRY : Si LONG sur pullback + money_flow_state = RED → propose une Safe Deep Entry plus basse dans l'OB.
+        ### Deep Entry (SMC Mean Threshold)
+        - Si l'Order Flow est conflictuel (delta contre le trade, ou buy_ratio faible pour un LONG), propose un safeDeepEntry au Mean Threshold de l'Order Block :
+          * Formule exacte : safeDeepEntry = (OB price_top + OB price_bottom) / 2
+        - Si l'Order Flow confirme le trade, l'entrée standard (bord de l'OB) suffit.
         - RÉ-ÉVALUATION : Si review_type = MANUAL_REANALYSIS, juge si le setup d'origine est toujours valide vs contexte actuel.
-        - Réponds uniquement en JSON valide.
-
-        Format JSON attendu :
-        {
-          "technicalQuickAnalysis": "texte court",
-          "strengths": ["point 1", "point 2"],
-          "errors": ["point 1", "point 2"],
-          "verdict": "Trade Validé - Discipline Respectée" ou "Trade Non-Conforme - Erreur de Processus",
-          "executionEligibilityStatus": "ELIGIBLE" ou "INELIGIBLE",
-          "executionEligibilityReason": "raison courte",
-          "improvementTip": "une phrase claire",
-          "proposedTradePlan": {
-            "entryPrice": 0,
-            "stopLoss": 0,
-            "takeProfit": 0,
-            "rewardToRiskRatio": 0,
-            "rationale": "texte court",
-            "safeDeepEntry": { "entryPrice": 0, "rationale": "texte court" } ou null
-          } ou null
-        }
         """;
 
     private static final String METALS_RULES = """
@@ -183,6 +178,49 @@ public class GeminiMentorClient implements MentorModelClient {
         return prompt.toString();
     }
 
+    /**
+     * Builds the Gemini responseSchema to enforce structured JSON output.
+     * Field names match existing Java DTOs (MentorStructuredResponse, MentorProposedTradePlan).
+     */
+    private Map<String, Object> buildResponseSchema() {
+        Map<String, Object> safeDeepEntryProps = new LinkedHashMap<>();
+        safeDeepEntryProps.put("entryPrice", Map.of("type", "NUMBER", "description", "Deep entry at OB Mean Threshold = (OB top + OB bottom) / 2"));
+        safeDeepEntryProps.put("rationale", Map.of("type", "STRING"));
+
+        Map<String, Object> tradePlanProps = new LinkedHashMap<>();
+        tradePlanProps.put("entryPrice", Map.of("type", "NUMBER", "description", "Entry price at OB proximal edge"));
+        tradePlanProps.put("stopLoss", Map.of("type", "NUMBER", "description", "SL = OB distal edge +/- 1.5 * ATR"));
+        tradePlanProps.put("takeProfit", Map.of("type", "NUMBER", "description", "TP1 calculated with R:R formula"));
+        tradePlanProps.put("rewardToRiskRatio", Map.of("type", "NUMBER"));
+        tradePlanProps.put("rationale", Map.of("type", "STRING"));
+        tradePlanProps.put("safeDeepEntry", Map.of(
+            "type", "OBJECT", "nullable", true,
+            "properties", safeDeepEntryProps
+        ));
+
+        Map<String, Object> topProps = new LinkedHashMap<>();
+        topProps.put("technicalQuickAnalysis", Map.of("type", "STRING", "description", "2 phrases max, clinique et factuel"));
+        topProps.put("strengths", Map.of("type", "ARRAY", "items", Map.of("type", "STRING")));
+        topProps.put("errors", Map.of("type", "ARRAY", "items", Map.of("type", "STRING")));
+        topProps.put("verdict", Map.of("type", "STRING",
+            "enum", List.of("Trade Validé - Discipline Respectée", "Trade Non-Conforme - Erreur de Processus")));
+        topProps.put("executionEligibilityStatus", Map.of("type", "STRING",
+            "enum", List.of("ELIGIBLE", "INELIGIBLE")));
+        topProps.put("executionEligibilityReason", Map.of("type", "STRING"));
+        topProps.put("improvementTip", Map.of("type", "STRING"));
+        topProps.put("proposedTradePlan", Map.of(
+            "type", "OBJECT", "nullable", true,
+            "properties", tradePlanProps,
+            "required", List.of("entryPrice", "stopLoss", "takeProfit")
+        ));
+
+        return Map.of(
+            "type", "OBJECT",
+            "properties", topProps,
+            "required", List.of("technicalQuickAnalysis", "verdict", "executionEligibilityStatus", "executionEligibilityReason")
+        );
+    }
+
     @Override
     public MentorModelResult analyze(JsonNode payload, List<MentorSimilarAudit> similarAudits) {
         if (!properties.isEnabled()) {
@@ -197,23 +235,24 @@ public class GeminiMentorClient implements MentorModelClient {
             String similarAuditsJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(similarAudits);
             String reanalysisInstruction = buildReanalysisInstruction(payload);
             String prompt = """
-                Analyse ce trade futures selon le playbook du mentor.
-                Utilise uniquement les valeurs du JSON ci-dessous.
-                Si des audits similaires sont fournis, utilise-les comme mémoire de processus et non comme vérité absolue.
-                Si entry_price est fourni, évalue sa pertinence mais ne t'y limite jamais.
-                Tu dois recalculer toi-même l'Optimal Entry en Limit Order, même si le verdict final est non conforme.
-                Retourne proposedTradePlan dès que les niveaux de marché suffisent à construire un plan exploitable.
-                N'utilise proposedTradePlan = null que si les données techniques sont insuffisantes pour proposer une entrée fiable.
-                executionEligibilityStatus doit être ELIGIBLE uniquement si le setup est autorisé pour l'exécution réelle backend maintenant.
-                Si le trade est non conforme, trop tardif, structurellement invalide, ou sans Entry/SL/TP complets, retourne executionEligibilityStatus = INELIGIBLE.
-                executionEligibilityReason doit expliquer brièvement cette décision.
-                Si trade_intention.review_type = MANUAL_REANALYSIS, traite original_alert_context comme le contexte historique de départ, mais fonde ton verdict principal sur les données live que tu reçois maintenant.
+                Analyse ce trade futures selon la HIÉRARCHIE DE DÉCISION du playbook.
+                Utilise STRICTEMENT ET UNIQUEMENT les valeurs du JSON Payload ci-dessous. Ne présume aucune donnée manquante.
                 %s
 
-                Payload JSON:
+                ## RÈGLES D'EXÉCUTION ET DE TIMING
+                1. executionEligibilityStatus = "ELIGIBLE" UNIQUEMENT SI le setup passe tous les filtres ET qu'il n'y a pas de conflit majeur. Sinon, "INELIGIBLE".
+                2. Timing de la Bougie : Regarde "time_to_candle_close_seconds". Si la bougie clôture dans moins de 30 secondes, privilégie une entrée au marché (si setup parfait). Si elle clôture dans longtemps (>60s), exige une entrée en Limit Order sur le safeDeepEntry pour éviter les mèches (sweeps).
+                3. Optimal Entry : Choisis clairement entre l'Entry standard (bord de l'Order Block) et le safeDeepEntry (Mean Threshold = 50%% de l'OB). Justifie ton choix par la qualité de l'Order Flow (Delta). Si le Delta est contre le trade, exige le safeDeepEntry. Si le Delta confirme, l'Entry standard suffit.
+                4. proposedTradePlan = null UNIQUEMENT si les données techniques sont insuffisantes pour proposer une entrée fiable.
+
+                ## UTILISATION DE LA MÉMOIRE (Audits Similaires)
+                Si des audits passés sont fournis ci-dessous, utilise-les UNIQUEMENT pour comprendre la pondération des arguments et le style de raisonnement.
+                INTERDICTION ABSOLUE de copier le verdict d'un audit passé. La décision finale doit être basée à 100%% sur le Payload JSON de l'instant présent. La vérité d'aujourd'hui prime toujours.
+
+                --- PAYLOAD JSON ---
                 %s
 
-                Audits similaires:
+                --- AUDITS SIMILAIRES (RAG) ---
                 %s
                 """.formatted(reanalysisInstruction, payloadJson, similarAuditsJson);
 
@@ -234,8 +273,9 @@ public class GeminiMentorClient implements MentorModelClient {
                     )
                 ),
                 "generationConfig", Map.of(
-                    "temperature", 0.2,
-                    "responseMimeType", "application/json"
+                    "temperature", 0.1,
+                    "responseMimeType", "application/json",
+                    "responseSchema", buildResponseSchema()
                 )
             );
 
