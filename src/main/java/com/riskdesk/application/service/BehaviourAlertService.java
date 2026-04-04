@@ -37,16 +37,19 @@ public class BehaviourAlertService {
     private final IndicatorService indicatorService;
     private final BehaviourAlertEvaluator evaluator;
     private final SimpMessagingTemplate messagingTemplate;
+    private final MentorSignalReviewService mentorSignalReviewService;
 
     // Independent key-based deduplication (cooldown per signal key)
     private final Map<String, Instant> lastFired = new ConcurrentHashMap<>();
 
     public BehaviourAlertService(IndicatorService indicatorService,
                                   BehaviourAlertEvaluator evaluator,
-                                  SimpMessagingTemplate messagingTemplate) {
+                                  SimpMessagingTemplate messagingTemplate,
+                                  MentorSignalReviewService mentorSignalReviewService) {
         this.indicatorService  = indicatorService;
         this.evaluator         = evaluator;
         this.messagingTemplate = messagingTemplate;
+        this.mentorSignalReviewService = mentorSignalReviewService;
     }
 
     public void evaluate(Instrument instrument) {
@@ -56,7 +59,13 @@ public class BehaviourAlertService {
                 BehaviourAlertContext context = toContext(instrument, tf, snap);
                 List<BehaviourAlertSignal> signals = evaluator.evaluate(context);
                 for (BehaviourAlertSignal signal : signals) {
-                    publish(signal);
+                    if (publish(signal)) {
+                        try {
+                            mentorSignalReviewService.captureBehaviourReview(signal, tf, snap);
+                        } catch (Exception e) {
+                            log.debug("Behaviour mentor review capture failed for {} {}: {}", instrument, tf, e.getMessage());
+                        }
+                    }
                 }
             } catch (Exception e) {
                 log.debug("BehaviourAlertService error for {} {}: {}", instrument, tf, e.getMessage());
@@ -101,11 +110,11 @@ public class BehaviourAlertService {
         if (price != null) list.add(new SrLevel(type, price));
     }
 
-    private void publish(BehaviourAlertSignal signal) {
+    private boolean publish(BehaviourAlertSignal signal) {
         Instant now = Instant.now();
         Instant last = lastFired.get(signal.key());
         if (last != null && now.isBefore(last.plusSeconds(DEDUP_COOLDOWN_SECONDS))) {
-            return;
+            return false;
         }
         lastFired.put(signal.key(), now);
 
@@ -123,5 +132,6 @@ public class BehaviourAlertService {
         } catch (Exception e) {
             log.debug("WebSocket behaviour alert send failed: {}", e.getMessage());
         }
+        return true;
     }
 }
