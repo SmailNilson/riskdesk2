@@ -26,8 +26,10 @@ import com.riskdesk.domain.model.TradeSimulationStatus;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -68,6 +70,7 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final ApplicationEventPublisher eventPublisher;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
@@ -86,6 +89,7 @@ public class MentorSignalReviewService {
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
+                                     ApplicationEventPublisher eventPublisher,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -97,6 +101,7 @@ public class MentorSignalReviewService {
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
+        this.eventPublisher = eventPublisher;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -443,10 +448,38 @@ public class MentorSignalReviewService {
                 review.setErrorMessage(null);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
                 publish(updated);
+                publishTradeValidatedIfEligible(updated, analysis);
             });
         } catch (Exception e) {
             log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
+        }
+    }
+
+    private void publishTradeValidatedIfEligible(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
+        if (review.getExecutionEligibilityStatus() != ExecutionEligibilityStatus.ELIGIBLE) {
+            return;
+        }
+        if (analysis.analysis() == null || analysis.analysis().proposedTradePlan() == null) {
+            return;
+        }
+        var plan = analysis.analysis().proposedTradePlan();
+        try {
+            eventPublisher.publishEvent(new TradeValidatedEvent(
+                    review.getInstrument(),
+                    review.getAction(),
+                    review.getTimeframe(),
+                    review.getVerdict(),
+                    analysis.analysis().technicalQuickAnalysis(),
+                    plan.entryPrice(),
+                    plan.safeDeepEntry() != null ? plan.safeDeepEntry().entryPrice() : null,
+                    plan.stopLoss(),
+                    plan.takeProfit(),
+                    plan.rewardToRiskRatio(),
+                    Instant.now()
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to publish TradeValidatedEvent for review {} — {}", review.getId(), e.getMessage());
         }
     }
 
