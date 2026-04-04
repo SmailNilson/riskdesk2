@@ -334,7 +334,7 @@ function parseAlertTimeframe(message: string): Timeframe | null {
   return null;
 }
 
-const BEHAVIOUR_CATEGORIES = new Set(['EMA_PROXIMITY', 'SUPPORT_RESISTANCE', 'CHAIKIN_BEHAVIOUR']);
+export const BEHAVIOUR_CATEGORIES = new Set(['EMA_PROXIMITY', 'SUPPORT_RESISTANCE', 'CHAIKIN_BEHAVIOUR']);
 
 function inferTradeActionFromAlert(alert: AlertMessage): TradeAction | null {
   // Behaviour alerts are non-directional — return MONITOR
