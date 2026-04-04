@@ -1,5 +1,6 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.service.OpenInterestRolloverService;
 import com.riskdesk.application.service.RolloverDetectionService;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Instrument;
@@ -14,19 +15,24 @@ import java.util.stream.Collectors;
  *
  * GET  /api/rollover/status          — current contract month + days-to-expiry per instrument
  * POST /api/rollover/confirm         — trader confirms the rollover to a new contract month
+ * GET  /api/rollover/oi-status       — current vs next month OI for each instrument
+ * POST /api/rollover/check-oi        — trigger an immediate OI comparison check
  */
 @RestController
 @RequestMapping("/api/rollover")
 @CrossOrigin
 public class RolloverController {
 
-    private final RolloverDetectionService  detectionService;
-    private final ActiveContractRegistry    contractRegistry;
+    private final RolloverDetectionService     detectionService;
+    private final OpenInterestRolloverService  oiRolloverService;
+    private final ActiveContractRegistry       contractRegistry;
 
     public RolloverController(RolloverDetectionService detectionService,
+                              OpenInterestRolloverService oiRolloverService,
                               ActiveContractRegistry contractRegistry) {
-        this.detectionService = detectionService;
-        this.contractRegistry = contractRegistry;
+        this.detectionService   = detectionService;
+        this.oiRolloverService  = oiRolloverService;
+        this.contractRegistry   = contractRegistry;
     }
 
     /**
@@ -82,5 +88,23 @@ public class RolloverController {
             "contractMonth", contractMonth,
             "status",        "ROLLOVER_CONFIRMED"
         ));
+    }
+
+    /**
+     * Returns the current Open Interest comparison for each instrument
+     * (front month OI vs next month OI).
+     */
+    @GetMapping("/oi-status")
+    public ResponseEntity<Map<String, Object>> getOiStatus() {
+        return ResponseEntity.ok(oiRolloverService.getOiStatus());
+    }
+
+    /**
+     * Triggers an immediate OI comparison check for all instruments.
+     * If auto-confirm is enabled and next OI > current OI, the rollover is applied.
+     */
+    @PostMapping("/check-oi")
+    public ResponseEntity<Map<String, Object>> checkOiNow() {
+        return ResponseEntity.ok(oiRolloverService.checkAllNow());
     }
 }

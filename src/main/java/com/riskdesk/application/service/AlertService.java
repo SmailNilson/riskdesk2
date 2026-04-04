@@ -104,8 +104,8 @@ public class AlertService {
             log.debug("H4 snapshot error for {}: {}", instrument, e.getMessage());
         }
 
-        // Indicator evaluation via domain service (all timeframes)
-        for (String timeframe : List.of("5m", "10m", "30m", "1h", "4h")) {
+        // Indicator evaluation via domain service (10m+ timeframes only)
+        for (String timeframe : List.of("10m", "30m", "1h", "4h")) {
             if (mutedTimeframes.contains(timeframe)) continue;
             try {
                 // Reuse pre-computed snapshots for H1 and H4; compute fresh for others
