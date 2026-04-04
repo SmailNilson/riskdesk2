@@ -25,6 +25,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
@@ -72,6 +73,9 @@ class MentorSignalReviewServiceTest {
     @Mock
     private ObjectProvider<com.riskdesk.domain.marketdata.port.TickDataPort> tickDataPortProvider;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -87,6 +91,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
 
@@ -247,6 +252,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
 
@@ -414,6 +420,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -484,6 +491,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
         service.setAutoAnalysisEnabled(true);
