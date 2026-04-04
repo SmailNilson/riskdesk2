@@ -80,6 +80,27 @@ export default function DxyPanel() {
 
   const points = sparklinePoints(history.map(row => row.dxyValue));
   const latestValue = latest?.dxyValue ?? null;
+
+  const pctChange: number | null = (() => {
+    if (history.length < 2) return null;
+    const oldest = history[0].dxyValue;
+    const newest = history[history.length - 1].dxyValue;
+    if (!oldest) return null;
+    return ((newest - oldest) / oldest) * 100;
+  })();
+
+  const trend: 'BULLISH' | 'BEARISH' | 'FLAT' | null = pctChange === null
+    ? null
+    : pctChange > 0 ? 'BULLISH' : pctChange < 0 ? 'BEARISH' : 'FLAT';
+
+  const trendColor = trend === 'BULLISH'
+    ? 'text-emerald-400'
+    : trend === 'BEARISH'
+      ? 'text-red-400'
+      : 'text-zinc-400';
+
+  const trendArrow = trend === 'BULLISH' ? '▲' : trend === 'BEARISH' ? '▼' : '—';
+
   const statusColor = health?.status === 'UP'
     ? 'text-emerald-300 bg-emerald-950/40 border-emerald-800/60'
     : health?.status === 'DEGRADED'
@@ -95,6 +116,17 @@ export default function DxyPanel() {
             <div className="text-3xl font-semibold text-white">
               {latestValue != null ? latestValue.toFixed(4) : '—'}
             </div>
+            {trend !== null && (
+              <div className={`flex items-center gap-1 text-sm font-medium ${trendColor}`}>
+                <span>{trendArrow}</span>
+                <span>{trend}</span>
+                {pctChange !== null && (
+                  <span className="text-xs font-normal opacity-80">
+                    ({pctChange >= 0 ? '+' : ''}{pctChange.toFixed(2)}% 24h)
+                  </span>
+                )}
+              </div>
+            )}
             <div className="text-xs text-zinc-500">
               Updated {formatTimestamp(latest?.timestamp ?? health?.latestTimestamp ?? null)}
             </div>
