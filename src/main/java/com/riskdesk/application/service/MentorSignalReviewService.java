@@ -213,16 +213,14 @@ public class MentorSignalReviewService {
             return;
         }
 
-        String alertKey = signal.timestamp() + ":" + signal.instrument()
-            + ":BEHAVIOUR:" + signal.category().name() + ":" + signal.message();
-        if (reviewRepository.existsByAlertKey(alertKey)) return;
-
-        // Convert to a synthetic Alert so we can reuse the existing payload builder
+        // Convert to a synthetic Alert so we can reuse the canonical alertKey() and payload builder
         AlertCategory category = AlertCategory.valueOf(signal.category().name());
         Alert syntheticAlert = new Alert(
             signal.key(), AlertSeverity.WARNING, signal.message(),
             category, signal.instrument(), signal.timestamp()
         );
+        String alertKey = alertKey(syntheticAlert);
+        if (reviewRepository.existsByAlertKey(alertKey)) return;
         AlertReviewCandidate candidate = new AlertReviewCandidate(instrument, timeframe, "MONITOR");
 
         JsonNode payload = null;
@@ -739,11 +737,18 @@ public class MentorSignalReviewService {
             return null;
         }
 
-        if (!isEligibleCategory(alert.category().name(), alert.message())) {
+        String categoryName = alert.category().name();
+        if (!isEligibleCategory(categoryName, alert.message())) {
             return null;
         }
 
-        String action = inferAction(alert.message());
+        // Behaviour categories (EMA_PROXIMITY, SUPPORT_RESISTANCE, CHAIKIN_BEHAVIOUR) are
+        // vigilance-only and don't carry directional bias — use MONITOR instead of LONG/SHORT.
+        boolean isBehaviour = "EMA_PROXIMITY".equals(categoryName)
+            || "SUPPORT_RESISTANCE".equals(categoryName)
+            || "CHAIKIN_BEHAVIOUR".equals(categoryName);
+
+        String action = isBehaviour ? "MONITOR" : inferAction(alert.message());
         if (action == null) {
             return null;
         }
