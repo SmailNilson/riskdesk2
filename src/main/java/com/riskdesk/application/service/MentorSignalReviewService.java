@@ -298,66 +298,6 @@ public class MentorSignalReviewService {
         }
     }
 
-    /**
-     * Captures a Mentor review for a behaviour alert (EMA proximity, S/R touch, CMF).
-     * Behaviour reviews are vigilance-only: always INELIGIBLE for execution arming.
-     */
-    public void captureBehaviourReview(BehaviourAlertSignal signal,
-                                       String timeframe,
-                                       IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
-
-        Instrument instrument;
-        try {
-            instrument = Instrument.valueOf(signal.instrument().toUpperCase(java.util.Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            return;
-        }
-
-        String alertKey = signal.timestamp() + ":" + signal.instrument()
-            + ":BEHAVIOUR:" + signal.category().name() + ":" + signal.message();
-        if (reviewRepository.existsByAlertKey(alertKey)) return;
-
-        // Convert to a synthetic Alert so we can reuse the existing payload builder
-        AlertCategory category = AlertCategory.valueOf(signal.category().name());
-        Alert syntheticAlert = new Alert(
-            signal.key(), AlertSeverity.WARNING, signal.message(),
-            category, signal.instrument(), signal.timestamp()
-        );
-        AlertReviewCandidate candidate = new AlertReviewCandidate(instrument, timeframe, "MONITOR");
-
-        JsonNode payload = null;
-        String snapshotJson = "{}";
-        String snapshotError = null;
-        try {
-            payload = buildPayload(candidate, syntheticAlert, focusSnapshot, AUTO_SELECTED_TIMEZONE);
-            snapshotJson = objectMapper.writeValueAsString(payload);
-        } catch (Exception e) {
-            snapshotError = "Behaviour review snapshot capture failed: " + errorMessage(e);
-        }
-
-        MentorSignalReviewRecord pending = newReviewRecord(
-            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
-            syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
-        );
-        pending.setSourceType("BEHAVIOUR");
-        pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
-        pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
-        if (snapshotError != null) {
-            pending.setStatus(STATUS_ERROR);
-            pending.setCompletedAt(Instant.now());
-            pending.setErrorMessage(snapshotError);
-        }
-
-        MentorSignalReviewRecord saved = reviewRepository.save(pending);
-        publish(saved);
-
-        if (snapshotError == null && payload != null) {
-            JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
-        }
-    }
-
     public MentorSignalReview reanalyzeAlert(Alert alert) {
         return reanalyzeAlert(alert, AUTO_SELECTED_TIMEZONE, null, null, null);
     }
