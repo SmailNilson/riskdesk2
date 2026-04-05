@@ -5,7 +5,7 @@ export type TzEntry = {
 
 export const TIMEZONES = [
   { label: 'UTC', tz: 'UTC' },
-  { label: 'Casablanca', tz: 'Africa/Casablanca' },
+  { label: 'Casablanca', tz: 'Africa/Tunis' },
   { label: 'Paris', tz: 'Europe/Paris' },
   { label: 'London', tz: 'Europe/London' },
   { label: 'New York', tz: 'America/New_York' },
@@ -13,7 +13,7 @@ export const TIMEZONES = [
   { label: 'Tokyo', tz: 'Asia/Tokyo' },
 ] as const satisfies readonly TzEntry[];
 
-export const DEFAULT_TIMEZONE = TIMEZONES.find(entry => entry.tz === 'Africa/Casablanca') ?? TIMEZONES[0];
+export const DEFAULT_TIMEZONE = TIMEZONES.find(entry => entry.tz === 'Africa/Tunis') ?? TIMEZONES[0];
 
 export function findTimezoneByTz(timezone: string) {
   return TIMEZONES.find(entry => entry.tz === timezone) ?? DEFAULT_TIMEZONE;

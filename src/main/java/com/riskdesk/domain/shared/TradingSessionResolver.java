@@ -25,6 +25,19 @@ public final class TradingSessionResolver {
     public static final ZoneId CME_ZONE = ZoneId.of("America/New_York");
     public static final LocalTime CME_SESSION_CLOSE = LocalTime.of(17, 0);
 
+    /**
+     * Daily CME Globex maintenance windows (America/New_York, DST-aware).
+     * <ul>
+     *   <li>Standard futures (energy MCL, metals MGC, equity-index MNQ): 17:00–18:00 ET</li>
+     *   <li>FX futures (6E / Euro FX): 16:00–17:00 ET</li>
+     * </ul>
+     * During these windows IBKR may emit stale/delayed ticks for instruments whose
+     * exchange is still closed. Candle accumulation and indicator evaluation should
+     * be suppressed. Use the caller's knowledge of instrument type to choose the right method.
+     */
+    private static final LocalTime STANDARD_MAINTENANCE_END = LocalTime.of(18, 0);
+    private static final LocalTime FX_MAINTENANCE_START     = LocalTime.of(16, 0);
+
     private TradingSessionResolver() {}
 
     /**
@@ -133,5 +146,29 @@ public final class TradingSessionResolver {
             return zdt.toLocalDate();
         }
         return zdt.toLocalDate().plusDays(1);
+    }
+
+    /**
+     * Returns {@code true} if the timestamp falls in the standard CME Globex daily
+     * maintenance window: <b>17:00–18:00 ET</b> (DST-aware).
+     * <p>
+     * Applies to: MCL (energy), MGC (metals), MNQ (equity index).
+     * During this window IBKR may forward stale last-trade ticks even though the
+     * exchange is halted. Callers should suppress candle accumulation and alerts.
+     */
+    public static boolean isStandardMaintenanceWindow(Instant timestamp) {
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        return !t.isBefore(CME_SESSION_CLOSE) && t.isBefore(STANDARD_MAINTENANCE_END);
+    }
+
+    /**
+     * Returns {@code true} if the timestamp falls in the FX CME Globex daily
+     * maintenance window: <b>16:00–17:00 ET</b> (DST-aware).
+     * <p>
+     * Applies to: E6 (Euro FX Futures) and other CME FX instruments.
+     */
+    public static boolean isFxMaintenanceWindow(Instant timestamp) {
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        return !t.isBefore(FX_MAINTENANCE_START) && t.isBefore(CME_SESSION_CLOSE);
     }
 }

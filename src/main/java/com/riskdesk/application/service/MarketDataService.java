@@ -15,6 +15,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.math.BigDecimal;
@@ -253,7 +254,29 @@ public class MarketDataService {
     // Candle accumulation
     // -------------------------------------------------------------------------
 
+    /**
+     * Returns true when {@code now} falls inside the instrument's CME Globex daily
+     * maintenance halt (DST-aware via ZoneId). Candle accumulation and alerts must be
+     * suppressed during this window — IBKR may emit stale last-trade ticks even though
+     * the exchange is closed.
+     * <ul>
+     *   <li>FX (E6): 16:00–17:00 ET</li>
+     *   <li>Energy (MCL), Metals (MGC), Equity-Index (MNQ): 17:00–18:00 ET</li>
+     * </ul>
+     */
+    private static boolean isDuringMaintenanceWindow(Instrument instrument, Instant now) {
+        if (instrument.assetClass() == AssetClass.FOREX) {
+            return TradingSessionResolver.isFxMaintenanceWindow(now);
+        }
+        return TradingSessionResolver.isStandardMaintenanceWindow(now);
+    }
+
     private void accumulate(Instrument instrument, String timeframe, BigDecimal price, Instant now) {
+        if (isDuringMaintenanceWindow(instrument, now)) {
+            log.trace("Suppressing {} {} candle — CME maintenance window active", instrument, timeframe);
+            return;
+        }
+
         String  contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         CandleKey key         = new CandleKey(instrument, timeframe);
         long    periodMins    = TIMEFRAMES.get(timeframe);
