@@ -125,7 +125,7 @@ export default function Dashboard() {
       </header>
 
       {/* Metrics bar */}
-      <MetricsBar summary={summary} connected={connected} />
+      <MetricsBar summary={summary} connected={connected} prices={prices} />
 
       {/* Rollover warning — visible only when a contract is near expiry */}
       <RolloverBanner />
@@ -138,7 +138,7 @@ export default function Dashboard() {
           return (
             <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
               <span className="text-[10px] text-zinc-500">{inst}</span>
-              <span className="text-xs font-mono text-white">
+              <span className={`text-xs font-mono ${p?.source === 'STALE' ? 'text-zinc-500' : 'text-white'}`}>
                 {p ? p.price.toFixed(decimals) : '—'}
               </span>
             </div>

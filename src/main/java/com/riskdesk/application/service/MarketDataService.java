@@ -111,25 +111,31 @@ public class MarketDataService {
                 continue;
             }
 
+            boolean marketOpen = TradingSessionResolver.isMarketOpen(now, instrument);
+            String source;
+            if (fallbackPrice) {
+                source = "FALLBACK_DB";
+            } else if (!marketOpen) {
+                source = "STALE";
+            } else {
+                source = "LIVE_PROVIDER";
+            }
+
             lastPrice.put(instrument, price);
             lastTimestamp.put(instrument, timestamp);
-            lastSource.put(instrument, fallbackPrice ? "FALLBACK_DB" : "LIVE_PROVIDER");
+            lastSource.put(instrument, source);
 
             positionService.updateMarketPrice(instrument, price);
-            sendPriceUpdate(instrument, price, timestamp);
+            sendPriceUpdate(instrument, price, timestamp, source);
             eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
 
-            if (!fallbackPrice) {
+            if (!fallbackPrice && marketOpen) {
                 for (String tf : TIMEFRAMES.keySet()) {
                     accumulate(instrument, tf, price, now);
                 }
 
-                // Skip alert evaluation when the market is closed (weekend)
-                // to avoid spurious alerts on stale IBKR prices.
-                if (TradingSessionResolver.isMarketOpen(now)) {
-                    alertService.evaluate(instrument);
-                    behaviourAlertService.evaluate(instrument);
-                }
+                alertService.evaluate(instrument);
+                behaviourAlertService.evaluate(instrument);
             }
         }
 
@@ -148,13 +154,14 @@ public class MarketDataService {
     // WebSocket push
     // -------------------------------------------------------------------------
 
-    private void sendPriceUpdate(Instrument instrument, BigDecimal price, Instant now) {
+    private void sendPriceUpdate(Instrument instrument, BigDecimal price, Instant now, String source) {
         try {
             Map<String, Object> payload = Map.of(
                 "instrument",  instrument.name(),
                 "displayName", instrument.getDisplayName(),
                 "price",       price,
-                "timestamp",   now.toString()
+                "timestamp",   now.toString(),
+                "source",      source
             );
             messagingTemplate.convertAndSend("/topic/prices", payload);
         } catch (Exception e) {

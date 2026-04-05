@@ -1,10 +1,12 @@
 'use client';
 
 import { PortfolioSummary } from '@/app/lib/api';
+import { PriceUpdate } from '@/app/hooks/useWebSocket';
 
 interface Props {
   summary: PortfolioSummary | null;
   connected: boolean;
+  prices?: Record<string, PriceUpdate>;
 }
 
 function fmt(n: number | null | undefined, decimals = 2, prefix = '$') {
@@ -26,14 +28,28 @@ function marginColor(pct: number) {
   return 'text-emerald-400';
 }
 
-export default function MetricsBar({ summary, connected }: Props) {
+export default function MetricsBar({ summary, connected, prices }: Props) {
   const s = summary;
+  const priceValues = Object.values(prices ?? {});
+  const marketClosed = connected && priceValues.length > 0 &&
+    priceValues.every(p => p.source === 'STALE' || p.source === 'FALLBACK_DB');
+
+  let statusDot = 'bg-red-500';
+  let statusText = 'STREAM OFFLINE';
+  if (connected && marketClosed) {
+    statusDot = 'bg-amber-400';
+    statusText = 'MARKET CLOSED';
+  } else if (connected) {
+    statusDot = 'bg-emerald-400';
+    statusText = 'STREAM LIVE';
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-4 px-4 py-3 bg-zinc-900 border-b border-zinc-700">
       {/* Connection status */}
       <div className="flex items-center gap-1.5 mr-2">
-        <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} />
-        <span className="text-xs text-zinc-500">{connected ? 'STREAM LIVE' : 'STREAM OFFLINE'}</span>
+        <span className={`w-2 h-2 rounded-full ${statusDot}`} />
+        <span className="text-xs text-zinc-500">{statusText}</span>
       </div>
 
       <Metric label="Unrealized P&L"

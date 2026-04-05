@@ -4,6 +4,7 @@ import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.CandleSeriesNormalizer;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.http.ResponseEntity;
@@ -63,6 +64,7 @@ public class CandleController {
 
         List<Candle> ordered = new ArrayList<>(candles);
         Collections.reverse(ordered);
+        ordered = CandleSeriesNormalizer.purgeOutOfSession(ordered, inst);
 
         List<Map<String, Object>> result = ordered.stream().map(c -> Map.<String, Object>of(
             "time",   c.getTimestamp().getEpochSecond(),

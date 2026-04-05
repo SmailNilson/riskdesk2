@@ -1,5 +1,7 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
+
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -96,6 +98,22 @@ public final class TradingSessionResolver {
         if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return false;
 
         return true;
+    }
+
+    /**
+     * Instrument-aware overload for future extensibility.
+     * <p>
+     * Currently all exchange-traded instruments (MCL, MGC, E6, MNQ) follow
+     * the same CME Globex schedule.  Synthetic instruments (DXY) are excluded
+     * from session filtering because they derive from FX pairs that trade 24/5.
+     *
+     * @param timestamp  the moment to check
+     * @param instrument the instrument to check
+     * @return true if the market is open for this instrument at that instant
+     */
+    public static boolean isMarketOpen(Instant timestamp, Instrument instrument) {
+        if (instrument.isSynthetic()) return true;
+        return isMarketOpen(timestamp);
     }
 
     /**
