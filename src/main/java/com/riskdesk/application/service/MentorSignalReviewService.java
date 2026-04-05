@@ -26,8 +26,10 @@ import com.riskdesk.domain.model.TradeSimulationStatus;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -68,6 +70,7 @@ public class MentorSignalReviewService {
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final ApplicationEventPublisher eventPublisher;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
@@ -86,6 +89,7 @@ public class MentorSignalReviewService {
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
+                                     ApplicationEventPublisher eventPublisher,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -97,6 +101,7 @@ public class MentorSignalReviewService {
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
+        this.eventPublisher = eventPublisher;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -115,10 +120,10 @@ public class MentorSignalReviewService {
     /**
      * Batch-capture: groups alerts by direction and creates ONE combined review
      * per direction instead of one per indicator.
-     * No-op when auto-analysis is disabled.
+     * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
+     * so the semantic dedup prevents re-review after restart.
      */
     public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
         // Group by direction (LONG/SHORT)
         Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
         for (Alert alert : alerts) {
@@ -142,8 +147,6 @@ public class MentorSignalReviewService {
     private static final long MAX_ALERT_AGE_SECONDS = 600;
 
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
-        if (!autoAnalysisEnabled) return;
-
         // Reject stale alerts (e.g. data bursts replaying old signals)
         if (alert.timestamp() != null &&
                 alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
@@ -157,6 +160,31 @@ public class MentorSignalReviewService {
 
         String alertKey = alertKey(alert);
         if (reviewRepository.existsByAlertKey(alertKey)) {
+            return;
+        }
+
+        // Semantic dedup: same instrument + category + direction recently analyzed?
+        long dedupWindowSeconds = semanticDedupWindowSeconds(candidate.timeframe());
+        if (reviewRepository.existsRecentReview(
+                candidate.instrument().name(), alert.category().name(),
+                candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
+            log.info("Semantic dedup: skipping {} {} {} — already analyzed within {}s window",
+                     candidate.instrument(), alert.category(), candidate.action(), dedupWindowSeconds);
+            return;
+        }
+
+        // When auto-analysis is disabled, record as ERROR so the semantic dedup
+        // prevents this alert from being reviewed after a restart or reconnect.
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                alert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}"
+            );
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            log.info("Auto-analysis OFF: recorded ERROR placeholder for {} {} {}",
+                     candidate.instrument(), alert.category(), candidate.action());
             return;
         }
 
@@ -182,6 +210,79 @@ public class MentorSignalReviewService {
             AUTO_SELECTED_TIMEZONE,
             snapshotJson
         );
+        if (snapshotError != null) {
+            pending.setStatus(STATUS_ERROR);
+            pending.setCompletedAt(Instant.now());
+            pending.setErrorMessage(snapshotError);
+        }
+
+        MentorSignalReviewRecord saved = reviewRepository.save(pending);
+        publish(saved);
+
+        if (snapshotError == null && payload != null) {
+            JsonNode reviewPayload = payload;
+            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload))
+                .exceptionally(ex -> {
+                    log.error("Async analysis failed for review {}", saved.getId(), ex);
+                    return null;
+                });
+        }
+    }
+
+    /**
+     * Captures a Mentor review for a behaviour alert (EMA proximity, S/R touch, CMF).
+     * Behaviour reviews are vigilance-only: always INELIGIBLE for execution arming.
+     */
+    public void captureBehaviourReview(BehaviourAlertSignal signal,
+                                       String timeframe,
+                                       IndicatorSnapshot focusSnapshot) {
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(signal.instrument().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+
+        // Convert to a synthetic Alert so we can reuse the canonical alertKey() and payload builder
+        AlertCategory category = AlertCategory.valueOf(signal.category().name());
+        Alert syntheticAlert = new Alert(
+            signal.key(), AlertSeverity.WARNING, signal.message(),
+            category, signal.instrument(), signal.timestamp()
+        );
+        String alertKey = alertKey(syntheticAlert);
+        if (reviewRepository.existsByAlertKey(alertKey)) return;
+        AlertReviewCandidate candidate = new AlertReviewCandidate(instrument, timeframe, "MONITOR");
+
+        // When auto-analysis is disabled, record as ERROR for dedup protection
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}"
+            );
+            skipped.setSourceType("BEHAVIOUR");
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            return;
+        }
+
+        JsonNode payload = null;
+        String snapshotJson = "{}";
+        String snapshotError = null;
+        try {
+            payload = buildPayload(candidate, syntheticAlert, focusSnapshot, AUTO_SELECTED_TIMEZONE);
+            snapshotJson = objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            snapshotError = "Behaviour review snapshot capture failed: " + errorMessage(e);
+        }
+
+        MentorSignalReviewRecord pending = newReviewRecord(
+            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+            syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
+        );
+        pending.setSourceType("BEHAVIOUR");
+        pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+        pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -324,7 +425,11 @@ public class MentorSignalReviewService {
             publish(saved);
             JsonNode reviewPayload = payload;
             Long savedReviewId = saved.getId();
-            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload));
+            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload))
+                .exceptionally(ex -> {
+                    log.error("Async reanalysis failed for review {}", savedReviewId, ex);
+                    return null;
+                });
         } catch (Exception e) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -411,10 +516,38 @@ public class MentorSignalReviewService {
                 review.setErrorMessage(null);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
                 publish(updated);
+                publishTradeValidatedIfEligible(updated, analysis);
             });
         } catch (Exception e) {
             log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
+        }
+    }
+
+    private void publishTradeValidatedIfEligible(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
+        if (review.getExecutionEligibilityStatus() != ExecutionEligibilityStatus.ELIGIBLE) {
+            return;
+        }
+        if (analysis.analysis() == null || analysis.analysis().proposedTradePlan() == null) {
+            return;
+        }
+        var plan = analysis.analysis().proposedTradePlan();
+        try {
+            eventPublisher.publishEvent(new TradeValidatedEvent(
+                    review.getInstrument(),
+                    review.getAction(),
+                    review.getTimeframe(),
+                    review.getVerdict(),
+                    analysis.analysis().technicalQuickAnalysis(),
+                    plan.entryPrice(),
+                    plan.safeDeepEntry() != null ? plan.safeDeepEntry().entryPrice() : null,
+                    plan.stopLoss(),
+                    plan.takeProfit(),
+                    plan.rewardToRiskRatio(),
+                    Instant.now()
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to publish TradeValidatedEvent for review {} — {}", review.getId(), e.getMessage());
         }
     }
 
@@ -739,11 +872,18 @@ public class MentorSignalReviewService {
             return null;
         }
 
-        if (!isEligibleCategory(alert.category().name(), alert.message())) {
+        String categoryName = alert.category().name();
+        if (!isEligibleCategory(categoryName, alert.message())) {
             return null;
         }
 
-        String action = inferAction(alert.message());
+        // Behaviour categories (EMA_PROXIMITY, SUPPORT_RESISTANCE, CHAIKIN_BEHAVIOUR) are
+        // vigilance-only and don't carry directional bias — use MONITOR instead of LONG/SHORT.
+        boolean isBehaviour = "EMA_PROXIMITY".equals(categoryName)
+            || "SUPPORT_RESISTANCE".equals(categoryName)
+            || "CHAIKIN_BEHAVIOUR".equals(categoryName);
+
+        String action = isBehaviour ? "MONITOR" : inferAction(alert.message());
         if (action == null) {
             return null;
         }
@@ -754,6 +894,22 @@ public class MentorSignalReviewService {
     private String alertKey(Alert alert) {
         return alert.timestamp() + ":" + (alert.instrument() == null || alert.instrument().isBlank() ? "GLOBAL" : alert.instrument())
             + ":" + alert.category().name() + ":" + alert.message();
+    }
+
+    /** Timeframe-aware semantic dedup window: base duration × 5. */
+    static long semanticDedupWindowSeconds(String timeframe) {
+        long base = switch (timeframe) {
+            case "1m"  -> 60;
+            case "5m"  -> 300;
+            case "10m" -> 600;
+            case "15m" -> 900;
+            case "30m" -> 1800;
+            case "1h"  -> 3600;
+            case "4h"  -> 14400;
+            case "1d"  -> 86400;
+            default    -> 3600;
+        };
+        return base * 5;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {
@@ -1217,6 +1373,10 @@ public class MentorSignalReviewService {
     }
 
     private Map<String, Object> linkedMap(Object... values) {
+        if (values.length % 2 != 0) {
+            throw new IllegalArgumentException(
+                "linkedMap requires even number of arguments (key-value pairs), got " + values.length);
+        }
         Map<String, Object> map = new LinkedHashMap<>();
         for (int i = 0; i < values.length; i += 2) {
             map.put(String.valueOf(values[i]), values[i + 1]);

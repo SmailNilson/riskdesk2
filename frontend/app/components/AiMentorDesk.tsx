@@ -4,7 +4,7 @@ import { useState, useMemo } from 'react';
 import type { AlertMessage, PriceUpdate } from '@/app/hooks/useWebSocket';
 import type { TzEntry } from '@/app/lib/timezones';
 import type { PortfolioSummary, IndicatorSnapshot, MentorSignalReview } from '@/app/lib/api';
-import { isSignalReview, isBehaviourReview } from '@/app/lib/mentor';
+import { isSignalReview, isBehaviourReview, BEHAVIOUR_CATEGORIES } from '@/app/lib/mentor';
 import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
@@ -63,6 +63,17 @@ export default function AiMentorDesk({
     [reviews]
   );
 
+  const signalAlerts = useMemo(
+    () => alerts.filter(a => !BEHAVIOUR_CATEGORIES.has(a.category)),
+    [alerts]
+  );
+
+  const behaviourAlerts = useMemo(
+    () => alerts.filter(a => BEHAVIOUR_CATEGORIES.has(a.category)),
+    [alerts]
+  );
+
+
   const tabCounts: Record<TabKey, number> = useMemo(() => ({
     ALL: reviews.length,
     SIGNALS: signalReviews.length,
@@ -111,7 +122,7 @@ export default function AiMentorDesk({
       {/* Tab content */}
       <div>
         {(activeTab === 'ALL' || activeTab === 'SIGNALS') && (
-          <div className={activeTab === 'ALL' ? '' : ''}>
+          <div>
             {activeTab === 'ALL' && (
               <div className="px-4 pt-2 pb-1">
                 <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider">
@@ -121,7 +132,7 @@ export default function AiMentorDesk({
             )}
             <MentorSignalPanel
               timezone={timezone}
-              alerts={alerts}
+              alerts={activeTab === 'ALL' ? alerts : signalAlerts}
               reviews={activeTab === 'ALL' ? reviews : signalReviews}
               selectedBrokerAccountId={selectedBrokerAccountId}
               onRefresh={onRefresh}
@@ -142,7 +153,7 @@ export default function AiMentorDesk({
             ) : (
               <MentorSignalPanel
                 timezone={timezone}
-                alerts={alerts}
+                alerts={behaviourAlerts}
                 reviews={behaviourReviews}
                 selectedBrokerAccountId={selectedBrokerAccountId}
                 onRefresh={onRefresh}

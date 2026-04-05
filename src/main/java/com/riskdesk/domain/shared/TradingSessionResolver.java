@@ -76,6 +76,29 @@ public final class TradingSessionResolver {
     }
 
     /**
+     * Returns {@code true} if the CME futures market is open at the given timestamp.
+     * <p>
+     * CME weekly session: Sunday 17:00 ET → Friday 17:00 ET.
+     * Outside this window (Friday 17:00 ET → Sunday 17:00 ET) the market is closed.
+     * This does NOT filter the daily 17:00–18:00 ET maintenance halt because
+     * IBKR data is already clean and indicators need contiguous series.
+     */
+    public static boolean isMarketOpen(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        // Saturday: always closed
+        if (dow == DayOfWeek.SATURDAY) return false;
+        // Sunday before 17:00 ET: closed
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_CLOSE)) return false;
+        // Friday at or after 17:00 ET: closed
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return false;
+
+        return true;
+    }
+
+    /**
      * Returns the CME trading date for a given timestamp.
      * <p>
      * The trading date is the calendar date on which the session <em>closes</em>.

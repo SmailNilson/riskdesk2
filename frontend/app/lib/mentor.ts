@@ -14,7 +14,7 @@ import {
 
 export type Instrument = 'MCL' | 'MGC' | 'E6' | 'MNQ';
 export type Timeframe = '5m' | '10m' | '1h' | '1d';
-export type TradeAction = 'LONG' | 'SHORT';
+export type TradeAction = 'LONG' | 'SHORT' | 'MONITOR';
 export type { TzEntry } from '@/app/lib/timezones';
 
 export type MentorTradeIntention = {
@@ -139,6 +139,10 @@ export function isMentorEligibleAlert(alert: AlertMessage) {
   }
   if (alert.category === 'ORDER_BLOCK' || alert.category === 'ORDER_BLOCK_VWAP') {
     return ['mitigated', 'invalidated', 'VWAP inside'].some(fragment => alert.message.includes(fragment));
+  }
+  // Behaviour alert categories — always eligible (vigilance-only)
+  if (alert.category === 'EMA_PROXIMITY' || alert.category === 'SUPPORT_RESISTANCE' || alert.category === 'CHAIKIN_BEHAVIOUR') {
+    return true;
   }
   return false;
 }
@@ -330,7 +334,13 @@ function parseAlertTimeframe(message: string): Timeframe | null {
   return null;
 }
 
+export const BEHAVIOUR_CATEGORIES = new Set(['EMA_PROXIMITY', 'SUPPORT_RESISTANCE', 'CHAIKIN_BEHAVIOUR']);
+
 function inferTradeActionFromAlert(alert: AlertMessage): TradeAction | null {
+  // Behaviour alerts are non-directional — return MONITOR
+  if (BEHAVIOUR_CATEGORIES.has(alert.category)) {
+    return 'MONITOR';
+  }
   const normalized = alert.message.toUpperCase();
   if (normalized.includes('BULLISH') || normalized.includes('OVERSOLD')) {
     return 'LONG';
