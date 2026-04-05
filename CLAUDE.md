@@ -56,10 +56,11 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 
 ### Key Domain Packages
 
-- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend
+- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend, CMF (Chaikin Money Flow)
 - `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks
 - `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
 - `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
+- `domain/behaviouralert/` — CMF/Chaikin behaviour alerts (separate from technical indicator alerts)
 - `domain/trading/` — Position, risk, and portfolio models
 - `domain/analysis/` — AI/Mentor analysis models
 - `domain/shared/TradingSessionResolver` — All timezone/session logic lives here
@@ -92,6 +93,29 @@ The domain layer publishes events consumed by application services:
 | `/topic/alerts` | Individual indicator alerts |
 | `/topic/mentor-alerts` | AI mentor review updates |
 | `/topic/rollover` | Contract rollover events |
+
+### Backend Service Map
+
+| Service | Responsibility |
+|---|---|
+| `MarketDataService` | Live price polls, DXY synthesis, WebSocket publication |
+| `HistoricalDataService` | Candle backfill and refresh coordination from IBKR |
+| `PositionService` | Position P&L, exposure, risk calculations |
+| `AlertService` | Indicator alert publishing + Mentor review batching by direction |
+| `MentorSignalReviewService` | Persisted review snapshots, re-analysis revisions |
+| `MentorIntermarketService` | Macro correlation context (DXY-backed, no external HTTP) |
+| `IbGatewayNativeClient` | Native IB Gateway TCP connection (infra) |
+
+### Frontend Component Map
+
+| Component | Purpose |
+|---|---|
+| `Dashboard.tsx` | Main layout; composes all panels |
+| `MentorPanel.tsx` | Live Mentor analysis (non-persisted) |
+| `MentorSignalPanel.tsx` | Persisted reviews grouped by instrument/timeframe/direction (90s window) |
+| `DxyPanel.tsx` | Synthetic DXY trend direction + 24h % change |
+| `useWebSocket.ts` | STOMP over SockJS hook; subscribes to all `/topic/*` streams |
+| `lib/api.ts` | REST API client |
 
 ### Market Data — Critical Constraint
 
@@ -149,7 +173,7 @@ Full rules in `docs/ARCHITECTURE_PRINCIPLES.md` § "Date, Time & Timezone Rules"
 
 - **Transition-based**: alerts fire only on state *change*, not persistence. `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe.
 - **Grouped reviews**: when multiple indicators fire simultaneously for the same instrument/timeframe/direction, they produce one combined Mentor review via `captureGroupReview`.
-- **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP.
+- **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP, Chaikin Behaviour (CMF).
 - **Mentor reviews are snapshot-based**: first review uses a frozen payload at alert time. `Reanalyse` creates a new revision with live data + original context.
 
 ## Execution Workflow
@@ -180,6 +204,23 @@ riskdesk.mentor.embeddings-model=gemini-embedding-001
 Key defaults (`application.properties`): PostgreSQL on `localhost:5432/riskdesk`, market data poll every 3000ms.
 
 Environment variables (must stay out of Git): `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+
+## Validation Expectations
+
+- Backend-only change: `mvn -q -DskipTests compile` + run affected test class
+- Frontend-only change: `cd frontend && npm run lint`
+- Cross-stack change: run both
+
+## Documentation Updates
+
+When making significant architectural or workflow changes, update these three docs:
+- `docs/AI_HANDOFF.md` — What changed and why (for incoming agents)
+- `docs/ARCHITECTURE_PRINCIPLES.md` — If rules or constraints changed
+- `docs/PROJECT_CONTEXT.md` — If service map, execution state machine, or environment changed
+
+## Container Release
+
+Images are built and validated in GitHub Actions on every push to `main`. Published to `ghcr.io/smailnilson/riskdesk2` on Git tag push via `docker-compose.release.yml`. The `tws-api` JAR is vendored in `vendor/maven-repo/` so Docker/CI never needs `~/.m2`.
 
 ## Testing
 

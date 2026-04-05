@@ -15,6 +15,7 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -162,12 +163,12 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     /**
      * Parses the bar timestamp from IBKR.  The primary path uses {@code bar.time()}
      * which returns epoch seconds (timezone-safe).  The string fallback ({@code bar.timeStr()})
-     * is treated as UTC, which is correct when the TWS API Controller pre-parses the time.
-     * <p>
-     * <b>Caution:</b> if IBKR ever returns raw exchange-timezone strings in the fallback
-     * path, they would be mis-interpreted as UTC (4-5 h offset for CME).  A warning is
-     * logged whenever the fallback activates so this can be detected in production.
+     * is interpreted as {@code America/New_York} — the timezone in which IBKR serialises
+     * intraday bar strings (e.g. "20240407 17:00:00").  Treating it as UTC would shift
+     * CME timestamps by 4–5 hours depending on DST.
      */
+    private static final ZoneId IBKR_BAR_ZONE = ZoneId.of("America/New_York");
+
     private long parseBarTime(Bar bar) {
         if (bar.time() != Long.MAX_VALUE) {
             return bar.time();
@@ -178,20 +179,21 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             return Instant.now().getEpochSecond();
         }
 
-        log.warn("IBKR bar.time() unavailable, falling back to timeStr '{}' parsed as UTC. "
-                + "Verify this is not exchange-local time.", raw);
+        log.warn("IBKR bar.time() unavailable, falling back to timeStr '{}' parsed as America/New_York.", raw);
 
         String normalized = raw.trim().replaceAll("\\s+", " ");
         try {
             if (normalized.length() == 8) {
+                // Daily bar — date only: treat midnight in NY timezone
                 return LocalDate.parse(normalized, IB_DATE)
-                    .atStartOfDay()
-                    .toEpochSecond(ZoneOffset.UTC);
+                    .atStartOfDay(IBKR_BAR_ZONE)
+                    .toEpochSecond();
             }
 
             String dateTime = normalized.length() >= 17 ? normalized.substring(0, 17) : normalized;
             return LocalDateTime.parse(dateTime, IB_DATE_TIME)
-                .toEpochSecond(ZoneOffset.UTC);
+                .atZone(IBKR_BAR_ZONE)
+                .toEpochSecond();
         } catch (DateTimeParseException ex) {
             log.warn("Unable to parse IB historical bar time '{}', falling back to now.", raw);
             return Instant.now().getEpochSecond();
