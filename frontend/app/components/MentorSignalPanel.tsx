@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, MentorSignalReview, TradeExecutionView } from '@/app/lib/api';
 import { AlertMessage } from '@/app/hooks/useWebSocket';
-import { buildMentorAlertKey, isMentorEligibleAlert, TzEntry } from '@/app/lib/mentor';
+import { buildMentorAlertKey, isMentorEligibleAlert, BEHAVIOUR_CATEGORIES, TzEntry } from '@/app/lib/mentor';
 import { formatTime, formatInTimezone } from '@/app/lib/datetime';
 import { API_BASE } from '@/app/lib/runtimeConfig';
 
@@ -287,7 +287,12 @@ export default function MentorSignalPanel({
         .filter((reviewId): reviewId is number => reviewId != null);
       await loadExecutionsForReviewIds(Array.from(new Set(reviewIds)));
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Unable to load saved mentor reviews.');
+      const raw = nextError instanceof Error ? nextError.message : String(nextError);
+      // Replace raw HTTP status lines with a user-friendly message
+      const friendly = raw.includes('→ 5') || raw.includes('→ 4')
+        ? 'Impossible de charger les reviews Mentor pour ce groupe. Verifiez que le backend est actif.'
+        : raw;
+      setError(friendly);
     } finally {
       setLoadingGroupKey(current => (current === group.groupKey ? null : current));
     }
@@ -373,7 +378,11 @@ export default function MentorSignalPanel({
       }));
       setReanalysisDraft(current => (current?.alertKey === alertKey ? null : current));
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Mentor reanalysis failed.');
+      const raw = nextError instanceof Error ? nextError.message : String(nextError);
+      const friendly = raw.includes('→ 5') || raw.includes('→ 4')
+        ? 'Echec de la reanalyse Mentor. Verifiez que le backend est actif et que l\'auto-analyse est activee.'
+        : raw;
+      setError(friendly);
     } finally {
       setReanalyzingAlertKey(current => (current === alertKey ? null : current));
     }
@@ -453,7 +462,7 @@ export default function MentorSignalPanel({
           <button
             onClick={() => void cleanUp()}
             disabled={cleaningUp}
-            title="Supprimer les alertes ERROR (base) et vider le buffer No Review (mémoire)"
+            title="Vider le buffer alertes (memoire) et supprimer les reviews ERROR (base)"
             className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900/60 px-2 py-1 font-semibold text-zinc-500 transition-colors hover:border-zinc-500 hover:text-zinc-400 disabled:cursor-not-allowed"
           >
             {cleaningUp ? '...' : 'Clean Up'}
@@ -1029,6 +1038,8 @@ function SimulationChip({
 }
 
 function inferDirection(alert: AlertMessage) {
+  // Behaviour alerts are non-directional — group them together as MONITOR
+  if (BEHAVIOUR_CATEGORIES.has(alert.category)) return 'MONITOR';
   const normalized = `${alert.category} ${alert.message}`.toUpperCase();
   if (normalized.includes('BULLISH') || normalized.includes('OVERSOLD')) return 'LONG';
   if (normalized.includes('BEARISH') || normalized.includes('OVERBOUGHT')) return 'SHORT';

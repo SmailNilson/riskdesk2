@@ -5,7 +5,6 @@ import com.riskdesk.domain.model.Instrument;
 
 import java.time.Instant;
 import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Aggregates classified trade ticks into a rolling time window for order flow analysis.
@@ -19,8 +18,6 @@ public class TickByTickAggregator {
     private final Instrument instrument;
     private final long windowSeconds;
     private final ConcurrentLinkedDeque<ClassifiedTick> ticks = new ConcurrentLinkedDeque<>();
-    private final AtomicLong totalBuyVolume = new AtomicLong(0);
-    private final AtomicLong totalSellVolume = new AtomicLong(0);
 
     // For divergence detection: track price direction over the window
     private volatile double firstPriceInWindow = Double.NaN;
@@ -45,12 +42,6 @@ public class TickByTickAggregator {
         }
         ClassifiedTick tick = new ClassifiedTick(price, size, classification, timestamp);
         ticks.addLast(tick);
-
-        if (classification == TickClassification.BUY) {
-            totalBuyVolume.addAndGet(size);
-        } else if (classification == TickClassification.SELL) {
-            totalSellVolume.addAndGet(size);
-        }
 
         lastPrice = price;
         if (Double.isNaN(firstPriceInWindow)) {

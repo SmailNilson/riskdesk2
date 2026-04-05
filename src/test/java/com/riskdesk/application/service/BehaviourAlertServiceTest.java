@@ -30,12 +30,13 @@ class BehaviourAlertServiceTest {
     @Mock private IndicatorService       indicatorService;
     @Mock private BehaviourAlertEvaluator evaluator;
     @Mock private SimpMessagingTemplate  messagingTemplate;
+    @Mock private MentorSignalReviewService mentorSignalReviewService;
 
     private BehaviourAlertService service;
 
     @BeforeEach
     void setUp() {
-        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate);
+        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate, mentorSignalReviewService);
     }
 
     @Test
@@ -88,6 +89,136 @@ class BehaviourAlertServiceTest {
         // But deduplication uses the same key → only 1 publish total (first key encounter).
         verify(messagingTemplate, times(1))
                 .convertAndSend(eq("/topic/alerts"), (Object) any());
+    }
+
+    @Test
+    void evaluate_capturesMentorReviewOnPublishedSignal() {
+        IndicatorSnapshot snap = emptySnapshot();
+        when(indicatorService.computeSnapshot(eq(Instrument.MCL), anyString())).thenReturn(snap);
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+                "sr:touch:MCL:1h",
+                BehaviourAlertCategory.SUPPORT_RESISTANCE,
+                "MCL [1h] — Price touching strong high",
+                "MCL",
+                Instant.now()
+        );
+        when(evaluator.evaluate(any(BehaviourAlertContext.class)))
+                .thenReturn(List.of(signal))
+                .thenReturn(Collections.emptyList());
+
+        service.evaluate(Instrument.MCL);
+
+        verify(mentorSignalReviewService).captureBehaviourReview(eq(signal), anyString(), eq(snap));
+    }
+
+    @Test
+    void evaluate_mentorCaptureFailureDoesNotPreventWebSocketPublish() {
+        IndicatorSnapshot snap = emptySnapshot();
+        when(indicatorService.computeSnapshot(eq(Instrument.MGC), anyString())).thenReturn(snap);
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+                "cmf:extreme:MGC:10m",
+                BehaviourAlertCategory.CHAIKIN_BEHAVIOUR,
+                "MGC [10m] — CMF extreme zone",
+                "MGC",
+                Instant.now()
+        );
+        when(evaluator.evaluate(any(BehaviourAlertContext.class)))
+                .thenReturn(List.of(signal))
+                .thenReturn(Collections.emptyList());
+
+        doThrow(new RuntimeException("Gemini API timeout"))
+                .when(mentorSignalReviewService).captureBehaviourReview(any(), anyString(), any());
+
+        service.evaluate(Instrument.MGC);
+
+        // WebSocket publish should still have happened before mentor capture
+        verify(messagingTemplate, times(1))
+                .convertAndSend(eq("/topic/alerts"), (Object) any());
+    }
+
+    @Test
+    void evaluate_indicatorServiceFailureDoesNotPropagateException() {
+        when(indicatorService.computeSnapshot(eq(Instrument.E6), eq("10m")))
+                .thenThrow(new RuntimeException("DB connection lost"));
+        when(indicatorService.computeSnapshot(eq(Instrument.E6), eq("1h")))
+                .thenReturn(emptySnapshot());
+        when(evaluator.evaluate(any(BehaviourAlertContext.class)))
+                .thenReturn(Collections.emptyList());
+
+        // Should not throw — errors are caught per-timeframe
+        service.evaluate(Instrument.E6);
+    }
+
+    @Test
+    void evaluate_iteratesBothTimeframes() {
+        IndicatorSnapshot snap = emptySnapshot();
+        when(indicatorService.computeSnapshot(eq(Instrument.MNQ), anyString())).thenReturn(snap);
+        when(evaluator.evaluate(any(BehaviourAlertContext.class))).thenReturn(Collections.emptyList());
+
+        service.evaluate(Instrument.MNQ);
+
+        // Should evaluate for both 10m and 1h timeframes
+        verify(indicatorService).computeSnapshot(Instrument.MNQ, "10m");
+        verify(indicatorService).computeSnapshot(Instrument.MNQ, "1h");
+        verify(evaluator, times(2)).evaluate(any(BehaviourAlertContext.class));
+    }
+
+    @Test
+    void evaluate_differentKeysPublishSeparately() {
+        IndicatorSnapshot snap = emptySnapshot();
+        when(indicatorService.computeSnapshot(eq(Instrument.MCL), anyString())).thenReturn(snap);
+
+        BehaviourAlertSignal signal10m = new BehaviourAlertSignal(
+                "ema50:proximity:MCL:10m",
+                BehaviourAlertCategory.EMA_PROXIMITY,
+                "MCL [10m] — Price approaching EMA50",
+                "MCL",
+                Instant.now()
+        );
+        BehaviourAlertSignal signal1h = new BehaviourAlertSignal(
+                "ema200:proximity:MCL:1h",
+                BehaviourAlertCategory.EMA_PROXIMITY,
+                "MCL [1h] — Price approaching EMA200",
+                "MCL",
+                Instant.now()
+        );
+        when(evaluator.evaluate(any(BehaviourAlertContext.class)))
+                .thenReturn(List.of(signal10m))
+                .thenReturn(List.of(signal1h));
+
+        service.evaluate(Instrument.MCL);
+
+        // Both should publish because they have different keys
+        verify(messagingTemplate, times(2))
+                .convertAndSend(eq("/topic/alerts"), (Object) any());
+    }
+
+    @Test
+    void evaluate_webSocketFailureDoesNotPreventMentorCapture() {
+        IndicatorSnapshot snap = emptySnapshot();
+        when(indicatorService.computeSnapshot(eq(Instrument.MCL), anyString())).thenReturn(snap);
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+                "sr:touch:MCL:10m",
+                BehaviourAlertCategory.SUPPORT_RESISTANCE,
+                "MCL [10m] — Price touching strong low",
+                "MCL",
+                Instant.now()
+        );
+        when(evaluator.evaluate(any(BehaviourAlertContext.class)))
+                .thenReturn(List.of(signal))
+                .thenReturn(Collections.emptyList());
+
+        doThrow(new RuntimeException("WebSocket closed"))
+                .when(messagingTemplate).convertAndSend(anyString(), (Object) any());
+
+        service.evaluate(Instrument.MCL);
+
+        // Mentor capture should still be attempted because publish() returns true
+        // (WebSocket error is caught inside publish, after lastFired update)
+        verify(mentorSignalReviewService).captureBehaviourReview(eq(signal), anyString(), eq(snap));
     }
 
     // ---- helpers ----

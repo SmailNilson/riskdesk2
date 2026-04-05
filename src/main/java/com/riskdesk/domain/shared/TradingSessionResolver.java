@@ -78,32 +78,25 @@ public final class TradingSessionResolver {
     }
 
     /**
-     * Returns {@code true} when the CME futures market is open.
+     * Returns {@code true} if the CME futures market is open at the given timestamp.
      * <p>
-     * CME Globex is open Sunday 17:00 ET through Friday 17:00 ET (with a daily
-     * maintenance halt 17:00–18:00 ET that we intentionally do NOT filter,
-     * because IBKR does not send ticks during that window anyway).
-     * <p>
-     * Closed window: Friday 17:00 ET → Sunday 17:00 ET.
-     *
-     * @param timestamp the moment to check (UTC)
-     * @return true if the market is open at that instant
+     * CME weekly session: Sunday 17:00 ET → Friday 17:00 ET.
+     * Outside this window (Friday 17:00 ET → Sunday 17:00 ET) the market is closed.
+     * This does NOT filter the daily 17:00–18:00 ET maintenance halt because
+     * IBKR data is already clean and indicators need contiguous series.
      */
     public static boolean isMarketOpen(Instant timestamp) {
         ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
         DayOfWeek dow = zdt.getDayOfWeek();
         LocalTime time = zdt.toLocalTime();
 
-        // Saturday → always closed
+        // Saturday: always closed
         if (dow == DayOfWeek.SATURDAY) return false;
+        // Sunday before 17:00 ET: closed
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_CLOSE)) return false;
+        // Friday at or after 17:00 ET: closed
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return false;
 
-        // Sunday → open only at or after 17:00 ET
-        if (dow == DayOfWeek.SUNDAY) return !time.isBefore(CME_SESSION_CLOSE);
-
-        // Friday → open only before 17:00 ET
-        if (dow == DayOfWeek.FRIDAY) return time.isBefore(CME_SESSION_CLOSE);
-
-        // Monday–Thursday → always open (maintenance halt is intentionally ignored)
         return true;
     }
 

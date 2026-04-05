@@ -21,7 +21,8 @@ import java.math.BigDecimal;
     name = "mentor_signal_reviews",
     indexes = {
         @Index(name = "idx_mentor_signal_reviews_alert_key", columnList = "alertKey"),
-        @Index(name = "idx_mentor_signal_reviews_created_at", columnList = "createdAt")
+        @Index(name = "idx_mentor_signal_reviews_created_at", columnList = "createdAt"),
+        @Index(name = "idx_mentor_signal_reviews_source_type", columnList = "sourceType")
     },
     uniqueConstraints = {
         @UniqueConstraint(name = "uk_mentor_signal_reviews_alert_revision", columnNames = {"alertKey", "revision"})
@@ -106,6 +107,9 @@ public class MentorSignalReviewEntity {
 
     @Column(precision = 19, scale = 6)
     private BigDecimal maxDrawdownPoints;
+
+    @Column(length = 16, nullable = false)
+    private String sourceType = "SIGNAL";
 
     public Long getId() {
         return id;
@@ -305,5 +309,13 @@ public class MentorSignalReviewEntity {
 
     public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) {
         this.maxDrawdownPoints = maxDrawdownPoints;
+    }
+
+    public String getSourceType() {
+        return sourceType;
+    }
+
+    public void setSourceType(String sourceType) {
+        this.sourceType = sourceType;
     }
 }

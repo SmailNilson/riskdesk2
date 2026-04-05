@@ -8,8 +8,7 @@ import RolloverBanner from './RolloverBanner';
 import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
-import MentorPanel from './MentorPanel';
-import MentorSignalPanel from './MentorSignalPanel';
+import AiMentorDesk from './AiMentorDesk';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -170,18 +169,7 @@ export default function Dashboard() {
           onRefreshRequested={loadSummary}
         />
 
-        <MentorSignalPanel
-          timezone={timezone}
-          alerts={alerts}
-          reviews={mentorSignalReviews}
-          selectedBrokerAccountId={selectedIbkrAccountId}
-          onRefresh={refresh}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
-
-        <MentorPanel
+        <AiMentorDesk
           instrument={instrument}
           timeframe={timeframe}
           timezone={timezone}
@@ -190,7 +178,13 @@ export default function Dashboard() {
           snapshot={snapshot}
           prices={prices}
           alerts={alerts}
+          reviews={mentorSignalReviews}
+          selectedBrokerAccountId={selectedIbkrAccountId}
+          onRefresh={refresh}
         />
+
+        {/* Backtest */}
+        <BacktestPanel />
       </div>
 
       <AlertsFeed alerts={alerts} />
