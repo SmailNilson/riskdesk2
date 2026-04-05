@@ -22,6 +22,11 @@ public interface MentorSignalReviewJpaRepository extends JpaRepository<MentorSig
 
     long deleteByStatusIn(List<String> statuses);
 
+    @Query("SELECT CASE WHEN COUNT(e) > 0 THEN true ELSE false END FROM MentorSignalReviewEntity e " +
+           "WHERE e.instrument = ?1 AND e.category = ?2 AND e.action = ?3 " +
+           "AND e.createdAt > ?4 AND e.status IN ('DONE', 'ANALYZING')")
+    boolean existsRecentReview(String instrument, String category, String action, Instant since);
+
     @Modifying
     @Query("UPDATE MentorSignalReviewEntity e SET e.status = 'ERROR', e.completedAt = ?2, e.errorMessage = ?1 WHERE e.status = 'ANALYZING'")
     int markAnalyzingAsError(String errorMessage, Instant completedAt);

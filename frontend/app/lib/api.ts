@@ -492,7 +492,8 @@ export interface MentorSignalReview {
   message: string;
   instrument: string;
   timeframe: string;
-  action: 'LONG' | 'SHORT';
+  action: 'LONG' | 'SHORT' | 'MONITOR';
+  sourceType: 'SIGNAL' | 'BEHAVIOUR';
   timestamp: string;
   createdAt: string;
   selectedTimezone: string | null;

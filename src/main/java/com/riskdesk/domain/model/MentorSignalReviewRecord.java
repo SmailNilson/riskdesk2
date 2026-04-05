@@ -29,6 +29,7 @@ public class MentorSignalReviewRecord {
     private Instant activationTime;
     private Instant resolutionTime;
     private java.math.BigDecimal maxDrawdownPoints;
+    private String sourceType = "SIGNAL";
 
     public Long getId() {
         return id;
@@ -228,5 +229,13 @@ public class MentorSignalReviewRecord {
 
     public void setMaxDrawdownPoints(java.math.BigDecimal maxDrawdownPoints) {
         this.maxDrawdownPoints = maxDrawdownPoints;
+    }
+
+    public String getSourceType() {
+        return sourceType;
+    }
+
+    public void setSourceType(String sourceType) {
+        this.sourceType = sourceType;
     }
 }

@@ -15,6 +15,8 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
+import com.riskdesk.domain.behaviouralert.model.BehaviourAlertCategory;
+import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -25,6 +27,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
@@ -35,9 +38,8 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.startsWith;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
+
 
 @ExtendWith(MockitoExtension.class)
 class MentorSignalReviewServiceTest {
@@ -72,6 +74,9 @@ class MentorSignalReviewServiceTest {
     @Mock
     private ObjectProvider<com.riskdesk.domain.marketdata.port.TickDataPort> tickDataPortProvider;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -87,6 +92,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
 
@@ -247,6 +253,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
 
@@ -414,6 +421,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -484,6 +492,7 @@ class MentorSignalReviewServiceTest {
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
+            eventPublisher,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -524,6 +533,143 @@ class MentorSignalReviewServiceTest {
         assertThat(reviewCaptor.getValue().getMessage()).isEqualTo(primary.message());
         assertThat(reviewCaptor.getValue().getAlertTimestamp()).isEqualTo(primaryTimestamp);
         assertThat(reviewCaptor.getValue().getCategory()).isEqualTo("ORDER_BLOCK");
+    }
+
+    // -- captureBehaviourReview tests --
+
+    @Test
+    void captureBehaviourReview_setsSourceTypeBehaviourAndIneligible() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService, indicatorService, mentorIntermarketService,
+            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+        );
+        service.setAutoAnalysisEnabled(true);
+
+        Instant now = Instant.now();
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+            "ema50:proximity:MNQ:10m",
+            BehaviourAlertCategory.EMA_PROXIMITY,
+            "MNQ [10m] — Price approaching EMA50",
+            "MNQ",
+            now
+        );
+
+        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
+        when(reviewRepository.save(any())).thenAnswer(inv -> {
+            MentorSignalReviewRecord r = inv.getArgument(0);
+            if (r.getId() == null) r.setId(99L);
+            return r;
+        });
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(null);
+        when(indicatorService.computeSnapshot(Instrument.MNQ, "1h")).thenReturn(
+            snapshot("1h", new BigDecimal("24405.00"), new BigDecimal("44.10"), "CHOCH_BEARISH"));
+        when(indicatorService.computeSeries(Instrument.MNQ, "10m", 500)).thenReturn(
+            new IndicatorSeriesSnapshot("MNQ", "10m", List.of(), List.of(), List.of(), List.of(), List.of()));
+        when(candleRepositoryPort.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
+            candle("2026-03-26T02:20:00Z", "24418.25", "24422.00", "24410.00", "24415.00")
+        ));
+        when(mentorIntermarketService.current(Instrument.MNQ)).thenReturn(
+            new MentorIntermarketSnapshot(0.35, "BULLISH", null, null, null, null, "DXY_AVAILABLE"));
+        when(mentorIntermarketService.currentForAssetClass(any(), any())).thenReturn(
+            new MacroCorrelationSnapshot(0.35, "BULLISH", null, null, null, null, null, null, "UNAVAILABLE", "DXY_ONLY"));
+
+        service.captureBehaviourReview(signal, "10m",
+            snapshot("10m", new BigDecimal("24422.50"), new BigDecimal("47.20"), "CHOCH_BEARISH"));
+
+        ArgumentCaptor<MentorSignalReviewRecord> cap = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
+        verify(reviewRepository).save(cap.capture());
+
+        MentorSignalReviewRecord saved = cap.getValue();
+        assertThat(saved.getSourceType()).isEqualTo("BEHAVIOUR");
+        assertThat(saved.getExecutionEligibilityStatus()).isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(saved.getExecutionEligibilityReason()).contains("vigilance-only");
+        assertThat(saved.getAction()).isEqualTo("MONITOR");
+        assertThat(saved.getCategory()).isEqualTo("EMA_PROXIMITY");
+    }
+
+    @Test
+    void captureBehaviourReview_recordsErrorWhenAutoAnalysisDisabled() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService, indicatorService, mentorIntermarketService,
+            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
+        );
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+            "ema50:proximity:MCL:10m",
+            BehaviourAlertCategory.EMA_PROXIMITY,
+            "MCL [10m] — Price approaching EMA50",
+            "MCL",
+            Instant.now()
+        );
+
+        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
+        when(reviewRepository.save(any())).thenAnswer(inv -> {
+            MentorSignalReviewRecord r = inv.getArgument(0);
+            if (r.getId() == null) r.setId(101L);
+            return r;
+        });
+
+        service.captureBehaviourReview(signal, "10m",
+            snapshot("10m", new BigDecimal("70.00"), new BigDecimal("55.00"), null));
+
+        // When auto-analysis is off, it still saves an ERROR record for dedup protection
+        ArgumentCaptor<MentorSignalReviewRecord> cap = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
+        verify(reviewRepository).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo("ERROR");
+        assertThat(cap.getValue().getSourceType()).isEqualTo("BEHAVIOUR");
+        assertThat(cap.getValue().getErrorMessage()).contains("desactivee");
+        // Should NOT call mentorAnalysisService (no Gemini call)
+        verifyNoInteractions(mentorAnalysisService);
+    }
+
+    @Test
+    void captureBehaviourReview_deduplicatesByAlertKey() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService, indicatorService, mentorIntermarketService,
+            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+        );
+        service.setAutoAnalysisEnabled(true);
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+            "sr:touch:MCL:1h",
+            BehaviourAlertCategory.SUPPORT_RESISTANCE,
+            "MCL [1h] — Price touching strong high",
+            "MCL",
+            Instant.now()
+        );
+
+        when(reviewRepository.existsByAlertKey(any())).thenReturn(true);
+
+        service.captureBehaviourReview(signal, "1h",
+            snapshot("1h", new BigDecimal("70.00"), new BigDecimal("55.00"), null));
+
+        verify(reviewRepository, never()).save(any());
+    }
+
+    @Test
+    void captureBehaviourReview_ignoresInvalidInstrument() {
+        MentorSignalReviewService service = new MentorSignalReviewService(
+            mentorAnalysisService, indicatorService, mentorIntermarketService,
+            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+        );
+        service.setAutoAnalysisEnabled(true);
+
+        BehaviourAlertSignal signal = new BehaviourAlertSignal(
+            "ema50:proximity:INVALID:10m",
+            BehaviourAlertCategory.EMA_PROXIMITY,
+            "INVALID [10m] — Price approaching EMA50",
+            "INVALID",
+            Instant.now()
+        );
+
+        service.captureBehaviourReview(signal, "10m",
+            snapshot("10m", new BigDecimal("100.00"), new BigDecimal("50.00"), null));
+
+        verifyNoInteractions(reviewRepository);
     }
 
     private static IndicatorSnapshot snapshot(String timeframe, BigDecimal vwap, BigDecimal rsi, String lastBreakType) {

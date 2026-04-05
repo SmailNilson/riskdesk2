@@ -1,5 +1,6 @@
 package com.riskdesk.infrastructure.config;
 
+import com.riskdesk.domain.alert.port.AlertStateStore;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
@@ -30,8 +31,8 @@ public class AlertConfig {
     }
 
     @Bean
-    public IndicatorAlertEvaluator indicatorAlertEvaluator() {
-        return new IndicatorAlertEvaluator();
+    public IndicatorAlertEvaluator indicatorAlertEvaluator(AlertStateStore alertStateStore) {
+        return new IndicatorAlertEvaluator(alertStateStore);
     }
 
     @Bean

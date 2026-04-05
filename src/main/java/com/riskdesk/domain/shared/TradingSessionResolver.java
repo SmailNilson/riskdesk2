@@ -1,5 +1,7 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
+
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -73,6 +75,45 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    /**
+     * Returns {@code true} if the CME futures market is open at the given timestamp.
+     * <p>
+     * CME weekly session: Sunday 17:00 ET → Friday 17:00 ET.
+     * Outside this window (Friday 17:00 ET → Sunday 17:00 ET) the market is closed.
+     * This does NOT filter the daily 17:00–18:00 ET maintenance halt because
+     * IBKR data is already clean and indicators need contiguous series.
+     */
+    public static boolean isMarketOpen(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        // Saturday: always closed
+        if (dow == DayOfWeek.SATURDAY) return false;
+        // Sunday before 17:00 ET: closed
+        if (dow == DayOfWeek.SUNDAY && time.isBefore(CME_SESSION_CLOSE)) return false;
+        // Friday at or after 17:00 ET: closed
+        if (dow == DayOfWeek.FRIDAY && !time.isBefore(CME_SESSION_CLOSE)) return false;
+
+        return true;
+    }
+
+    /**
+     * Instrument-aware overload for future extensibility.
+     * <p>
+     * Currently all exchange-traded instruments (MCL, MGC, E6, MNQ) follow
+     * the same CME Globex schedule.  Synthetic instruments (DXY) are excluded
+     * from session filtering because they derive from FX pairs that trade 24/5.
+     *
+     * @param timestamp  the moment to check
+     * @param instrument the instrument to check
+     * @return true if the market is open for this instrument at that instant
+     */
+    public static boolean isMarketOpen(Instant timestamp, Instrument instrument) {
+        if (instrument.isSynthetic()) return true;
+        return isMarketOpen(timestamp);
     }
 
     /**

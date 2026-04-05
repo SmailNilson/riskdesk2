@@ -15,6 +15,7 @@ public record MentorSignalReview(
     String instrument,
     String timeframe,
     String action,
+    String sourceType,
     String timestamp,
     String createdAt,
     String selectedTimezone,

@@ -71,6 +71,11 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     }
 
     @Override
+    public boolean existsRecentReview(String instrument, String category, String action, Instant since) {
+        return repository.existsRecentReview(instrument, category, action, since);
+    }
+
+    @Override
     @Transactional
     public int markAnalyzingAsError(String errorMessage) {
         return repository.markAnalyzingAsError(errorMessage, Instant.now());

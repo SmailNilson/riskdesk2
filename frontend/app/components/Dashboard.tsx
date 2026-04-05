@@ -8,8 +8,7 @@ import RolloverBanner from './RolloverBanner';
 import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
-import MentorPanel from './MentorPanel';
-import MentorSignalPanel from './MentorSignalPanel';
+import AiMentorDesk from './AiMentorDesk';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -126,7 +125,7 @@ export default function Dashboard() {
       </header>
 
       {/* Metrics bar */}
-      <MetricsBar summary={summary} connected={connected} />
+      <MetricsBar summary={summary} connected={connected} prices={prices} />
 
       {/* Rollover warning — visible only when a contract is near expiry */}
       <RolloverBanner />
@@ -139,7 +138,7 @@ export default function Dashboard() {
           return (
             <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
               <span className="text-[10px] text-zinc-500">{inst}</span>
-              <span className="text-xs font-mono text-white">
+              <span className={`text-xs font-mono ${p?.source === 'STALE' ? 'text-zinc-500' : 'text-white'}`}>
                 {p ? p.price.toFixed(decimals) : '—'}
               </span>
             </div>
@@ -170,18 +169,7 @@ export default function Dashboard() {
           onRefreshRequested={loadSummary}
         />
 
-        <MentorSignalPanel
-          timezone={timezone}
-          alerts={alerts}
-          reviews={mentorSignalReviews}
-          selectedBrokerAccountId={selectedIbkrAccountId}
-          onRefresh={refresh}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
-
-        <MentorPanel
+        <AiMentorDesk
           instrument={instrument}
           timeframe={timeframe}
           timezone={timezone}
@@ -190,7 +178,13 @@ export default function Dashboard() {
           snapshot={snapshot}
           prices={prices}
           alerts={alerts}
+          reviews={mentorSignalReviews}
+          selectedBrokerAccountId={selectedIbkrAccountId}
+          onRefresh={refresh}
         />
+
+        {/* Backtest */}
+        <BacktestPanel />
       </div>
 
       <AlertsFeed alerts={alerts} />
