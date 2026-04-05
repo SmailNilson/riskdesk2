@@ -10,6 +10,8 @@ import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.infrastructure.config.MentorProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class MentorAnalysisService {
 
+    private static final Logger log = LoggerFactory.getLogger(MentorAnalysisService.class);
     private static final long SIMILAR_AUDITS_TIMEOUT_MS = 2500L;
     public static final String MANUAL_SOURCE_PREFIX = "manual-mentor:";
     public static final String ALERT_SOURCE_PREFIX = "alert-review:";
@@ -113,7 +116,11 @@ public class MentorAnalysisService {
             audit.setSemanticText(buildSemanticText(payload, structured));
             audit.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
             MentorAudit saved = mentorAuditRepository.save(audit);
-            CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved));
+            CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved))
+                .exceptionally(ex -> {
+                    log.error("Async audit indexing failed for audit {}", saved.getId(), ex);
+                    return null;
+                });
             return saved.getId();
         } catch (Exception ignored) {
             return null;

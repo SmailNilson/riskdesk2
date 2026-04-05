@@ -221,7 +221,11 @@ public class MentorSignalReviewService {
 
         if (snapshotError == null && payload != null) {
             JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
+            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload))
+                .exceptionally(ex -> {
+                    log.error("Async analysis failed for review {}", saved.getId(), ex);
+                    return null;
+                });
         }
     }
 
@@ -361,7 +365,11 @@ public class MentorSignalReviewService {
             publish(saved);
             JsonNode reviewPayload = payload;
             Long savedReviewId = saved.getId();
-            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload));
+            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload))
+                .exceptionally(ex -> {
+                    log.error("Async reanalysis failed for review {}", savedReviewId, ex);
+                    return null;
+                });
         } catch (Exception e) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -1305,6 +1313,10 @@ public class MentorSignalReviewService {
     }
 
     private Map<String, Object> linkedMap(Object... values) {
+        if (values.length % 2 != 0) {
+            throw new IllegalArgumentException(
+                "linkedMap requires even number of arguments (key-value pairs), got " + values.length);
+        }
         Map<String, Object> map = new LinkedHashMap<>();
         for (int i = 0; i < values.length; i += 2) {
             map.put(String.valueOf(values[i]), values[i + 1]);

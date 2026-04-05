@@ -112,7 +112,11 @@ public class HistoricalDataService implements ApplicationRunner {
         if (!enabled) {
             return Map.of("status", "disabled", "message", "Historical data fetch is disabled.");
         }
-        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual"));
+        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual"))
+            .exceptionally(ex -> {
+                log.error("Async historical data refresh failed", ex);
+                return null;
+            });
         return Map.of("status", "ok", "message", "Database refresh started in background.");
     }
 
