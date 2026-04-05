@@ -121,7 +121,7 @@ export default function AiMentorDesk({
       {/* Tab content */}
       <div>
         {(activeTab === 'ALL' || activeTab === 'SIGNALS') && (
-          <div className={activeTab === 'ALL' ? '' : ''}>
+          <div>
             {activeTab === 'ALL' && (
               <div className="px-4 pt-2 pb-1">
                 <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider">
