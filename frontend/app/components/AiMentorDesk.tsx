@@ -73,6 +73,7 @@ export default function AiMentorDesk({
     [alerts]
   );
 
+
   const tabCounts: Record<TabKey, number> = useMemo(() => ({
     ALL: reviews.length,
     SIGNALS: signalReviews.length,
