@@ -34,12 +34,6 @@ public class IbGatewayContractResolver {
             return Optional.of(cached);
         }
 
-        Optional<IbGatewayResolvedContract> preconfigured = preconfigured(instrument);
-        if (preconfigured.isPresent()) {
-            cache.put(instrument, preconfigured.get());
-            return preconfigured;
-        }
-
         return refresh(instrument);
     }
 
@@ -144,19 +138,6 @@ public class IbGatewayContractResolver {
         };
     }
 
-    private Optional<IbGatewayResolvedContract> preconfigured(Instrument instrument) {
-        Contract contract = switch (instrument) {
-            case MCL -> buildContract(661016514, "MCL", "NYMEX", "USD", "100", "MCL", "202605");
-            case MGC -> buildContract(706903676, "MGC", "COMEX", "USD", "10", "MGC", "202604");
-            case MNQ -> buildContract(770561201, "MNQ", "CME", "USD", "2", "MNQ", "202606");
-            case E6 -> buildContract(496647057, "EUR", "CME", "USD", "125000", "6E", "202606");
-            case DXY -> null;
-        };
-        return contract == null
-            ? Optional.empty()
-            : Optional.of(new IbGatewayResolvedContract(instrument, contract, null));
-    }
-
     private Contract buildQuery(String symbol,
                                 String exchange,
                                 String currency,
@@ -174,26 +155,6 @@ public class IbGatewayContractResolver {
         if (tradingClass != null) {
             contract.tradingClass(tradingClass);
         }
-        return contract;
-    }
-
-    private Contract buildContract(int conid,
-                                   String symbol,
-                                   String exchange,
-                                   String currency,
-                                   String multiplier,
-                                   String tradingClass,
-                                   String contractMonth) {
-        Contract contract = new Contract();
-        contract.conid(conid);
-        contract.secType(SecType.FUT);
-        contract.symbol(symbol);
-        contract.exchange(exchange);
-        contract.currency(currency);
-        contract.multiplier(multiplier);
-        contract.tradingClass(tradingClass);
-        contract.lastTradeDateOrContractMonth(contractMonth);
-        contract.includeExpired(false);
         return contract;
     }
 
