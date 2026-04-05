@@ -731,6 +731,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // ── Append live tick to current candle bar ──────────────────────────────────
   useEffect(() => {
     if (!livePrice || !candleRef.current) return;
+    // Do not merge stale prices (market closed) into the chart
+    if (livePrice.source === 'STALE') return;
     const updated = mergeLivePrice(lastCandleRef.current, livePrice, timeframe);
     // lightweight-charts throws if we update() with a time older than the last bar
     if (lastCandleRef.current && (updated.time as number) < (lastCandleRef.current.time as number)) return;

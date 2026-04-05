@@ -1,5 +1,7 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
+
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -73,6 +75,52 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    /**
+     * Returns {@code true} when the CME futures market is open.
+     * <p>
+     * CME Globex is open Sunday 17:00 ET through Friday 17:00 ET (with a daily
+     * maintenance halt 17:00–18:00 ET that we intentionally do NOT filter,
+     * because IBKR does not send ticks during that window anyway).
+     * <p>
+     * Closed window: Friday 17:00 ET → Sunday 17:00 ET.
+     *
+     * @param timestamp the moment to check (UTC)
+     * @return true if the market is open at that instant
+     */
+    public static boolean isMarketOpen(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        LocalTime time = zdt.toLocalTime();
+
+        // Saturday → always closed
+        if (dow == DayOfWeek.SATURDAY) return false;
+
+        // Sunday → open only at or after 17:00 ET
+        if (dow == DayOfWeek.SUNDAY) return !time.isBefore(CME_SESSION_CLOSE);
+
+        // Friday → open only before 17:00 ET
+        if (dow == DayOfWeek.FRIDAY) return time.isBefore(CME_SESSION_CLOSE);
+
+        // Monday–Thursday → always open (maintenance halt is intentionally ignored)
+        return true;
+    }
+
+    /**
+     * Instrument-aware overload for future extensibility.
+     * <p>
+     * Currently all exchange-traded instruments (MCL, MGC, E6, MNQ) follow
+     * the same CME Globex schedule.  Synthetic instruments (DXY) are excluded
+     * from session filtering because they derive from FX pairs that trade 24/5.
+     *
+     * @param timestamp  the moment to check
+     * @param instrument the instrument to check
+     * @return true if the market is open for this instrument at that instant
+     */
+    public static boolean isMarketOpen(Instant timestamp, Instrument instrument) {
+        if (instrument.isSynthetic()) return true;
+        return isMarketOpen(timestamp);
     }
 
     /**

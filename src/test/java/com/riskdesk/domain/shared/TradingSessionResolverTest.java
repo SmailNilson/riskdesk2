@@ -1,5 +1,6 @@
 package com.riskdesk.domain.shared;
 
+import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -200,6 +201,109 @@ class TradingSessionResolverTest {
     void tradingDate_variousUTCTimes(String utcTimestamp, String expectedDate) {
         Instant tick = Instant.parse(utcTimestamp);
         assertEquals(LocalDate.parse(expectedDate), TradingSessionResolver.tradingDate(tick));
+    }
+
+    // -- isMarketOpen -----------------------------------------------------------
+
+    @Test
+    void isMarketOpen_saturdayAlwaysClosed() {
+        // Saturday March 28, 2026 at 12:00 ET
+        Instant saturday = ZonedDateTime.of(2026, 3, 28, 12, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMarketOpen(saturday));
+    }
+
+    @Test
+    void isMarketOpen_sundayBeforeOpen_closed() {
+        // Sunday March 22, 2026 at 10:00 ET (before 17:00 ET)
+        Instant sundayMorning = ZonedDateTime.of(2026, 3, 22, 10, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMarketOpen(sundayMorning));
+    }
+
+    @Test
+    void isMarketOpen_sundayAtOpen_open() {
+        // Sunday March 22, 2026 at 17:00 ET (exactly at open)
+        Instant sundayOpen = ZonedDateTime.of(2026, 3, 22, 17, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMarketOpen(sundayOpen));
+    }
+
+    @Test
+    void isMarketOpen_sundayAfterOpen_open() {
+        // Sunday March 22, 2026 at 18:30 ET
+        Instant sundayEvening = ZonedDateTime.of(2026, 3, 22, 18, 30, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMarketOpen(sundayEvening));
+    }
+
+    @Test
+    void isMarketOpen_midweek_alwaysOpen() {
+        // Wednesday March 25, 2026 at 03:00 ET (overnight session)
+        Instant wednesdayNight = ZonedDateTime.of(2026, 3, 25, 3, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMarketOpen(wednesdayNight));
+    }
+
+    @Test
+    void isMarketOpen_fridayBeforeClose_open() {
+        // Friday March 27, 2026 at 16:59 ET
+        Instant fridayBeforeClose = ZonedDateTime.of(2026, 3, 27, 16, 59, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMarketOpen(fridayBeforeClose));
+    }
+
+    @Test
+    void isMarketOpen_fridayAtClose_closed() {
+        // Friday March 27, 2026 at 17:00 ET (market closes)
+        Instant fridayClose = ZonedDateTime.of(2026, 3, 27, 17, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMarketOpen(fridayClose));
+    }
+
+    @Test
+    void isMarketOpen_fridayAfterClose_closed() {
+        // Friday March 27, 2026 at 20:00 ET
+        Instant fridayEvening = ZonedDateTime.of(2026, 3, 27, 20, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMarketOpen(fridayEvening));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        // DST spring forward: March 8, 2026 — Sunday 16:00 EDT (before 17:00 ET open)
+        "2026-03-08T20:00:00Z, false",
+        // DST spring forward: Sunday at 17:00 EDT (after DST switch)
+        "2026-03-08T21:00:00Z, true",
+        // DST fall back: Nov 1, 2026 — Sunday before open
+        "2026-11-01T15:00:00-04:00, false",
+        // DST fall back: Sunday at 17:00 EST (after DST switch)
+        "2026-11-01T22:00:00Z, true",
+    })
+    void isMarketOpen_dstTransitions(String timestamp, boolean expectedOpen) {
+        Instant tick = Instant.parse(timestamp);
+        assertEquals(expectedOpen, TradingSessionResolver.isMarketOpen(tick),
+                "isMarketOpen(" + timestamp + ") should be " + expectedOpen);
+    }
+
+    // -- isMarketOpen(Instant, Instrument) — instrument-aware -------------------
+
+    @Test
+    void isMarketOpen_syntheticInstrument_alwaysOpen() {
+        // DXY is synthetic — should always return true even on Saturday
+        Instant saturday = ZonedDateTime.of(2026, 3, 28, 12, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertTrue(TradingSessionResolver.isMarketOpen(saturday, Instrument.DXY));
+    }
+
+    @Test
+    void isMarketOpen_exchangeTradedFuture_respectsSchedule() {
+        Instant saturday = ZonedDateTime.of(2026, 3, 28, 12, 0, 0, 0,
+                TradingSessionResolver.CME_ZONE).toInstant();
+        assertFalse(TradingSessionResolver.isMarketOpen(saturday, Instrument.MCL));
+        assertFalse(TradingSessionResolver.isMarketOpen(saturday, Instrument.MGC));
+        assertFalse(TradingSessionResolver.isMarketOpen(saturday, Instrument.E6));
+        assertFalse(TradingSessionResolver.isMarketOpen(saturday, Instrument.MNQ));
     }
 
 }

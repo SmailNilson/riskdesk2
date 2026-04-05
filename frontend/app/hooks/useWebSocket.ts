@@ -11,6 +11,7 @@ export interface PriceUpdate {
   displayName: string;
   price: number;
   timestamp: string;
+  source?: string;
 }
 
 export interface AlertMessage {
