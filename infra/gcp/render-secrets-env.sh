@@ -81,12 +81,10 @@ chmod 700 /etc/riskdesk
   printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.1-pro-preview}"
   printf 'GEMINI_EMBEDDING_MODEL=%s\n' "${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}"
 
-  if [[ -n "${TELEGRAM_BOT_TOKEN_SECRET:-}" ]]; then
-    printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(maybe_read_secret "${TELEGRAM_BOT_TOKEN_SECRET}")"
-  fi
-
-  if [[ -n "${TELEGRAM_CHAT_ID_SECRET:-}" ]]; then
-    printf 'TELEGRAM_CHAT_ID=%s\n' "$(maybe_read_secret "${TELEGRAM_CHAT_ID_SECRET}")"
+  if [[ -n "${TELEGRAM_BOT_TOKEN_SECRET:-}" && -n "${TELEGRAM_CHAT_ID_SECRET:-}" ]]; then
+    printf 'RISKDESK_ALERTS_TELEGRAM_ENABLED=true\n'
+    printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(read_secret "${TELEGRAM_BOT_TOKEN_SECRET}")"
+    printf 'TELEGRAM_CHAT_ID=%s\n' "$(read_secret "${TELEGRAM_CHAT_ID_SECRET}")"
   fi
 } > /etc/riskdesk/runtime.env
 
