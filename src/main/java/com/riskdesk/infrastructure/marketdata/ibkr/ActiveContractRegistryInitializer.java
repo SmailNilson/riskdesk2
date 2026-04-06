@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,7 +11,9 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 /**
  * Initializes the ActiveContractRegistry at startup (Order 1 — before HistoricalDataService).
@@ -30,6 +33,7 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     private final ActiveContractRegistry    registry;
     private final IbGatewayContractResolver resolver;
+    private final OpenInterestProvider     openInterestProvider;
     private final IbkrProperties            ibkrProperties;
 
     @Value("${riskdesk.active-contracts.MCL:202505}")
@@ -46,10 +50,12 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
+                                             OpenInterestProvider openInterestProvider,
                                              IbkrProperties ibkrProperties) {
-        this.registry       = registry;
-        this.resolver       = resolver;
-        this.ibkrProperties = ibkrProperties;
+        this.registry              = registry;
+        this.resolver              = resolver;
+        this.openInterestProvider  = openInterestProvider;
+        this.ibkrProperties        = ibkrProperties;
     }
 
     @Override
@@ -81,20 +87,73 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
         log.info("ActiveContractRegistry ready: {}", registry.snapshot());
     }
 
+    /**
+     * Resolves the active contract month from IBKR using Open Interest comparison.
+     * Fetches the top 2 contracts (front + next) sorted by expiry, compares their OI,
+     * and picks the one with the highest OI. This ensures the system starts on the
+     * contract that the market has already rolled to, not the nearest-expiry one.
+     */
     private String resolveFromIbkr(Instrument instrument) {
         try {
-            return resolver.refresh(instrument)
-                .map(resolved -> resolved.contract().lastTradeDateOrContractMonth())
-                .map(raw -> {
-                    // Normalize: strip non-digits, keep first 6 (YYYYMM)
-                    String digits = raw.replaceAll("[^0-9]", "");
-                    return digits.length() >= 6 ? digits.substring(0, 6) : null;
-                })
-                .filter(month -> month != null && month.matches("\\d{6}"))
-                .orElse(null);
+            List<IbGatewayResolvedContract> topTwo = resolver.resolveTopTwo(instrument);
+            if (topTwo.isEmpty()) {
+                return null;
+            }
+
+            // Extract YYYYMM from each contract
+            String frontMonth = extractMonth(topTwo.get(0));
+            if (frontMonth == null) return null;
+
+            if (topTwo.size() < 2) {
+                log.info("ActiveContractRegistryInitializer: {} — only 1 contract available ({}), using it", instrument, frontMonth);
+                cacheResolved(instrument, topTwo.get(0));
+                return frontMonth;
+            }
+
+            String nextMonth = extractMonth(topTwo.get(1));
+            if (nextMonth == null) {
+                cacheResolved(instrument, topTwo.get(0));
+                return frontMonth;
+            }
+
+            // Compare OI: pick the contract with the highest Open Interest
+            OptionalLong frontOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
+            OptionalLong nextOI  = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
+
+            long fOI = frontOI.orElse(0L);
+            long nOI = nextOI.orElse(0L);
+
+            log.info("ActiveContractRegistryInitializer: {} OI comparison — {} OI={} vs {} OI={}",
+                instrument, frontMonth, fOI, nextMonth, nOI);
+
+            if (nOI > fOI) {
+                log.info("ActiveContractRegistryInitializer: {} — next month {} has higher OI, selecting it", instrument, nextMonth);
+                cacheResolved(instrument, topTwo.get(1));
+                return nextMonth;
+            }
+
+            cacheResolved(instrument, topTwo.get(0));
+            return frontMonth;
+
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
+    }
+
+    private void cacheResolved(Instrument instrument, IbGatewayResolvedContract resolved) {
+        // Populate the resolver cache so downstream services use the correct contract
+        resolver.clearCache();
+        resolver.resolve(instrument);
+    }
+
+    private String extractMonth(IbGatewayResolvedContract resolved) {
+        String raw = resolved.contract().lastTradeDateOrContractMonth();
+        if (raw == null) return null;
+        String digits = raw.replaceAll("[^0-9]", "");
+        if (digits.length() >= 6 && digits.substring(0, 6).matches("\\d{6}")) {
+            return digits.substring(0, 6);
+        }
+        return null;
     }
 }
