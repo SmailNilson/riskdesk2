@@ -57,6 +57,12 @@ class IndicatorAlertEvaluatorTest {
             List<OrderBlockZone> activeOrderBlocks,
             List<OrderBlockEvent> obEvents,
             Instant lastCandleTimestamp) {
+        // Derive a close price from the first OB event (if any) for proximity filter
+        BigDecimal close = null;
+        if (obEvents != null && !obEvents.isEmpty()) {
+            OrderBlockEvent evt = obEvents.get(0);
+            close = evt.high().add(evt.low()).divide(BigDecimal.TWO, 5, java.math.RoundingMode.HALF_UP);
+        }
         return new IndicatorAlertSnapshot(
             emaCrossover,
             rsi, rsiSignal,
@@ -71,7 +77,7 @@ class IndicatorAlertEvaluatorTest {
             activeOrderBlocks == null ? Collections.emptyList() : activeOrderBlocks,
             obEvents == null ? Collections.emptyList() : obEvents,
             lastCandleTimestamp,
-            null, null, null, null, Collections.emptyList(), Collections.emptyList(),
+            null, null, close, null, Collections.emptyList(), Collections.emptyList(),
             null, null, null, null, null, null, null, null
         );
     }
