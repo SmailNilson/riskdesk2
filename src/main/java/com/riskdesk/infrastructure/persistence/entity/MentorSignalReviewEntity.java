@@ -111,6 +111,9 @@ public class MentorSignalReviewEntity {
     @Column(length = 16, nullable = false)
     private String sourceType = "SIGNAL";
 
+    @Column(precision = 19, scale = 6)
+    private BigDecimal triggerPrice;
+
     public Long getId() {
         return id;
     }
@@ -317,5 +320,13 @@ public class MentorSignalReviewEntity {
 
     public void setSourceType(String sourceType) {
         this.sourceType = sourceType;
+    }
+
+    public BigDecimal getTriggerPrice() {
+        return triggerPrice;
+    }
+
+    public void setTriggerPrice(BigDecimal triggerPrice) {
+        this.triggerPrice = triggerPrice;
     }
 }
