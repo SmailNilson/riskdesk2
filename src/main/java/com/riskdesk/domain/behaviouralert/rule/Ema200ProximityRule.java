@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class Ema200ProximityRule implements BehaviourAlertRule {
 
-    static final BigDecimal PROXIMITY_THRESHOLD = new BigDecimal("0.0015");
+    static final BigDecimal PROXIMITY_THRESHOLD = new BigDecimal("0.003");
 
     private final ConcurrentHashMap<String, String> lastState = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Instant> lastFiredCandle = new ConcurrentHashMap<>();

@@ -2,7 +2,6 @@ package com.riskdesk.infrastructure.config;
 
 import com.riskdesk.domain.behaviouralert.rule.BehaviourAlertRule;
 import com.riskdesk.domain.behaviouralert.rule.CmfDivergenceRule;
-import com.riskdesk.domain.behaviouralert.rule.CmfPriceConfirmationRule;
 import com.riskdesk.domain.behaviouralert.rule.Ema200ProximityRule;
 import com.riskdesk.domain.behaviouralert.rule.Ema50ProximityRule;
 import com.riskdesk.domain.behaviouralert.rule.ExtremeCmfZoneRule;
@@ -48,11 +47,6 @@ public class BehaviourAlertConfig {
     @Bean
     public CmfDivergenceRule cmfDivergenceRule() {
         return new CmfDivergenceRule();
-    }
-
-    @Bean
-    public CmfPriceConfirmationRule cmfPriceConfirmationRule() {
-        return new CmfPriceConfirmationRule();
     }
 
     @Bean
