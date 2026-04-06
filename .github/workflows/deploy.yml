@@ -145,4 +145,4 @@ jobs:
           gcloud compute ssh "${INSTANCE_NAME}" \
             --zone "${ZONE}" \
             --tunnel-through-iap \
-            --command "timeout 180 bash -c 'until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done' && echo Deploy OK"
+            --command "timeout 480 bash -c 'until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done' && echo Deploy OK"
