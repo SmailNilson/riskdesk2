@@ -278,25 +278,20 @@ public class MentorSignalReviewService {
         }
 
         MentorSignalReviewRecord pending = newReviewRecord(
-            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+            alertKey, 1, TRIGGER_INITIAL, STATUS_DONE,
             syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
         );
         pending.setSourceType("BEHAVIOUR");
         pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
         pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+        pending.setCompletedAt(Instant.now());
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
-            pending.setCompletedAt(Instant.now());
             pending.setErrorMessage(snapshotError);
         }
 
         MentorSignalReviewRecord saved = reviewRepository.save(pending);
         publish(saved);
-
-        if (snapshotError == null && payload != null) {
-            JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
-        }
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert) {
