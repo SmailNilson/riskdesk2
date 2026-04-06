@@ -66,7 +66,7 @@ public class RolloverDetectionService {
 
     public void confirmRollover(Instrument instrument, String contractMonth) {
         contractRegistry.confirmRollover(instrument, contractMonth);
-        resolver.clearCache();
+        resolver.refreshToMonth(instrument, contractMonth);
     }
 
     /** Scheduled check every 6 hours (with 1-minute initial delay after startup). */

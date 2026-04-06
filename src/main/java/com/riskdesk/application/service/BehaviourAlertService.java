@@ -58,13 +58,18 @@ public class BehaviourAlertService {
                 IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, tf);
                 BehaviourAlertContext context = toContext(instrument, tf, snap);
                 List<BehaviourAlertSignal> signals = evaluator.evaluate(context);
+                BehaviourAlertSignal firstPublished = null;
                 for (BehaviourAlertSignal signal : signals) {
-                    if (publish(signal)) {
-                        try {
-                            mentorSignalReviewService.captureBehaviourReview(signal, tf, snap);
-                        } catch (Exception e) {
-                            log.debug("Behaviour mentor review capture failed for {} {}: {}", instrument, tf, e.getMessage());
-                        }
+                    boolean published = publish(signal);
+                    if (published && firstPublished == null) {
+                        firstPublished = signal;
+                    }
+                }
+                if (firstPublished != null) {
+                    try {
+                        mentorSignalReviewService.captureBehaviourReview(firstPublished, tf, snap);
+                    } catch (Exception e) {
+                        log.debug("Behaviour mentor review capture failed for {} {}: {}", instrument, tf, e.getMessage());
                     }
                 }
             } catch (Exception e) {
