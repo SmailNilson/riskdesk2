@@ -130,18 +130,11 @@ public class AlertService {
 
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
+                        // Route to confluence buffer — standalone signals (3.0) flush immediately
+                        SignalWeight sw = SignalWeight.fromAlert(alert);
                         String direction = SignalPreFilterService.extractDirection(alert);
-                        if (direction == null) continue;
-
-                        if ("5m".equals(timeframe)) {
-                            // 5m = TRIGGER only — fires any ARMED HTF buffer, never accumulates
-                            confluenceBuffer.trigger(alert, direction, snap);
-                        } else {
-                            // 10m, 1h = accumulate towards ARMED state
-                            SignalWeight sw = SignalWeight.fromAlert(alert);
-                            if (sw != null) {
-                                confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
-                            }
+                        if (sw != null && direction != null) {
+                            confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
                         }
                     }
                 }
