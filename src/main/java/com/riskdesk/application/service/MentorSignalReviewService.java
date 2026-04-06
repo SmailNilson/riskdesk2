@@ -278,25 +278,20 @@ public class MentorSignalReviewService {
         }
 
         MentorSignalReviewRecord pending = newReviewRecord(
-            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+            alertKey, 1, TRIGGER_INITIAL, STATUS_DONE,
             syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
         );
         pending.setSourceType("BEHAVIOUR");
         pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
         pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+        pending.setCompletedAt(Instant.now());
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
-            pending.setCompletedAt(Instant.now());
             pending.setErrorMessage(snapshotError);
         }
 
         MentorSignalReviewRecord saved = reviewRepository.save(pending);
         publish(saved);
-
-        if (snapshotError == null && payload != null) {
-            JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
-        }
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert) {
@@ -444,7 +439,7 @@ public class MentorSignalReviewService {
                 review.setStatus(STATUS_DONE);
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(analysis));
-                review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
+                review.setVerdict(truncate(analysis.analysis() == null ? null : analysis.analysis().verdict(), 512));
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
@@ -590,7 +585,11 @@ public class MentorSignalReviewService {
                 ? "Mentor explicitly marked the review as execution-eligible."
                 : "Mentor did not mark the review as execution-eligible.";
         }
-        return reason;
+        return truncate(reason, 1024);
+    }
+
+    private static String truncate(String value, int maxLen) {
+        return value != null && value.length() > maxLen ? value.substring(0, maxLen) : value;
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate,
