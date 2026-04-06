@@ -100,6 +100,16 @@ public class IbGatewayContractResolver {
         cache.clear();
     }
 
+    /**
+     * Directly caches a specific resolved contract for an instrument.
+     * Used by {@code ActiveContractRegistryInitializer} after OI-based selection
+     * to ensure downstream services (MarketDataService, HistoricalDataService)
+     * use the OI-selected contract, not the min-expiry one.
+     */
+    public void cacheContract(Instrument instrument, IbGatewayResolvedContract resolved) {
+        cache.put(instrument, resolved);
+    }
+
     public Optional<Instrument> detectInstrument(Contract contract) {
         String symbol = safe(contract.symbol());
         String localSymbol = safe(contract.localSymbol());
