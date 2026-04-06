@@ -27,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SignalConfluenceBuffer {
 
     private static final Logger log = LoggerFactory.getLogger(SignalConfluenceBuffer.class);
-    private static final float FLUSH_THRESHOLD = 3.0f;
+    private static final float FLUSH_THRESHOLD = 2.0f;
 
     private final ConcurrentHashMap<String, BufferEntry> buffers = new ConcurrentHashMap<>();
     private final MentorSignalReviewService mentorSignalReviewService;
