@@ -599,6 +599,7 @@ public class MentorSignalReviewService {
                                   MentorSignalReviewRecord originalReview,
                                   TradePlanValues requestedPlan,
                                   String selectedTimezone) {
+        boolean isLtf = "10m".equals(candidate.timeframe()) || "30m".equals(candidate.timeframe());
         IndicatorSnapshot focusSnapshot = precomputedFocusSnapshot != null
             ? precomputedFocusSnapshot
             : indicatorService.computeSnapshot(candidate.instrument(), candidate.timeframe());
@@ -660,14 +661,33 @@ public class MentorSignalReviewService {
             "trend_focus", focusSnapshot.marketStructureTrend(),
             "focus_timeframe", toMentorTimeframe(candidate.timeframe()),
             "pd_array_zone_session", focusSnapshot.sessionPdZone(),
-            "pd_array_zone_structural", focusSnapshot.currentZone(),
+            "pd_array_zone_structural", isLtf ? h1Snapshot.currentZone() : focusSnapshot.currentZone(),
             "last_event", focusSnapshot.lastBreakType(),
             "last_event_price", focusSnapshot.recentBreaks().isEmpty() ? null : focusSnapshot.recentBreaks().get(0).level(),
             "nearest_support_ob", nearestSupport,
             "nearest_resistance_ob", nearestResistance,
             "liquidity_pools", buildLiquidityPools(focusSnapshot),
             "nearest_fvg", buildNearestFvg(focusSnapshot, currentPrice),
-            "key_psychological_level_proximity", nearestPsychologicalLevel(currentPrice, candidate.instrument())
+            "key_psychological_level_proximity", nearestPsychologicalLevel(currentPrice, candidate.instrument()),
+            "htf_context", isLtf ? linkedMap(
+                "pd_zone", h1Snapshot.currentZone(),
+                "premium_zone_top", h1Snapshot.premiumZoneTop(),
+                "equilibrium", h1Snapshot.equilibriumLevel(),
+                "discount_zone_bottom", h1Snapshot.discountZoneBottom(),
+                "swing_high", h1Snapshot.swingHigh(),
+                "swing_low", h1Snapshot.swingLow(),
+                "strong_high", h1Snapshot.strongHigh(),
+                "strong_low", h1Snapshot.strongLow(),
+                "weak_high", h1Snapshot.weakHigh(),
+                "weak_low", h1Snapshot.weakLow(),
+                "last_break", h1Snapshot.lastBreakType(),
+                "nearest_ob_support", findNearestOrderBlock(h1Snapshot, referencePrice, "BULLISH"),
+                "nearest_ob_resistance", findNearestOrderBlock(h1Snapshot, referencePrice, "BEARISH"),
+                "ema_50", h1Snapshot.ema50(),
+                "ema_200", h1Snapshot.ema200(),
+                "rsi", h1Snapshot.rsi(),
+                "rsi_signal", h1Snapshot.rsiSignal()
+            ) : null
         ));
         payload.put("dynamic_levels_and_mean_reversion", linkedMap(
             "vwap_value", focusSnapshot.vwap(),
