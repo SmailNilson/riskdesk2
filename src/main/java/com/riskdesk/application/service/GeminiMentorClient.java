@@ -46,6 +46,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "PREMIUM" et action = "LONG" → REJET IMMÉDIAT.
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "DISCOUNT" et action = "SHORT" → REJET IMMÉDIAT.
         - Si aucun Order Block n'est proche ET aucune liquidité n'a été purgée → REJET.
+        - RÈGLE MULTI-TIMEFRAME : Si le bloc htf_context est présent dans le JSON, le trade proposé DOIT être dans le sens de la tendance H1 (trend_H1) et ne doit pas s'écraser contre un Order Block majeur du htf_context.
 
         ### Niveau 2 : Order Flow & Delta (Poids : 30%%)
         - Le delta cumulatif (cumulative_delta_trend) soutient-il le Niveau 1 ?
