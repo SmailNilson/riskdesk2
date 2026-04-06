@@ -56,13 +56,15 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 
 ### Key Domain Packages
 
-- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend, CMF (Chaikin Money Flow)
-- `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks
+- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend, CMF (Chaikin Money Flow), MarketRegimeDetector (TRENDING/RANGING/CHOPPY from EMA alignment + BB width)
+- `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks, SessionPdArrayCalculator (Premium/Discount/Equilibrium zones)
 - `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
 - `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
 - `domain/behaviouralert/` — CMF/Chaikin behaviour alerts (separate from technical indicator alerts)
 - `domain/trading/` — Position, risk, and portfolio models
 - `domain/analysis/` — AI/Mentor analysis models
+- `domain/model/AssetClass` — METALS, ENERGY, FOREX, EQUITY_INDEX — per-class macro correlation kinds and sector leader mappings
+- `domain/marketdata/port/TickDataPort` — Domain abstraction for real-time order flow (TickAggregation with Lee-Ready classification)
 - `domain/shared/TradingSessionResolver` — All timezone/session logic lives here
 - `domain/marketdata/model/SyntheticDollarIndexCalculator` — Synthetic DXY from 6 FX pairs
 
@@ -104,6 +106,10 @@ The domain layer publishes events consumed by application services:
 | `AlertService` | Indicator alert publishing + Mentor review batching by direction |
 | `MentorSignalReviewService` | Persisted review snapshots, re-analysis revisions |
 | `MentorIntermarketService` | Macro correlation context (DXY-backed, no external HTTP) |
+| `DxyMarketService` | Synthetic DXY computation, persistence, REST + WebSocket publication |
+| `ExecutionManagerService` | Trade execution lifecycle — arming, IBKR order submission, idempotence |
+| `TradeSimulationService` | Post-trade outcome replay using internal 1m candles |
+| `GeminiMentorClient` | Gemini API calls with dynamic per-asset-class system prompts |
 | `IbGatewayNativeClient` | Native IB Gateway TCP connection (infra) |
 
 ### Frontend Component Map
@@ -169,6 +175,24 @@ These are critical — violating them causes subtle bugs across half the year.
 
 Full rules in `docs/ARCHITECTURE_PRINCIPLES.md` § "Date, Time & Timezone Rules".
 
+## Mentor IA v2 — Per-Asset-Class Payloads
+
+The Mentor system uses Gemini with dynamic, per-asset-class system prompts and payloads:
+
+- **AssetClass** (`domain/model/AssetClass`) determines macro correlation kinds and sector leaders (e.g., Silver leads METALS, VIX signals for EQUITY_INDEX)
+- **Decision hierarchy** enforced in Gemini system prompt: Structure 50% > Order Flow 30% > Momentum 20%
+- **Order flow** sourced via `TickDataPort` — real ticks when available (Lee-Ready classified), CLV estimation as fallback. Payload includes `source: "REAL_TICKS" | "CLV_ESTIMATED"` so Gemini knows data quality
+- **Macro correlations** are per-asset-class (not universal). VIX, US10Y, Silver fields are currently null with `data_availability: "DXY_ONLY"` until IBKR subscriptions are added
+- `reqTickByTickData()` is NOT yet wired in `IbGatewayNativeClient` — tick infrastructure is ready but subscription is a future slice
+
+### Manual vs Auto Reviews
+
+Two separate review paths exist:
+- **Auto reviews**: triggered by qualified alerts → frozen payload snapshot at alert time → persisted in `mentor_signal_reviews` → exposed via `/api/mentor/auto-alerts/*`
+- **Manual reviews** ("Ask Mentor"): triggered by user click → live payload at click time → persisted in `mentor_audits` with `manual-mentor:` source reference → exposed via `/api/mentor/manual-reviews/recent`
+
+These paths use different persistence tables and endpoints. Do not merge them.
+
 ## Alert System
 
 - **Transition-based**: alerts fire only on state *change*, not persistence. `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe.
@@ -176,12 +200,24 @@ Full rules in `docs/ARCHITECTURE_PRINCIPLES.md` § "Date, Time & Timezone Rules"
 - **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP, Chaikin Behaviour (CMF).
 - **Mentor reviews are snapshot-based**: first review uses a frozen payload at alert time. `Reanalyse` creates a new revision with live data + original context.
 
+## Trade Simulation (Outcome Tracker)
+
+Qualified alert reviews with valid Entry/SL/TP plans are tracked as simulated trade outcomes:
+- States: `PENDING_ENTRY` → `ACTIVE` → `WIN` | `LOSS` | `MISSED` | `CANCELLED`
+- Uses internal 1m candles from PostgreSQL only (no external replay feeds)
+- Pessimistic rule: if one candle crosses both SL and TP, result is `LOSS`
+- If TP is hit before Entry, result is `MISSED`
+- `maxDrawdownPoints` records worst adverse excursion before resolution
+- Scheduled backend service (`TradeSimulationService`) polls reviews in `PENDING_ENTRY` or `ACTIVE`
+
 ## Execution Workflow
 
 - Live execution state lives in a dedicated `trade_executions` table — not on `MentorSignalReview`.
 - Idempotence key: `mentorSignalReviewId`. One review → max one execution.
 - Reviews carry `executionEligibilityStatus` / `executionEligibilityReason` — don't parse verdict strings.
 - Slice 2: IBKR limit entry orders via `POST /api/mentor/executions/{id}/submit-entry`.
+- Execution row is locked before broker side effects to prevent duplicate orders.
+- Full fill/re-sync/virtual exit orchestration does not exist yet.
 
 ## Runtime Configuration
 

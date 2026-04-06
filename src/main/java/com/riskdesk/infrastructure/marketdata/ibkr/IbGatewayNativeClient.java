@@ -18,6 +18,7 @@ import com.ib.controller.ApiConnection;
 import com.ib.controller.ApiController;
 import com.ib.controller.Bar;
 import com.ib.controller.Position;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -1155,10 +1156,12 @@ public class IbGatewayNativeClient {
          * A subscription is stale — and should be replaced — if it has previously received
          * at least one price tick but then went silent for more than {@value STALE_PRICE_SECONDS}
          * seconds. New subscriptions (lastPriceAt == null) are given an unlimited grace period
-         * until the first tick arrives.
+         * until the first tick arrives. When the market is closed (weekends), staleness is
+         * not checked to avoid a cancel/resubscribe loop.
          */
         private boolean isActive() {
             if (!active) return false;
+            if (!TradingSessionResolver.isMarketOpen(Instant.now())) return true;
             Instant last = lastPriceAt;
             if (last == null) {
                 // Not yet received any data; still warming up.
@@ -1255,6 +1258,7 @@ public class IbGatewayNativeClient {
 
         private boolean isActive() {
             if (!active) return false;
+            if (!TradingSessionResolver.isMarketOpen(Instant.now())) return true;
             Instant last = lastQuoteAt;
             if (last == null) {
                 return true;
