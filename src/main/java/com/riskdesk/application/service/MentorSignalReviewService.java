@@ -44,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 
@@ -977,8 +978,8 @@ public class MentorSignalReviewService {
         }
 
         BigDecimal structuralLevel = "BULLISH".equals(bias)
-            ? pickNearestLevel(currentPrice, List.of(snapshot.weakLow(), snapshot.strongLow()), true)
-            : pickNearestLevel(currentPrice, List.of(snapshot.weakHigh(), snapshot.strongHigh()), false);
+            ? pickNearestLevel(currentPrice, Stream.of(snapshot.weakLow(), snapshot.strongLow()).filter(Objects::nonNull).toList(), true)
+            : pickNearestLevel(currentPrice, Stream.of(snapshot.weakHigh(), snapshot.strongHigh()).filter(Objects::nonNull).toList(), false);
         if (structuralLevel == null) {
             return null;
         }
