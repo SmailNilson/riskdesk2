@@ -142,9 +142,9 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     }
 
     private void cacheResolved(Instrument instrument, IbGatewayResolvedContract resolved) {
-        // Populate the resolver cache so downstream services use the correct contract
-        resolver.clearCache();
-        resolver.resolve(instrument);
+        // Directly cache the OI-selected contract so downstream services
+        // (MarketDataService, HistoricalDataService) use the correct one
+        resolver.cacheContract(instrument, resolved);
     }
 
     private String extractMonth(IbGatewayResolvedContract resolved) {
