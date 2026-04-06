@@ -66,7 +66,7 @@ public class SignalPreFilterService {
      */
     public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend) {
         if (alerts.isEmpty()) return alerts;
-        boolean isLtf = !"1h".equals(timeframe) && !"4h".equals(timeframe);
+        boolean isLtf = !"4h".equals(timeframe);
 
         return alerts.stream()
                 .filter(alert -> {
@@ -138,6 +138,8 @@ public class SignalPreFilterService {
 
     /** Ordered list of direction extraction rules. First match wins. */
     private static final Map<AlertCategory, DirectionRule> DIRECTION_RULES = Map.ofEntries(
+        Map.entry(AlertCategory.ORDER_BLOCK,  new DirectionRule(AlertCategory.ORDER_BLOCK,  p("BULLISH"),                      p("BEARISH"))),
+        Map.entry(AlertCategory.ORDER_BLOCK_VWAP, new DirectionRule(AlertCategory.ORDER_BLOCK_VWAP, p("BULLISH"),              p("BEARISH"))),
         Map.entry(AlertCategory.SMC,          new DirectionRule(AlertCategory.SMC,          p("BULLISH"),                      p("BEARISH"))),
         Map.entry(AlertCategory.EMA,          new DirectionRule(AlertCategory.EMA,          p("Golden Cross"),                 p("Death Cross"))),
         Map.entry(AlertCategory.MACD,         new DirectionRule(AlertCategory.MACD,         p("Bullish"),                      p("Bearish"))),
@@ -156,7 +158,7 @@ public class SignalPreFilterService {
      * Infers LONG / SHORT bias from an alert's category and message.
      * Returns null for signals with no clear directional bias (e.g. BOLLINGER).
      */
-    static String extractDirection(Alert alert) {
+    public static String extractDirection(Alert alert) {
         DirectionRule rule = DIRECTION_RULES.get(alert.category());
         if (rule == null) return null;
         return rule.match(alert.message());

@@ -3,17 +3,20 @@ package com.riskdesk.application.service;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.IndicatorAlertSnapshot;
+import com.riskdesk.domain.alert.model.SignalWeight;
 import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
@@ -41,6 +44,7 @@ public class AlertService {
     private final AlertDeduplicator         deduplicator;
     private final SignalPreFilterService    signalPreFilterService;
     private final MentorSignalReviewService mentorSignalReviewService;
+    private final SignalConfluenceBuffer    confluenceBuffer;
     private final SimpMessagingTemplate     messagingTemplate;
 
     // Recent alerts buffer (last 50) for REST endpoint
@@ -56,6 +60,7 @@ public class AlertService {
                         AlertDeduplicator deduplicator,
                         SignalPreFilterService signalPreFilterService,
                         MentorSignalReviewService mentorSignalReviewService,
+                        SignalConfluenceBuffer confluenceBuffer,
                         SimpMessagingTemplate messagingTemplate) {
         this.positionService           = positionService;
         this.indicatorService          = indicatorService;
@@ -64,6 +69,7 @@ public class AlertService {
         this.deduplicator              = deduplicator;
         this.signalPreFilterService    = signalPreFilterService;
         this.mentorSignalReviewService = mentorSignalReviewService;
+        this.confluenceBuffer          = confluenceBuffer;
         this.messagingTemplate         = messagingTemplate;
     }
 
@@ -103,34 +109,34 @@ public class AlertService {
             log.debug("H4 snapshot error for {}: {}", instrument, e.getMessage());
         }
 
-        // Indicator evaluation via domain service (10m+ timeframes only)
-        for (String timeframe : List.of("10m", "30m", "1h", "4h")) {
+        // Indicator evaluation — 5m (kill zones only), 10m, 1h. H4 is passive filter only.
+        for (String timeframe : List.of("5m", "10m", "1h")) {
             if (mutedTimeframes.contains(timeframe)) continue;
+            if ("5m".equals(timeframe) && !TradingSessionResolver.isWithinKillZone(Instant.now())) continue;
             try {
-                // Reuse pre-computed snapshots for H1 and H4; compute fresh for others
                 IndicatorSnapshot snap;
                 if ("1h".equals(timeframe)) snap = h1Snap;
-                else if ("4h".equals(timeframe)) snap = h4Snap;
                 else snap = indicatorService.computeSnapshot(instrument, timeframe);
                 if (snap == null) continue;
 
                 List<Alert> indicatorAlerts = indicatorAlertEvaluator.evaluate(instrument, timeframe, toAlertSnapshot(snap));
                 alerts.addAll(indicatorAlerts);
 
-                // Record all candidate signals for anti-chop detection BEFORE filtering
                 signalPreFilterService.recordSignals(indicatorAlerts, timeframe);
 
-                // Apply Rules 1 (HTF alignment) and 3 (anti-chop)
-                List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, h1Trend);
+                // H4 trend filters 1H signals; H1 trend filters 5m/10m signals
+                String htfTrend = "1h".equals(timeframe) ? h4Trend : h1Trend;
+                List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, htfTrend);
 
-                List<Alert> publishedAlerts = new ArrayList<>();
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
-                        publishedAlerts.add(alert);
+                        // Route to confluence buffer instead of direct Gemini call
+                        SignalWeight sw = SignalWeight.fromAlert(alert);
+                        String direction = SignalPreFilterService.extractDirection(alert);
+                        if (sw != null && direction != null) {
+                            confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
+                        }
                     }
-                }
-                if (!publishedAlerts.isEmpty()) {
-                    mentorSignalReviewService.captureGroupReview(publishedAlerts, snap);
                 }
             } catch (Exception e) {
                 log.debug("Indicator evaluation error for {} {}: {}", instrument, timeframe, e.getMessage());

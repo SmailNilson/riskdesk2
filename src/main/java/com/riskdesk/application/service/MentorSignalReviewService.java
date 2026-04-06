@@ -124,6 +124,7 @@ public class MentorSignalReviewService {
      * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
      * so the semantic dedup prevents re-review after restart.
      */
+    @Deprecated
     public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
         // Group by direction (LONG/SHORT)
         Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
@@ -141,6 +142,94 @@ public class MentorSignalReviewService {
             // timestamp/category/message triple, so rewriting any of those fields
             // breaks review attachment and makes fresh groups appear as "No Review".
             captureInitialReview(primary, focusSnapshot);
+        }
+    }
+
+    /**
+     * Confluence Engine entry point — receives a consolidated batch of signals
+     * from {@link SignalConfluenceBuffer} after the weight threshold is reached.
+     */
+    public void captureConsolidatedReview(List<Alert> signals,
+                                           IndicatorSnapshot snap,
+                                           float confluenceWeight,
+                                           Alert primary,
+                                           float opposingBufferWeight) {
+        if (primary == null || signals.isEmpty()) return;
+        if (primary.timestamp() != null &&
+                primary.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
+            return;
+        }
+
+        AlertReviewCandidate candidate = classify(primary);
+        if (candidate == null) return;
+
+        String alertKey = primary.timestamp() + ":CONFLUENCE:"
+                + primary.instrument() + ":" + primary.category().name() + ":" + candidate.action();
+        if (reviewRepository.existsByAlertKey(alertKey)) return;
+
+        // Semantic dedup on quadruplet (instrument, category, direction, timeframe)
+        long dedupWindowSeconds = semanticDedupWindowSeconds(candidate.timeframe());
+        if (reviewRepository.existsRecentReview(
+                candidate.instrument().name(), primary.category().name(),
+                candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
+            log.info("Confluence dedup: skipping {} {} {} — already analyzed within {}s window",
+                     candidate.instrument(), primary.category(), candidate.action(), dedupWindowSeconds);
+            return;
+        }
+
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                    alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                    primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}");
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            return;
+        }
+
+        JsonNode payload = null;
+        String snapshotJson = "{}";
+        String snapshotError = null;
+        try {
+            payload = buildPayload(candidate, primary, snap, AUTO_SELECTED_TIMEZONE);
+            // Enrich with confluence data
+            if (payload instanceof com.fasterxml.jackson.databind.node.ObjectNode payloadNode) {
+                var csArray = objectMapper.createArrayNode();
+                for (Alert signal : signals) {
+                    var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(signal);
+                    var sigNode = objectMapper.createObjectNode();
+                    sigNode.put("category", signal.category().name());
+                    sigNode.put("message", signal.message());
+                    sigNode.put("weight", sw != null ? sw.weight() : 0f);
+                    sigNode.put("fired_at", signal.timestamp().toString());
+                    csArray.add(sigNode);
+                }
+                payloadNode.set("confluence_signals", csArray);
+                payloadNode.put("confluence_strength", signals.size());
+                payloadNode.put("confluence_weight", confluenceWeight);
+                payloadNode.put("primary_signal", primary.category().name());
+                payloadNode.put("opposing_buffer_weight", opposingBufferWeight);
+            }
+            snapshotJson = objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            snapshotError = "Confluence review payload failed: " + errorMessage(e);
+        }
+
+        MentorSignalReviewRecord pending = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+                primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson);
+        if (snapshotError != null) {
+            pending.setStatus(STATUS_ERROR);
+            pending.setCompletedAt(Instant.now());
+            pending.setErrorMessage(snapshotError);
+        }
+
+        MentorSignalReviewRecord saved = reviewRepository.save(pending);
+        publish(saved);
+
+        if (snapshotError == null && payload != null) {
+            JsonNode reviewPayload = payload;
+            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
         }
     }
 
