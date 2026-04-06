@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Confluence Engine — accumulates qualified signals per (instrument, timeframe, direction)
  * within a fixed time window, then flushes a single consolidated Mentor review when the
- * cumulative weight reaches the threshold (3.0).
+ * cumulative weight reaches the flush threshold.
  *
  * <p>Sub-threshold buffers are logged for backtest analysis and discarded.
  *
