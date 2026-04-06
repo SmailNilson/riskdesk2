@@ -146,15 +146,27 @@ public class MentorSignalReviewService {
     }
 
     /**
-     * Confluence Engine entry point — receives a consolidated batch of signals
-     * from {@link SignalConfluenceBuffer} after the weight threshold is reached.
+     * Arm &amp; Fire entry point — receives an ARMED HTF buffer's signals plus
+     * the LTF 5m trigger that fired it.
+     *
+     * @param htfSignals  signals from the armed HTF buffer (10m or 1H)
+     * @param htfSnap     indicator snapshot from the HTF buffer
+     * @param htfWeight   cumulative armed weight
+     * @param primary     highest-priority HTF signal
+     * @param opposingWeight weight of opposing direction buffer
+     * @param ltfTrigger  the 5m signal that fired the armed buffer (nullable for backward compat)
+     * @param ltfSnap     the 5m snapshot at trigger time (nullable)
+     * @param tradeType   "SCALP" (10m) or "DAY_TRADE" (1H)
      */
-    public void captureConsolidatedReview(List<Alert> signals,
-                                           IndicatorSnapshot snap,
-                                           float confluenceWeight,
+    public void captureConsolidatedReview(List<Alert> htfSignals,
+                                           IndicatorSnapshot htfSnap,
+                                           float htfWeight,
                                            Alert primary,
-                                           float opposingBufferWeight) {
-        if (primary == null || signals.isEmpty()) return;
+                                           float opposingWeight,
+                                           Alert ltfTrigger,
+                                           IndicatorSnapshot ltfSnap,
+                                           String tradeType) {
+        if (primary == null || htfSignals.isEmpty()) return;
         if (primary.timestamp() != null &&
                 primary.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
             return;
@@ -163,8 +175,8 @@ public class MentorSignalReviewService {
         AlertReviewCandidate candidate = classify(primary);
         if (candidate == null) return;
 
-        String alertKey = primary.timestamp() + ":CONFLUENCE:"
-                + primary.instrument() + ":" + primary.category().name() + ":" + candidate.action();
+        String alertKey = Instant.now() + ":ARM_FIRE:"
+                + primary.instrument() + ":" + candidate.timeframe() + ":" + candidate.action();
         if (reviewRepository.existsByAlertKey(alertKey)) return;
 
         // Semantic dedup on quadruplet (instrument, category, direction, timeframe)
@@ -172,7 +184,7 @@ public class MentorSignalReviewService {
         if (reviewRepository.existsRecentReview(
                 candidate.instrument().name(), primary.category().name(),
                 candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
-            log.info("Confluence dedup: skipping {} {} {} — already analyzed within {}s window",
+            log.info("Arm&Fire dedup: skipping {} {} {} — already analyzed within {}s window",
                      candidate.instrument(), primary.category(), candidate.action(), dedupWindowSeconds);
             return;
         }
@@ -191,33 +203,56 @@ public class MentorSignalReviewService {
         String snapshotJson = "{}";
         String snapshotError = null;
         try {
-            payload = buildPayload(candidate, primary, snap, AUTO_SELECTED_TIMEZONE);
-            // Enrich with confluence data
+            payload = buildPayload(candidate, primary, htfSnap, AUTO_SELECTED_TIMEZONE);
+            // Enrich with Arm & Fire context
             if (payload instanceof com.fasterxml.jackson.databind.node.ObjectNode payloadNode) {
-                var csArray = objectMapper.createArrayNode();
-                for (Alert signal : signals) {
+                var armFireCtx = objectMapper.createObjectNode();
+                armFireCtx.put("trade_type", tradeType != null ? tradeType : "SCALP");
+                armFireCtx.put("htf_timeframe", candidate.timeframe());
+                armFireCtx.put("htf_armed_weight", htfWeight);
+                armFireCtx.put("opposing_buffer_weight", opposingWeight);
+
+                // HTF armed signals
+                var htfArray = objectMapper.createArrayNode();
+                for (Alert signal : htfSignals) {
                     var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(signal);
                     var sigNode = objectMapper.createObjectNode();
                     sigNode.put("category", signal.category().name());
                     sigNode.put("message", signal.message());
                     sigNode.put("weight", sw != null ? sw.weight() : 0f);
                     sigNode.put("fired_at", signal.timestamp().toString());
-                    csArray.add(sigNode);
+                    htfArray.add(sigNode);
                 }
-                payloadNode.set("confluence_signals", csArray);
-                payloadNode.put("confluence_strength", signals.size());
-                payloadNode.put("confluence_weight", confluenceWeight);
+                armFireCtx.set("htf_armed_signals", htfArray);
+
+                // LTF trigger
+                if (ltfTrigger != null) {
+                    var triggerNode = objectMapper.createObjectNode();
+                    triggerNode.put("timeframe", "5m");
+                    triggerNode.put("category", ltfTrigger.category().name());
+                    triggerNode.put("message", ltfTrigger.message());
+                    triggerNode.put("fired_at", ltfTrigger.timestamp().toString());
+                    armFireCtx.set("ltf_trigger", triggerNode);
+                }
+
+                payloadNode.set("arm_fire_context", armFireCtx);
                 payloadNode.put("primary_signal", primary.category().name());
-                payloadNode.put("opposing_buffer_weight", opposingBufferWeight);
             }
             snapshotJson = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
-            snapshotError = "Confluence review payload failed: " + errorMessage(e);
+            snapshotError = "Arm&Fire review payload failed: " + errorMessage(e);
         }
+
+        // Build consolidated message including LTF trigger
+        List<Alert> allSignals = new ArrayList<>(htfSignals);
+        if (ltfTrigger != null) allSignals.add(ltfTrigger);
+        String consolidatedMessage = buildConsolidatedMessage(allSignals, candidate);
 
         MentorSignalReviewRecord pending = newReviewRecord(
                 alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
                 primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson);
+        pending.setMessage(consolidatedMessage);
+        pending.setTriggerPrice(resolveTriggerPrice(ltfSnap != null ? ltfSnap : htfSnap));
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -231,6 +266,28 @@ public class MentorSignalReviewService {
             JsonNode reviewPayload = payload;
             CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
         }
+    }
+
+    /**
+     * Builds a human-readable consolidated message from all signals in a confluence flush.
+     * Example: "MNQ [10m] — Swing CHoCH: CHOCH_BULLISH — WaveTrend Bearish Cross"
+     */
+    private String buildConsolidatedMessage(List<Alert> signals, AlertReviewCandidate candidate) {
+        if (signals.isEmpty()) return "";
+        String prefix = candidate.instrument().name() + " [" + candidate.timeframe() + "]";
+        // Extract short description from each signal message, removing the instrument/timeframe prefix
+        List<String> parts = new ArrayList<>();
+        for (Alert signal : signals) {
+            String msg = signal.message();
+            // Strip common prefix patterns like "Micro E-mini Nasdaq-100 [10m] — "
+            int dashIdx = msg.indexOf(" — ");
+            if (dashIdx >= 0 && dashIdx < msg.length() - 3) {
+                parts.add(msg.substring(dashIdx + 3).trim());
+            } else {
+                parts.add(msg);
+            }
+        }
+        return prefix + " — " + String.join(" — ", parts);
     }
 
     /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
@@ -300,6 +357,7 @@ public class MentorSignalReviewService {
             AUTO_SELECTED_TIMEZONE,
             snapshotJson
         );
+        pending.setTriggerPrice(resolveTriggerPrice(focusSnapshot));
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -516,6 +574,18 @@ public class MentorSignalReviewService {
         return review;
     }
 
+    /**
+     * Resolves the trigger price from a snapshot — uses lastPrice (live) first,
+     * falls back to latest candle close (ema9 position proxy).
+     */
+    private BigDecimal resolveTriggerPrice(IndicatorSnapshot snap) {
+        if (snap == null) return null;
+        if (snap.lastPrice() != null) return snap.lastPrice();
+        // fallback: VWAP is close to current price in most sessions
+        if (snap.vwap() != null) return snap.vwap();
+        return null;
+    }
+
     private void analyzeAndPersist(Long reviewId, JsonNode payload) {
         if (payload == null) {
             completeWithError(reviewId, "Saved alert snapshot is not available.");
@@ -630,7 +700,8 @@ public class MentorSignalReviewService {
             review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
             review.getMaxDrawdownPoints() == null ? null : review.getMaxDrawdownPoints().doubleValue(),
             analysis,
-            review.getErrorMessage()
+            review.getErrorMessage(),
+            review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue()
         );
     }
 

@@ -46,7 +46,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "PREMIUM" et action = "LONG" → REJET IMMÉDIAT.
         - RÈGLE ABSOLUE : Si pd_array_zone_session = "DISCOUNT" et action = "SHORT" → REJET IMMÉDIAT.
         - Si aucun Order Block n'est proche ET aucune liquidité n'a été purgée → REJET.
-        - RÈGLE CONFLUENCE : Le champ confluence_weight indique la force du setup. Un poids >= 5.0 avec 3+ signaux convergents est un setup A+. Un poids de 3.0 avec un seul signal (ex: ORDER_BLOCK seul) reste valide mais nécessite plus de prudence. Si opposing_buffer_weight > 0, des signaux contraires s'accumulent — évaluer le risque de reversal. Le champ confluence_signals liste chaque signal individuel avec son poids et timing.
+        - RÈGLE ARM & FIRE : Ce setup utilise le modèle multi-timeframe Arm & Fire. Le champ arm_fire_context contient : (1) htf_armed_signals = les signaux structurels HTF qui ont ARMÉ le setup, (2) ltf_trigger = le signal 5m qui a CONFIRMÉ l'entrée. trade_type "SCALP" (HTF=10m) → SL serré basé sur structure 10m, TP court (2-3 R:R). trade_type "DAY_TRADE" (HTF=1H) → SL structurel basé sur structure 1H, TP élargi (3-5 R:R). Vérifie que le trigger LTF est cohérent avec la structure HTF. Si opposing_buffer_weight > 0, des signaux contraires existent — évaluer le risque de reversal.
 
         ### Niveau 2 : Order Flow & Delta (Poids : 30%%)
         - Le delta cumulatif (cumulative_delta_trend) soutient-il le Niveau 1 ?

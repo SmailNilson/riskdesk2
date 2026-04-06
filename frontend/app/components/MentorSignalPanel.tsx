@@ -722,7 +722,12 @@ export default function MentorSignalPanel({
                           </span>
                         </div>
 
-                        <div className="mb-2 text-[10px] text-zinc-500">{review.message}</div>
+                        <div className="mb-1 text-[10px] text-zinc-500">{review.message}</div>
+                        {review.triggerPrice != null && (
+                          <div className="mb-2 text-[10px] font-medium text-yellow-400/80">
+                            Prix @ signal: {review.triggerPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </div>
+                        )}
 
                         {review.status === 'ANALYZING' ? (
                           <div className="text-[11px] text-zinc-500">Analyse Mentor en cours...</div>

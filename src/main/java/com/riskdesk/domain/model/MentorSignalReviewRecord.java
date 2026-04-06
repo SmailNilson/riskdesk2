@@ -30,6 +30,7 @@ public class MentorSignalReviewRecord {
     private Instant resolutionTime;
     private java.math.BigDecimal maxDrawdownPoints;
     private String sourceType = "SIGNAL";
+    private java.math.BigDecimal triggerPrice;
 
     public Long getId() {
         return id;
@@ -237,5 +238,13 @@ public class MentorSignalReviewRecord {
 
     public void setSourceType(String sourceType) {
         this.sourceType = sourceType;
+    }
+
+    public java.math.BigDecimal getTriggerPrice() {
+        return triggerPrice;
+    }
+
+    public void setTriggerPrice(java.math.BigDecimal triggerPrice) {
+        this.triggerPrice = triggerPrice;
     }
 }

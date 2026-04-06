@@ -26,6 +26,7 @@ public record MentorSignalReview(
     String resolutionTime,
     Double maxDrawdownPoints,
     MentorAnalyzeResponse analysis,
-    String errorMessage
+    String errorMessage,
+    Double triggerPrice
 ) {
 }

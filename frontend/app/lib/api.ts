@@ -505,6 +505,7 @@ export interface MentorSignalReview {
   maxDrawdownPoints: number | null;
   analysis: MentorAnalyzeResponse | null;
   errorMessage: string | null;
+  triggerPrice: number | null;
 }
 
 export interface MentorAlertReviewRequest {

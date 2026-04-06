@@ -6,25 +6,27 @@ import java.util.Set;
 /**
  * Confluence weight, family, and structural priority for each qualified signal type.
  *
+ * <p><b>Arm &amp; Fire model:</b> Signals with weight 3.0 ("standalone") ARM a HTF buffer
+ * on their own. Signals with weight 1.0 contribute to confluence but cannot arm alone.
+ *
  * <p>Non-cumul rule: within families {@code Momentum} and {@code Flow},
  * only the maximum weight counts (EMA + MACD = 1.0, not 2.0).
- * All other families cumulate normally (CHoCH 2.0 + BOS 1.5 = 3.5).
  */
 public enum SignalWeight {
 
     ORDER_BLOCK(3.0f, "Structure",       1),
-    CHOCH      (2.0f, "SMC",             2),
-    WAVETREND  (2.0f, "Oscillateur",     3),
-    BOS        (1.5f, "SMC",             4),
-    EQUAL_LEVEL(1.0f, "Liquidite",       5),
-    FVG        (1.0f, "Structure_FVG",   6),
-    SUPERTREND (1.0f, "Tendance",        7),
-    VWAP_CROSS (1.0f, "Niveaux",         8),
-    EMA        (1.0f, "Momentum",        9),
-    MACD       (1.0f, "Momentum",       10),
-    CHAIKIN    (1.0f, "Flow",           11),
+    CHOCH      (3.0f, "SMC",             2),
+    WAVETREND  (3.0f, "Oscillateur",     3),
+    BOS        (3.0f, "SMC",             4),
+    CHAIKIN    (3.0f, "Flow",            5),
+    EQUAL_LEVEL(1.0f, "Liquidite",       6),
+    FVG        (1.0f, "Structure_FVG",   7),
+    SUPERTREND (1.0f, "Tendance",        8),
+    VWAP_CROSS (1.0f, "Niveaux",         9),
+    EMA        (1.0f, "Momentum",       10),
+    MACD       (1.0f, "Momentum",       11),
     DELTA_FLOW (1.0f, "Flow",           12),
-    RSI        (0.5f, "Oscillateur_RSI", 13);
+    RSI        (1.0f, "Oscillateur_RSI", 13);
 
     private static final Set<String> NON_CUMUL_FAMILIES = Set.of("Momentum", "Flow");
 
