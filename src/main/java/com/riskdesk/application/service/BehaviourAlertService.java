@@ -26,13 +26,19 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>Triggered by {@link MarketDataService#pollPrices()} on each live price tick,
  * alongside the existing {@code AlertService.evaluate()} call.
+ *
+ * <p>S/R levels are sourced exclusively from HTF snapshots (1h, 4h, 1d) so that
+ * {@link com.riskdesk.domain.behaviouralert.rule.SupportResistanceTouchRule} only fires
+ * against structurally significant levels, not short-term noise from the evaluation timeframe.
  */
 @Service
 public class BehaviourAlertService {
 
     private static final Logger log = LoggerFactory.getLogger(BehaviourAlertService.class);
     private static final String[] TIMEFRAMES = {"10m", "1h"};
-    private static final long DEDUP_COOLDOWN_SECONDS = 300L;
+    /** Timeframes from which S/R levels are sourced (HTF only). */
+    private static final String[] SR_SOURCE_TIMEFRAMES = {"1h", "4h", "1d"};
+    private static final long DEDUP_COOLDOWN_SECONDS = 900L;
 
     private final IndicatorService indicatorService;
     private final BehaviourAlertEvaluator evaluator;
@@ -53,10 +59,12 @@ public class BehaviourAlertService {
     }
 
     public void evaluate(Instrument instrument) {
+        List<SrLevel> htfSrLevels = buildHtfSrLevels(instrument);
+
         for (String tf : TIMEFRAMES) {
             try {
                 IndicatorSnapshot snap = indicatorService.computeSnapshot(instrument, tf);
-                BehaviourAlertContext context = toContext(instrument, tf, snap);
+                BehaviourAlertContext context = toContext(instrument, tf, snap, htfSrLevels);
                 List<BehaviourAlertSignal> signals = evaluator.evaluate(context);
                 BehaviourAlertSignal firstPublished = null;
                 for (BehaviourAlertSignal signal : signals) {
@@ -80,31 +88,47 @@ public class BehaviourAlertService {
 
     // -----------------------------------------------------------------------
 
-    private BehaviourAlertContext toContext(Instrument instrument, String tf, IndicatorSnapshot snap) {
-        List<SrLevel> srLevels = new ArrayList<>();
+    /**
+     * Fetches S/R levels from HTF snapshots (1h, 4h, 1d) only.
+     * Levels are deduplicated by price to avoid double-firing on identical values
+     * that appear in multiple timeframes.
+     */
+    private List<SrLevel> buildHtfSrLevels(Instrument instrument) {
+        List<SrLevel> levels = new ArrayList<>();
+        for (String htfTf : SR_SOURCE_TIMEFRAMES) {
+            try {
+                IndicatorSnapshot htfSnap = indicatorService.computeSnapshot(instrument, htfTf);
 
-        Optional.ofNullable(snap.equalHighs()).orElse(List.of()).stream()
-                .filter(eq -> eq.price() != null)
-                .map(eq -> new SrLevel("EQH", eq.price()))
-                .forEach(srLevels::add);
+                Optional.ofNullable(htfSnap.equalHighs()).orElse(List.of()).stream()
+                        .filter(eq -> eq.price() != null)
+                        .map(eq -> new SrLevel("EQH", eq.price()))
+                        .forEach(levels::add);
 
-        Optional.ofNullable(snap.equalLows()).orElse(List.of()).stream()
-                .filter(eq -> eq.price() != null)
-                .map(eq -> new SrLevel("EQL", eq.price()))
-                .forEach(srLevels::add);
+                Optional.ofNullable(htfSnap.equalLows()).orElse(List.of()).stream()
+                        .filter(eq -> eq.price() != null)
+                        .map(eq -> new SrLevel("EQL", eq.price()))
+                        .forEach(levels::add);
 
-        addIfNotNull(srLevels, "STRONG_HIGH", snap.strongHigh());
-        addIfNotNull(srLevels, "STRONG_LOW",  snap.strongLow());
-        addIfNotNull(srLevels, "WEAK_HIGH",   snap.weakHigh());
-        addIfNotNull(srLevels, "WEAK_LOW",    snap.weakLow());
+                addIfNotNull(levels, "STRONG_HIGH", htfSnap.strongHigh());
+                addIfNotNull(levels, "STRONG_LOW",  htfSnap.strongLow());
+                addIfNotNull(levels, "WEAK_HIGH",   htfSnap.weakHigh());
+                addIfNotNull(levels, "WEAK_LOW",    htfSnap.weakLow());
+            } catch (Exception e) {
+                log.debug("BehaviourAlertService: could not fetch HTF S/R for {} {}: {}", instrument, htfTf, e.getMessage());
+            }
+        }
+        return levels;
+    }
 
+    private BehaviourAlertContext toContext(Instrument instrument, String tf, IndicatorSnapshot snap,
+                                            List<SrLevel> htfSrLevels) {
         return new BehaviourAlertContext(
                 instrument.name(),
                 tf,
                 snap.lastPrice(),
                 snap.ema50(),
                 snap.ema200(),
-                srLevels,
+                htfSrLevels,
                 snap.lastCandleTimestamp(),
                 snap.chaikinOscillator(),
                 snap.cmf()

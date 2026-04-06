@@ -27,7 +27,7 @@ class ExtremeCmfZoneRuleTest {
 
     @Test
     void accumulationTransition_firesSignal() {
-        BehaviourAlertContext ctx = context("0.32", CANDLE_1);
+        BehaviourAlertContext ctx = context("0.45", CANDLE_1);
 
         List<BehaviourAlertSignal> signals = rule.evaluate(ctx);
 
@@ -35,18 +35,18 @@ class ExtremeCmfZoneRuleTest {
         BehaviourAlertSignal s = signals.get(0);
         assertEquals(BehaviourAlertCategory.CHAIKIN_BEHAVIOUR, s.category());
         assertTrue(s.message().contains("accumulation"));
-        assertTrue(s.message().contains("0.32"));
+        assertTrue(s.message().contains("0.45"));
     }
 
     @Test
     void distributionTransition_firesSignal() {
-        BehaviourAlertContext ctx = context("-0.35", CANDLE_1);
+        BehaviourAlertContext ctx = context("-0.45", CANDLE_1);
 
         List<BehaviourAlertSignal> signals = rule.evaluate(ctx);
 
         assertEquals(1, signals.size());
         assertTrue(signals.get(0).message().contains("distribution"));
-        assertTrue(signals.get(0).message().contains("-0.35"));
+        assertTrue(signals.get(0).message().contains("-0.45"));
     }
 
     @Test
@@ -57,15 +57,15 @@ class ExtremeCmfZoneRuleTest {
 
     @Test
     void noRefireOnSameCandle() {
-        BehaviourAlertContext ctx = context("0.30", CANDLE_1);
+        BehaviourAlertContext ctx = context("0.45", CANDLE_1);
         rule.evaluate(ctx);
 
         // Reset to neutral then back to accumulation on same candle
         rule.evaluate(context("0.05", CANDLE_1));
-        assertTrue(rule.evaluate(context("0.30", CANDLE_1)).isEmpty());
+        assertTrue(rule.evaluate(context("0.45", CANDLE_1)).isEmpty());
 
         // New candle allows re-fire
-        assertEquals(1, rule.evaluate(context("0.30", CANDLE_2)).size());
+        assertEquals(1, rule.evaluate(context("0.45", CANDLE_2)).size());
     }
 
     private static BehaviourAlertContext context(String cmf, Instant candle) {
