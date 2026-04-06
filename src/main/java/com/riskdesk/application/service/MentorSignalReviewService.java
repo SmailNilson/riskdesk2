@@ -444,7 +444,7 @@ public class MentorSignalReviewService {
                 review.setStatus(STATUS_DONE);
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(analysis));
-                review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
+                review.setVerdict(truncate(analysis.analysis() == null ? null : analysis.analysis().verdict(), 512));
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
@@ -590,7 +590,11 @@ public class MentorSignalReviewService {
                 ? "Mentor explicitly marked the review as execution-eligible."
                 : "Mentor did not mark the review as execution-eligible.";
         }
-        return reason;
+        return truncate(reason, 1024);
+    }
+
+    private static String truncate(String value, int maxLen) {
+        return value != null && value.length() > maxLen ? value.substring(0, maxLen) : value;
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate,
