@@ -33,8 +33,37 @@ public class IbGatewayContractResolver {
         if (cached != null) {
             return Optional.of(cached);
         }
-
         return refresh(instrument);
+    }
+
+    /**
+     * Directly seeds the cache with an already-resolved contract.
+     * Used by ActiveContractRegistryInitializer after OI-based startup selection.
+     */
+    public void setResolved(Instrument instrument, IbGatewayResolvedContract resolved) {
+        cache.put(instrument, resolved);
+    }
+
+    /**
+     * Clears the cache for one instrument and re-resolves from IBKR targeting a specific month.
+     * Used by confirmRollover() so the new month is immediately cached without falling through
+     * to a stale preconfigured() fallback.
+     */
+    public void refreshToMonth(Instrument instrument, String targetMonth) {
+        cache.remove(instrument);
+        for (Contract query : buildQueries(instrument)) {
+            List<ContractDetails> details = nativeClient.requestContractDetails(query);
+            if (details.isEmpty()) continue;
+            Optional<ContractDetails> match = details.stream()
+                .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
+                .findFirst();
+            if (match.isPresent()) {
+                ContractDetails d = match.get();
+                cache.put(instrument, new IbGatewayResolvedContract(instrument, d.contract(), d));
+                return;
+            }
+        }
+        // Not found — cache stays empty; next resolve() will call refresh()
     }
 
     public Optional<IbGatewayResolvedContract> refresh(Instrument instrument) {
@@ -138,6 +167,19 @@ public class IbGatewayContractResolver {
         };
     }
 
+    private Optional<IbGatewayResolvedContract> preconfigured(Instrument instrument) {
+        Contract contract = switch (instrument) {
+            case MCL -> buildContract(661016514, "MCL", "NYMEX", "USD", "100", "MCL", "202605");
+            case MGC -> buildContract(706903676, "MGC", "COMEX", "USD", "10", "MGC", "202604");
+            case MNQ -> buildContract(770561201, "MNQ", "CME", "USD", "2", "MNQ", "202606");
+            case E6 -> buildContract(496647057, "EUR", "CME", "USD", "125000", "6E", "202606");
+            case DXY -> null;
+        };
+        return contract == null
+            ? Optional.empty()
+            : Optional.of(new IbGatewayResolvedContract(instrument, contract, null));
+    }
+
     private Contract buildQuery(String symbol,
                                 String exchange,
                                 String currency,
@@ -158,6 +200,26 @@ public class IbGatewayContractResolver {
         return contract;
     }
 
+    private Contract buildContract(int conid,
+                                   String symbol,
+                                   String exchange,
+                                   String currency,
+                                   String multiplier,
+                                   String tradingClass,
+                                   String contractMonth) {
+        Contract contract = new Contract();
+        contract.conid(conid);
+        contract.secType(SecType.FUT);
+        contract.symbol(symbol);
+        contract.exchange(exchange);
+        contract.currency(currency);
+        contract.multiplier(multiplier);
+        contract.tradingClass(tradingClass);
+        contract.lastTradeDateOrContractMonth(contractMonth);
+        contract.includeExpired(false);
+        return contract;
+    }
+
     private LocalDate expiryKey(ContractDetails details) {
         String raw = details.contract().lastTradeDateOrContractMonth();
         if (raw == null || raw.isBlank()) return null;
@@ -173,6 +235,12 @@ public class IbGatewayContractResolver {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim().toUpperCase();
+    }
+
+    private static String normalizeMonth(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String digits = raw.replaceAll("[^0-9]", "");
+        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 
 }
