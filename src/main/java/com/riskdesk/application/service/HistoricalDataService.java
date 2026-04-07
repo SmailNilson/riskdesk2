@@ -13,7 +13,6 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -185,24 +184,31 @@ public class HistoricalDataService implements ApplicationRunner {
      * On contract rollover, delete all candles for the rolled instrument (all timeframes)
      * and trigger a full historical backfill from the new contract. This ensures indicators
      * recalculate on a clean price series without old-contract data contamination.
+     *
+     * Runs async via CompletableFuture (not @Async) because this class implements
+     * ApplicationRunner — Spring's JDK proxy would not expose this method otherwise.
      */
-    @Async
     @EventListener
     public void onContractRollover(ContractRolloverEvent event) {
         Instrument instrument = event.instrument();
-        log.info("Rollover backfill: deleting old candles and backfilling {} (new contract {})",
-                instrument, event.newContractMonth());
+        CompletableFuture.runAsync(() -> {
+            log.info("Rollover backfill: deleting old candles and backfilling {} (new contract {})",
+                    instrument, event.newContractMonth());
 
-        for (String timeframe : TIMEFRAMES) {
-            try {
-                candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
-            } catch (Exception e) {
-                log.warn("Rollover backfill: failed to delete {} {} candles: {}", instrument, timeframe, e.getMessage());
+            for (String timeframe : TIMEFRAMES) {
+                try {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+                } catch (Exception e) {
+                    log.warn("Rollover backfill: failed to delete {} {} candles: {}", instrument, timeframe, e.getMessage());
+                }
             }
-        }
 
-        Map<String, Integer> result = refreshInstrumentContext(instrument, TIMEFRAMES);
-        log.info("Rollover backfill complete for {}: {}", instrument, result);
+            Map<String, Integer> result = refreshInstrumentContext(instrument, TIMEFRAMES);
+            log.info("Rollover backfill complete for {}: {}", instrument, result);
+        }).exceptionally(ex -> {
+            log.error("Rollover backfill failed for {}: {}", instrument, ex.getMessage(), ex);
+            return null;
+        });
     }
 
     /** Trigger a manual full refresh asynchronously. Returns immediately. */
