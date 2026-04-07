@@ -2,6 +2,7 @@ package com.riskdesk.domain.alert.service;
 
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
+import com.riskdesk.domain.alert.model.SignalWeight;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -97,14 +98,20 @@ public class SignalPreFilterService {
         }
 
         // Rule 3: Anti-Chop — cancel signal if the opposite direction fired within the chop window
+        // Exception: standalone signals (weight >= 3.0) bypass anti-chop — they represent
+        // genuine structural breaks (CHoCH, BOS, WT cross) that should not be suppressed
         if (direction != null) {
-            String opposite = "LONG".equals(direction) ? "SHORT" : "LONG";
-            DirectionKey key = new DirectionKey(alert.instrument(), timeframe);
-            if (hasRecentSignal(key, opposite)) {
-                log.warn("Market Chop detected - Signals cancelled [{} {} {}]",
-                        alert.instrument(), timeframe, direction);
-                return new FilterResult(false,
-                        "Anti-chop: conflicting " + opposite + " signal within " + CHOP_WINDOW_SECONDS + "s");
+            SignalWeight sw = SignalWeight.fromAlert(alert);
+            boolean isStandaloneSignal = sw != null && sw.weight() >= 3.0f;
+            if (!isStandaloneSignal) {
+                String opposite = "LONG".equals(direction) ? "SHORT" : "LONG";
+                DirectionKey key = new DirectionKey(alert.instrument(), timeframe);
+                if (hasRecentSignal(key, opposite)) {
+                    log.warn("Market Chop detected - Signals cancelled [{} {} {}]",
+                            alert.instrument(), timeframe, direction);
+                    return new FilterResult(false,
+                            "Anti-chop: conflicting " + opposite + " signal within " + CHOP_WINDOW_SECONDS + "s");
+                }
             }
         }
 

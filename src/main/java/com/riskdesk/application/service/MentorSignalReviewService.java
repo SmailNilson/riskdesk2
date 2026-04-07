@@ -968,6 +968,12 @@ public class MentorSignalReviewService {
     }
 
     /** Timeframe-aware semantic dedup window: base duration × 5. */
+    /**
+     * Semantic dedup window = 2× the timeframe duration.
+     * Previous ×5 multiplier was too aggressive — blocked re-evaluation when
+     * market conditions changed (e.g. LONG rejected at 02:00, price moved 20pts
+     * by 02:40 but dedup still active for 50 min on 10m).
+     */
     static long semanticDedupWindowSeconds(String timeframe) {
         long base = switch (timeframe) {
             case "1m"  -> 60;
@@ -980,7 +986,7 @@ public class MentorSignalReviewService {
             case "1d"  -> 86400;
             default    -> 3600;
         };
-        return base * 5;
+        return base * 2;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {

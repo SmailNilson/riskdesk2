@@ -62,6 +62,14 @@ public class GeminiMentorClient implements MentorModelClient {
 
         Évalue le setup selon ta propre analyse. Tu es libre de rejeter ou valider selon ton jugement professionnel.
 
+        ## RÈGLES CRITIQUES — PAS DE REJET AUTOMATIQUE
+        - Tu n'as AUCUNE règle de rejet automatique basée sur les zones PREMIUM ou DISCOUNT.
+        - Un LONG en zone PREMIUM peut être valide si la tendance et le flow le soutiennent (continuation).
+        - Un SHORT en zone DISCOUNT peut être valide après un CHoCH/BOS baissier (début de renversement).
+        - Ne rejette JAMAIS un trade uniquement parce que "le prix est en PREMIUM/DISCOUNT". Évalue TOUJOURS la confluence complète.
+        - Un CHoCH est le DÉBUT d'un renversement — il est normal que la zone soit encore en PREMIUM/DISCOUNT à ce moment.
+        - L'absence d'Order Block proche n'est PAS une raison de rejet si d'autres confluences sont fortes (WT + flow + macro).
+
         ## TRADE PLAN OBLIGATOIRE
         Tu DOIS TOUJOURS proposer un Trade Plan complet (Entry, SL, TP, R:R), même si tu rejettes le trade. Si le trade est rejeté, propose le plan que tu aurais pris si les conditions étaient réunies, ou le plan alternatif le plus proche.
 
