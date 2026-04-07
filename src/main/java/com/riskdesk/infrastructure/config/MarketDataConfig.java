@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
 import com.riskdesk.infrastructure.marketdata.ibkr.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,6 +86,21 @@ public class MarketDataConfig {
     public FxQuoteProvider ibGatewayFxQuoteProvider(IbGatewayNativeClient nativeClient,
                                                     IbGatewayFxContractResolver contractResolver) {
         return new IbGatewayFxQuoteProvider(nativeClient, contractResolver);
+    }
+
+    /**
+     * Wires the push-based price listener so that IBKR ticks are forwarded to
+     * MarketDataService in real-time instead of waiting for the polling cycle.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayPriceListenerWiring(IbGatewayNativeClient nativeClient,
+                                                Optional<StreamingPriceListener> listener) {
+        listener.ifPresent(l -> {
+            nativeClient.setPriceListener(l);
+            log.info("Push-based price listener wired to IB Gateway native client");
+        });
+        return new Object(); // marker bean
     }
 
     // -------------------------------------------------------------------------

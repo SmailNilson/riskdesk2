@@ -18,6 +18,8 @@ import com.ib.controller.ApiConnection;
 import com.ib.controller.ApiController;
 import com.ib.controller.Bar;
 import com.ib.controller.Position;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
+import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,9 +91,27 @@ public class IbGatewayNativeClient {
     private volatile String lastConnectionFailure = "uninitialized";
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
+    private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
+    private volatile StreamingPriceListener priceListener;
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
+    }
+
+    /**
+     * Registers a listener that will be called on the IBKR EReader thread whenever a
+     * new price tick or 5-second bar arrives. The listener MUST be non-blocking.
+     */
+    public void setPriceListener(StreamingPriceListener listener) {
+        this.priceListener = listener;
+    }
+
+    /**
+     * Associates a subscription key with its domain Instrument so that push callbacks
+     * can identify which instrument a tick belongs to.
+     */
+    public void registerInstrumentMapping(Contract contract, Instrument instrument) {
+        contractKeyToInstrument.put(subscriptionKey(contract), instrument);
     }
 
     // -------------------------------------------------------------------------
@@ -1137,6 +1157,7 @@ public class IbGatewayNativeClient {
             if (bestPrice != null) {
                 lastPriceAt = Instant.now();
                 logFirstPrice("tickPrice");
+                notifyPriceListener(bestPrice, lastPriceAt);
             }
         }
 
@@ -1191,6 +1212,7 @@ public class IbGatewayNativeClient {
             bestPrice = bar.close();
             lastPriceAt = Instant.now();
             logFirstPrice("realtimeBar");
+            notifyPriceListener(bestPrice, lastPriceAt);
         }
 
         private Optional<BigDecimal> bestPrice() {
@@ -1220,6 +1242,18 @@ public class IbGatewayNativeClient {
             if (!loggedFirstPrice) {
                 loggedFirstPrice = true;
                 log.info("IB Gateway first live price for {} received via {}", describeContract(contract), source);
+            }
+        }
+
+        private void notifyPriceListener(double price, Instant timestamp) {
+            StreamingPriceListener listener = priceListener;
+            if (listener == null) return;
+            Instrument instrument = contractKeyToInstrument.get(subscriptionKey(contract));
+            if (instrument == null) return;
+            try {
+                listener.onLivePriceUpdate(instrument, BigDecimal.valueOf(price), timestamp);
+            } catch (Exception e) {
+                log.debug("Price listener error for {}: {}", instrument, e.getMessage());
             }
         }
     }

@@ -21,8 +21,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Fetches real historical OHLCV candles on startup and persists them.
@@ -47,11 +50,20 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.enabled:false}")
     private boolean enabled;
 
+    @Value("${riskdesk.market-data.historical.backfill-days-5m:30}")
+    private int backfillDays5m;
+
     @Value("${riskdesk.market-data.historical.backfill-days-10m:90}")
     private int backfillDays10m;
 
+    @Value("${riskdesk.market-data.historical.backfill-days-30m:180}")
+    private int backfillDays30m;
+
     @Value("${riskdesk.market-data.historical.backfill-days-1h:365}")
     private int backfillDays1h;
+
+    @Value("${riskdesk.market-data.historical.backfill-days-4h:730}")
+    private int backfillDays4h;
 
     @Value("${riskdesk.market-data.historical.mentor-refresh-timeout-ms:2500}")
     private long mentorRefreshTimeoutMs;
@@ -123,38 +135,60 @@ public class HistoricalDataService implements ApplicationRunner {
     // -------------------------------------------------------------------------
 
     private void tryFetchAndReplace(String context) {
-        log.info("HistoricalDataService [{}]: fetching real OHLCV candles...", context);
-        int totalSaved = 0;
+        log.info("HistoricalDataService [{}]: fetching real OHLCV candles (parallel by instrument)...", context);
+        AtomicInteger totalSaved = new AtomicInteger(0);
+        List<Instrument> instruments = Instrument.exchangeTradedFutures();
 
-        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-            for (String timeframe : TIMEFRAMES) {
-                if (!historicalProvider.supports(instrument, timeframe)) continue;
-                try {
-                    int limit = candlesTargetFor(timeframe);
-                    List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
-                    candles = tagWithContractMonth(candles, instrument);
-                    candles = deduplicate(candles);
-                    if (candles.isEmpty()) {
-                        log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
-                    } else {
-                        candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
-                        candlePort.saveAll(candles);
-                        totalSaved += candles.size();
-                        log.debug("HistoricalDataService [{}]: {} {} fetched {} candles.", context, instrument, timeframe, candles.size());
-                    }
-                } catch (Exception e) {
-                    log.debug("HistoricalDataService [{}]: {} {} fetch failed — {}", context, instrument, timeframe, e.getMessage());
-                }
-            }
+        // Fetch instruments in parallel; timeframes within each instrument stay sequential
+        // to respect IBKR pacing limits per contract.
+        ExecutorService pool = Executors.newFixedThreadPool(
+            Math.min(instruments.size(), 4),
+            r -> { Thread t = new Thread(r, "hist-backfill"); t.setDaemon(true); return t; }
+        );
+
+        List<CompletableFuture<Void>> futures = instruments.stream()
+            .map(instrument -> CompletableFuture.runAsync(() ->
+                fetchAllTimeframesForInstrument(instrument, context, totalSaved), pool))
+            .toList();
+
+        try {
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                .get(10, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [{}]: parallel fetch interrupted — {}", context, e.getMessage());
+        } finally {
+            pool.shutdown();
         }
 
-        if (totalSaved == 0) {
+        if (totalSaved.get() == 0) {
             log.warn("HistoricalDataService [{}]: no candles retrieved — retaining existing data. Will retry in 30 min.", context);
             return;
         }
 
         realDataLoaded.set(true);
-        log.info("HistoricalDataService [{}]: done — {} IBKR candles saved to chart.", context, totalSaved);
+        log.info("HistoricalDataService [{}]: done — {} IBKR candles saved to chart.", context, totalSaved.get());
+    }
+
+    private void fetchAllTimeframesForInstrument(Instrument instrument, String context, AtomicInteger totalSaved) {
+        for (String timeframe : TIMEFRAMES) {
+            if (!historicalProvider.supports(instrument, timeframe)) continue;
+            try {
+                int limit = candlesTargetFor(timeframe);
+                List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
+                candles = tagWithContractMonth(candles, instrument);
+                candles = deduplicate(candles);
+                if (candles.isEmpty()) {
+                    log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
+                } else {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+                    candlePort.saveAll(candles);
+                    totalSaved.addAndGet(candles.size());
+                    log.debug("HistoricalDataService [{}]: {} {} fetched {} candles.", context, instrument, timeframe, candles.size());
+                }
+            } catch (Exception e) {
+                log.debug("HistoricalDataService [{}]: {} {} fetch failed — {}", context, instrument, timeframe, e.getMessage());
+            }
+        }
     }
 
     private int refreshSingleInstrumentTimeframe(Instrument instrument, String timeframe, String context) {
@@ -208,8 +242,11 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private int candlesTargetFor(String timeframe) {
         return switch (timeframe) {
+            case "5m"  -> minutesToCandles(backfillDays5m, 5);
             case "10m" -> minutesToCandles(backfillDays10m, 10);
-            case "1h" -> minutesToCandles(backfillDays1h, 60);
+            case "30m" -> minutesToCandles(backfillDays30m, 30);
+            case "1h"  -> minutesToCandles(backfillDays1h, 60);
+            case "4h"  -> minutesToCandles(backfillDays4h, 240);
             default -> DEFAULT_CANDLES_PER_PAIR;
         };
     }

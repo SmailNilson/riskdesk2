@@ -234,13 +234,19 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     }
 
     private boolean supportsDeepBackfill(String timeframe) {
-        return "10m".equals(timeframe) || "1h".equals(timeframe);
+        return switch (timeframe) {
+            case "5m", "10m", "30m", "1h", "4h" -> true;
+            default -> false;
+        };
     }
 
     private HistoricalQuery chunkQueryFor(String timeframe) {
         return switch (timeframe) {
+            case "5m"  -> new HistoricalQuery(5, DurationUnit.DAY, BarSize._5_mins);
             case "10m" -> new HistoricalQuery(10, DurationUnit.DAY, BarSize._10_mins);
-            case "1h" -> new HistoricalQuery(30, DurationUnit.DAY, BarSize._1_hour);
+            case "30m" -> new HistoricalQuery(20, DurationUnit.DAY, BarSize._30_mins);
+            case "1h"  -> new HistoricalQuery(30, DurationUnit.DAY, BarSize._1_hour);
+            case "4h"  -> new HistoricalQuery(60, DurationUnit.DAY, BarSize._4_hours);
             default -> queryFor(timeframe, 500);
         };
     }
