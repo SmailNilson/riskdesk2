@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.marketdata.event.MarketPriceUpdated;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
@@ -11,6 +12,7 @@ import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.context.annotation.Profile;
@@ -372,6 +374,33 @@ public class MarketDataService implements StreamingPriceListener {
         long epochMin    = ts.getEpochSecond() / 60;
         long periodStart = (epochMin / periodMinutes) * periodMinutes;
         return Instant.ofEpochSecond(periodStart * 60);
+    }
+
+    // -------------------------------------------------------------------------
+    // Rollover: flush stale candle state
+    // -------------------------------------------------------------------------
+
+    /**
+     * On contract rollover, flush all in-memory candle accumulators and cached
+     * price state for the rolled instrument. This prevents the old-contract's
+     * partial candle from contaminating the new contract's first bar.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        int flushed = 0;
+        var it = accumulators.entrySet().iterator();
+        while (it.hasNext()) {
+            if (it.next().getKey().instrument() == instrument) {
+                it.remove();
+                flushed++;
+            }
+        }
+        lastPrice.remove(instrument);
+        lastTimestamp.remove(instrument);
+        lastSource.remove(instrument);
+        lastPushAt.remove(instrument);
+        log.info("Rollover: flushed {} candle accumulators and price cache for {}", flushed, instrument);
     }
 
     // -------------------------------------------------------------------------

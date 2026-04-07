@@ -3,12 +3,14 @@ package com.riskdesk.application.service;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.engine.indicators.*;
 import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.CandleSeriesNormalizer;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -76,6 +78,15 @@ public class IndicatorService {
     }
 
     public void clearSnapshotCache() {
+        snapshotCache.clear();
+    }
+
+    /**
+     * On contract rollover, invalidate all cached indicator snapshots so that the next
+     * poll recomputes from the freshly backfilled candle data of the new contract.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
         snapshotCache.clear();
     }
 

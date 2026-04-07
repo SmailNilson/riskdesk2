@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.RolloverStatus;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -10,10 +11,12 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.temporal.ChronoUnit;
@@ -45,6 +48,7 @@ public class RolloverDetectionService {
     private final OpenInterestProvider      openInterestProvider;
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final ApplicationEventPublisher eventPublisher;
     private final int                       calendarDaysThreshold;
 
     public RolloverDetectionService(ActiveContractRegistry contractRegistry,
@@ -52,12 +56,14 @@ public class RolloverDetectionService {
                                     OpenInterestProvider openInterestProvider,
                                     IbkrProperties ibkrProperties,
                                     SimpMessagingTemplate messagingTemplate,
+                                    ApplicationEventPublisher eventPublisher,
                                     @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold) {
         this.contractRegistry       = contractRegistry;
         this.resolver               = resolver;
         this.openInterestProvider   = openInterestProvider;
         this.ibkrProperties         = ibkrProperties;
         this.messagingTemplate      = messagingTemplate;
+        this.eventPublisher         = eventPublisher;
         this.calendarDaysThreshold  = calendarDaysThreshold;
     }
 
@@ -74,8 +80,17 @@ public class RolloverDetectionService {
     }
 
     public void confirmRollover(Instrument instrument, String contractMonth) {
+        String oldMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
+
+        if (oldMonth != null && !oldMonth.equals(contractMonth)) {
+            ContractRolloverEvent event = new ContractRolloverEvent(
+                    instrument, oldMonth, contractMonth, Instant.now());
+            log.info("Rollover confirmed: {} {} → {} — publishing ContractRolloverEvent",
+                    instrument, oldMonth, contractMonth);
+            eventPublisher.publishEvent(event);
+        }
     }
 
     /** Scheduled check every 6 hours (with 1-minute initial delay after startup). */

@@ -114,6 +114,50 @@ public class IbGatewayNativeClient {
         contractKeyToInstrument.put(subscriptionKey(contract), instrument);
     }
 
+    /**
+     * Atomically cancels all streaming subscriptions for {@code oldContract} and
+     * starts fresh subscriptions for {@code newContract}. Used during contract
+     * rollover to prevent orphaned IBKR data streams and stale reqId mappings.
+     *
+     * Thread-safe: all mutations happen under {@link #streamingLock}.
+     */
+    public void cancelAndResubscribe(Contract oldContract, Contract newContract, Instrument instrument) {
+        if (oldContract == null && newContract == null) return;
+
+        synchronized (streamingLock) {
+            // --- Cancel old subscriptions ---
+            if (oldContract != null) {
+                String oldKey = subscriptionKey(oldContract);
+                ApiController ctrl = controller;
+
+                StreamingPriceSubscription oldPrice = streamingSubscriptions.remove(oldKey);
+                if (oldPrice != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldPrice); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(oldPrice); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled price stream for old contract {}", describeContract(oldContract));
+                }
+
+                StreamingQuoteSubscription oldQuote = streamingQuoteSubscriptions.remove(oldKey);
+                if (oldQuote != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldQuote); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled quote stream for old contract {}", describeContract(oldContract));
+                }
+
+                contractKeyToInstrument.remove(oldKey);
+            }
+        }
+
+        // --- Subscribe to new contract (outside streamingLock — ensureStreaming acquires it internally) ---
+        if (newContract != null) {
+            if (instrument != null) {
+                registerInstrumentMapping(newContract, instrument);
+            }
+            ensureStreamingPriceSubscription(newContract);
+            ensureStreamingQuoteSubscription(newContract);
+            log.info("Rollover: subscribed to new contract {}", describeContract(newContract));
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Connection management
     // -------------------------------------------------------------------------
