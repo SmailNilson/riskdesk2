@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Periodically checks expiry dates for each active contract and publishes
@@ -45,6 +46,7 @@ public class RolloverDetectionService {
     private final OpenInterestProvider      openInterestProvider;
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final HistoricalDataService     historicalDataService;
     private final int                       calendarDaysThreshold;
     private final boolean                   autoConfirm;
 
@@ -53,6 +55,7 @@ public class RolloverDetectionService {
                                     OpenInterestProvider openInterestProvider,
                                     IbkrProperties ibkrProperties,
                                     SimpMessagingTemplate messagingTemplate,
+                                    HistoricalDataService historicalDataService,
                                     @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold,
                                     @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
         this.contractRegistry       = contractRegistry;
@@ -60,6 +63,7 @@ public class RolloverDetectionService {
         this.openInterestProvider   = openInterestProvider;
         this.ibkrProperties         = ibkrProperties;
         this.messagingTemplate      = messagingTemplate;
+        this.historicalDataService   = historicalDataService;
         this.calendarDaysThreshold  = calendarDaysThreshold;
         this.autoConfirm            = autoConfirm;
     }
@@ -79,6 +83,18 @@ public class RolloverDetectionService {
     public void confirmRollover(Instrument instrument, String contractMonth) {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
+
+        // Re-fetch historical data for the new contract to prevent chart data mismatch.
+        // Without this, old contract candles remain in DB and the chart shows a fake spike
+        // (e.g. old 202604 at ~99 → new 202605 live tick at ~114).
+        CompletableFuture.runAsync(() -> {
+            log.info("Rollover confirmed: {} → {} — refreshing historical data...", instrument, contractMonth);
+            Map<String, Integer> saved = historicalDataService.refreshInstrumentFull(instrument);
+            log.info("Rollover historical refresh done: {} → {}", instrument, saved);
+        }).exceptionally(ex -> {
+            log.warn("Rollover historical refresh failed for {} — {}", instrument, ex.getMessage());
+            return null;
+        });
     }
 
     /** Scheduled check every 6 hours (with 1-minute initial delay after startup). */

@@ -140,6 +140,22 @@ public class HistoricalDataService implements ApplicationRunner {
         return savedByTimeframe;
     }
 
+    /**
+     * Refreshes all timeframes for a single instrument without cooldown or timeout.
+     * Used after contract rollover to replace old-contract candles with new-contract data.
+     * Runs synchronously — caller should wrap in CompletableFuture if async is desired.
+     */
+    public Map<String, Integer> refreshInstrumentFull(Instrument instrument) {
+        if (!enabled) return Collections.emptyMap();
+
+        Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
+        for (String timeframe : TIMEFRAMES) {
+            int saved = refreshSingleInstrumentTimeframe(instrument, timeframe, "rollover");
+            savedByTimeframe.put(timeframe, saved);
+        }
+        return savedByTimeframe;
+    }
+
     /** Trigger a manual full refresh asynchronously. Returns immediately. */
     public Map<String, Object> refreshAll() {
         if (!enabled) {
