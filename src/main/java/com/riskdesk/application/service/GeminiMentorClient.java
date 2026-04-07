@@ -90,7 +90,7 @@ public class GeminiMentorClient implements MentorModelClient {
         ### Entrée (Entry)
         - Setup LONG : Entry = nearest_support_ob price_top (bord proximal de l'Order Block).
         - Setup SHORT : Entry = nearest_resistance_ob price_bottom.
-        - FILTRE : N'entre JAMAIS si pd_array_zone_session = "PREMIUM" pour un LONG, ni "DISCOUNT" pour un SHORT.
+        - Tiens compte de pd_array_zone_session dans ton analyse, mais ce n'est PAS un motif de rejet automatique.
 
         ### Stop Loss (SL) — Structurel + Volatilité
         - LONG : SL = nearest_support_ob price_bottom - (1.5 × current_atr_focus).
@@ -101,7 +101,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - TP1 (R:R 1.5:1 strict) — Tu DOIS appliquer cette formule :
           * LONG : TP1 = Entry + ((Entry - SL) * 1.5)
           * SHORT : TP1 = Entry - ((SL - Entry) * 1.5)
-          * Si un obstacle (VWAP, EMA200, daily_poc_price) bloque avant TP1, le trade est rejeté.
+          * Si un obstacle (VWAP, EMA200, daily_poc_price) bloque avant TP1, mentionne-le dans l'analyse mais ne rejette pas automatiquement.
         - TP2 (Structurel — cible de liquidité) :
           * LONG : TP2 = eqh_level (Equal Highs, Buy-Side Liquidity) ou nearest_resistance_ob price_bottom.
           * SHORT : TP2 = eql_level (Equal Lows, Sell-Side Liquidity) ou nearest_support_ob price_top.
