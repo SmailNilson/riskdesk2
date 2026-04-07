@@ -46,19 +46,22 @@ public class RolloverDetectionService {
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
     private final int                       calendarDaysThreshold;
+    private final boolean                   autoConfirm;
 
     public RolloverDetectionService(ActiveContractRegistry contractRegistry,
                                     IbGatewayContractResolver resolver,
                                     OpenInterestProvider openInterestProvider,
                                     IbkrProperties ibkrProperties,
                                     SimpMessagingTemplate messagingTemplate,
-                                    @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold) {
+                                    @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold,
+                                    @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
         this.contractRegistry       = contractRegistry;
         this.resolver               = resolver;
         this.openInterestProvider   = openInterestProvider;
         this.ibkrProperties         = ibkrProperties;
         this.messagingTemplate      = messagingTemplate;
         this.calendarDaysThreshold  = calendarDaysThreshold;
+        this.autoConfirm            = autoConfirm;
     }
 
     /**
@@ -86,9 +89,12 @@ public class RolloverDetectionService {
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             RolloverInfo info = computeInfo(instrument);
             if (info.status() == RolloverStatus.WARNING || info.status() == RolloverStatus.CRITICAL) {
-                log.warn("Rollover {} — {} {} ({} days to expiry {})",
+                log.info("Rollover {} — {} {} ({} days to expiry {})",
                     info.status(), instrument, info.contractMonth(), info.daysToExpiry(), info.expiryDate());
-                pushAlert(info);
+                // Only push alerts to frontend when auto-confirm is off (manual mode)
+                if (!autoConfirm) {
+                    pushAlert(info);
+                }
             }
         }
     }
