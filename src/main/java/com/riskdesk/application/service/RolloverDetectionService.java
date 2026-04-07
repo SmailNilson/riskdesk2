@@ -98,8 +98,12 @@ public class RolloverDetectionService {
     /**
      * Rollover detection strategy:
      *   1. OI comparison (2 contracts) — if next OI > current OI → RECOMMEND_ROLL
-     *   2. OI empty → calendar roll: if contract month < 32 days away → WARNING
+     *   2. OI empty → calendar fallback: WARNING if ≤ 7 days, CRITICAL if ≤ 3 days
      *   3. Otherwise → STABLE
+     *
+     * Note: the 32-day calendarDaysThreshold is used by ActiveContractRegistryInitializer
+     * for pre-rolling at startup. For user-facing alerts, we use WARNING_DAYS / CRITICAL_DAYS
+     * to avoid false positives on freshly-rolled contracts.
      */
     private RolloverInfo computeInfo(Instrument instrument) {
         String currentMonth = contractRegistry.getContractMonth(instrument).orElse(null);
@@ -133,11 +137,18 @@ public class RolloverDetectionService {
             return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
         }
 
-        // Strategy 2: OI empty → calendar fallback (skip serial months for quarterly instruments)
+        // Strategy 2: OI empty → calendar fallback using WARNING_DAYS / CRITICAL_DAYS
+        // (not calendarDaysThreshold which is for pre-roll at startup, too aggressive for alerts)
         if (!isSerialMonth(instrument, currentMonth)) {
             long daysToContractMonth = daysToFirstOfMonth(currentMonth);
-            if (daysToContractMonth >= 0 && daysToContractMonth < calendarDaysThreshold) {
-                log.info("Rollover calendar: {} — {} expires within {}d (OI unavailable)",
+            if (daysToContractMonth >= 0 && daysToContractMonth <= CRITICAL_DAYS) {
+                log.info("Rollover calendar CRITICAL: {} — {} expires within {}d (OI unavailable)",
+                    instrument, currentMonth, daysToContractMonth);
+                return new RolloverInfo(instrument.name(), currentMonth, null,
+                    daysToContractMonth, RolloverStatus.CRITICAL);
+            }
+            if (daysToContractMonth >= 0 && daysToContractMonth <= WARNING_DAYS) {
+                log.info("Rollover calendar WARNING: {} — {} expires within {}d (OI unavailable)",
                     instrument, currentMonth, daysToContractMonth);
                 return new RolloverInfo(instrument.name(), currentMonth, null,
                     daysToContractMonth, RolloverStatus.WARNING);
