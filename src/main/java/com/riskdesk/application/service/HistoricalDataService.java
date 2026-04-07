@@ -141,18 +141,43 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     /**
-     * Refreshes all timeframes for a single instrument without cooldown or timeout.
-     * Used after contract rollover to replace old-contract candles with new-contract data.
-     * Runs synchronously — caller should wrap in CompletableFuture if async is desired.
+     * Quick rollover refresh: fetches only 7 days of recent data for key timeframes.
+     * Enough to give the chart correct data immediately after a contract switch.
+     * The scheduled deep backfill handles the full historical depth later.
      */
-    public Map<String, Integer> refreshInstrumentFull(Instrument instrument) {
+    public Map<String, Integer> refreshInstrumentRollover(Instrument instrument) {
         if (!enabled) return Collections.emptyMap();
 
+        // 7 days of data — just enough to fix the chart spike
+        Map<String, Integer> targets = Map.of(
+            "5m",  7 * 24 * 60 / 5,    // 2016 candles
+            "1h",  7 * 24              // 168 candles
+        );
+
         Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
-        for (String timeframe : TIMEFRAMES) {
-            int saved = refreshSingleInstrumentTimeframe(instrument, timeframe, "rollover");
-            savedByTimeframe.put(timeframe, saved);
+        for (var entry : targets.entrySet()) {
+            String timeframe = entry.getKey();
+            int limit = entry.getValue();
+            try {
+                if (!historicalProvider.supports(instrument, timeframe)) continue;
+                List<Candle> candles = deduplicate(
+                    tagWithContractMonth(historicalProvider.fetchHistory(instrument, timeframe, limit), instrument));
+                if (!candles.isEmpty()) {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+                    candlePort.saveAll(candles);
+                    savedByTimeframe.put(timeframe, candles.size());
+                    log.info("HistoricalDataService [rollover]: refreshed {} {} with {} candles.",
+                        instrument, timeframe, candles.size());
+                }
+            } catch (Exception e) {
+                log.warn("HistoricalDataService [rollover]: {} {} refresh failed — {}",
+                    instrument, timeframe, e.getMessage());
+            }
         }
+
+        // Reset deep backfill flag so scheduled task re-runs and fills remaining timeframes
+        deepBackfillDone.set(false);
+
         return savedByTimeframe;
     }
 

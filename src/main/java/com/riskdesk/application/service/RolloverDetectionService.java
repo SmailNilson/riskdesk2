@@ -84,15 +84,14 @@ public class RolloverDetectionService {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
 
-        // Re-fetch historical data for the new contract to prevent chart data mismatch.
-        // Without this, old contract candles remain in DB and the chart shows a fake spike
-        // (e.g. old 202604 at ~99 → new 202605 live tick at ~114).
+        // Quick refresh: 7 days of 5m+1h data to fix the chart immediately.
+        // Deep backfill (remaining timeframes + full depth) runs on its scheduled task.
         CompletableFuture.runAsync(() -> {
-            log.info("Rollover confirmed: {} → {} — refreshing historical data...", instrument, contractMonth);
-            Map<String, Integer> saved = historicalDataService.refreshInstrumentFull(instrument);
-            log.info("Rollover historical refresh done: {} → {}", instrument, saved);
+            log.info("Rollover confirmed: {} → {} — quick 7-day refresh...", instrument, contractMonth);
+            Map<String, Integer> saved = historicalDataService.refreshInstrumentRollover(instrument);
+            log.info("Rollover quick refresh done: {} → {}", instrument, saved);
         }).exceptionally(ex -> {
-            log.warn("Rollover historical refresh failed for {} — {}", instrument, ex.getMessage());
+            log.warn("Rollover quick refresh failed for {} — {}", instrument, ex.getMessage());
             return null;
         });
     }
