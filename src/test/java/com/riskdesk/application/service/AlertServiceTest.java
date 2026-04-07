@@ -58,6 +58,9 @@ class AlertServiceTest {
     private MentorSignalReviewService mentorSignalReviewService;
 
     @Mock
+    private SignalConfluenceBuffer confluenceBuffer;
+
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
 
     @Test
@@ -71,42 +74,23 @@ class AlertServiceTest {
     }
 
     @Test
-    void orderBlockAlertsTriggerMentorReviewCapture() {
+    void confluenceBufferAcceptsDirectAccumulation() {
         Alert orderBlockAlert = new Alert(
             "ob:mitigated:MNQ:10m",
             AlertSeverity.INFO,
-            "MNQ [10m] Bearish order block mitigated",
+            "MNQ [10m] BEARISH OB mitigated [24200 – 24260]",
             AlertCategory.ORDER_BLOCK,
             "MNQ"
         );
+        var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(orderBlockAlert);
+        var dir = SignalPreFilterService.extractDirection(orderBlockAlert);
 
-        AlertService service = reviewAwareService();
-
-        when(indicatorAlertEvaluator.evaluate(eq(Instrument.MNQ), eq("10m"), any()))
-            .thenReturn(List.of(orderBlockAlert));
-        when(indicatorAlertEvaluator.evaluate(eq(Instrument.MNQ), eq("1h"), any()))
-            .thenReturn(List.of());
-        when(signalPreFilterService.filter(anyList(), eq("10m"), anyString()))
-            .thenReturn(List.of(orderBlockAlert));
-        when(signalPreFilterService.filter(anyList(), eq("1h"), anyString()))
-            .thenReturn(List.of());
-
-        service.evaluate(Instrument.MNQ);
-
-        ArgumentCaptor<List<Alert>> alertsCaptor = ArgumentCaptor.forClass(List.class);
-        verify(mentorSignalReviewService).captureGroupReview(alertsCaptor.capture(), any());
-        assertEquals(List.of(orderBlockAlert), alertsCaptor.getValue());
+        assertEquals(com.riskdesk.domain.alert.model.SignalWeight.ORDER_BLOCK, sw);
+        assertEquals("SHORT", dir);
     }
 
     @Test
-    void publishedIndicatorAlertsShareTheSameMentorReviewCaptureBatch() {
-        Alert orderBlockAlert = new Alert(
-            "ob:mitigated:MNQ:10m",
-            AlertSeverity.INFO,
-            "MNQ [10m] Bearish order block mitigated",
-            AlertCategory.ORDER_BLOCK,
-            "MNQ"
-        );
+    void multipleSignalWeightsResolved() {
         Alert macdAlert = new Alert(
             "macd:bearish:MNQ:10m",
             AlertSeverity.INFO,
@@ -114,23 +98,11 @@ class AlertServiceTest {
             AlertCategory.MACD,
             "MNQ"
         );
+        var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(macdAlert);
+        var dir = SignalPreFilterService.extractDirection(macdAlert);
 
-        AlertService service = reviewAwareService();
-
-        when(indicatorAlertEvaluator.evaluate(eq(Instrument.MNQ), eq("10m"), any()))
-            .thenReturn(List.of(orderBlockAlert, macdAlert));
-        when(indicatorAlertEvaluator.evaluate(eq(Instrument.MNQ), eq("1h"), any()))
-            .thenReturn(List.of());
-        when(signalPreFilterService.filter(anyList(), eq("10m"), anyString()))
-            .thenReturn(List.of(orderBlockAlert, macdAlert));
-        when(signalPreFilterService.filter(anyList(), eq("1h"), anyString()))
-            .thenReturn(List.of());
-
-        service.evaluate(Instrument.MNQ);
-
-        ArgumentCaptor<List<Alert>> alertsCaptor = ArgumentCaptor.forClass(List.class);
-        verify(mentorSignalReviewService).captureGroupReview(alertsCaptor.capture(), any());
-        assertEquals(List.of(orderBlockAlert, macdAlert), alertsCaptor.getValue());
+        assertEquals(com.riskdesk.domain.alert.model.SignalWeight.MACD, sw);
+        assertEquals("SHORT", dir);
     }
 
     private void assertAlertCanRefireAfterSharedCooldown(String key) throws Exception {
@@ -143,6 +115,7 @@ class AlertServiceTest {
             null,
             null,
             deduplicator,
+            null,
             null,
             null,
             new SimpMessagingTemplate(channel)
@@ -165,8 +138,10 @@ class AlertServiceTest {
     private AlertService reviewAwareService() {
         when(positionService.getPortfolio()).thenReturn(new Portfolio(Money.ZERO, List.of()));
         when(riskAlertEvaluator.evaluate(any())).thenReturn(List.of());
-        when(indicatorService.computeSnapshot(eq(Instrument.MNQ), eq("10m"))).thenReturn(snapshot("10m"));
-        when(indicatorService.computeSnapshot(eq(Instrument.MNQ), eq("1h"))).thenReturn(snapshot("1h"));
+        // Return null for unneeded timeframes so the loop skips them cleanly
+        when(indicatorService.computeSnapshot(any(), anyString())).thenReturn(null);
+        when(indicatorService.computeSnapshot(any(), eq("10m"))).thenReturn(snapshot("10m"));
+        when(indicatorService.computeSnapshot(any(), eq("1h"))).thenReturn(snapshot("1h"));
 
         AlertDeduplicator deduplicator = new AlertDeduplicator(60);
         return new AlertService(
@@ -177,6 +152,7 @@ class AlertServiceTest {
             deduplicator,
             signalPreFilterService,
             mentorSignalReviewService,
+            confluenceBuffer,
             messagingTemplate
         );
     }

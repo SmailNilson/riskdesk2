@@ -28,7 +28,7 @@ import java.util.List;
 public class TradeSimulationService {
 
     private static final Logger log = LoggerFactory.getLogger(TradeSimulationService.class);
-    private static final String SIMULATION_TIMEFRAME = "1m";
+    private static final String SIMULATION_TIMEFRAME = "5m";
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final MentorAuditRepositoryPort auditRepository;

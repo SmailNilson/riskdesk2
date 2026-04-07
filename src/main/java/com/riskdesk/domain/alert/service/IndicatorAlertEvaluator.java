@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.math.RoundingMode;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
@@ -221,6 +222,16 @@ public class IndicatorAlertEvaluator {
         return true;
     }
 
+    /** OB zone midpoint must be within 1.5% of current price to generate an alert. */
+    private static final BigDecimal OB_PROXIMITY_THRESHOLD = new BigDecimal("0.015");
+
+    private static boolean isObProximate(BigDecimal price, BigDecimal obHigh, BigDecimal obLow) {
+        if (price == null || obHigh == null || obLow == null || price.signum() == 0) return false;
+        BigDecimal mid = obHigh.add(obLow).divide(BigDecimal.TWO, 6, RoundingMode.HALF_UP);
+        BigDecimal dist = price.subtract(mid).abs().divide(price, 6, RoundingMode.HALF_UP);
+        return dist.compareTo(OB_PROXIMITY_THRESHOLD) <= 0;
+    }
+
     public List<Alert> evaluate(Instrument instrument, String timeframe, IndicatorAlertSnapshot snap) {
         List<Alert> alerts = new ArrayList<>();
         if (snap == null) return alerts;
@@ -349,8 +360,10 @@ public class IndicatorAlertEvaluator {
         }
 
         // Order Block lifecycle events (UC-SMC-009) — fires on real MITIGATION / INVALIDATION
-        if (snap.recentObEvents() != null && !snap.recentObEvents().isEmpty()) {
+        // Only fire for OBs within 1.5% of current price to avoid noise from distant zones.
+        if (snap.recentObEvents() != null && !snap.recentObEvents().isEmpty() && snap.close() != null) {
             for (IndicatorAlertSnapshot.OrderBlockEvent evt : snap.recentObEvents()) {
+                if (!isObProximate(snap.close(), evt.high(), evt.low())) continue;
                 EvalKey obEventKey = key("ob", instrument, timeframe, evt.eventType() + ":" + evt.obType(),
                         evt.high(), evt.low());
                 if (shouldFireOrderBlockEvent(obEventKey, snap.lastCandleTimestamp())) {

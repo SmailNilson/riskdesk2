@@ -44,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 
@@ -123,6 +124,7 @@ public class MentorSignalReviewService {
      * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
      * so the semantic dedup prevents re-review after restart.
      */
+    @Deprecated
     public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
         // Group by direction (LONG/SHORT)
         Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
@@ -141,6 +143,122 @@ public class MentorSignalReviewService {
             // breaks review attachment and makes fresh groups appear as "No Review".
             captureInitialReview(primary, focusSnapshot);
         }
+    }
+
+    /**
+     * Confluence Engine entry point — receives a consolidated batch of signals
+     * from {@link SignalConfluenceBuffer} after the weight threshold is reached.
+     * Standalone signals (weight 3.0) flush immediately; secondary signals
+     * need confluence to reach the threshold.
+     */
+    public void captureConsolidatedReview(List<Alert> signals,
+                                           IndicatorSnapshot snap,
+                                           float confluenceWeight,
+                                           Alert primary,
+                                           float opposingBufferWeight) {
+        if (primary == null || signals.isEmpty()) return;
+        if (primary.timestamp() != null &&
+                primary.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
+            return;
+        }
+
+        AlertReviewCandidate candidate = classify(primary);
+        if (candidate == null) return;
+
+        String alertKey = primary.timestamp() + ":CONFLUENCE:"
+                + primary.instrument() + ":" + primary.category().name() + ":" + candidate.action();
+        if (reviewRepository.existsByAlertKey(alertKey)) return;
+
+        // Semantic dedup on quadruplet (instrument, category, direction, timeframe)
+        long dedupWindowSeconds = semanticDedupWindowSeconds(candidate.timeframe());
+        if (reviewRepository.existsRecentReview(
+                candidate.instrument().name(), primary.category().name(),
+                candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
+            log.info("Confluence dedup: skipping {} {} {} — already analyzed within {}s window",
+                     candidate.instrument(), primary.category(), candidate.action(), dedupWindowSeconds);
+            return;
+        }
+
+        if (!autoAnalysisEnabled) {
+            MentorSignalReviewRecord skipped = newReviewRecord(
+                    alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
+                    primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}");
+            skipped.setCompletedAt(Instant.now());
+            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
+            reviewRepository.save(skipped);
+            return;
+        }
+
+        JsonNode payload = null;
+        String snapshotJson = "{}";
+        String snapshotError = null;
+        try {
+            payload = buildPayload(candidate, primary, snap, AUTO_SELECTED_TIMEZONE);
+            // Enrich with confluence data
+            if (payload instanceof com.fasterxml.jackson.databind.node.ObjectNode payloadNode) {
+                var csArray = objectMapper.createArrayNode();
+                for (Alert signal : signals) {
+                    var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(signal);
+                    var sigNode = objectMapper.createObjectNode();
+                    sigNode.put("category", signal.category().name());
+                    sigNode.put("message", signal.message());
+                    sigNode.put("weight", sw != null ? sw.weight() : 0f);
+                    sigNode.put("fired_at", signal.timestamp().toString());
+                    csArray.add(sigNode);
+                }
+                payloadNode.set("confluence_signals", csArray);
+                payloadNode.put("confluence_strength", signals.size());
+                payloadNode.put("confluence_weight", confluenceWeight);
+                payloadNode.put("primary_signal", primary.category().name());
+                payloadNode.put("opposing_buffer_weight", opposingBufferWeight);
+            }
+            snapshotJson = objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            snapshotError = "Confluence review payload failed: " + errorMessage(e);
+        }
+
+        String consolidatedMessage = buildConsolidatedMessage(signals, candidate);
+
+        MentorSignalReviewRecord pending = newReviewRecord(
+                alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+                primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson);
+        pending.setMessage(consolidatedMessage);
+        pending.setTriggerPrice(resolveTriggerPrice(snap));
+        if (snapshotError != null) {
+            pending.setStatus(STATUS_ERROR);
+            pending.setCompletedAt(Instant.now());
+            pending.setErrorMessage(snapshotError);
+        }
+
+        MentorSignalReviewRecord saved = reviewRepository.save(pending);
+        publish(saved);
+
+        if (snapshotError == null && payload != null) {
+            JsonNode reviewPayload = payload;
+            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
+        }
+    }
+
+    /**
+     * Builds a human-readable consolidated message from all signals in a confluence flush.
+     * Example: "MNQ [10m] — Swing CHoCH: CHOCH_BULLISH — WaveTrend Bearish Cross"
+     */
+    private String buildConsolidatedMessage(List<Alert> signals, AlertReviewCandidate candidate) {
+        if (signals.isEmpty()) return "";
+        String prefix = candidate.instrument().name() + " [" + candidate.timeframe() + "]";
+        // Extract short description from each signal message, removing the instrument/timeframe prefix
+        List<String> parts = new ArrayList<>();
+        for (Alert signal : signals) {
+            String msg = signal.message();
+            // Strip common prefix patterns like "Micro E-mini Nasdaq-100 [10m] — "
+            int dashIdx = msg.indexOf(" — ");
+            if (dashIdx >= 0 && dashIdx < msg.length() - 3) {
+                parts.add(msg.substring(dashIdx + 3).trim());
+            } else {
+                parts.add(msg);
+            }
+        }
+        return prefix + " — " + String.join(" — ", parts);
     }
 
     /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
@@ -210,6 +328,7 @@ public class MentorSignalReviewService {
             AUTO_SELECTED_TIMEZONE,
             snapshotJson
         );
+        pending.setTriggerPrice(resolveTriggerPrice(focusSnapshot));
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -277,25 +396,20 @@ public class MentorSignalReviewService {
         }
 
         MentorSignalReviewRecord pending = newReviewRecord(
-            alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
+            alertKey, 1, TRIGGER_INITIAL, STATUS_DONE,
             syntheticAlert, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson
         );
         pending.setSourceType("BEHAVIOUR");
         pending.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
         pending.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+        pending.setCompletedAt(Instant.now());
         if (snapshotError != null) {
             pending.setStatus(STATUS_ERROR);
-            pending.setCompletedAt(Instant.now());
             pending.setErrorMessage(snapshotError);
         }
 
         MentorSignalReviewRecord saved = reviewRepository.save(pending);
         publish(saved);
-
-        if (snapshotError == null && payload != null) {
-            JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
-        }
     }
 
     public MentorSignalReview reanalyzeAlert(Alert alert) {
@@ -431,6 +545,18 @@ public class MentorSignalReviewService {
         return review;
     }
 
+    /**
+     * Resolves the trigger price from a snapshot — uses lastPrice (live) first,
+     * falls back to latest candle close (ema9 position proxy).
+     */
+    private BigDecimal resolveTriggerPrice(IndicatorSnapshot snap) {
+        if (snap == null) return null;
+        if (snap.lastPrice() != null) return snap.lastPrice();
+        // fallback: VWAP is close to current price in most sessions
+        if (snap.vwap() != null) return snap.vwap();
+        return null;
+    }
+
     private void analyzeAndPersist(Long reviewId, JsonNode payload) {
         if (payload == null) {
             completeWithError(reviewId, "Saved alert snapshot is not available.");
@@ -443,7 +569,7 @@ public class MentorSignalReviewService {
                 review.setStatus(STATUS_DONE);
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(analysis));
-                review.setVerdict(analysis.analysis() == null ? null : analysis.analysis().verdict());
+                review.setVerdict(truncate(analysis.analysis() == null ? null : analysis.analysis().verdict(), 512));
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
@@ -545,7 +671,8 @@ public class MentorSignalReviewService {
             review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
             review.getMaxDrawdownPoints() == null ? null : review.getMaxDrawdownPoints().doubleValue(),
             analysis,
-            review.getErrorMessage()
+            review.getErrorMessage(),
+            review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue()
         );
     }
 
@@ -589,7 +716,11 @@ public class MentorSignalReviewService {
                 ? "Mentor explicitly marked the review as execution-eligible."
                 : "Mentor did not mark the review as execution-eligible.";
         }
-        return reason;
+        return truncate(reason, 1024);
+    }
+
+    private static String truncate(String value, int maxLen) {
+        return value != null && value.length() > maxLen ? value.substring(0, maxLen) : value;
     }
 
     private JsonNode buildPayload(AlertReviewCandidate candidate,
@@ -837,6 +968,12 @@ public class MentorSignalReviewService {
     }
 
     /** Timeframe-aware semantic dedup window: base duration × 5. */
+    /**
+     * Semantic dedup window = 2× the timeframe duration.
+     * Previous ×5 multiplier was too aggressive — blocked re-evaluation when
+     * market conditions changed (e.g. LONG rejected at 02:00, price moved 20pts
+     * by 02:40 but dedup still active for 50 min on 10m).
+     */
     static long semanticDedupWindowSeconds(String timeframe) {
         long base = switch (timeframe) {
             case "1m"  -> 60;
@@ -849,7 +986,7 @@ public class MentorSignalReviewService {
             case "1d"  -> 86400;
             default    -> 3600;
         };
-        return base * 5;
+        return base * 2;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {
@@ -977,8 +1114,8 @@ public class MentorSignalReviewService {
         }
 
         BigDecimal structuralLevel = "BULLISH".equals(bias)
-            ? pickNearestLevel(currentPrice, List.of(snapshot.weakLow(), snapshot.strongLow()), true)
-            : pickNearestLevel(currentPrice, List.of(snapshot.weakHigh(), snapshot.strongHigh()), false);
+            ? pickNearestLevel(currentPrice, Stream.of(snapshot.weakLow(), snapshot.strongLow()).filter(Objects::nonNull).toList(), true)
+            : pickNearestLevel(currentPrice, Stream.of(snapshot.weakHigh(), snapshot.strongHigh()).filter(Objects::nonNull).toList(), false);
         if (structuralLevel == null) {
             return null;
         }

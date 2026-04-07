@@ -171,4 +171,15 @@ public final class TradingSessionResolver {
         LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
         return !t.isBefore(FX_MAINTENANCE_START) && t.isBefore(CME_SESSION_CLOSE);
     }
+
+    /**
+     * Returns {@code true} if the timestamp falls within an ICT kill zone:
+     * London 02:00–05:00 ET, NY 08:30–11:00 ET.
+     * Used to gate 5m alert evaluation.
+     */
+    public static boolean isWithinKillZone(Instant timestamp) {
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        return (t.compareTo(LocalTime.of(2, 0)) >= 0 && t.isBefore(LocalTime.of(5, 0)))
+            || (t.compareTo(LocalTime.of(8, 30)) >= 0 && t.isBefore(LocalTime.of(11, 0)));
+    }
 }

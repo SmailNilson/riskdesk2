@@ -109,7 +109,14 @@ export function useWebSocket() {
     loadRecentAlerts();
     loadRecentMentorReviews();
     connect();
+
+    // Periodic polls — recover from WebSocket disconnects
+    const reviewPoll = setInterval(loadRecentMentorReviews, 30_000);
+    const alertPoll = setInterval(loadRecentAlerts, 30_000);
+
     return () => {
+      clearInterval(reviewPoll);
+      clearInterval(alertPoll);
       clientRef.current?.deactivate();
     };
   }, [connect, loadRecentAlerts, loadRecentMentorReviews]);

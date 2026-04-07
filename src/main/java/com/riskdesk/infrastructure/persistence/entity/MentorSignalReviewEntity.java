@@ -22,7 +22,8 @@ import java.math.BigDecimal;
     indexes = {
         @Index(name = "idx_mentor_signal_reviews_alert_key", columnList = "alertKey"),
         @Index(name = "idx_mentor_signal_reviews_created_at", columnList = "createdAt"),
-        @Index(name = "idx_mentor_signal_reviews_source_type", columnList = "sourceType")
+        @Index(name = "idx_mentor_signal_reviews_source_type", columnList = "sourceType"),
+        @Index(name = "idx_mentor_signal_reviews_semantic_dedup", columnList = "instrument, category, action, createdAt, status")
     },
     uniqueConstraints = {
         @UniqueConstraint(name = "uk_mentor_signal_reviews_alert_revision", columnNames = {"alertKey", "revision"})
@@ -110,6 +111,9 @@ public class MentorSignalReviewEntity {
 
     @Column(length = 16, nullable = false)
     private String sourceType = "SIGNAL";
+
+    @Column(precision = 19, scale = 6)
+    private BigDecimal triggerPrice;
 
     public Long getId() {
         return id;
@@ -317,5 +321,13 @@ public class MentorSignalReviewEntity {
 
     public void setSourceType(String sourceType) {
         this.sourceType = sourceType;
+    }
+
+    public BigDecimal getTriggerPrice() {
+        return triggerPrice;
+    }
+
+    public void setTriggerPrice(BigDecimal triggerPrice) {
+        this.triggerPrice = triggerPrice;
     }
 }

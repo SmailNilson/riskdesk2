@@ -20,8 +20,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class ExtremeCmfZoneRule implements BehaviourAlertRule {
 
-    static final BigDecimal ACCUMULATION_THRESHOLD = new BigDecimal("0.25");
-    static final BigDecimal DISTRIBUTION_THRESHOLD = new BigDecimal("-0.25");
+    static final BigDecimal ACCUMULATION_THRESHOLD = new BigDecimal("0.40");
+    static final BigDecimal DISTRIBUTION_THRESHOLD = new BigDecimal("-0.40");
 
     private static final String ACCUMULATION = "ACCUMULATION";
     private static final String DISTRIBUTION = "DISTRIBUTION";

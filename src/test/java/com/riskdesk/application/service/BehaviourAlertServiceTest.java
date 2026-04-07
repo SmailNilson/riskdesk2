@@ -159,9 +159,10 @@ class BehaviourAlertServiceTest {
 
         service.evaluate(Instrument.MNQ);
 
-        // Should evaluate for both 10m and 1h timeframes
-        verify(indicatorService).computeSnapshot(Instrument.MNQ, "10m");
-        verify(indicatorService).computeSnapshot(Instrument.MNQ, "1h");
+        // Should evaluate for both 10m and 1h timeframes.
+        // "1h" appears in both SR_SOURCE_TIMEFRAMES and TIMEFRAMES so it's called twice.
+        verify(indicatorService, atLeastOnce()).computeSnapshot(Instrument.MNQ, "10m");
+        verify(indicatorService, atLeastOnce()).computeSnapshot(Instrument.MNQ, "1h");
         verify(evaluator, times(2)).evaluate(any(BehaviourAlertContext.class));
     }
 
