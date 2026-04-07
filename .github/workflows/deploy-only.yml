@@ -1,0 +1,71 @@
+name: Deploy Only (no build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (e.g. v1.8.7)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION }}
+  ZONE: ${{ vars.GCP_ZONE }}
+  REPOSITORY: ${{ vars.GCP_ARTIFACT_REGISTRY_REPOSITORY }}
+  INSTANCE_NAME: ${{ vars.GCP_INSTANCE_NAME }}
+  CONFIG_BUCKET: ${{ vars.GCP_CONFIG_BUCKET }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+  IMAGE_TAG: ${{ inputs.tag }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Prepare image names
+        id: images
+        run: |
+          echo "backend_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/riskdesk-backend:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/riskdesk-frontend:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ibkr_gateway_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/ibkr-gateway:stable" >> "$GITHUB_OUTPUT"
+
+      - name: Upload runtime config bundle
+        run: |
+          gcloud storage cp infra/gcp/docker-compose.gce.yml "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml"
+          gcloud storage cp infra/gcp/render-secrets-env.sh "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh"
+          gcloud storage cp infra/gcp/backup-postgres-to-gcs.sh "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh"
+          gcloud storage cp infra/gcp/refresh-runtime-on-vm.sh "gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh"
+          gcloud storage cp infra/docker/nginx/local-prod.conf "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf"
+          gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql"
+
+      - name: Deploy on VM
+        run: |
+          gcloud compute ssh "${INSTANCE_NAME}" \
+            --zone "${ZONE}" \
+            --tunnel-through-iap \
+            --command "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ steps.images.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ steps.images.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ steps.images.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh'"
+
+      - name: Health check
+        run: |
+          gcloud compute ssh "${INSTANCE_NAME}" \
+            --zone "${ZONE}" \
+            --tunnel-through-iap \
+            --command "timeout 480 bash -c 'until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done' && echo Deploy OK"
