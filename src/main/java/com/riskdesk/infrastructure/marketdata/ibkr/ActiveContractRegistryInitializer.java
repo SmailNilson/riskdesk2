@@ -138,12 +138,10 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     }
 
     /**
-     * Compares OI across ALL available contracts (not just the first 2).
+     * Compares OI across ALL available contracts.
      * Returns the contract with the highest OI, or null if OI is unavailable for all.
-     *
-     * During rollover week, the expiring contract may still have higher OI than the
-     * next month. By comparing all 3 contracts, we avoid flip-flopping between old
-     * and new contract on restarts.
+     * The highest-OI contract is where liquidity currently sits — that's the correct
+     * active contract, even if it's near expiry during rollover week.
      */
     private IbGatewayResolvedContract selectByOi(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
         IbGatewayResolvedContract best = null;
@@ -165,42 +163,11 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
         }
 
         if (best != null && anyOiPresent) {
-            String bestMonth = normalizeMonth(best.contract().lastTradeDateOrContractMonth());
             log.info("ActiveContractRegistry: {} OI-select → {} (OI={}, all: [{}])",
-                instrument, bestMonth, bestOi, logDetail.toString().trim());
-
-            // Safety guard: if the OI winner is near expiry and there's a viable next
-            // contract with non-trivial OI (>10% of winner), prefer the next month.
-            // This prevents re-selecting an expiring contract on restart during rollover week.
-            if (isNearExpiry(bestMonth) && contracts.size() > 1) {
-                IbGatewayResolvedContract nextViable = findNextViableContract(instrument, contracts, bestMonth);
-                if (nextViable != null) {
-                    String nextMonth = normalizeMonth(nextViable.contract().lastTradeDateOrContractMonth());
-                    OptionalLong nextOi = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
-                    if (nextOi.isPresent() && nextOi.getAsLong() > bestOi / 10) {
-                        log.info("ActiveContractRegistry: {} OI-winner {} is near expiry — preferring {} (OI={}, >10% of {})",
-                            instrument, bestMonth, nextMonth, nextOi.getAsLong(), bestOi);
-                        return nextViable;
-                    }
-                }
-            }
+                instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()),
+                bestOi, logDetail.toString().trim());
         }
         return anyOiPresent ? best : null;
-    }
-
-    /**
-     * Finds the first contract in the list whose month is strictly after {@code afterMonth}.
-     */
-    private IbGatewayResolvedContract findNextViableContract(Instrument instrument,
-                                                              List<IbGatewayResolvedContract> contracts,
-                                                              String afterMonth) {
-        for (IbGatewayResolvedContract c : contracts) {
-            String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
-            if (month != null && month.compareTo(afterMonth) > 0) {
-                return c;
-            }
-        }
-        return null;
     }
 
     /**
