@@ -17,7 +17,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * Initializes the ActiveContractRegistry at startup (Order 1 — before HistoricalDataService).
@@ -74,30 +73,26 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             Instrument.E6,  fallbackE6
         );
 
-        // Step 1: instant startup with fallback values (no IBKR calls)
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-            String fallback = applyCalendarRollIfNeeded(instrument, fallbacks.get(instrument));
-            registry.initialize(instrument, fallback);
-        }
-        log.info("ActiveContractRegistry ready (fallbacks): {}", registry.snapshot());
+            String resolved = ibkrProperties.isEnabled()
+                ? resolveFromIbkr(instrument)
+                : null;
 
-        // Step 2: resolve from IBKR in background (won't block health check)
-        if (ibkrProperties.isEnabled()) {
-            CompletableFuture.runAsync(() -> {
-                for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-                    try {
-                        String resolved = resolveFromIbkr(instrument);
-                        if (resolved != null) {
-                            registry.initialize(instrument, resolved);
-                            log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
-                        }
-                    } catch (Exception e) {
-                        log.debug("ActiveContractRegistry: {} IBKR resolution failed — {}", instrument, e.getMessage());
-                    }
-                }
-                log.info("ActiveContractRegistry updated (IBKR): {}", registry.snapshot());
-            });
+            if (resolved != null) {
+                registry.initialize(instrument, resolved);
+                log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
+            } else {
+                String fallback = fallbacks.get(instrument);
+                // Apply calendar rule to fallback too
+                fallback = applyCalendarRollIfNeeded(instrument, fallback);
+                registry.initialize(instrument, fallback);
+                log.warn("ActiveContractRegistry: {} → {} (fallback — IBKR {} or unavailable)",
+                    instrument, fallback,
+                    ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+            }
         }
+
+        log.info("ActiveContractRegistry ready: {}", registry.snapshot());
     }
 
     private String resolveFromIbkr(Instrument instrument) {
