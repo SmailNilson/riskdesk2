@@ -89,21 +89,28 @@ public class HistoricalDataService implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        // No DB loading at startup — let the health check pass first.
+        // All historical data is fetched by the scheduled tasks below.
         if (!enabled) {
             log.debug("Historical fetch disabled. Set riskdesk.market-data.historical.enabled=true to enable.");
-            return;
+        } else {
+            log.info("HistoricalDataService: startup complete — quick fetch in 30s, deep backfill in 5min.");
         }
-        // Phase 1: quick single-contract fetch (500 candles, 1 thread) — non-blocking.
-        // Gives charts and indicators enough data to work within seconds.
-        CompletableFuture.runAsync(() -> tryFetchAndReplace("startup", DEFAULT_CANDLES_PER_PAIR, 1))
-            .exceptionally(ex -> {
-                log.error("Startup historical data fetch failed", ex);
-                return null;
-            });
     }
 
     /**
-     * Phase 2: deep multi-contract backfill — runs 5 minutes after startup.
+     * Phase 1: quick fetch — 30 seconds after startup (health check is already OK).
+     * Gets 500 recent candles per instrument/timeframe so charts are usable quickly.
+     */
+    @Scheduled(initialDelay = 30 * 1000, fixedDelay = Long.MAX_VALUE)
+    public void quickStartupFetch() {
+        if (!enabled || realDataLoaded.get()) return;
+        log.info("HistoricalDataService: starting quick startup fetch (500 candles)...");
+        tryFetchAndReplace("startup", DEFAULT_CANDLES_PER_PAIR, 1);
+    }
+
+    /**
+     * Phase 2: deep multi-contract backfill — 5 minutes after startup.
      * Walks backward through expired contracts with full target counts.
      * Sequential (1 thread) to respect IBKR pacing limits (~60 requests/10 min).
      */
