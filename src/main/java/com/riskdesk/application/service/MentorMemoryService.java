@@ -174,6 +174,10 @@ public class MentorMemoryService {
             jdbcTemplate.execute(
                 "ALTER TABLE mentor_audit_memories ADD COLUMN IF NOT EXISTS embedding vector(" + properties.getEmbeddingDimensions() + ")"
             );
+            jdbcTemplate.execute(
+                "CREATE INDEX IF NOT EXISTS mentor_audit_memories_embedding_hnsw_idx "
+                + "ON mentor_audit_memories USING hnsw (embedding vector_cosine_ops)"
+            );
             vectorColumnAvailable = true;
         } catch (Exception e) {
             vectorColumnAvailable = false;

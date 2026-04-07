@@ -22,7 +22,8 @@ import java.math.BigDecimal;
     indexes = {
         @Index(name = "idx_mentor_signal_reviews_alert_key", columnList = "alertKey"),
         @Index(name = "idx_mentor_signal_reviews_created_at", columnList = "createdAt"),
-        @Index(name = "idx_mentor_signal_reviews_source_type", columnList = "sourceType")
+        @Index(name = "idx_mentor_signal_reviews_source_type", columnList = "sourceType"),
+        @Index(name = "idx_mentor_signal_reviews_semantic_dedup", columnList = "instrument, category, action, createdAt, status")
     },
     uniqueConstraints = {
         @UniqueConstraint(name = "uk_mentor_signal_reviews_alert_revision", columnNames = {"alertKey", "revision"})
