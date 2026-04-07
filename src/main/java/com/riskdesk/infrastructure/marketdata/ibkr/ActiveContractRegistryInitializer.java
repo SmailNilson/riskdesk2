@@ -11,6 +11,9 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -20,10 +23,10 @@ import java.util.OptionalLong;
  *
  * Resolution strategy (in order):
  *   1. Ask IBKR for the front-month contract via IbGatewayContractResolver.refresh().
- *   2. If IBKR is unavailable or disabled, fall back to application properties
- *      (riskdesk.active-contracts.MCL, .MGC, .MNQ, .E6).
- *
- * This guarantees the registry is populated before any service fetches or tags candles.
+ *   2. Compare OI between front and next month — pick the one with higher OI.
+ *   3. If OI is unavailable, apply calendar rule: if front-month expires within
+ *      {@code calendarDaysThreshold} days, auto-roll to next contract.
+ *   4. If IBKR is unavailable or disabled, fall back to application properties.
  */
 @Component
 @Order(1)
@@ -47,6 +50,9 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     @Value("${riskdesk.active-contracts.E6:202506}")
     private String fallbackE6;
+
+    @Value("${riskdesk.rollover.calendar-days-threshold:32}")
+    private int calendarDaysThreshold;
 
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
@@ -77,6 +83,8 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
             } else {
                 String fallback = fallbacks.get(instrument);
+                // Apply calendar rule to fallback too
+                fallback = applyCalendarRollIfNeeded(instrument, fallback);
                 registry.initialize(instrument, fallback);
                 log.warn("ActiveContractRegistry: {} → {} (fallback — IBKR {} or unavailable)",
                     instrument, fallback,
@@ -105,8 +113,14 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                     : OptionalLong.empty();
 
                 if (nextOI.isPresent() && frontOI.isPresent() && nextOI.getAsLong() > frontOI.getAsLong()) {
+                    // OI-based roll: next month has more liquidity
                     log.info("ActiveContractRegistry: {} OI-roll → {} (OI={}) over {} (OI={})",
                         instrument, nextMonth, nextOI.getAsLong(), frontMonth, frontOI.getAsLong());
+                    selected = topTwo.get(1);
+                } else if (frontOI.isEmpty() && nextOI.isEmpty() && isNearExpiry(frontMonth)) {
+                    // Calendar fallback: OI unavailable + front-month near expiry → auto-roll
+                    log.info("ActiveContractRegistry: {} calendar-roll → {} (OI unavailable, {} expires within {}d)",
+                        instrument, nextMonth, frontMonth, calendarDaysThreshold);
                     selected = topTwo.get(1);
                 } else {
                     selected = topTwo.get(0);
@@ -123,6 +137,60 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Returns true if the contract month is within {@code calendarDaysThreshold} days
+     * of its first day (approximate expiry).
+     * Example: contractMonth="202506", today=2026-05-05, first day=2026-06-01 → 27 days → true if threshold=32.
+     */
+    private boolean isNearExpiry(String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return false;
+        try {
+            int year = Integer.parseInt(contractMonth.substring(0, 4));
+            int month = Integer.parseInt(contractMonth.substring(4, 6));
+            LocalDate firstDayOfContractMonth = LocalDate.of(year, month, 1);
+            long daysUntil = ChronoUnit.DAYS.between(LocalDate.now(), firstDayOfContractMonth);
+            return daysUntil < calendarDaysThreshold;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Applies the calendar roll rule to a fallback contract month.
+     * If the fallback is near expiry, computes the next contract month.
+     */
+    private String applyCalendarRollIfNeeded(Instrument instrument, String contractMonth) {
+        if (!isNearExpiry(contractMonth)) return contractMonth;
+        String next = nextContractMonth(instrument, contractMonth);
+        log.info("ActiveContractRegistry: {} calendar-roll fallback → {} (was {} — expires within {}d)",
+            instrument, next, contractMonth, calendarDaysThreshold);
+        return next;
+    }
+
+    /**
+     * Computes the next contract month based on instrument cycle.
+     * E6/MNQ: quarterly (Mar, Jun, Sep, Dec)
+     * MCL/MGC: monthly
+     */
+    static String nextContractMonth(Instrument instrument, String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return contractMonth;
+        int year = Integer.parseInt(contractMonth.substring(0, 4));
+        int month = Integer.parseInt(contractMonth.substring(4, 6));
+        YearMonth ym = YearMonth.of(year, month);
+
+        if (instrument == Instrument.E6 || instrument == Instrument.MNQ) {
+            // Quarterly: Mar(3), Jun(6), Sep(9), Dec(12)
+            do {
+                ym = ym.plusMonths(1);
+            } while (ym.getMonthValue() % 3 != 0);
+        } else {
+            // Monthly: MCL, MGC
+            ym = ym.plusMonths(1);
+        }
+
+        return String.format("%04d%02d", ym.getYear(), ym.getMonthValue());
     }
 
     private static String normalizeMonth(String raw) {
