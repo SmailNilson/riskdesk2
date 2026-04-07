@@ -102,48 +102,114 @@ public class OpenInterestRolloverService {
     // ─────────────────────────────────────────────────────────────────────────
 
     private RolloverRecommendation checkInstrument(Instrument instrument) {
-        String currentMonth = contractRegistry.getContractMonth(instrument).orElse(null);
-        if (currentMonth == null) {
-            log.debug("OI check: no active contract for {}", instrument);
-            return null;
-        }
-
-        // Resolve front + next month contracts from IBKR
-        List<IbGatewayResolvedContract> topTwo = contractResolver.resolveNextContracts(instrument);
-        if (topTwo.size() < 2) {
+        // ── Step 1: Fetch up to 3 upcoming contracts from IBKR ──
+        List<IbGatewayResolvedContract> upcoming = contractResolver.resolveNextContracts(instrument);
+        if (upcoming.size() < 2) {
             log.debug("OI check: fewer than 2 contract months available for {}", instrument);
             return null;
         }
 
-        String frontMonth = normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
-        String nextMonth  = normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
-
-        if (frontMonth == null || nextMonth == null) {
-            log.debug("OI check: could not parse contract months for {}", instrument);
+        // Parse all contract months upfront
+        List<String> months = upcoming.stream()
+                .map(r -> normalizeMonth(r.contract().lastTradeDateOrContractMonth()))
+                .toList();
+        if (months.stream().anyMatch(m -> m == null)) {
+            log.debug("OI check: could not parse all contract months for {} — {}", instrument, months);
             return null;
         }
 
-        // Fetch OI for both months
-        OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
+        String activeMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+
+        // ── Step 2: Cold Start — registry empty, self-initialize ──
+        if (activeMonth == null) {
+            return handleColdStart(instrument, upcoming, months);
+        }
+
+        // ── Step 3: Dynamic Matching — find active month in IBKR list ──
+        return handleDynamicMatch(instrument, upcoming, months, activeMonth);
+    }
+
+    /**
+     * Cold Start: no active contract in registry. Compare OI of the first two IBKR
+     * contracts and initialize the registry with the one that has the highest OI
+     * (= where liquidity currently sits).
+     */
+    private RolloverRecommendation handleColdStart(Instrument instrument,
+                                                    List<IbGatewayResolvedContract> upcoming,
+                                                    List<String> months) {
+        String month0 = months.get(0);
+        String month1 = months.get(1);
+
+        OptionalLong oi0 = openInterestProvider.fetchOpenInterest(instrument, month0);
+        OptionalLong oi1 = openInterestProvider.fetchOpenInterest(instrument, month1);
+
+        if (oi0.isEmpty() || oi1.isEmpty()) {
+            log.warn("OI cold start: {} — OI unavailable for {} and/or {}, defaulting to front month {}",
+                    instrument, month0, month1, month0);
+            contractRegistry.initialize(instrument, month0);
+            return null;
+        }
+
+        String selected = oi1.getAsLong() > oi0.getAsLong() ? month1 : month0;
+        contractRegistry.initialize(instrument, selected);
+        log.info("OI cold start: {} — initialized to {} ({}={}, {}={})",
+                instrument, selected, month0, oi0.getAsLong(), month1, oi1.getAsLong());
+        return null;
+    }
+
+    /**
+     * Dynamic Matching: find the active contract month in IBKR's sorted list,
+     * then compare its OI with the next contract in line.
+     * This avoids the hardcoded index[0]/index[1] assumption that causes
+     * spurious re-rollovers when the old contract is still listed by IBKR.
+     */
+    private RolloverRecommendation handleDynamicMatch(Instrument instrument,
+                                                       List<IbGatewayResolvedContract> upcoming,
+                                                       List<String> months,
+                                                       String activeMonth) {
+        int currentIndex = months.indexOf(activeMonth);
+
+        if (currentIndex < 0) {
+            // Active month not in IBKR list — likely already expired. The oldest
+            // available contract becomes the candidate. Compare index 0 vs 1.
+            log.warn("OI check: {} active month {} not found in IBKR list {} — comparing first two",
+                    instrument, activeMonth, months);
+            currentIndex = 0;
+        }
+
+        if (currentIndex >= months.size() - 1) {
+            log.debug("OI check: {} — active month {} is the last available contract, nothing to compare",
+                    instrument, activeMonth);
+            return null;
+        }
+
+        String currentMonth = months.get(currentIndex);
+        String nextMonth    = months.get(currentIndex + 1);
+
+        log.info("OI check: {} — active contract {} found at IBKR index {}, comparing with index {} ({})",
+                instrument, currentMonth, currentIndex, currentIndex + 1, nextMonth);
+
+        // Fetch OI for both
+        OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, currentMonth);
         OptionalLong nextOI    = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
 
         if (currentOI.isEmpty() || nextOI.isEmpty()) {
-            log.debug("OI check: OI data unavailable for {} ({} / {})", instrument, frontMonth, nextMonth);
+            log.debug("OI check: {} — OI data unavailable ({} / {})", instrument, currentMonth, nextMonth);
             return null;
         }
 
         // Evaluate the domain rule
-        OpenInterestSnapshot currentSnap = new OpenInterestSnapshot(frontMonth, currentOI.getAsLong());
+        OpenInterestSnapshot currentSnap = new OpenInterestSnapshot(currentMonth, currentOI.getAsLong());
         OpenInterestSnapshot nextSnap    = new OpenInterestSnapshot(nextMonth, nextOI.getAsLong());
         RolloverRecommendation recommendation = OpenInterestRolloverRule.evaluate(instrument, currentSnap, nextSnap);
 
         log.info("OI check: {} — current {} OI={}, next {} OI={} → {}",
-            instrument, frontMonth, currentOI.getAsLong(), nextMonth, nextOI.getAsLong(), recommendation.action());
+                instrument, currentMonth, currentOI.getAsLong(), nextMonth, nextOI.getAsLong(), recommendation.action());
 
         if (recommendation.action() == RolloverRecommendation.Action.RECOMMEND_ROLL) {
             if (autoConfirm) {
                 rolloverDetectionService.confirmRollover(instrument, nextMonth);
-                log.info("OI auto-rollover: {} rolled from {} to {}", instrument, frontMonth, nextMonth);
+                log.info("OI auto-rollover: {} rolled from {} to {}", instrument, currentMonth, nextMonth);
             }
             pushOiRolloverAlert(recommendation);
         }
