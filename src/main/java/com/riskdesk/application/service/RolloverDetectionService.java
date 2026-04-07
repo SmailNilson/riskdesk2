@@ -49,7 +49,9 @@ public class RolloverDetectionService {
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
     private final ApplicationEventPublisher eventPublisher;
+    private final HistoricalDataService     historicalDataService;
     private final int                       calendarDaysThreshold;
+    private final boolean                   autoConfirm;
 
     public RolloverDetectionService(ActiveContractRegistry contractRegistry,
                                     IbGatewayContractResolver resolver,
@@ -57,14 +59,18 @@ public class RolloverDetectionService {
                                     IbkrProperties ibkrProperties,
                                     SimpMessagingTemplate messagingTemplate,
                                     ApplicationEventPublisher eventPublisher,
-                                    @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold) {
+                                    HistoricalDataService historicalDataService,
+                                    @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold,
+                                    @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
         this.contractRegistry       = contractRegistry;
         this.resolver               = resolver;
         this.openInterestProvider   = openInterestProvider;
         this.ibkrProperties         = ibkrProperties;
         this.messagingTemplate      = messagingTemplate;
         this.eventPublisher         = eventPublisher;
+        this.historicalDataService   = historicalDataService;
         this.calendarDaysThreshold  = calendarDaysThreshold;
+        this.autoConfirm            = autoConfirm;
     }
 
     /**
@@ -84,6 +90,9 @@ public class RolloverDetectionService {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
 
+        // Reset deep backfill so the scheduled task re-runs with the new contract
+        historicalDataService.resetDeepBackfill();
+
         if (oldMonth != null && !oldMonth.equals(contractMonth)) {
             ContractRolloverEvent event = new ContractRolloverEvent(
                     instrument, oldMonth, contractMonth, Instant.now());
@@ -101,9 +110,12 @@ public class RolloverDetectionService {
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             RolloverInfo info = computeInfo(instrument);
             if (info.status() == RolloverStatus.WARNING || info.status() == RolloverStatus.CRITICAL) {
-                log.warn("Rollover {} — {} {} ({} days to expiry {})",
+                log.info("Rollover {} — {} {} ({} days to expiry {})",
                     info.status(), instrument, info.contractMonth(), info.daysToExpiry(), info.expiryDate());
-                pushAlert(info);
+                // Only push alerts to frontend when auto-confirm is off (manual mode)
+                if (!autoConfirm) {
+                    pushAlert(info);
+                }
             }
         }
     }
@@ -113,8 +125,12 @@ public class RolloverDetectionService {
     /**
      * Rollover detection strategy:
      *   1. OI comparison (2 contracts) — if next OI > current OI → RECOMMEND_ROLL
-     *   2. OI empty → calendar roll: if contract month < 32 days away → WARNING
+     *   2. OI empty → calendar fallback: WARNING if ≤ 7 days, CRITICAL if ≤ 3 days
      *   3. Otherwise → STABLE
+     *
+     * Note: the 32-day calendarDaysThreshold is used by ActiveContractRegistryInitializer
+     * for pre-rolling at startup. For user-facing alerts, we use WARNING_DAYS / CRITICAL_DAYS
+     * to avoid false positives on freshly-rolled contracts.
      */
     private RolloverInfo computeInfo(Instrument instrument) {
         String currentMonth = contractRegistry.getContractMonth(instrument).orElse(null);
@@ -148,11 +164,18 @@ public class RolloverDetectionService {
             return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
         }
 
-        // Strategy 2: OI empty → calendar fallback (skip serial months for quarterly instruments)
+        // Strategy 2: OI empty → calendar fallback using WARNING_DAYS / CRITICAL_DAYS
+        // (not calendarDaysThreshold which is for pre-roll at startup, too aggressive for alerts)
         if (!isSerialMonth(instrument, currentMonth)) {
             long daysToContractMonth = daysToFirstOfMonth(currentMonth);
-            if (daysToContractMonth >= 0 && daysToContractMonth < calendarDaysThreshold) {
-                log.info("Rollover calendar: {} — {} expires within {}d (OI unavailable)",
+            if (daysToContractMonth >= 0 && daysToContractMonth <= CRITICAL_DAYS) {
+                log.info("Rollover calendar CRITICAL: {} — {} expires within {}d (OI unavailable)",
+                    instrument, currentMonth, daysToContractMonth);
+                return new RolloverInfo(instrument.name(), currentMonth, null,
+                    daysToContractMonth, RolloverStatus.CRITICAL);
+            }
+            if (daysToContractMonth >= 0 && daysToContractMonth <= WARNING_DAYS) {
+                log.info("Rollover calendar WARNING: {} — {} expires within {}d (OI unavailable)",
                     instrument, currentMonth, daysToContractMonth);
                 return new RolloverInfo(instrument.name(), currentMonth, null,
                     daysToContractMonth, RolloverStatus.WARNING);

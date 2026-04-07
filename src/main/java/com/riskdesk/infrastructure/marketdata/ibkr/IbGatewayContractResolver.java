@@ -53,6 +53,10 @@ public class IbGatewayContractResolver {
      * to a stale cached fallback.
      */
     public void refreshToMonth(Instrument instrument, String targetMonth) {
+        // Cancel old IBKR streaming subscriptions BEFORE updating the cache,
+        // so orphaned subscriptions on the expired contract month don't keep
+        // pushing stale prices alongside the new contract.
+        nativeClient.cancelInstrumentSubscriptions(instrument);
         cache.remove(instrument);
         for (Contract query : buildQueries(instrument)) {
             try {
@@ -137,6 +141,30 @@ public class IbGatewayContractResolver {
             .limit(3)
             .map(d -> new IbGatewayResolvedContract(instrument, d.contract(), d))
             .toList();
+    }
+
+    /**
+     * Resolves an expired contract for a specific month (e.g. "202503").
+     * Uses includeExpired=true so IBKR returns historical contracts.
+     * Used by deep backfill to walk across prior contract months.
+     */
+    public Optional<IbGatewayResolvedContract> resolveExpiredMonth(Instrument instrument, String targetMonth) {
+        if (!instrument.isExchangeTradedFuture()) return Optional.empty();
+
+        for (Contract query : buildQueries(instrument)) {
+            query.includeExpired(true);
+            query.lastTradeDateOrContractMonth(targetMonth);
+            try {
+                List<ContractDetails> details = nativeClient.requestContractDetails(query);
+                if (!details.isEmpty()) {
+                    ContractDetails d = details.get(0);
+                    return Optional.of(new IbGatewayResolvedContract(instrument, d.contract(), d));
+                }
+            } catch (Exception e) {
+                log.debug("resolveExpiredMonth: {} {} query failed — {}", instrument, targetMonth, e.getMessage());
+            }
+        }
+        return Optional.empty();
     }
 
     public void clearCache() {

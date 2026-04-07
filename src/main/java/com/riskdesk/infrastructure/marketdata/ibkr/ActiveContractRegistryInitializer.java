@@ -39,7 +39,7 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     private final IbkrProperties            ibkrProperties;
     private final OpenInterestProvider      openInterestProvider;
 
-    @Value("${riskdesk.active-contracts.MCL:202505}")
+    @Value("${riskdesk.active-contracts.MCL:202605}")
     private String fallbackMcl;
 
     @Value("${riskdesk.active-contracts.MGC:202506}")
@@ -118,10 +118,19 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
             }
 
-            // Default: front-month (calendar roll only applies to fallback path, not IBKR)
-            log.info("ActiveContractRegistry: {} defaulting to front-month (OI+volume unavailable)", instrument);
+            // Default: front-month, but apply calendar roll if near expiry (OI+volume unavailable)
+            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            if (contracts.size() >= 2 && isNearExpiry(frontMonth)) {
+                IbGatewayResolvedContract nextContract = contracts.get(1);
+                String nextMonth = normalizeMonth(nextContract.contract().lastTradeDateOrContractMonth());
+                log.info("ActiveContractRegistry: {} calendar-roll IBKR → {} (front-month {} near expiry, OI+volume unavailable)",
+                    instrument, nextMonth, frontMonth);
+                resolver.setResolved(instrument, nextContract);
+                return nextMonth;
+            }
+            log.info("ActiveContractRegistry: {} defaulting to front-month {} (OI+volume unavailable)", instrument, frontMonth);
             resolver.setResolved(instrument, contracts.get(0));
-            return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            return frontMonth;
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
@@ -212,6 +221,30 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
         log.info("ActiveContractRegistry: {} calendar-roll fallback → {} (was {} — expires within {}d)",
             instrument, next, contractMonth, calendarDaysThreshold);
         return next;
+    }
+
+    /**
+     * Computes the previous contract month based on instrument cycle.
+     * E6/MNQ: quarterly (Mar, Jun, Sep, Dec)
+     * MCL/MGC: monthly
+     */
+    static String previousContractMonth(Instrument instrument, String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return contractMonth;
+        int year = Integer.parseInt(contractMonth.substring(0, 4));
+        int month = Integer.parseInt(contractMonth.substring(4, 6));
+        YearMonth ym = YearMonth.of(year, month);
+
+        if (instrument == Instrument.E6 || instrument == Instrument.MNQ) {
+            // Quarterly: Mar(3), Jun(6), Sep(9), Dec(12)
+            do {
+                ym = ym.minusMonths(1);
+            } while (ym.getMonthValue() % 3 != 0);
+        } else {
+            // Monthly: MCL, MGC
+            ym = ym.minusMonths(1);
+        }
+
+        return String.format("%04d%02d", ym.getYear(), ym.getMonthValue());
     }
 
     /**

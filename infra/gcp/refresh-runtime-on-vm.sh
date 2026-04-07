@@ -100,4 +100,4 @@ COMPOSE_CMD=${COMPOSE_CMD:-$(compose_cmd)}
 
 cd /opt/riskdesk
 ${COMPOSE_CMD} pull
-${COMPOSE_CMD} up -d --remove-orphans
+${COMPOSE_CMD} up -d --remove-orphans --force-recreate

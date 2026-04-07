@@ -19,10 +19,12 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
@@ -30,6 +32,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     private static final DateTimeFormatter IB_DATE = DateTimeFormatter.BASIC_ISO_DATE;
     private static final DateTimeFormatter IB_DATE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd HH:mm:ss");
     private static final int MAX_BACKFILL_CHUNKS = 32;
+    /** Max expired contracts to walk backward through for deep backfill. */
+    private static final int MAX_CONTRACT_WALK = 24;
 
     private final IbGatewayNativeClient nativeClient;
     private final IbGatewayContractResolver contractResolver;
@@ -82,12 +86,153 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         };
     }
 
+    /**
+     * Multi-contract deep backfill with volume-based rollover detection.
+     *
+     * Fetches data from the current (front-month) contract, then walks backward
+     * through expired contracts. At each overlap zone, compares bar volume between
+     * the two contracts to determine the actual rollover point — matching the
+     * approach used by TradingView for continuous contracts.
+     *
+     * Each candle is tagged with its source contract month for proper tracking.
+     * MCL/MGC roll monthly, E6/MNQ roll quarterly — the walk depth adapts accordingly.
+     */
     private List<Candle> fetchDeepHistory(Instrument instrument, String timeframe, int targetCount, com.ib.client.Contract contract) {
+        Map<Instant, Candle> merged = new LinkedHashMap<>();
+        String currentMonth = normalizeMonth(contract.lastTradeDateOrContractMonth());
+        int contractsUsed = 1;
+
+        // Phase 1: fetch from current (front-month) contract
+        fetchChunksFromContract(instrument, timeframe, targetCount, contract, currentMonth, merged);
+
+        // Phase 2: walk backward through expired contracts with volume-based rollover
+        int maxWalk = maxContractWalk(instrument, timeframe);
+        String prevMonth = currentMonth;
+
+        for (int walk = 0; walk < maxWalk && merged.size() < targetCount; walk++) {
+            prevMonth = ActiveContractRegistryInitializer.previousContractMonth(instrument, prevMonth);
+            if (prevMonth == null) break;
+
+            Optional<IbGatewayResolvedContract> prevResolved = contractResolver.resolveExpiredMonth(instrument, prevMonth);
+            if (prevResolved.isEmpty()) {
+                log.debug("IB Gateway backfill: no expired contract for {} {}, stopping walk", instrument, prevMonth);
+                break;
+            }
+
+            // Fetch older contract into a separate map for volume comparison
+            Map<Instant, Candle> olderData = new LinkedHashMap<>();
+            fetchChunksFromContract(instrument, timeframe, targetCount, prevResolved.get().contract(), prevMonth, olderData);
+
+            if (olderData.isEmpty()) {
+                log.debug("IB Gateway backfill: {} {} returned no data, stopping walk", instrument, prevMonth);
+                break;
+            }
+
+            // Detect rollover via volume comparison, then merge with clean cut
+            Instant rolloverBoundary = detectVolumeRollover(merged, olderData);
+            int beforeSize = merged.size();
+            mergeWithVolumeRollover(merged, olderData, rolloverBoundary);
+
+            log.info("IB Gateway backfill: {} {} volume-rollover at {} — {} new candles from contract {}",
+                instrument, timeframe, rolloverBoundary, merged.size() - beforeSize, prevMonth);
+
+            if (merged.size() == beforeSize) break;
+            contractsUsed++;
+        }
+
+        List<Candle> result = merged.values().stream()
+            .sorted(Comparator.comparing(Candle::getTimestamp))
+            .toList();
+        if (!result.isEmpty()) {
+            log.info("IB Gateway historical backfill {} {} completed with {} candles across {} contracts ({} .. {})",
+                instrument, timeframe, result.size(), contractsUsed,
+                result.get(0).getTimestamp(), result.get(result.size() - 1).getTimestamp());
+        }
+        return result;
+    }
+
+    /**
+     * Detects the volume-based rollover boundary between two overlapping contracts.
+     *
+     * Walks backward through the overlap zone (timestamps present in both datasets).
+     * The rollover point is the latest timestamp where the older contract's volume
+     * exceeds the newer contract's for 2+ consecutive bars — indicating the older
+     * contract was still the dominant (actively traded) one at that time.
+     *
+     * @return boundary timestamp: older contract data should be used at and before
+     *         this instant; newer contract data after it.
+     */
+    private Instant detectVolumeRollover(Map<Instant, Candle> newerData, Map<Instant, Candle> olderData) {
+        List<Instant> overlaps = olderData.keySet().stream()
+            .filter(newerData::containsKey)
+            .sorted()
+            .toList();
+
+        if (overlaps.size() < 2) {
+            // Not enough overlap for volume comparison — use natural data boundary
+            return newerData.keySet().stream()
+                .min(Comparator.naturalOrder())
+                .orElse(Instant.MAX);
+        }
+
+        // Walk backward through overlap to find where older contract was dominant.
+        // Require 2+ consecutive bars to avoid single-bar volume anomalies.
+        int consecutiveOlderWins = 0;
+        for (int i = overlaps.size() - 1; i >= 0; i--) {
+            Instant ts = overlaps.get(i);
+            long olderVol = olderData.get(ts).getVolume();
+            long newerVol = newerData.get(ts).getVolume();
+
+            if (olderVol > newerVol) {
+                consecutiveOlderWins++;
+                if (consecutiveOlderWins >= 2) {
+                    // Rollover boundary = latest bar where older contract was still dominant
+                    Instant boundary = overlaps.get(i + consecutiveOlderWins - 1);
+                    log.debug("Volume rollover detected at {} (older vol dominated for {} consecutive bars)",
+                        boundary, consecutiveOlderWins);
+                    return boundary;
+                }
+            } else {
+                consecutiveOlderWins = 0;
+            }
+        }
+
+        // Newer contract dominated throughout the entire overlap
+        return overlaps.get(0);
+    }
+
+    /**
+     * Merges older contract data into the main dataset using the volume-based
+     * rollover boundary as the clean cut point.
+     *
+     * At and before the boundary: older contract data replaces any newer contract
+     * data (because the older contract was the dominant one at that time).
+     * After the boundary: newer contract data is kept; older data only fills gaps.
+     */
+    private void mergeWithVolumeRollover(Map<Instant, Candle> merged, Map<Instant, Candle> olderData, Instant rolloverBoundary) {
+        for (Map.Entry<Instant, Candle> entry : olderData.entrySet()) {
+            Instant ts = entry.getKey();
+            if (!ts.isAfter(rolloverBoundary)) {
+                // At or before rollover: older contract was dominant — use its data
+                merged.put(ts, entry.getValue());
+            } else if (!merged.containsKey(ts)) {
+                // After rollover but no newer data exists — fill the gap
+                merged.put(ts, entry.getValue());
+            }
+        }
+    }
+
+    /**
+     * Fetches chunked historical data from a single contract, walking backward in time.
+     * Candles are tagged with the source contractMonth and merged into the shared map.
+     */
+    private void fetchChunksFromContract(Instrument instrument, String timeframe, int targetCount,
+                                         com.ib.client.Contract contract, String contractMonth,
+                                         Map<Instant, Candle> merged) {
         HistoricalQuery chunkQuery = chunkQueryFor(timeframe);
         long stepSeconds = timeframeSeconds(timeframe);
         Instant endDateTime = null;
         Instant previousOldest = null;
-        Map<Instant, Candle> merged = new LinkedHashMap<>();
 
         for (int chunkIndex = 0; chunkIndex < MAX_BACKFILL_CHUNKS && merged.size() < targetCount; chunkIndex++) {
             List<Bar> bars = nativeClient.requestHistoricalBars(
@@ -100,18 +245,14 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 false
             );
 
-            if (bars.isEmpty()) {
-                break;
-            }
+            if (bars.isEmpty()) break;
 
             List<Candle> candles = bars.stream()
-                .map(bar -> toCandle(instrument, timeframe, bar))
+                .map(bar -> toCandleWithMonth(instrument, timeframe, bar, contractMonth))
                 .sorted(Comparator.comparing(Candle::getTimestamp))
                 .toList();
 
-            if (candles.isEmpty()) {
-                break;
-            }
+            if (candles.isEmpty()) break;
 
             Instant oldest = candles.get(0).getTimestamp();
             Instant newest = candles.get(candles.size() - 1).getTimestamp();
@@ -120,28 +261,32 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 merged.putIfAbsent(candle.getTimestamp(), candle);
             }
 
-            log.debug("IB Gateway historical backfill {} {} chunk {}/{} -> {} candles ({} .. {}), total={}",
-                instrument, timeframe, chunkIndex + 1, MAX_BACKFILL_CHUNKS, candles.size(), oldest, newest, merged.size());
+            log.debug("IB Gateway backfill {} {} [{}] chunk {}/{} -> {} candles ({} .. {}), total={}",
+                instrument, timeframe, contractMonth, chunkIndex + 1, MAX_BACKFILL_CHUNKS,
+                candles.size(), oldest, newest, merged.size());
 
-            if (previousOldest != null && !oldest.isBefore(previousOldest)) {
-                break;
-            }
+            if (previousOldest != null && !oldest.isBefore(previousOldest)) break;
             previousOldest = oldest;
             endDateTime = oldest.minusSeconds(Math.max(stepSeconds, 1));
         }
+    }
 
-        List<Candle> mergedCandles = merged.values().stream()
-            .sorted(Comparator.comparing(Candle::getTimestamp))
-            .toList();
-        if (!mergedCandles.isEmpty()) {
-            log.info("IB Gateway historical backfill {} {} completed with {} candles ({} .. {})",
-                instrument,
-                timeframe,
-                mergedCandles.size(),
-                mergedCandles.get(0).getTimestamp(),
-                mergedCandles.get(mergedCandles.size() - 1).getTimestamp());
-        }
-        return mergedCandles;
+    /**
+     * Max number of expired contracts to walk backward.
+     * Monthly instruments (MCL/MGC) need more contracts to cover the same time span.
+     */
+    private int maxContractWalk(Instrument instrument, String timeframe) {
+        int baseDays = switch (timeframe) {
+            case "5m"  -> 30;
+            case "10m" -> 90;
+            case "30m" -> 180;
+            case "1h"  -> 365;
+            case "4h"  -> 730;
+            default -> 30;
+        };
+        boolean quarterly = instrument == Instrument.E6 || instrument == Instrument.MNQ;
+        int monthsPerContract = quarterly ? 3 : 1;
+        return Math.min(MAX_CONTRACT_WALK, (baseDays / (monthsPerContract * 30)) + 2);
     }
 
     private Candle toCandle(Instrument instrument, String timeframe, Bar bar) {
@@ -158,6 +303,12 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             round(bar.close(), instrument),
             volume
         );
+    }
+
+    private Candle toCandleWithMonth(Instrument instrument, String timeframe, Bar bar, String contractMonth) {
+        Candle candle = toCandle(instrument, timeframe, bar);
+        candle.setContractMonth(contractMonth);
+        return candle;
     }
 
     /**
@@ -281,6 +432,12 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         }
         int years = Math.max(1, (int) Math.ceil(weeksEstimate / 52.0));
         return new HistoricalQuery(years, DurationUnit.YEAR, barSize);
+    }
+
+    private static String normalizeMonth(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String digits = raw.replaceAll("[^0-9]", "");
+        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 
     private record HistoricalQuery(int duration, DurationUnit durationUnit, BarSize barSize) {}

@@ -74,8 +74,10 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.mentor-refresh-cooldown-ms:60000}")
     private long mentorRefreshCooldownMs;
 
-    /** Set to true once real candles have been successfully loaded. */
+    /** Set to true once real candles have been successfully loaded (quick startup). */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
+    /** Set to true once deep multi-contract backfill has completed. */
+    private final AtomicBoolean deepBackfillDone = new AtomicBoolean(false);
     private final Map<RefreshKey, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
 
     private record RefreshKey(Instrument instrument, String timeframe) {}
@@ -94,15 +96,72 @@ public class HistoricalDataService implements ApplicationRunner {
             log.debug("Historical fetch disabled. Set riskdesk.market-data.historical.enabled=true to enable.");
             return;
         }
-        tryFetchAndReplace("startup");
+        // Phase 1: quick single-contract fetch (500 candles, 1 thread) — non-blocking.
+        // Gives charts and indicators enough data to work within seconds.
+        CompletableFuture.runAsync(() -> tryFetchAndReplace("startup", DEFAULT_CANDLES_PER_PAIR, 1))
+            .exceptionally(ex -> {
+                log.error("Startup historical data fetch failed", ex);
+                return null;
+            });
     }
 
-    /** Retry every 30 minutes until real data is loaded. */
+    /**
+     * Phase 2: deep multi-contract backfill — runs 5 minutes after startup.
+     * Walks backward through expired contracts with full target counts.
+     * Sequential (1 thread) to respect IBKR pacing limits (~60 requests/10 min).
+     */
+    @Scheduled(initialDelay = 5 * 60 * 1000, fixedDelay = 24 * 60 * 60 * 1000)
+    public void deepBackfill() {
+        if (!enabled || deepBackfillDone.get()) return;
+        log.info("HistoricalDataService: starting deep multi-contract backfill...");
+        tryFetchAndReplace("deep-backfill", -1, 1);
+        deepBackfillDone.set(true);
+    }
+
+    /** Resets the deep backfill flag so the next scheduled run re-fetches all data. */
+    public void resetDeepBackfill() {
+        deepBackfillDone.set(false);
+    }
+
+    /**
+     * Quick rollover refresh: fetches 7 days of 5m+1h data for one instrument.
+     * Fixes the chart spike immediately after contract switch.
+     * Runs synchronously — caller should wrap in CompletableFuture if async desired.
+     */
+    public Map<String, Integer> refreshInstrumentRollover(Instrument instrument) {
+        if (!enabled) return Collections.emptyMap();
+
+        Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
+        Map<String, Integer> targets = Map.of(
+            "5m",  7 * 24 * 60 / 5,   // ~2016 candles
+            "1h",  7 * 24             // ~168 candles
+        );
+        for (var entry : targets.entrySet()) {
+            String tf = entry.getKey();
+            int limit = entry.getValue();
+            try {
+                if (!historicalProvider.supports(instrument, tf)) continue;
+                List<Candle> candles = deduplicate(
+                    tagWithContractMonth(historicalProvider.fetchHistory(instrument, tf, limit), instrument));
+                if (!candles.isEmpty()) {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, tf);
+                    candlePort.saveAll(candles);
+                    savedByTimeframe.put(tf, candles.size());
+                    log.info("HistoricalDataService [rollover]: {} {} refreshed with {} candles.", instrument, tf, candles.size());
+                }
+            } catch (Exception e) {
+                log.warn("HistoricalDataService [rollover]: {} {} failed — {}", instrument, tf, e.getMessage());
+            }
+        }
+        return savedByTimeframe;
+    }
+
+    /** Retry every 30 minutes until initial data is loaded. */
     @Scheduled(fixedDelay = 30 * 60 * 1000, initialDelay = 30 * 60 * 1000)
     public void scheduledRetry() {
         if (!enabled || realDataLoaded.get()) return;
         log.info("HistoricalDataService: retrying historical candle fetch...");
-        tryFetchAndReplace("retry");
+        tryFetchAndReplace("retry", DEFAULT_CANDLES_PER_PAIR, 1);
     }
 
     public Map<String, Integer> refreshInstrumentContext(Instrument instrument, List<String> requestedTimeframes) {
@@ -151,7 +210,7 @@ public class HistoricalDataService implements ApplicationRunner {
         if (!enabled) {
             return Map.of("status", "disabled", "message", "Historical data fetch is disabled.");
         }
-        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual"))
+        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual", -1, 4))
             .exceptionally(ex -> {
                 log.error("Async historical data refresh failed", ex);
                 return null;
@@ -161,46 +220,54 @@ public class HistoricalDataService implements ApplicationRunner {
 
     // -------------------------------------------------------------------------
 
-    private void tryFetchAndReplace(String context) {
-        log.info("HistoricalDataService [{}]: fetching real OHLCV candles (parallel by instrument)...", context);
+    /**
+     * @param maxCandlesOverride  if > 0, caps the candle count per timeframe (used for quick startup).
+     *                            If -1, uses full candlesTargetFor() (deep multi-contract backfill).
+     * @param threadCount         number of parallel instrument threads (1 = sequential for IBKR pacing).
+     */
+    private void tryFetchAndReplace(String context, int maxCandlesOverride, int threadCount) {
+        log.info("HistoricalDataService [{}]: fetching OHLCV candles (threads={}, maxCandles={})...",
+            context, threadCount, maxCandlesOverride > 0 ? maxCandlesOverride : "full");
         AtomicInteger totalSaved = new AtomicInteger(0);
         List<Instrument> instruments = Instrument.exchangeTradedFutures();
 
-        // Fetch instruments in parallel; timeframes within each instrument stay sequential
-        // to respect IBKR pacing limits per contract.
         ExecutorService pool = Executors.newFixedThreadPool(
-            Math.min(instruments.size(), 4),
+            Math.min(instruments.size(), threadCount),
             r -> { Thread t = new Thread(r, "hist-backfill"); t.setDaemon(true); return t; }
         );
 
         List<CompletableFuture<Void>> futures = instruments.stream()
             .map(instrument -> CompletableFuture.runAsync(() ->
-                fetchAllTimeframesForInstrument(instrument, context, totalSaved), pool))
+                fetchAllTimeframesForInstrument(instrument, context, maxCandlesOverride, totalSaved), pool))
             .toList();
 
         try {
+            // Deep backfill can take longer — give it 30 minutes
+            int timeoutMinutes = maxCandlesOverride > 0 ? 10 : 30;
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
-                .get(10, TimeUnit.MINUTES);
+                .get(timeoutMinutes, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.warn("HistoricalDataService [{}]: parallel fetch interrupted — {}", context, e.getMessage());
+            log.warn("HistoricalDataService [{}]: fetch interrupted — {}", context, e.getMessage());
         } finally {
             pool.shutdown();
         }
 
         if (totalSaved.get() == 0) {
-            log.warn("HistoricalDataService [{}]: no candles retrieved — retaining existing data. Will retry in 30 min.", context);
+            log.warn("HistoricalDataService [{}]: no candles retrieved — retaining existing data.", context);
             return;
         }
 
         realDataLoaded.set(true);
-        log.info("HistoricalDataService [{}]: done — {} IBKR candles saved to chart.", context, totalSaved.get());
+        log.info("HistoricalDataService [{}]: done — {} IBKR candles saved.", context, totalSaved.get());
     }
 
-    private void fetchAllTimeframesForInstrument(Instrument instrument, String context, AtomicInteger totalSaved) {
+    private void fetchAllTimeframesForInstrument(Instrument instrument, String context,
+                                                  int maxCandlesOverride, AtomicInteger totalSaved) {
         for (String timeframe : TIMEFRAMES) {
             if (!historicalProvider.supports(instrument, timeframe)) continue;
             try {
-                int limit = candlesTargetFor(timeframe);
+                int fullTarget = candlesTargetFor(timeframe);
+                int limit = maxCandlesOverride > 0 ? Math.min(maxCandlesOverride, fullTarget) : fullTarget;
                 List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
                 candles = tagWithContractMonth(candles, instrument);
                 candles = deduplicate(candles);
@@ -288,7 +355,10 @@ public class HistoricalDataService implements ApplicationRunner {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         if (contractMonth == null) return candles;
         for (Candle candle : candles) {
-            candle.setContractMonth(contractMonth);
+            // Preserve contract month already set by multi-contract backfill
+            if (candle.getContractMonth() == null) {
+                candle.setContractMonth(contractMonth);
+            }
         }
         return candles;
     }

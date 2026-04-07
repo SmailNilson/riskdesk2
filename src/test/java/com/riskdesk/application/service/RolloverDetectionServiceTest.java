@@ -27,6 +27,7 @@ class RolloverDetectionServiceTest {
     @Mock private IbkrProperties ibkrProperties;
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private ApplicationEventPublisher eventPublisher;
+    @Mock private HistoricalDataService historicalDataService;
 
     private RolloverDetectionService service;
 
@@ -34,7 +35,8 @@ class RolloverDetectionServiceTest {
     void setUp() {
         service = new RolloverDetectionService(
                 contractRegistry, resolver, openInterestProvider,
-                ibkrProperties, messagingTemplate, eventPublisher, 32);
+                ibkrProperties, messagingTemplate, eventPublisher,
+                historicalDataService, 32, false);
     }
 
     @Test
