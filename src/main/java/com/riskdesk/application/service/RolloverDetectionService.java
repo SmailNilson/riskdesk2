@@ -2,22 +2,25 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.RolloverStatus;
+import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayResolvedContract;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.riskdesk.domain.shared.TradingSessionResolver;
-
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
+import java.time.YearMonth;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 
 /**
  * Periodically checks expiry dates for each active contract and publishes
@@ -39,17 +42,23 @@ public class RolloverDetectionService {
 
     private final ActiveContractRegistry    contractRegistry;
     private final IbGatewayContractResolver resolver;
+    private final OpenInterestProvider      openInterestProvider;
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final int                       calendarDaysThreshold;
 
     public RolloverDetectionService(ActiveContractRegistry contractRegistry,
                                     IbGatewayContractResolver resolver,
+                                    OpenInterestProvider openInterestProvider,
                                     IbkrProperties ibkrProperties,
-                                    SimpMessagingTemplate messagingTemplate) {
-        this.contractRegistry  = contractRegistry;
-        this.resolver          = resolver;
-        this.ibkrProperties    = ibkrProperties;
-        this.messagingTemplate = messagingTemplate;
+                                    SimpMessagingTemplate messagingTemplate,
+                                    @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold) {
+        this.contractRegistry       = contractRegistry;
+        this.resolver               = resolver;
+        this.openInterestProvider   = openInterestProvider;
+        this.ibkrProperties         = ibkrProperties;
+        this.messagingTemplate      = messagingTemplate;
+        this.calendarDaysThreshold  = calendarDaysThreshold;
     }
 
     /**
@@ -86,57 +95,88 @@ public class RolloverDetectionService {
 
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Rollover detection strategy:
+     *   1. OI comparison (2 contracts) — if next OI > current OI → RECOMMEND_ROLL
+     *   2. OI empty → calendar roll: if contract month < 32 days away → WARNING
+     *   3. Otherwise → STABLE
+     */
     private RolloverInfo computeInfo(Instrument instrument) {
-        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
-        if (contractMonth == null) {
+        String currentMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        if (currentMonth == null) {
             return RolloverInfo.unknown(instrument.name());
         }
 
-        LocalDate expiry = resolveExpiry(instrument);
-        if (expiry == null) {
-            return new RolloverInfo(instrument.name(), contractMonth, null, -1, RolloverStatus.STABLE);
+        // Get 2 contracts from IBKR for OI comparison
+        List<IbGatewayResolvedContract> contracts = resolver.resolveNextContracts(instrument);
+        if (contracts.size() < 2) {
+            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
         }
 
-        long daysToExpiry = LocalDate.now(TradingSessionResolver.CME_ZONE).until(expiry, ChronoUnit.DAYS);
-        RolloverStatus status = statusFor(daysToExpiry);
-        return new RolloverInfo(instrument.name(), contractMonth, expiry.toString(), daysToExpiry, status);
+        String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+        String nextMonth  = normalizeMonth(contracts.get(1).contract().lastTradeDateOrContractMonth());
+        if (frontMonth == null || nextMonth == null) {
+            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
+        }
+
+        // Strategy 1: OI comparison — next OI > current OI → recommend roll
+        OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
+        OptionalLong nextOI    = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
+
+        if (currentOI.isPresent() && nextOI.isPresent()) {
+            if (nextOI.getAsLong() > currentOI.getAsLong()) {
+                log.info("Rollover OI: {} — next {} OI={} > current {} OI={} → RECOMMEND_ROLL",
+                    instrument, nextMonth, nextOI.getAsLong(), frontMonth, currentOI.getAsLong());
+                return new RolloverInfo(instrument.name(), currentMonth, null,
+                    -1, RolloverStatus.WARNING);
+            }
+            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
+        }
+
+        // Strategy 2: OI empty → calendar fallback (skip serial months for quarterly instruments)
+        if (!isSerialMonth(instrument, currentMonth)) {
+            long daysToContractMonth = daysToFirstOfMonth(currentMonth);
+            if (daysToContractMonth >= 0 && daysToContractMonth < calendarDaysThreshold) {
+                log.info("Rollover calendar: {} — {} expires within {}d (OI unavailable)",
+                    instrument, currentMonth, daysToContractMonth);
+                return new RolloverInfo(instrument.name(), currentMonth, null,
+                    daysToContractMonth, RolloverStatus.WARNING);
+            }
+        }
+
+        return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
     }
 
-    private LocalDate resolveExpiry(Instrument instrument) {
+    /**
+     * Returns true if the contract month is a serial (non-quarterly) for E6/MNQ.
+     * E6 and MNQ only trade quarterly: Mar(3), Jun(6), Sep(9), Dec(12).
+     * Serial months (Jan, Feb, Apr, May, Jul, Aug, Oct, Nov) are ignored.
+     */
+    private boolean isSerialMonth(Instrument instrument, String contractMonth) {
+        if (instrument != Instrument.E6 && instrument != Instrument.MNQ) {
+            return false; // MCL/MGC are monthly — no serials
+        }
+        if (contractMonth == null || contractMonth.length() < 6) return false;
+        int m = Integer.parseInt(contractMonth.substring(4, 6));
+        return m % 3 != 0;
+    }
+
+    private long daysToFirstOfMonth(String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return -1;
         try {
-            return resolver.resolve(instrument)
-                .map(r -> r.contract().lastTradeDateOrContractMonth())
-                .map(this::parseExpiry)
-                .orElse(null);
+            int year = Integer.parseInt(contractMonth.substring(0, 4));
+            int month = Integer.parseInt(contractMonth.substring(4, 6));
+            LocalDate firstDay = LocalDate.of(year, month, 1);
+            return ChronoUnit.DAYS.between(LocalDate.now(), firstDay);
         } catch (Exception e) {
-            log.debug("RolloverDetectionService: could not resolve expiry for {} — {}", instrument, e.getMessage());
-            return null;
+            return -1;
         }
     }
 
-    private LocalDate parseExpiry(String raw) {
-        if (raw == null || raw.isBlank()) return null;
+    private static String normalizeMonth(String raw) {
+        if (raw == null) return null;
         String digits = raw.replaceAll("[^0-9]", "");
-        try {
-            if (digits.length() >= 8) {
-                return LocalDate.parse(digits.substring(0, 8), DateTimeFormatter.BASIC_ISO_DATE);
-            }
-            if (digits.length() == 6) {
-                // YYYYMM → last day of month as conservative estimate
-                return LocalDate.of(
-                    Integer.parseInt(digits.substring(0, 4)),
-                    Integer.parseInt(digits.substring(4, 6)),
-                    1
-                ).withDayOfMonth(1).plusMonths(1).minusDays(1);
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    private RolloverStatus statusFor(long daysToExpiry) {
-        if (daysToExpiry <= CRITICAL_DAYS) return RolloverStatus.CRITICAL;
-        if (daysToExpiry <= WARNING_DAYS)  return RolloverStatus.WARNING;
-        return RolloverStatus.STABLE;
+        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 
     private void pushAlert(RolloverInfo info) {
