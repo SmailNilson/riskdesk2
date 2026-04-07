@@ -77,7 +77,7 @@ public class GeminiMentorClient implements MentorModelClient {
         Si market_regime_context est présent :
         - TRENDING_UP/DOWN : privilégier les setups de continuation (pullback sur OB/EMA).
         - RANGING : privilégier les reversals aux extrêmes (OB + WT oversold/overbought).
-        - CHOPPY : être très sélectif, exiger une confluence de 3 niveaux minimum.
+        - CHOPPY : le marché est instable, tiens-en compte dans ton analyse.
         - Si htf_alignment = false, réduire la confiance et mentionner le désalignement.
 
         ## CONTEXTE MARCHÉ
