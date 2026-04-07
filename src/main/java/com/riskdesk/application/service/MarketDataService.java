@@ -5,6 +5,7 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.marketdata.event.MarketPriceUpdated;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
@@ -19,6 +20,7 @@ import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -35,9 +37,12 @@ import java.util.concurrent.TimeUnit;
  */
 @Service
 @Profile("!test")
-public class MarketDataService {
+public class MarketDataService implements StreamingPriceListener {
 
     private static final Logger log = LoggerFactory.getLogger(MarketDataService.class);
+
+    /** Minimum interval between push-based WebSocket updates per instrument. */
+    private static final long PUSH_DEBOUNCE_MS = 100L;
 
     private static final Map<String, Long> TIMEFRAMES = Map.of(
         "5m",  5L,
@@ -66,6 +71,7 @@ public class MarketDataService {
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
     private final Map<Instrument, String>        lastSource   = new ConcurrentHashMap<>();
     private final Map<CandleKey, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
+    private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
     public MarketDataService(MarketDataProvider marketDataProvider,
@@ -156,6 +162,49 @@ public class MarketDataService {
         } else if (!usedDatabaseFallback && databaseFallbackActive) {
             log.info("IBKR recovered: live market data polling resumed.");
             databaseFallbackActive = false;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Push-based live price updates (called from IBKR EReader thread)
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void onLivePriceUpdate(Instrument instrument, BigDecimal price, Instant timestamp) {
+        // Debounce: suppress updates faster than PUSH_DEBOUNCE_MS per instrument
+        Instant previousPush = lastPushAt.get(instrument);
+        if (previousPush != null && Duration.between(previousPush, timestamp).toMillis() < PUSH_DEBOUNCE_MS) {
+            return;
+        }
+        lastPushAt.put(instrument, timestamp);
+
+        // Skip if price hasn't changed
+        if (samePrice(lastPrice.get(instrument), price)) {
+            return;
+        }
+
+        lastPrice.put(instrument, price);
+        lastTimestamp.put(instrument, timestamp);
+        lastSource.put(instrument, "LIVE_PUSH");
+
+        positionService.updateMarketPrice(instrument, price);
+        sendPriceUpdate(instrument, price, timestamp, "LIVE_PUSH");
+        eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
+
+        boolean marketOpen = TradingSessionResolver.isMarketOpen(timestamp, instrument);
+        if (marketOpen) {
+            for (String tf : TIMEFRAMES.keySet()) {
+                accumulate(instrument, tf, price, timestamp);
+            }
+
+            CompletableFuture.runAsync(() -> {
+                try { alertService.evaluate(instrument); }
+                catch (Exception e) { log.debug("Push alert eval error for {}: {}", instrument, e.getMessage()); }
+            });
+            CompletableFuture.runAsync(() -> {
+                try { behaviourAlertService.evaluate(instrument); }
+                catch (Exception e) { log.debug("Push behaviour eval error for {}: {}", instrument, e.getMessage()); }
+            });
         }
     }
 

@@ -33,6 +33,7 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             try {
                 contractResolver.resolve(instrument).ifPresent(resolved -> {
+                    nativeClient.registerInstrumentMapping(resolved.contract(), instrument);
                     nativeClient.ensureStreamingPriceSubscription(resolved.contract());
                     nativeClient.latestStreamingPrice(resolved.contract())
                         .ifPresent(price -> prices.put(instrument, price));
@@ -66,6 +67,7 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
         try {
             return contractResolver.resolve(instrument)
                 .flatMap(resolved -> {
+                    nativeClient.registerInstrumentMapping(resolved.contract(), instrument);
                     nativeClient.ensureStreamingPriceSubscription(resolved.contract());
                     Optional<BigDecimal> live = nativeClient.latestStreamingPrice(resolved.contract());
                     if (live.isPresent()) {
