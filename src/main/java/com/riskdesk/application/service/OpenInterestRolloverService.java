@@ -109,7 +109,7 @@ public class OpenInterestRolloverService {
         }
 
         // Resolve front + next month contracts from IBKR
-        List<IbGatewayResolvedContract> topTwo = contractResolver.resolveTopTwo(instrument);
+        List<IbGatewayResolvedContract> topTwo = contractResolver.resolveNextContracts(instrument);
         if (topTwo.size() < 2) {
             log.debug("OI check: fewer than 2 contract months available for {}", instrument);
             return null;
