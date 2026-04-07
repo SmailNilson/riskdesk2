@@ -118,10 +118,19 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
             }
 
-            // Default: front-month (calendar roll only applies to fallback path, not IBKR)
-            log.info("ActiveContractRegistry: {} defaulting to front-month (OI+volume unavailable)", instrument);
+            // Default: front-month, but apply calendar roll if near expiry (OI+volume unavailable)
+            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            if (contracts.size() >= 2 && isNearExpiry(frontMonth)) {
+                IbGatewayResolvedContract nextContract = contracts.get(1);
+                String nextMonth = normalizeMonth(nextContract.contract().lastTradeDateOrContractMonth());
+                log.info("ActiveContractRegistry: {} calendar-roll IBKR → {} (front-month {} near expiry, OI+volume unavailable)",
+                    instrument, nextMonth, frontMonth);
+                resolver.setResolved(instrument, nextContract);
+                return nextMonth;
+            }
+            log.info("ActiveContractRegistry: {} defaulting to front-month {} (OI+volume unavailable)", instrument, frontMonth);
             resolver.setResolved(instrument, contracts.get(0));
-            return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            return frontMonth;
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
