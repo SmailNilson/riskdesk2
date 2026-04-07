@@ -120,6 +120,39 @@ public class HistoricalDataService implements ApplicationRunner {
         deepBackfillDone.set(false);
     }
 
+    /**
+     * Quick rollover refresh: fetches 7 days of 5m+1h data for one instrument.
+     * Fixes the chart spike immediately after contract switch.
+     * Runs synchronously — caller should wrap in CompletableFuture if async desired.
+     */
+    public Map<String, Integer> refreshInstrumentRollover(Instrument instrument) {
+        if (!enabled) return Collections.emptyMap();
+
+        Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
+        Map<String, Integer> targets = Map.of(
+            "5m",  7 * 24 * 60 / 5,   // ~2016 candles
+            "1h",  7 * 24             // ~168 candles
+        );
+        for (var entry : targets.entrySet()) {
+            String tf = entry.getKey();
+            int limit = entry.getValue();
+            try {
+                if (!historicalProvider.supports(instrument, tf)) continue;
+                List<Candle> candles = deduplicate(
+                    tagWithContractMonth(historicalProvider.fetchHistory(instrument, tf, limit), instrument));
+                if (!candles.isEmpty()) {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, tf);
+                    candlePort.saveAll(candles);
+                    savedByTimeframe.put(tf, candles.size());
+                    log.info("HistoricalDataService [rollover]: {} {} refreshed with {} candles.", instrument, tf, candles.size());
+                }
+            } catch (Exception e) {
+                log.warn("HistoricalDataService [rollover]: {} {} failed — {}", instrument, tf, e.getMessage());
+            }
+        }
+        return savedByTimeframe;
+    }
+
     /** Retry every 30 minutes until initial data is loaded. */
     @Scheduled(fixedDelay = 30 * 60 * 1000, initialDelay = 30 * 60 * 1000)
     public void scheduledRetry() {

@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Periodically checks expiry dates for each active contract and publishes
@@ -82,9 +83,17 @@ public class RolloverDetectionService {
     public void confirmRollover(Instrument instrument, String contractMonth) {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
-        // Reset deep backfill so the scheduled task re-fetches with the new contract
+        // Reset deep backfill so the scheduled task re-runs with the new contract
         historicalDataService.resetDeepBackfill();
-        log.info("Rollover confirmed: {} → {} — deep backfill will re-run on next schedule", instrument, contractMonth);
+        // Quick async refresh (7 days, 5m+1h) to fix the chart immediately
+        CompletableFuture.runAsync(() -> {
+            log.info("Rollover confirmed: {} → {} — quick 7-day refresh...", instrument, contractMonth);
+            var saved = historicalDataService.refreshInstrumentRollover(instrument);
+            log.info("Rollover quick refresh done: {} → {}", instrument, saved);
+        }).exceptionally(ex -> {
+            log.warn("Rollover quick refresh failed for {} — {}", instrument, ex.getMessage());
+            return null;
+        });
     }
 
     /** Scheduled check every 6 hours (with 1-minute initial delay after startup). */
