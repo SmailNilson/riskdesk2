@@ -261,7 +261,10 @@ public class HistoricalDataService implements ApplicationRunner {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         if (contractMonth == null) return candles;
         for (Candle candle : candles) {
-            candle.setContractMonth(contractMonth);
+            // Preserve contract month already set by multi-contract backfill
+            if (candle.getContractMonth() == null) {
+                candle.setContractMonth(contractMonth);
+            }
         }
         return candles;
     }
