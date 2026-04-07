@@ -45,8 +45,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Job 2: Frontend lint (runs in parallel with Job 1) ──
-  lint-frontend:
+  # ── Job 2: Frontend lint + build (runs in parallel with Job 1) ──
+  build-frontend:
     runs-on: ubuntu-latest
 
     steps:
@@ -58,6 +58,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Cache Next.js build
+        uses: actions/cache@v4
+        with:
+          path: frontend/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-${{ hashFiles('frontend/app/**', 'frontend/lib/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-
+            nextjs-${{ runner.os }}-
+
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
@@ -68,10 +77,26 @@ jobs:
           RISKDESK_API_PROXY_TARGET: http://localhost:8080
         run: npm run lint
 
+      - name: Build
+        working-directory: frontend
+        env:
+          RISKDESK_API_PROXY_TARGET: http://backend:8080
+        run: npm run build
+
+      - name: Upload standalone build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-standalone
+          path: |
+            frontend/.next/standalone
+            frontend/.next/static
+          if-no-files-found: error
+          retention-days: 1
+
   # ── Job 3: Build Docker images + push to Artifact Registry ──
   build-and-push:
     runs-on: ubuntu-latest
-    needs: [test-backend, lint-frontend]
+    needs: [test-backend, build-frontend]
     environment: production
     outputs:
       backend_image: ${{ steps.images.outputs.backend_image }}
@@ -86,6 +111,12 @@ jobs:
         with:
           name: backend-jar
           path: backend-jar/
+
+      - name: Download frontend standalone build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-standalone
+          path: frontend-standalone/
 
       - uses: docker/setup-buildx-action@v3
 
@@ -137,19 +168,24 @@ jobs:
             --load \
             backend-jar/
 
-      - name: Build frontend image (with BuildKit layer cache)
-        uses: docker/build-push-action@v5
-        with:
-          context: frontend
-          file: frontend/Dockerfile
-          build-args: |
-            NEXT_PUBLIC_API_URL=
-            NEXT_PUBLIC_WS_URL=
-            RISKDESK_API_PROXY_TARGET=http://backend:8080
-          tags: ${{ steps.images.outputs.frontend_image }}
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-          load: true
+      - name: Build frontend image (from pre-built standalone — no npm rebuild)
+        run: |
+          cat > frontend-standalone/Dockerfile <<'EOF'
+          FROM node:20-bookworm-slim
+          WORKDIR /app
+          ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0
+          RUN groupadd --system nextjs \
+              && useradd --system --gid nextjs --home-dir /app nextjs
+          COPY frontend/.next/standalone ./
+          COPY frontend/.next/static ./.next/static
+          USER nextjs
+          EXPOSE 3000
+          CMD ["node", "server.js"]
+          EOF
+          docker buildx build \
+            -t "${{ steps.images.outputs.frontend_image }}" \
+            --load \
+            frontend-standalone/
 
       - name: Pull upstream IBKR gateway image
         run: docker pull ghcr.io/gnzsnz/ib-gateway:stable
