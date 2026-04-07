@@ -4,6 +4,8 @@ import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
 import com.riskdesk.domain.model.Instrument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -18,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class IbGatewayContractResolver {
 
+    private static final Logger log = LoggerFactory.getLogger(IbGatewayContractResolver.class);
     private final IbGatewayNativeClient nativeClient;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
 
@@ -52,18 +55,31 @@ public class IbGatewayContractResolver {
     public void refreshToMonth(Instrument instrument, String targetMonth) {
         cache.remove(instrument);
         for (Contract query : buildQueries(instrument)) {
-            List<ContractDetails> details = nativeClient.requestContractDetails(query);
-            if (details.isEmpty()) continue;
-            Optional<ContractDetails> match = details.stream()
-                .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
-                .findFirst();
-            if (match.isPresent()) {
-                ContractDetails d = match.get();
-                cache.put(instrument, new IbGatewayResolvedContract(instrument, d.contract(), d));
-                return;
+            try {
+                List<ContractDetails> details = nativeClient.requestContractDetails(query);
+                if (details.isEmpty()) continue;
+                Optional<ContractDetails> match = details.stream()
+                    .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
+                    .findFirst();
+                if (match.isPresent()) {
+                    ContractDetails d = match.get();
+                    cache.put(instrument, new IbGatewayResolvedContract(instrument, d.contract(), d));
+                    return;
+                }
+            } catch (Exception e) {
+                // IBKR may be unavailable — continue to fallback
             }
         }
-        // Not found — cache stays empty; next resolve() will call refresh()
+        // IBKR didn't return the target month — build a synthetic contract from the query
+        // so the cache is seeded and resolve() doesn't fall back to front-month
+        List<Contract> queries = buildQueries(instrument);
+        if (!queries.isEmpty()) {
+            Contract synthetic = queries.get(0);
+            synthetic.lastTradeDateOrContractMonth(targetMonth);
+            cache.put(instrument, new IbGatewayResolvedContract(instrument, synthetic, null));
+            log.warn("refreshToMonth: {} → {} (synthetic fallback — IBKR did not return this month)",
+                instrument, targetMonth);
+        }
     }
 
     public Optional<IbGatewayResolvedContract> refresh(Instrument instrument) {
