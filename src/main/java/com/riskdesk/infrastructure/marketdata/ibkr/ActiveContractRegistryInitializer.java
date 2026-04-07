@@ -48,6 +48,16 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     @Value("${riskdesk.active-contracts.E6:202506}")
     private String fallbackE6;
 
+    /** Force-override: when set, IBKR resolution is skipped for that instrument. */
+    @Value("${riskdesk.force-contract.MCL:}")
+    private String forceMcl;
+    @Value("${riskdesk.force-contract.MGC:}")
+    private String forceMgc;
+    @Value("${riskdesk.force-contract.MNQ:}")
+    private String forceMnq;
+    @Value("${riskdesk.force-contract.E6:}")
+    private String forceE6;
+
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
                                              IbkrProperties ibkrProperties,
@@ -67,7 +77,22 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             Instrument.E6,  fallbackE6
         );
 
+        Map<Instrument, String> forceOverrides = Map.of(
+            Instrument.MCL, forceMcl != null ? forceMcl : "",
+            Instrument.MGC, forceMgc != null ? forceMgc : "",
+            Instrument.MNQ, forceMnq != null ? forceMnq : "",
+            Instrument.E6,  forceE6  != null ? forceE6  : ""
+        );
+
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+            // Force-override: skip IBKR entirely
+            String forced = forceOverrides.getOrDefault(instrument, "");
+            if (!forced.isBlank()) {
+                registry.initialize(instrument, forced);
+                log.info("ActiveContractRegistry: {} → {} (FORCED — IBKR skipped)", instrument, forced);
+                continue;
+            }
+
             String resolved = ibkrProperties.isEnabled()
                 ? resolveFromIbkr(instrument)
                 : null;
