@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -10,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -176,6 +178,37 @@ public class HistoricalDataService implements ApplicationRunner {
             savedByTimeframe.put(timeframe, saved);
         }
         return savedByTimeframe;
+    }
+
+    /**
+     * On contract rollover, delete all candles for the rolled instrument (all timeframes)
+     * and trigger a full historical backfill from the new contract. This ensures indicators
+     * recalculate on a clean price series without old-contract data contamination.
+     *
+     * Runs async via CompletableFuture (not @Async) because this class implements
+     * ApplicationRunner — Spring's JDK proxy would not expose this method otherwise.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        CompletableFuture.runAsync(() -> {
+            log.info("Rollover backfill: deleting old candles and backfilling {} (new contract {})",
+                    instrument, event.newContractMonth());
+
+            for (String timeframe : TIMEFRAMES) {
+                try {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+                } catch (Exception e) {
+                    log.warn("Rollover backfill: failed to delete {} {} candles: {}", instrument, timeframe, e.getMessage());
+                }
+            }
+
+            Map<String, Integer> result = refreshInstrumentContext(instrument, TIMEFRAMES);
+            log.info("Rollover backfill complete for {}: {}", instrument, result);
+        }).exceptionally(ex -> {
+            log.error("Rollover backfill failed for {}: {}", instrument, ex.getMessage(), ex);
+            return null;
+        });
     }
 
     /** Trigger a manual full refresh asynchronously. Returns immediately. */

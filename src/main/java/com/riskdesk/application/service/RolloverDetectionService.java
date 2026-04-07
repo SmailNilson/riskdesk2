@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.RolloverStatus;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -10,10 +11,12 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.temporal.ChronoUnit;
@@ -21,7 +24,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.concurrent.CompletableFuture;
 
 /**
  * Periodically checks expiry dates for each active contract and publishes
@@ -46,6 +48,7 @@ public class RolloverDetectionService {
     private final OpenInterestProvider      openInterestProvider;
     private final IbkrProperties            ibkrProperties;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final ApplicationEventPublisher eventPublisher;
     private final HistoricalDataService     historicalDataService;
     private final int                       calendarDaysThreshold;
     private final boolean                   autoConfirm;
@@ -55,6 +58,7 @@ public class RolloverDetectionService {
                                     OpenInterestProvider openInterestProvider,
                                     IbkrProperties ibkrProperties,
                                     SimpMessagingTemplate messagingTemplate,
+                                    ApplicationEventPublisher eventPublisher,
                                     HistoricalDataService historicalDataService,
                                     @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold,
                                     @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
@@ -63,6 +67,7 @@ public class RolloverDetectionService {
         this.openInterestProvider   = openInterestProvider;
         this.ibkrProperties         = ibkrProperties;
         this.messagingTemplate      = messagingTemplate;
+        this.eventPublisher         = eventPublisher;
         this.historicalDataService   = historicalDataService;
         this.calendarDaysThreshold  = calendarDaysThreshold;
         this.autoConfirm            = autoConfirm;
@@ -81,19 +86,20 @@ public class RolloverDetectionService {
     }
 
     public void confirmRollover(Instrument instrument, String contractMonth) {
+        String oldMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
+
         // Reset deep backfill so the scheduled task re-runs with the new contract
         historicalDataService.resetDeepBackfill();
-        // Quick async refresh (7 days, 5m+1h) to fix the chart immediately
-        CompletableFuture.runAsync(() -> {
-            log.info("Rollover confirmed: {} → {} — quick 7-day refresh...", instrument, contractMonth);
-            var saved = historicalDataService.refreshInstrumentRollover(instrument);
-            log.info("Rollover quick refresh done: {} → {}", instrument, saved);
-        }).exceptionally(ex -> {
-            log.warn("Rollover quick refresh failed for {} — {}", instrument, ex.getMessage());
-            return null;
-        });
+
+        if (oldMonth != null && !oldMonth.equals(contractMonth)) {
+            ContractRolloverEvent event = new ContractRolloverEvent(
+                    instrument, oldMonth, contractMonth, Instant.now());
+            log.info("Rollover confirmed: {} {} → {} — publishing ContractRolloverEvent",
+                    instrument, oldMonth, contractMonth);
+            eventPublisher.publishEvent(event);
+        }
     }
 
     /** Scheduled check every 6 hours (with 1-minute initial delay after startup). */

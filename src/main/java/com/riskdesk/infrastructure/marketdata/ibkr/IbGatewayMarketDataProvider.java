@@ -1,9 +1,12 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.ib.client.Contract;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 
 import java.math.BigDecimal;
 import java.util.EnumMap;
@@ -79,5 +82,51 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
             log.warn("IB Gateway single snapshot fetch failed for {}: {}", instrument, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Reacts to a confirmed contract rollover by cancelling the old IBKR streaming
+     * subscription and starting a new one for the rolled contract.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        if (instrument.isSynthetic()) return;
+
+        log.info("Rollover event received for {} ({} → {}) — switching IBKR streams",
+                instrument, event.oldContractMonth(), event.newContractMonth());
+
+        try {
+            // Resolve the new contract (cache was already refreshed by RolloverDetectionService)
+            Contract newContract = contractResolver.resolve(instrument)
+                    .map(IbGatewayResolvedContract::contract)
+                    .orElse(null);
+
+            // Build a synthetic old contract key for cancellation — the cache no longer holds it,
+            // but the subscription key is deterministic from the contract fields.
+            Contract oldContract = buildContractForMonth(instrument, event.oldContractMonth());
+
+            nativeClient.cancelAndResubscribe(oldContract, newContract, instrument);
+        } catch (Exception e) {
+            log.error("Rollover IBKR stream switch failed for {}: {}", instrument, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Builds a minimal Contract object matching the subscription key format used by
+     * the NativeClient, so the old subscription can be located and cancelled.
+     */
+    private Contract buildContractForMonth(Instrument instrument, String contractMonth) {
+        Contract c = new Contract();
+        c.secType(com.ib.client.Types.SecType.FUT);
+        c.lastTradeDateOrContractMonth(contractMonth);
+        switch (instrument) {
+            case MCL -> { c.symbol("MCL"); c.exchange("NYMEX"); c.currency("USD"); c.tradingClass("MCL"); }
+            case MGC -> { c.symbol("MGC"); c.exchange("COMEX"); c.currency("USD"); c.tradingClass("MGC"); }
+            case MNQ -> { c.symbol("MNQ"); c.exchange("GLOBEX"); c.currency("USD"); c.tradingClass("MNQ"); }
+            case E6  -> { c.symbol("EUR"); c.exchange("GLOBEX"); c.currency("USD"); c.tradingClass("6E"); }
+            default  -> { return null; }
+        }
+        return c;
     }
 }
