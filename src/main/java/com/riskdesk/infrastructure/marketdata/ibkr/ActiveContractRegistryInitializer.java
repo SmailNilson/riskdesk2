@@ -97,46 +97,100 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     private String resolveFromIbkr(Instrument instrument) {
         try {
-            List<IbGatewayResolvedContract> topTwo = resolver.resolveTopTwo(instrument);
-            if (topTwo.isEmpty()) return null;
-
-            IbGatewayResolvedContract selected;
-            if (topTwo.size() >= 2) {
-                String frontMonth = normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
-                String nextMonth  = normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
-
-                OptionalLong frontOI = frontMonth != null
-                    ? openInterestProvider.fetchOpenInterest(instrument, frontMonth)
-                    : OptionalLong.empty();
-                OptionalLong nextOI = nextMonth != null
-                    ? openInterestProvider.fetchOpenInterest(instrument, nextMonth)
-                    : OptionalLong.empty();
-
-                if (nextOI.isPresent() && frontOI.isPresent() && nextOI.getAsLong() > frontOI.getAsLong()) {
-                    // OI-based roll: next month has more liquidity
-                    log.info("ActiveContractRegistry: {} OI-roll → {} (OI={}) over {} (OI={})",
-                        instrument, nextMonth, nextOI.getAsLong(), frontMonth, frontOI.getAsLong());
-                    selected = topTwo.get(1);
-                } else if (frontOI.isEmpty() && nextOI.isEmpty() && isNearExpiry(frontMonth)) {
-                    // Calendar fallback: OI unavailable + front-month near expiry → auto-roll
-                    log.info("ActiveContractRegistry: {} calendar-roll → {} (OI unavailable, {} expires within {}d)",
-                        instrument, nextMonth, frontMonth, calendarDaysThreshold);
-                    selected = topTwo.get(1);
-                } else {
-                    selected = topTwo.get(0);
-                }
-            } else {
-                selected = topTwo.get(0);
+            List<IbGatewayResolvedContract> contracts = resolver.resolveNextContracts(instrument);
+            if (contracts.isEmpty()) return null;
+            if (contracts.size() == 1) {
+                resolver.setResolved(instrument, contracts.get(0));
+                return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
             }
 
-            // Seed resolver cache so downstream resolve() uses the OI-selected contract
-            resolver.setResolved(instrument, selected);
+            // Strategy 1: OI comparison — pick the contract with highest OI
+            IbGatewayResolvedContract oiWinner = selectByOi(instrument, contracts);
+            if (oiWinner != null) {
+                resolver.setResolved(instrument, oiWinner);
+                return normalizeMonth(oiWinner.contract().lastTradeDateOrContractMonth());
+            }
 
-            return normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
+            // Strategy 2: Volume comparison — pick the contract with highest volume
+            IbGatewayResolvedContract volWinner = selectByVolume(instrument, contracts);
+            if (volWinner != null) {
+                resolver.setResolved(instrument, volWinner);
+                return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
+            }
+
+            // Strategy 3: Calendar — if front-month near expiry, pick next
+            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            if (isNearExpiry(frontMonth) && contracts.size() >= 2) {
+                IbGatewayResolvedContract next = contracts.get(1);
+                String nextMonth = normalizeMonth(next.contract().lastTradeDateOrContractMonth());
+                log.info("ActiveContractRegistry: {} calendar-roll → {} ({} expires within {}d, OI+volume unavailable)",
+                    instrument, nextMonth, frontMonth, calendarDaysThreshold);
+                resolver.setResolved(instrument, next);
+                return nextMonth;
+            }
+
+            // Default: front-month
+            resolver.setResolved(instrument, contracts.get(0));
+            return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Compares OI across up to 3 contracts. Returns the one with highest OI, or null if all empty.
+     */
+    private IbGatewayResolvedContract selectByOi(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
+        IbGatewayResolvedContract best = null;
+        long bestOi = -1;
+        boolean anyOiPresent = false;
+
+        for (IbGatewayResolvedContract c : contracts) {
+            String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
+            OptionalLong oi = month != null ? openInterestProvider.fetchOpenInterest(instrument, month) : OptionalLong.empty();
+            if (oi.isPresent()) {
+                anyOiPresent = true;
+                if (oi.getAsLong() > bestOi) {
+                    bestOi = oi.getAsLong();
+                    best = c;
+                }
+            }
+        }
+
+        if (best != null && anyOiPresent) {
+            log.info("ActiveContractRegistry: {} OI-select → {} (OI={})",
+                instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()), bestOi);
+        }
+        return anyOiPresent ? best : null;
+    }
+
+    /**
+     * Compares volume across up to 3 contracts. Returns the one with highest volume, or null if all empty.
+     * Fallback when OI is unavailable (e.g. FX maintenance).
+     */
+    private IbGatewayResolvedContract selectByVolume(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
+        IbGatewayResolvedContract best = null;
+        long bestVol = -1;
+        boolean anyVolPresent = false;
+
+        for (IbGatewayResolvedContract c : contracts) {
+            String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
+            OptionalLong vol = month != null ? openInterestProvider.fetchVolume(instrument, month) : OptionalLong.empty();
+            if (vol.isPresent()) {
+                anyVolPresent = true;
+                if (vol.getAsLong() > bestVol) {
+                    bestVol = vol.getAsLong();
+                    best = c;
+                }
+            }
+        }
+
+        if (best != null && anyVolPresent) {
+            log.info("ActiveContractRegistry: {} volume-select → {} (vol={}, OI was unavailable)",
+                instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()), bestVol);
+        }
+        return anyVolPresent ? best : null;
     }
 
     /**

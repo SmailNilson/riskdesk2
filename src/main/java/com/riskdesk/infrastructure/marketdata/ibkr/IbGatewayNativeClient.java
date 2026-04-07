@@ -453,6 +453,26 @@ public class IbGatewayNativeClient {
         return collector.openInterest();
     }
 
+    /**
+     * One-shot snapshot to get the trading volume for a contract.
+     * Used as fallback when OI is unavailable for contract selection.
+     */
+    public OptionalLong requestSnapshotVolume(Contract contract) {
+        if (!ensureConnected()) {
+            return OptionalLong.empty();
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        VolumeCollector collector = new VolumeCollector(latch);
+
+        // Default ticks include volume (TickType.VOLUME = tick 8)
+        controller.reqTopMktData(contract, "", false, false, collector);
+        awaitLatch(latch, "volume snapshot", REQUEST_TIMEOUT);
+        controller.cancelTopMktData(collector);
+
+        return collector.volume();
+    }
+
     public Optional<NativeMarketQuote> requestSnapshotQuote(Contract contract) {
         if (!ensureConnected()) {
             return Optional.empty();
@@ -981,6 +1001,32 @@ public class IbGatewayNativeClient {
 
         private OptionalLong openInterest() {
             return oi == null ? OptionalLong.empty() : OptionalLong.of(oi);
+        }
+    }
+
+    private static final class VolumeCollector extends ApiController.TopMktDataAdapter {
+        private final CountDownLatch latch;
+        private volatile Long vol;
+
+        private VolumeCollector(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            if (tickType == TickType.VOLUME && size != null && size.longValue() >= 0) {
+                vol = size.longValue();
+                latch.countDown();
+            }
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            latch.countDown();
+        }
+
+        private OptionalLong volume() {
+            return vol == null ? OptionalLong.empty() : OptionalLong.of(vol);
         }
     }
 

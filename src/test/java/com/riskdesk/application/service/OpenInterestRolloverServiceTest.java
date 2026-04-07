@@ -116,7 +116,7 @@ class OpenInterestRolloverServiceTest {
 
         Contract c = new Contract();
         c.lastTradeDateOrContractMonth("202505");
-        when(contractResolver.resolveTopTwo(Instrument.MCL))
+        when(contractResolver.resolveNextContracts(Instrument.MCL))
             .thenReturn(List.of(new IbGatewayResolvedContract(Instrument.MCL, c, null)));
 
         Map<String, Object> result = service.checkAllNow();
@@ -136,7 +136,7 @@ class OpenInterestRolloverServiceTest {
         Contract c2 = new Contract();
         c2.lastTradeDateOrContractMonth(nextMonth);
 
-        when(contractResolver.resolveTopTwo(Instrument.MCL))
+        when(contractResolver.resolveNextContracts(Instrument.MCL))
             .thenReturn(List.of(
                 new IbGatewayResolvedContract(Instrument.MCL, c1, null),
                 new IbGatewayResolvedContract(Instrument.MCL, c2, null)

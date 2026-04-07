@@ -111,10 +111,10 @@ public class IbGatewayContractResolver {
     }
 
     /**
-     * Returns the two nearest contract months (front + next) for an instrument,
-     * sorted by expiry date ascending. Used for Open Interest comparison.
+     * Returns the nearest contract months (up to 3) for an instrument,
+     * sorted by expiry date ascending. Used for OI and volume comparison.
      */
-    public List<IbGatewayResolvedContract> resolveTopTwo(Instrument instrument) {
+    public List<IbGatewayResolvedContract> resolveNextContracts(Instrument instrument) {
         if (!instrument.isExchangeTradedFuture()) {
             return List.of();
         }
@@ -127,16 +127,14 @@ public class IbGatewayContractResolver {
             }
         }
 
-        if (details.size() < 2) {
-            return details.stream()
-                .map(d -> new IbGatewayResolvedContract(instrument, d.contract(), d))
-                .toList();
+        if (details.isEmpty()) {
+            return List.of();
         }
 
         return details.stream()
             .filter(d -> expiryKey(d) != null)
             .sorted(Comparator.comparing(this::expiryKey, Comparator.nullsLast(Comparator.naturalOrder())))
-            .limit(2)
+            .limit(3)
             .map(d -> new IbGatewayResolvedContract(instrument, d.contract(), d))
             .toList();
     }
