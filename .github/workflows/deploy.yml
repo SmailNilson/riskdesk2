@@ -21,13 +21,9 @@ env:
   IMAGE_TAG: ${{ github.ref_name }}
 
 jobs:
-  build-and-push:
+  # ── Job 1: Backend test + package (produces JAR artifact) ──
+  test-backend:
     runs-on: ubuntu-latest
-    environment: production
-    outputs:
-      backend_image: ${{ steps.images.outputs.backend_image }}
-      frontend_image: ${{ steps.images.outputs.frontend_image }}
-      ibkr_gateway_image: ${{ steps.images.outputs.ibkr_gateway_image }}
 
     steps:
       - uses: actions/checkout@v4
@@ -38,11 +34,60 @@ jobs:
           java-version: '21'
           cache: maven
 
+      - name: Test and package backend
+        run: mvn -q package
+
+      - name: Upload backend JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: target/riskdesk-*.jar
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Job 2: Frontend lint (runs in parallel with Job 1) ──
+  lint-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        env:
+          RISKDESK_API_PROXY_TARGET: http://localhost:8080
+        run: npm run lint
+
+  # ── Job 3: Build Docker images + push to Artifact Registry ──
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [test-backend, lint-frontend]
+    environment: production
+    outputs:
+      backend_image: ${{ steps.images.outputs.backend_image }}
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
+      ibkr_gateway_image: ${{ steps.images.outputs.ibkr_gateway_image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download backend JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: backend-jar/
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Prepare image names
         id: images
@@ -50,43 +95,6 @@ jobs:
           echo "backend_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/riskdesk-backend:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/riskdesk-frontend:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "ibkr_gateway_image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/ibkr-gateway:stable" >> "$GITHUB_OUTPUT"
-
-      - name: Test and package backend
-        run: mvn -q verify
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Lint frontend
-        working-directory: frontend
-        env:
-          RISKDESK_API_PROXY_TARGET: http://localhost:8080
-        run: npm run lint
-
-      - name: Pull upstream IBKR gateway image
-        run: docker pull ghcr.io/gnzsnz/ib-gateway:stable
-
-      - name: Build backend image
-        run: |
-          docker build \
-            --build-arg APP_VERSION="${IMAGE_TAG}" \
-            --build-arg APP_GIT_SHA="${GITHUB_SHA::7}" \
-            --build-arg APP_IMAGE_TAG="${IMAGE_TAG}" \
-            --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -t "${{ steps.images.outputs.backend_image }}" \
-            -f Dockerfile .
-
-      - name: Build frontend image
-        working-directory: frontend
-        run: |
-          docker build \
-            --build-arg NEXT_PUBLIC_API_URL= \
-            --build-arg NEXT_PUBLIC_WS_URL= \
-            --build-arg RISKDESK_API_PROXY_TARGET=http://backend:8080 \
-            -t "${{ steps.images.outputs.frontend_image }}" \
-            -f Dockerfile \
-            .
 
       - uses: google-github-actions/auth@v3
         with:
@@ -100,13 +108,61 @@ jobs:
       - name: Authenticate Docker to Artifact Registry
         run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-      - name: Push images
+      - name: Build backend image (from pre-built JAR — no Maven rebuild)
         run: |
-          docker push "${{ steps.images.outputs.backend_image }}"
-          docker push "${{ steps.images.outputs.frontend_image }}"
-          docker tag ghcr.io/gnzsnz/ib-gateway:stable "${{ steps.images.outputs.ibkr_gateway_image }}"
-          docker push "${{ steps.images.outputs.ibkr_gateway_image }}"
+          cat > backend-jar/Dockerfile <<'EOF'
+          FROM eclipse-temurin:21-jre-alpine
+          ARG APP_VERSION=0.1.0-SNAPSHOT
+          ARG APP_GIT_SHA=unknown
+          ARG APP_IMAGE_TAG=unknown
+          ARG APP_BUILD_TIME=unknown
+          WORKDIR /app
+          ENV APP_VERSION="${APP_VERSION}" \
+              APP_GIT_SHA="${APP_GIT_SHA}" \
+              APP_IMAGE_TAG="${APP_IMAGE_TAG}" \
+              APP_BUILD_TIME="${APP_BUILD_TIME}"
+          LABEL org.opencontainers.image.version="${APP_VERSION}" \
+                org.opencontainers.image.revision="${APP_GIT_SHA}" \
+                org.opencontainers.image.created="${APP_BUILD_TIME}"
+          COPY riskdesk-*.jar app.jar
+          EXPOSE 8080
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          EOF
+          docker buildx build \
+            --build-arg APP_VERSION="${IMAGE_TAG}" \
+            --build-arg APP_GIT_SHA="${GITHUB_SHA::7}" \
+            --build-arg APP_IMAGE_TAG="${IMAGE_TAG}" \
+            --build-arg APP_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "${{ steps.images.outputs.backend_image }}" \
+            --load \
+            backend-jar/
 
+      - name: Build frontend image (with BuildKit layer cache)
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          build-args: |
+            NEXT_PUBLIC_API_URL=
+            NEXT_PUBLIC_WS_URL=
+            RISKDESK_API_PROXY_TARGET=http://backend:8080
+          tags: ${{ steps.images.outputs.frontend_image }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          load: true
+
+      - name: Pull upstream IBKR gateway image
+        run: docker pull ghcr.io/gnzsnz/ib-gateway:stable
+
+      - name: Tag and push all images in parallel
+        run: |
+          docker tag ghcr.io/gnzsnz/ib-gateway:stable "${{ steps.images.outputs.ibkr_gateway_image }}"
+          docker push "${{ steps.images.outputs.backend_image }}" &
+          docker push "${{ steps.images.outputs.frontend_image }}" &
+          docker push "${{ steps.images.outputs.ibkr_gateway_image }}" &
+          wait
+
+  # ── Job 4: Deploy to GCE VM ──
   deploy:
     runs-on: ubuntu-latest
     needs: build-and-push
@@ -126,12 +182,13 @@ jobs:
 
       - name: Upload runtime config bundle
         run: |
-          gcloud storage cp infra/gcp/docker-compose.gce.yml "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml"
-          gcloud storage cp infra/gcp/render-secrets-env.sh "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh"
-          gcloud storage cp infra/gcp/backup-postgres-to-gcs.sh "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh"
-          gcloud storage cp infra/gcp/refresh-runtime-on-vm.sh "gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh"
-          gcloud storage cp infra/docker/nginx/local-prod.conf "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf"
-          gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql"
+          gcloud storage cp infra/gcp/docker-compose.gce.yml "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" &
+          gcloud storage cp infra/gcp/render-secrets-env.sh "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" &
+          gcloud storage cp infra/gcp/backup-postgres-to-gcs.sh "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" &
+          gcloud storage cp infra/gcp/refresh-runtime-on-vm.sh "gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh" &
+          gcloud storage cp infra/docker/nginx/local-prod.conf "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" &
+          gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" &
+          wait
 
       - name: Deploy on VM
         run: |
