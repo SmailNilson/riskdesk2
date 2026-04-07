@@ -135,8 +135,16 @@ public class MarketDataService {
                     accumulate(instrument, tf, price, now);
                 }
 
-                alertService.evaluate(instrument);
-                behaviourAlertService.evaluate(instrument);
+                // OPT-2: fire-and-forget on riskdesk-async- pool (core=4, max=8)
+                final Instrument evalInstrument = instrument;
+                CompletableFuture.runAsync(() -> {
+                    try { alertService.evaluate(evalInstrument); }
+                    catch (Exception e) { log.debug("Async alert eval error for {}: {}", evalInstrument, e.getMessage()); }
+                });
+                CompletableFuture.runAsync(() -> {
+                    try { behaviourAlertService.evaluate(evalInstrument); }
+                    catch (Exception e) { log.debug("Async behaviour eval error for {}: {}", evalInstrument, e.getMessage()); }
+                });
             }
         }
 

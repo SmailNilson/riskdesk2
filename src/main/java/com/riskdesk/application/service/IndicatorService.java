@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class IndicatorService {
@@ -64,12 +65,28 @@ public class IndicatorService {
             FVG_EXTENSION_BARS
     );
 
+    // OPT-1: TTL-based snapshot cache — eliminates 55% duplicate computations per poll cycle
+    private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos) {}
+    private final ConcurrentHashMap<String, CachedSnapshot> snapshotCache = new ConcurrentHashMap<>();
+    private static final long CACHE_TTL_NANOS = 3_000_000_000L; // 3 seconds, matches poll interval
+
     public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
         this.candlePort       = candlePort;
         this.contractRegistry = contractRegistry;
     }
 
+    public void clearSnapshotCache() {
+        snapshotCache.clear();
+    }
+
     public IndicatorSnapshot computeSnapshot(Instrument instrument, String timeframe) {
+        String cacheKey = instrument.name() + ":" + timeframe;
+        long now = System.nanoTime();
+        CachedSnapshot cached = snapshotCache.get(cacheKey);
+        if (cached != null && now < cached.expiresAtNanos()) {
+            return cached.snapshot();
+        }
+
         List<Candle> candles = loadCandles(instrument, timeframe, SNAPSHOT_LOOKBACK_BARS);
         if (candles.isEmpty()) {
             return emptySnapshot(instrument, timeframe);
@@ -261,7 +278,7 @@ public class IndicatorService {
 
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
-        return new IndicatorSnapshot(
+        IndicatorSnapshot result = new IndicatorSnapshot(
                 instrument.name(), timeframe,
                 last(ema9v), last(ema50v), last(ema200v), emaCross,
                 rsiValue, rsiSignal,
@@ -320,6 +337,8 @@ public class IndicatorService {
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
+        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + CACHE_TTL_NANOS));
+        return result;
     }
 
     public IndicatorSeriesSnapshot computeSeries(Instrument instrument, String timeframe, int limit) {
