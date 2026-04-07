@@ -118,18 +118,8 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
             }
 
-            // Strategy 3: Calendar — if front-month near expiry, pick next
-            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
-            if (isNearExpiry(frontMonth) && contracts.size() >= 2) {
-                IbGatewayResolvedContract next = contracts.get(1);
-                String nextMonth = normalizeMonth(next.contract().lastTradeDateOrContractMonth());
-                log.info("ActiveContractRegistry: {} calendar-roll → {} ({} expires within {}d, OI+volume unavailable)",
-                    instrument, nextMonth, frontMonth, calendarDaysThreshold);
-                resolver.setResolved(instrument, next);
-                return nextMonth;
-            }
-
-            // Default: front-month
+            // Default: front-month (calendar roll only applies to fallback path, not IBKR)
+            log.info("ActiveContractRegistry: {} defaulting to front-month (OI+volume unavailable)", instrument);
             resolver.setResolved(instrument, contracts.get(0));
             return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
         } catch (Exception e) {
@@ -139,14 +129,15 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     }
 
     /**
-     * Compares OI across up to 3 contracts. Returns the one with highest OI, or null if all empty.
+     * Compares OI between the first 2 contracts (front + next). Returns the one with highest OI, or null if all empty.
      */
     private IbGatewayResolvedContract selectByOi(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
         IbGatewayResolvedContract best = null;
         long bestOi = -1;
         boolean anyOiPresent = false;
 
-        for (IbGatewayResolvedContract c : contracts) {
+        List<IbGatewayResolvedContract> topTwo = contracts.subList(0, Math.min(2, contracts.size()));
+        for (IbGatewayResolvedContract c : topTwo) {
             String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
             OptionalLong oi = month != null ? openInterestProvider.fetchOpenInterest(instrument, month) : OptionalLong.empty();
             if (oi.isPresent()) {
