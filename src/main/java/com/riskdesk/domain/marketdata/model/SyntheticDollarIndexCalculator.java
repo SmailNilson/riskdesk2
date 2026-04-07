@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Optional;
 
 public final class SyntheticDollarIndexCalculator {
 
@@ -95,6 +96,45 @@ public final class SyntheticDollarIndexCalculator {
             true
         );
         return new DxyCalculationOutcome.CompleteSnapshot(snapshot, immutable, maxSkew);
+    }
+
+    /**
+     * Computes a DXY snapshot from previous-day close prices (IBKR TickType.CLOSE).
+     * Skips bid/ask evaluation and time-skew checks — close prices are inherently synchronised.
+     * Returns empty if any close price is missing or non-positive.
+     */
+    public Optional<DxySnapshot> calculateFromCloses(Map<FxPair, FxQuoteSnapshot> quotes) {
+        Map<FxPair, BigDecimal> closes = new EnumMap<>(FxPair.class);
+        for (FxPair pair : FxPair.values()) {
+            FxQuoteSnapshot q = quotes.get(pair);
+            if (q == null || q.close() == null || q.close().compareTo(BigDecimal.ZERO) <= 0) {
+                return Optional.empty();
+            }
+            closes.put(pair, q.close());
+        }
+
+        BigDecimal dxyValue = multiply(
+            DXY_FACTOR,
+            pow(closes.get(FxPair.EURUSD), -0.576),
+            pow(closes.get(FxPair.USDJPY), 0.136),
+            pow(closes.get(FxPair.GBPUSD), -0.119),
+            pow(closes.get(FxPair.USDCAD), 0.091),
+            pow(closes.get(FxPair.USDSEK), 0.042),
+            pow(closes.get(FxPair.USDCHF), 0.036)
+        ).setScale(6, RoundingMode.HALF_UP);
+
+        return Optional.of(new DxySnapshot(
+            Instant.EPOCH, // close has no meaningful timestamp
+            closes.get(FxPair.EURUSD),
+            closes.get(FxPair.USDJPY),
+            closes.get(FxPair.GBPUSD),
+            closes.get(FxPair.USDCAD),
+            closes.get(FxPair.USDSEK),
+            closes.get(FxPair.USDCHF),
+            dxyValue,
+            "IBKR_CLOSE",
+            true
+        ));
     }
 
     // -------------------------------------------------------------------------
