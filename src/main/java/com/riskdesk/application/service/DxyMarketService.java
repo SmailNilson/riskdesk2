@@ -229,8 +229,15 @@ public class DxyMarketService {
         return supportedMode;
     }
 
+    /**
+     * Finds the baseline DXY snapshot for percentage change calculation.
+     * Uses the CME session open (17:00 ET) as reference — aligns with how traders
+     * see DXY on TradingView (change since session open, not last 10 minutes).
+     * Falls back to 1 hour before if no session-open snapshot exists.
+     */
     public Optional<DxySnapshot> findBaselineSnapshot(Instant referenceTime) {
-        return repository.findLatestCompleteAtOrBefore(referenceTime.minus(TEN_MINUTES))
+        Instant sessionOpen = TradingSessionResolver.dailySessionStart(referenceTime);
+        return repository.findLatestCompleteAtOrBefore(sessionOpen.plusSeconds(300))
             .or(() -> repository.findLatestCompleteAtOrBefore(referenceTime.minus(ONE_HOUR)));
     }
 
