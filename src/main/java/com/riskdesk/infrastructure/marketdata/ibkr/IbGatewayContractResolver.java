@@ -53,6 +53,10 @@ public class IbGatewayContractResolver {
      * to a stale cached fallback.
      */
     public void refreshToMonth(Instrument instrument, String targetMonth) {
+        // Cancel old IBKR streaming subscriptions BEFORE updating the cache,
+        // so orphaned subscriptions on the expired contract month don't keep
+        // pushing stale prices alongside the new contract.
+        nativeClient.cancelInstrumentSubscriptions(instrument);
         cache.remove(instrument);
         for (Contract query : buildQueries(instrument)) {
             try {
