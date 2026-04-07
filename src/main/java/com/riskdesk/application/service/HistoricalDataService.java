@@ -91,7 +91,13 @@ public class HistoricalDataService implements ApplicationRunner {
             log.debug("Historical fetch disabled. Set riskdesk.market-data.historical.enabled=true to enable.");
             return;
         }
-        tryFetchAndReplace("startup");
+        // Run backfill asynchronously so Spring Boot health check responds immediately.
+        // Multi-contract walking can take several minutes — must not block startup.
+        CompletableFuture.runAsync(() -> tryFetchAndReplace("startup"))
+            .exceptionally(ex -> {
+                log.error("Startup historical data fetch failed", ex);
+                return null;
+            });
     }
 
     /** Retry every 30 minutes until real data is loaded. */
