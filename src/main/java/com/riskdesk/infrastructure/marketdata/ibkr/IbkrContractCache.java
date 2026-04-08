@@ -23,10 +23,12 @@ public class IbkrContractCache {
     private static final Logger log = LoggerFactory.getLogger(IbkrContractCache.class);
 
     // Front-month conids — update after contract rolls
+    // These must match the conIds that IBKR returns via requestContractDetails
+    // for the current front-month contract. Stale conIds cause dual-stream bugs.
     private static final Map<Instrument, Long> DEFAULTS = Map.of(
-        Instrument.MCL, 661016514L,  // Micro WTI Crude Oil  MAY26
-        Instrument.MGC, 706903676L,  // Micro Gold           APR26
-        Instrument.E6,  496647057L,  // EUR/USD Futures (6E) JUN26
+        Instrument.MCL, 661016514L,  // Micro WTI Crude Oil  MAY26 (expires Apr 21)
+        Instrument.MGC, 712565978L,  // Micro Gold           JUN26
+        Instrument.E6,  831436137L,  // EUR/USD Futures (6E) JUN26 (expires Apr)
         Instrument.MNQ, 770561201L   // Micro E-mini Nasdaq  JUN26
     );
 

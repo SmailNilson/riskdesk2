@@ -118,6 +118,48 @@ public class IndicatorAlertEvaluator {
         return new EvalKey(family, instrument, timeframe, qualifier, high, low);
     }
 
+    /**
+     * Clears all transition state for a specific instrument. Called during contract
+     * rollover to prevent the old contract's indicator states from producing false
+     * transition alerts when the new contract's price series kicks in.
+     *
+     * Thread-safe: all maps are ConcurrentHashMap, entrySet().removeIf() is atomic
+     * per-entry.
+     */
+    public void clearStatesForInstrument(String instrumentName) {
+        // Collect keys to remove from persistent store BEFORE clearing in-memory maps
+        List<String> persistedKeysToRemove = lastState.entrySet().stream()
+                .filter(e -> instrumentName.equals(e.getKey().instrument()))
+                .map(e -> serializeEvalKey(e.getKey()))
+                .toList();
+
+        int removedStates = removeMatching(lastState, instrumentName);
+        int removedCandle = removeMatching(lastFiredCandle, instrumentName);
+        int removedOB;
+        synchronized (orderBlockEventLock) {
+            removedOB = removeMatching(seenOrderBlockEvents, instrumentName);
+            orderBlockEventOrder.removeIf(k -> instrumentName.equals(k.instrument()));
+        }
+
+        // Remove from persistent store so recovery after restart is clean
+        for (String key : persistedKeysToRemove) {
+            stateStore.remove(key);
+        }
+
+        log.info("Rollover: cleared alert state for {} — {} states, {} candle guards, {} OB events",
+                instrumentName, removedStates, removedCandle, removedOB);
+    }
+
+    private <V> int removeMatching(Map<EvalKey, V> map, String instrumentName) {
+        int[] count = {0};
+        map.entrySet().removeIf(e -> {
+            boolean match = instrumentName.equals(e.getKey().instrument());
+            if (match) count[0]++;
+            return match;
+        });
+        return count[0];
+    }
+
     private record EvalKey(
             String family,
             String instrument,

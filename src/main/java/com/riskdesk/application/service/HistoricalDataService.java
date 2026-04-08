@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
@@ -10,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -80,8 +82,10 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.mentor-refresh-cooldown-ms:60000}")
     private long mentorRefreshCooldownMs;
 
-    /** Set to true once real candles have been successfully loaded. */
+    /** Set to true once real candles have been successfully loaded (quick startup). */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
+    /** Set to true once deep multi-contract backfill has completed. */
+    private final AtomicBoolean deepBackfillDone = new AtomicBoolean(false);
     private final Map<RefreshKey, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
 
     private record RefreshKey(Instrument instrument, String timeframe) {}
@@ -111,17 +115,68 @@ public class HistoricalDataService implements ApplicationRunner {
                 .exceptionally(ex -> { log.error("Startup delta backfill failed", ex); return null; });
         } else {
             log.info("HistoricalDataService: no existing candles — full backfill in background.");
-            CompletableFuture.runAsync(() -> fullBackfill("startup-full"))
+            CompletableFuture.runAsync(() -> tryFetchAndReplace("startup-full", DEFAULT_CANDLES_PER_PAIR, 1))
                 .exceptionally(ex -> { log.error("Startup full backfill failed", ex); return null; });
         }
     }
 
-    /** Retry every 30 minutes until real data is loaded. */
+    /**
+     * Phase 2: deep multi-contract backfill — runs 5 minutes after startup.
+     * Walks backward through expired contracts with full target counts.
+     * Sequential (1 thread) to respect IBKR pacing limits (~60 requests/10 min).
+     */
+    @Scheduled(initialDelay = 5 * 60 * 1000, fixedDelay = 24 * 60 * 60 * 1000)
+    public void deepBackfill() {
+        if (!enabled || deepBackfillDone.get()) return;
+        log.info("HistoricalDataService: starting deep multi-contract backfill...");
+        tryFetchAndReplace("deep-backfill", -1, 1);
+        deepBackfillDone.set(true);
+    }
+
+    /** Resets the deep backfill flag so the next scheduled run re-fetches all data. */
+    public void resetDeepBackfill() {
+        deepBackfillDone.set(false);
+    }
+
+    /**
+     * Quick rollover refresh: fetches 7 days of 5m+1h data for one instrument.
+     * Fixes the chart spike immediately after contract switch.
+     * Runs synchronously — caller should wrap in CompletableFuture if async desired.
+     */
+    public Map<String, Integer> refreshInstrumentRollover(Instrument instrument) {
+        if (!enabled) return Collections.emptyMap();
+
+        Map<String, Integer> savedByTimeframe = new LinkedHashMap<>();
+        Map<String, Integer> targets = Map.of(
+            "5m",  7 * 24 * 60 / 5,   // ~2016 candles
+            "1h",  7 * 24             // ~168 candles
+        );
+        for (var entry : targets.entrySet()) {
+            String tf = entry.getKey();
+            int limit = entry.getValue();
+            try {
+                if (!historicalProvider.supports(instrument, tf)) continue;
+                List<Candle> candles = deduplicate(
+                    tagWithContractMonth(historicalProvider.fetchHistory(instrument, tf, limit), instrument));
+                if (!candles.isEmpty()) {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, tf);
+                    candlePort.saveAll(candles);
+                    savedByTimeframe.put(tf, candles.size());
+                    log.info("HistoricalDataService [rollover]: {} {} refreshed with {} candles.", instrument, tf, candles.size());
+                }
+            } catch (Exception e) {
+                log.warn("HistoricalDataService [rollover]: {} {} failed — {}", instrument, tf, e.getMessage());
+            }
+        }
+        return savedByTimeframe;
+    }
+
+    /** Retry every 30 minutes until initial data is loaded. */
     @Scheduled(fixedDelay = 30 * 60 * 1000, initialDelay = 30 * 60 * 1000)
     public void scheduledRetry() {
         if (!enabled || realDataLoaded.get()) return;
         log.info("HistoricalDataService: retrying historical candle fetch...");
-        fullBackfill("retry");
+        tryFetchAndReplace("retry", DEFAULT_CANDLES_PER_PAIR, 1);
     }
 
     public Map<String, Integer> refreshInstrumentContext(Instrument instrument, List<String> requestedTimeframes) {
@@ -141,6 +196,37 @@ public class HistoricalDataService implements ApplicationRunner {
         return savedByTimeframe;
     }
 
+    /**
+     * On contract rollover, delete all candles for the rolled instrument (all timeframes)
+     * and trigger a full historical backfill from the new contract. This ensures indicators
+     * recalculate on a clean price series without old-contract data contamination.
+     *
+     * Runs async via CompletableFuture (not @Async) because this class implements
+     * ApplicationRunner — Spring's JDK proxy would not expose this method otherwise.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        CompletableFuture.runAsync(() -> {
+            log.info("Rollover backfill: deleting old candles and backfilling {} (new contract {})",
+                    instrument, event.newContractMonth());
+
+            for (String timeframe : TIMEFRAMES) {
+                try {
+                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+                } catch (Exception e) {
+                    log.warn("Rollover backfill: failed to delete {} {} candles: {}", instrument, timeframe, e.getMessage());
+                }
+            }
+
+            Map<String, Integer> result = refreshInstrumentContext(instrument, TIMEFRAMES);
+            log.info("Rollover backfill complete for {}: {}", instrument, result);
+        }).exceptionally(ex -> {
+            log.error("Rollover backfill failed for {}: {}", instrument, ex.getMessage(), ex);
+            return null;
+        });
+    }
+
     /** Trigger a manual full refresh asynchronously. Returns immediately. */
     public Map<String, Object> refreshAll() {
         if (!enabled) {
@@ -155,46 +241,67 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     // -------------------------------------------------------------------------
-    // Full backfill (first run / no data)
+    // Full backfill (deep multi-contract, from main)
     // -------------------------------------------------------------------------
 
-    private void fullBackfill(String context) {
-        log.info("HistoricalDataService [{}]: full backfill — fetching all OHLCV candles (parallel by instrument)...", context);
+    /**
+     * @param maxCandlesOverride  if > 0, caps the candle count per timeframe (used for quick startup).
+     *                            If -1, uses full candlesTargetFor() (deep multi-contract backfill).
+     * @param threadCount         number of parallel instrument threads (1 = sequential for IBKR pacing).
+     */
+    private void tryFetchAndReplace(String context, int maxCandlesOverride, int threadCount) {
+        log.info("HistoricalDataService [{}]: fetching OHLCV candles (threads={}, maxCandles={})...",
+            context, threadCount, maxCandlesOverride > 0 ? maxCandlesOverride : "full");
         AtomicInteger totalSaved = new AtomicInteger(0);
         List<Instrument> instruments = Instrument.exchangeTradedFutures();
 
-        ExecutorService pool = newBackfillPool(instruments.size());
+        ExecutorService pool = Executors.newFixedThreadPool(
+            Math.min(instruments.size(), threadCount),
+            r -> { Thread t = new Thread(r, "hist-backfill"); t.setDaemon(true); return t; }
+        );
+
         List<CompletableFuture<Void>> futures = instruments.stream()
             .map(instrument -> CompletableFuture.runAsync(() ->
-                fullBackfillInstrument(instrument, context, totalSaved), pool))
+                fetchAllTimeframesForInstrument(instrument, context, maxCandlesOverride, totalSaved), pool))
             .toList();
 
-        awaitAll(futures, pool, context);
+        try {
+            // Deep backfill can take longer — give it 30 minutes
+            int timeoutMinutes = maxCandlesOverride > 0 ? 10 : 30;
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                .get(timeoutMinutes, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [{}]: fetch interrupted — {}", context, e.getMessage());
+        } finally {
+            pool.shutdown();
+        }
 
         if (totalSaved.get() == 0) {
-            log.warn("HistoricalDataService [{}]: no candles retrieved — will retry in 30 min.", context);
+            log.warn("HistoricalDataService [{}]: no candles retrieved — retaining existing data.", context);
             return;
         }
 
         realDataLoaded.set(true);
-        log.info("HistoricalDataService [{}]: full backfill done — {} candles saved.", context, totalSaved.get());
+        log.info("HistoricalDataService [{}]: done — {} IBKR candles saved.", context, totalSaved.get());
     }
 
-    private void fullBackfillInstrument(Instrument instrument, String context, AtomicInteger totalSaved) {
+    private void fetchAllTimeframesForInstrument(Instrument instrument, String context,
+                                                  int maxCandlesOverride, AtomicInteger totalSaved) {
         for (String timeframe : TIMEFRAMES) {
             if (!historicalProvider.supports(instrument, timeframe)) continue;
             try {
-                int limit = candlesTargetFor(timeframe);
+                int fullTarget = candlesTargetFor(timeframe);
+                int limit = maxCandlesOverride > 0 ? Math.min(maxCandlesOverride, fullTarget) : fullTarget;
                 List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
                 candles = tagWithContractMonth(candles, instrument);
                 candles = deduplicate(candles);
                 if (!candles.isEmpty()) {
                     candlePort.saveAll(candles);
                     totalSaved.addAndGet(candles.size());
-                    log.debug("HistoricalDataService [{}]: {} {} full backfill — {} candles.", context, instrument, timeframe, candles.size());
+                    log.debug("HistoricalDataService [{}]: {} {} fetched {} candles.", context, instrument, timeframe, candles.size());
                 }
             } catch (Exception e) {
-                log.debug("HistoricalDataService [{}]: {} {} full backfill failed — {}", context, instrument, timeframe, e.getMessage());
+                log.debug("HistoricalDataService [{}]: {} {} fetch failed — {}", context, instrument, timeframe, e.getMessage());
             }
         }
     }
@@ -365,7 +472,10 @@ public class HistoricalDataService implements ApplicationRunner {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         if (contractMonth == null) return candles;
         for (Candle candle : candles) {
-            candle.setContractMonth(contractMonth);
+            // Preserve contract month already set by multi-contract backfill
+            if (candle.getContractMonth() == null) {
+                candle.setContractMonth(contractMonth);
+            }
         }
         return candles;
     }

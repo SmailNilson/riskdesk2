@@ -8,11 +8,13 @@ import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -71,6 +73,15 @@ public class AlertService {
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.confluenceBuffer          = confluenceBuffer;
         this.messagingTemplate         = messagingTemplate;
+    }
+
+    /**
+     * On contract rollover, clear all transition state for the rolled instrument
+     * to prevent false alerts from the old-to-new contract price gap.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        indicatorAlertEvaluator.clearStatesForInstrument(event.instrument().name());
     }
 
     /**

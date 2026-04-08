@@ -295,4 +295,36 @@ class IndicatorAlertEvaluatorTest {
         assertEquals(1, alerts.size(), "confirmed WaveTrend signal should still fire after the open-candle pass");
         assertTrue(alerts.get(0).message().contains("overbought"));
     }
+
+    // -------------------------------------------------------------------------
+    // Rollover: clearStatesForInstrument
+    // -------------------------------------------------------------------------
+
+    @Test
+    void clearStatesForInstrument_removesTargetAndKeepsOthers() {
+        // Prime MCL state
+        IndicatorAlertSnapshot mclSnap = makeSnapshot("GOLDEN_CROSS", null, null, null, null, null, null);
+        evaluator.evaluate(Instrument.MCL, "10m", mclSnap);
+
+        // Prime MNQ state
+        IndicatorAlertSnapshot mnqSnap = makeSnapshot("DEATH_CROSS", null, null, null, null, null, null);
+        evaluator.evaluate(Instrument.MNQ, "10m", mnqSnap);
+
+        // Clear MCL only
+        evaluator.clearStatesForInstrument("MCL");
+
+        // MCL Golden Cross should fire again (state was cleared)
+        List<Alert> mclAlerts = evaluator.evaluate(Instrument.MCL, "10m", mclSnap);
+        assertFalse(mclAlerts.isEmpty(), "MCL alert should re-fire after state clear");
+
+        // MNQ Death Cross should NOT re-fire (state was preserved)
+        List<Alert> mnqAlerts = evaluator.evaluate(Instrument.MNQ, "10m", mnqSnap);
+        assertTrue(mnqAlerts.isEmpty(), "MNQ alert should NOT re-fire — state was preserved");
+    }
+
+    @Test
+    void clearStatesForInstrument_noOpWhenNoMatchingState() {
+        // Should not throw even when no states exist for the instrument
+        assertDoesNotThrow(() -> evaluator.clearStatesForInstrument("MCL"));
+    }
 }

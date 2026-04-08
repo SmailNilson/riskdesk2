@@ -114,6 +114,50 @@ public class IbGatewayNativeClient {
         contractKeyToInstrument.put(subscriptionKey(contract), instrument);
     }
 
+    /**
+     * Atomically cancels all streaming subscriptions for {@code oldContract} and
+     * starts fresh subscriptions for {@code newContract}. Used during contract
+     * rollover to prevent orphaned IBKR data streams and stale reqId mappings.
+     *
+     * Thread-safe: all mutations happen under {@link #streamingLock}.
+     */
+    public void cancelAndResubscribe(Contract oldContract, Contract newContract, Instrument instrument) {
+        if (oldContract == null && newContract == null) return;
+
+        synchronized (streamingLock) {
+            // --- Cancel old subscriptions ---
+            if (oldContract != null) {
+                String oldKey = subscriptionKey(oldContract);
+                ApiController ctrl = controller;
+
+                StreamingPriceSubscription oldPrice = streamingSubscriptions.remove(oldKey);
+                if (oldPrice != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldPrice); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(oldPrice); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled price stream for old contract {}", describeContract(oldContract));
+                }
+
+                StreamingQuoteSubscription oldQuote = streamingQuoteSubscriptions.remove(oldKey);
+                if (oldQuote != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldQuote); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled quote stream for old contract {}", describeContract(oldContract));
+                }
+
+                contractKeyToInstrument.remove(oldKey);
+            }
+        }
+
+        // --- Subscribe to new contract (outside streamingLock — ensureStreaming acquires it internally) ---
+        if (newContract != null) {
+            if (instrument != null) {
+                registerInstrumentMapping(newContract, instrument);
+            }
+            ensureStreamingPriceSubscription(newContract);
+            ensureStreamingQuoteSubscription(newContract);
+            log.info("Rollover: subscribed to new contract {}", describeContract(newContract));
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Connection management
     // -------------------------------------------------------------------------
@@ -553,6 +597,39 @@ public class IbGatewayNativeClient {
         }
         StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
         return subscription == null ? Optional.empty() : subscription.bestPrice();
+    }
+
+    /**
+     * Cancels all streaming subscriptions (price + quote) for the given instrument,
+     * regardless of contract month. Called during contract rollover to prevent orphaned
+     * subscriptions on expired months from producing stale prices.
+     */
+    public void cancelInstrumentSubscriptions(Instrument instrument) {
+        List<String> keysToRemove = contractKeyToInstrument.entrySet().stream()
+            .filter(e -> e.getValue() == instrument)
+            .map(Map.Entry::getKey)
+            .toList();
+
+        if (keysToRemove.isEmpty()) return;
+
+        synchronized (streamingLock) {
+            ApiController ctrl = controller;
+            for (String key : keysToRemove) {
+                StreamingPriceSubscription priceSub = streamingSubscriptions.remove(key);
+                if (priceSub != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(priceSub); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(priceSub); } catch (Exception ignored) {}
+                }
+                StreamingQuoteSubscription quoteSub = streamingQuoteSubscriptions.remove(key);
+                if (quoteSub != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(quoteSub); } catch (Exception ignored) {}
+                }
+                contractKeyToInstrument.remove(key);
+            }
+        }
+
+        log.info("IB Gateway cancelled {} subscription(s) for {} (contract rollover cleanup)",
+            keysToRemove.size(), instrument);
     }
 
     public void ensureStreamingQuoteSubscription(Contract contract) {

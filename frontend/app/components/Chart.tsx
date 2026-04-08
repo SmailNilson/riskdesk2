@@ -38,6 +38,18 @@ const WT_OVERBOUGHT = 53;
 const WT_OVERSOLD = -53;
 const PRESENT_OB_WINDOW_BARS = 48;
 
+/** Price format per instrument — precision matches tick size from backend Instrument enum. */
+function priceFormatFor(instrument: string): { type: 'price'; precision: number; minMove: number } {
+  switch (instrument) {
+    case 'E6':  return { type: 'price', precision: 5, minMove: 0.00005 };
+    case 'DXY': return { type: 'price', precision: 3, minMove: 0.005 };
+    case 'MGC': return { type: 'price', precision: 1, minMove: 0.1 };
+    case 'MNQ': return { type: 'price', precision: 2, minMove: 0.25 };
+    case 'MCL': return { type: 'price', precision: 2, minMove: 0.01 };
+    default:    return { type: 'price', precision: 2, minMove: 0.01 };
+  }
+}
+
 function timeframeToSeconds(timeframe: string) {
   return timeframe === '1d' ? 86400 : timeframe === '1h' ? 3600 : timeframe === '5m' ? 300 : 600;
 }
@@ -307,6 +319,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e',   wickDownColor: '#ef4444',
       priceLineVisible: false,
+      priceFormat: priceFormatFor(instrument),
     });
     const ema9Series    = priceChart.addSeries(LineSeries, { color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     const ema50Series   = priceChart.addSeries(LineSeries, { color: '#ef4444', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });

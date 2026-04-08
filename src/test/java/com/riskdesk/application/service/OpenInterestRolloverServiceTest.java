@@ -112,7 +112,8 @@ class OpenInterestRolloverServiceTest {
 
     @Test
     void singleContractAvailable_returnsUnavailable() {
-        when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(java.util.Optional.of("202505"));
+        // No contractRegistry stub needed — checkInstrument() returns early
+        // when fewer than 2 contracts are available from IBKR.
 
         Contract c = new Contract();
         c.lastTradeDateOrContractMonth("202505");
