@@ -41,13 +41,13 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     @Value("${riskdesk.active-contracts.MCL:202605}")
     private String fallbackMcl;
 
-    @Value("${riskdesk.active-contracts.MGC:202506}")
+    @Value("${riskdesk.active-contracts.MGC:202606}")
     private String fallbackMgc;
 
-    @Value("${riskdesk.active-contracts.MNQ:202506}")
+    @Value("${riskdesk.active-contracts.MNQ:202606}")
     private String fallbackMnq;
 
-    @Value("${riskdesk.active-contracts.E6:202506}")
+    @Value("${riskdesk.active-contracts.E6:202606}")
     private String fallbackE6;
 
     // calendarDaysThreshold removed — caused Frankenstein charts by rolling the
