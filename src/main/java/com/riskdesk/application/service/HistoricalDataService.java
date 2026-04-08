@@ -295,6 +295,17 @@ public class HistoricalDataService implements ApplicationRunner {
                 List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
                 candles = tagWithContractMonth(candles, instrument);
                 candles = deduplicate(candles);
+
+                // Filter out candles already in DB to avoid unique-key collisions
+                // (e.g. deep-backfill overlapping with startup-full's recent candles)
+                Optional<Instant> hwm = candlePort.findLatestTimestamp(instrument, timeframe);
+                if (hwm.isPresent()) {
+                    Instant cutoff = hwm.get();
+                    candles = candles.stream()
+                        .filter(c -> c.getTimestamp().isAfter(cutoff))
+                        .toList();
+                }
+
                 if (!candles.isEmpty()) {
                     candlePort.saveAll(candles);
                     totalSaved.addAndGet(candles.size());
