@@ -42,9 +42,18 @@ public class IbGatewayContractResolver {
     /**
      * Directly seeds the cache with an already-resolved contract.
      * Used by ActiveContractRegistryInitializer after OI-based startup selection.
+     *
+     * Always updates the cache (the initializer's OI-based selection is authoritative).
+     * If the conId changes, the old IBKR stream is cancelled and a new one started.
+     * If the conId is the same, the cache is updated silently (no stream disruption).
      */
     public void setResolved(Instrument instrument, IbGatewayResolvedContract resolved) {
-        cache.put(instrument, resolved);
+        IbGatewayResolvedContract previous = cache.put(instrument, resolved);
+        if (previous != null && previous.contract().conid() != resolved.contract().conid()) {
+            log.info("ContractResolver: {} conId changed {} → {} — switching IBKR stream",
+                instrument, previous.contract().conid(), resolved.contract().conid());
+            nativeClient.cancelAndResubscribe(previous.contract(), resolved.contract(), instrument);
+        }
     }
 
     /**
