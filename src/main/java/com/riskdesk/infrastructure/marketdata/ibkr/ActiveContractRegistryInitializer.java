@@ -2,6 +2,7 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -132,16 +133,22 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     /**
      * Compares OI across ALL available contracts.
      * Returns the contract with the highest OI, or null if OI is unavailable for all.
-     * The highest-OI contract is where liquidity currently sits — that's the correct
-     * active contract, even if it's near expiry during rollover week.
+     *
+     * Energy contracts (MCL) have a CME convention where the last trade date is one
+     * month BEFORE the delivery month. IBKR's normalizeMonth("20260421") = "202604"
+     * but that's the MAY contract. So when OI selects "202605" as the winner, it's
+     * actually the JUNE contract. For MCL, we take the contract at index-1 (the one
+     * that expires one month earlier = the real active delivery month).
      */
     private IbGatewayResolvedContract selectByOi(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
         IbGatewayResolvedContract best = null;
+        int bestIndex = -1;
         long bestOi = -1;
         boolean anyOiPresent = false;
         StringBuilder logDetail = new StringBuilder();
 
-        for (IbGatewayResolvedContract c : contracts) {
+        for (int i = 0; i < contracts.size(); i++) {
+            IbGatewayResolvedContract c = contracts.get(i);
             String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
             OptionalLong oi = month != null ? openInterestProvider.fetchOpenInterest(instrument, month) : OptionalLong.empty();
             if (oi.isPresent()) {
@@ -150,16 +157,29 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 if (oi.getAsLong() > bestOi) {
                     bestOi = oi.getAsLong();
                     best = c;
+                    bestIndex = i;
                 }
             }
         }
 
-        if (best != null && anyOiPresent) {
-            log.info("ActiveContractRegistry: {} OI-select → {} (OI={}, all: [{}])",
-                instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()),
-                bestOi, logDetail.toString().trim());
+        if (!anyOiPresent || best == null) return null;
+
+        // Energy (MCL): IBKR lastTradeDateOrContractMonth gives the expiry month,
+        // which is one month BEFORE the delivery month. The OI winner at index N
+        // is actually the NEXT month's contract. The real active contract is at N-1.
+        if (instrument.assetClass() == AssetClass.ENERGY && bestIndex > 0) {
+            IbGatewayResolvedContract energyAdjusted = contracts.get(bestIndex - 1);
+            log.info("ActiveContractRegistry: {} OI-select → index {} (OI={}, all: [{}]) — ENERGY adjust: using index {} (conId={}) instead of index {} (conId={})",
+                instrument, bestIndex, bestOi, logDetail.toString().trim(),
+                bestIndex - 1, energyAdjusted.contract().conid(),
+                bestIndex, best.contract().conid());
+            return energyAdjusted;
         }
-        return anyOiPresent ? best : null;
+
+        log.info("ActiveContractRegistry: {} OI-select → {} (OI={}, all: [{}])",
+            instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()),
+            bestOi, logDetail.toString().trim());
+        return best;
     }
 
     /**
