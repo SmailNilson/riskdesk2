@@ -60,10 +60,11 @@ public class MentorMemoryService {
         try {
             String semanticQuery = buildSemanticQuery(payload);
             String queryModel = properties.getEmbeddingsModel();
+            String instrument = payload.path("metadata").path("asset").asText(null);
             List<Double> embedding = embeddingClient.embed(semanticQuery, queryModel);
             return vectorColumnAvailable
-                ? findWithPgVector(embedding, queryModel)
-                : findWithFallback(embedding, queryModel);
+                ? findWithPgVector(embedding, queryModel, instrument)
+                : findWithFallback(embedding, queryModel, instrument);
         } catch (Exception e) {
             log.warn("Mentor memory similarity search unavailable: {}", e.getMessage());
             return List.of();
@@ -187,22 +188,26 @@ public class MentorMemoryService {
         schemaInitialized = true;
     }
 
-    private List<MentorSimilarAudit> findWithPgVector(List<Double> embedding, String queryModel) {
+    private List<MentorSimilarAudit> findWithPgVector(List<Double> embedding, String queryModel, String instrument) {
         String vector = toVectorLiteral(embedding);
+        // Prefer same-instrument audits: boost similarity by 0.05 for matching instrument
         return jdbcTemplate.query(
             """
-                SELECT audit_id, created_at, instrument, timeframe, action, verdict, semantic_text,
-                       1 - (embedding <=> CAST(? AS vector)) AS similarity
-                FROM mentor_audit_memories
-                WHERE embedding IS NOT NULL
-                  AND embedding_model = ?
-                ORDER BY embedding <=> CAST(? AS vector)
+                SELECT m.audit_id, m.created_at, m.instrument, m.timeframe, m.action, m.verdict,
+                       m.semantic_text, a.simulation_status,
+                       (1 - (m.embedding <=> CAST(? AS vector)))
+                         + CASE WHEN m.instrument = ? THEN 0.05 ELSE 0 END AS similarity
+                FROM mentor_audit_memories m
+                LEFT JOIN mentor_audits a ON a.id = m.audit_id
+                WHERE m.embedding IS NOT NULL
+                  AND m.embedding_model = ?
+                ORDER BY similarity DESC
                 LIMIT ?
                 """,
             ps -> {
                 ps.setString(1, vector);
-                ps.setString(2, queryModel);
-                ps.setString(3, vector);
+                ps.setString(2, instrument);
+                ps.setString(3, queryModel);
                 ps.setInt(4, properties.getMemoryTopK());
             },
             (rs, rowNum) -> new MentorSimilarAudit(
@@ -213,19 +218,22 @@ public class MentorMemoryService {
                 rs.getString("action"),
                 rs.getString("verdict"),
                 Math.max(0.0, rs.getDouble("similarity")),
-                summarize(rs.getString("semantic_text"))
+                summarize(rs.getString("semantic_text")),
+                rs.getString("simulation_status")
             )
         );
     }
 
-    private List<MentorSimilarAudit> findWithFallback(List<Double> targetEmbedding, String queryModel) {
+    private List<MentorSimilarAudit> findWithFallback(List<Double> targetEmbedding, String queryModel, String instrument) {
         List<MentorSimilarAudit> matches = new ArrayList<>();
         jdbcTemplate.query(
             """
-                SELECT audit_id, created_at, instrument, timeframe, action, verdict, semantic_text, embedding_json
-                FROM mentor_audit_memories
-                WHERE embedding_model = ?
-                ORDER BY created_at DESC
+                SELECT m.audit_id, m.created_at, m.instrument, m.timeframe, m.action, m.verdict,
+                       m.semantic_text, m.embedding_json, a.simulation_status
+                FROM mentor_audit_memories m
+                LEFT JOIN mentor_audits a ON a.id = m.audit_id
+                WHERE m.embedding_model = ?
+                ORDER BY m.created_at DESC
                 LIMIT ?
                 """,
             ps -> {
@@ -235,6 +243,10 @@ public class MentorMemoryService {
             rs -> {
                 List<Double> candidate = parseEmbedding(rs.getString("embedding_json"));
                 double similarity = cosineSimilarity(targetEmbedding, candidate);
+                // Boost same-instrument matches
+                if (instrument != null && instrument.equals(rs.getString("instrument"))) {
+                    similarity += 0.05;
+                }
                 matches.add(new MentorSimilarAudit(
                     rs.getLong("audit_id"),
                     rs.getTimestamp("created_at").toInstant(),
@@ -243,7 +255,8 @@ public class MentorMemoryService {
                     rs.getString("action"),
                     rs.getString("verdict"),
                     similarity,
-                    summarize(rs.getString("semantic_text"))
+                    summarize(rs.getString("semantic_text")),
+                    rs.getString("simulation_status")
                 ));
             }
         );
@@ -259,11 +272,14 @@ public class MentorMemoryService {
             payload.path("metadata").path("timeframe_focus").asText(""),
             payload.path("metadata").path("market_session").asText(""),
             payload.path("trade_intention").path("action").asText(""),
-            payload.path("market_structure_the_king").path("trend_H1").asText(""),
-            payload.path("market_structure_the_king").path("trend_focus").asText(""),
-            payload.path("market_structure_the_king").path("last_event").asText(""),
-            payload.path("momentum_and_flow_the_trigger").path("money_flow_state").asText(""),
-            payload.path("risk_and_emotional_check").path("reward_to_risk_ratio").asText("")
+            payload.path("market_structure_smc").path("trend_H1").asText(""),
+            payload.path("market_structure_smc").path("trend_focus").asText(""),
+            payload.path("market_structure_smc").path("last_event").asText(""),
+            payload.path("momentum_oscillators").path("money_flow_state").asText(""),
+            payload.path("risk_management_gatekeeper").path("reward_to_risk_ratio").asText(""),
+            payload.path("metadata").path("current_price").asText(""),
+            payload.path("macro_correlations_dynamic").path("dxy_trend").asText(""),
+            payload.path("order_flow_and_volume").path("cumulative_delta_trend").asText("")
         );
     }
 
@@ -310,6 +326,6 @@ public class MentorMemoryService {
         if (semanticText == null) {
             return "";
         }
-        return semanticText.length() <= 180 ? semanticText : semanticText.substring(0, 180) + "...";
+        return semanticText.length() <= 300 ? semanticText : semanticText.substring(0, 300) + "...";
     }
 }
