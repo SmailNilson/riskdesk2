@@ -128,13 +128,13 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 break;
             }
 
-            // Detect rollover via volume comparison, then merge with clean cut
-            Instant rolloverBoundary = detectVolumeRollover(merged, olderData);
+            // Gap-fill only: older contract data extends the chart backward without
+            // overwriting any candles from the current (newer) contract.
             int beforeSize = merged.size();
-            mergeWithVolumeRollover(merged, olderData, rolloverBoundary);
+            mergeGapFillOnly(merged, olderData);
 
-            log.info("IB Gateway backfill: {} {} volume-rollover at {} — {} new candles from contract {}",
-                instrument, timeframe, rolloverBoundary, merged.size() - beforeSize, prevMonth);
+            log.info("IB Gateway backfill: {} {} — {} new candles gap-filled from contract {}",
+                instrument, timeframe, merged.size() - beforeSize, prevMonth);
 
             if (merged.size() == beforeSize) break;
             contractsUsed++;
@@ -152,74 +152,26 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     }
 
     /**
-     * Detects the volume-based rollover boundary between two overlapping contracts.
+     * Merges older contract data into the main dataset using a gap-fill-only strategy.
      *
-     * Walks backward through the overlap zone (timestamps present in both datasets).
-     * The rollover point is the latest timestamp where the older contract's volume
-     * exceeds the newer contract's for 2+ consecutive bars — indicating the older
-     * contract was still the dominant (actively traded) one at that time.
+     * The newer (current) contract's candles are NEVER overwritten. Older contract
+     * data only fills timestamps where the newer contract has no data — extending the
+     * chart backward in time without contaminating the active contract's price series.
      *
-     * @return boundary timestamp: older contract data should be used at and before
-     *         this instant; newer contract data after it.
+     * Previous approach used volume-based rollover detection to decide which contract's
+     * data to use at each timestamp. This caused Frankenstein charts when the volume
+     * boundary was miscalculated, overwriting current-contract candles with stale prices
+     * from the previous contract.
      */
-    private Instant detectVolumeRollover(Map<Instant, Candle> newerData, Map<Instant, Candle> olderData) {
-        List<Instant> overlaps = olderData.keySet().stream()
-            .filter(newerData::containsKey)
-            .sorted()
-            .toList();
-
-        if (overlaps.size() < 2) {
-            // Not enough overlap for volume comparison — use natural data boundary
-            return newerData.keySet().stream()
-                .min(Comparator.naturalOrder())
-                .orElse(Instant.MAX);
-        }
-
-        // Walk backward through overlap to find where older contract was dominant.
-        // Require 2+ consecutive bars to avoid single-bar volume anomalies.
-        int consecutiveOlderWins = 0;
-        for (int i = overlaps.size() - 1; i >= 0; i--) {
-            Instant ts = overlaps.get(i);
-            long olderVol = olderData.get(ts).getVolume();
-            long newerVol = newerData.get(ts).getVolume();
-
-            if (olderVol > newerVol) {
-                consecutiveOlderWins++;
-                if (consecutiveOlderWins >= 2) {
-                    // Rollover boundary = latest bar where older contract was still dominant
-                    Instant boundary = overlaps.get(i + consecutiveOlderWins - 1);
-                    log.debug("Volume rollover detected at {} (older vol dominated for {} consecutive bars)",
-                        boundary, consecutiveOlderWins);
-                    return boundary;
-                }
-            } else {
-                consecutiveOlderWins = 0;
-            }
-        }
-
-        // Newer contract dominated throughout the entire overlap
-        return overlaps.get(0);
-    }
-
-    /**
-     * Merges older contract data into the main dataset using the volume-based
-     * rollover boundary as the clean cut point.
-     *
-     * At and before the boundary: older contract data replaces any newer contract
-     * data (because the older contract was the dominant one at that time).
-     * After the boundary: newer contract data is kept; older data only fills gaps.
-     */
-    private void mergeWithVolumeRollover(Map<Instant, Candle> merged, Map<Instant, Candle> olderData, Instant rolloverBoundary) {
+    private void mergeGapFillOnly(Map<Instant, Candle> merged, Map<Instant, Candle> olderData) {
+        int filled = 0;
         for (Map.Entry<Instant, Candle> entry : olderData.entrySet()) {
-            Instant ts = entry.getKey();
-            if (!ts.isAfter(rolloverBoundary)) {
-                // At or before rollover: older contract was dominant — use its data
-                merged.put(ts, entry.getValue());
-            } else if (!merged.containsKey(ts)) {
-                // After rollover but no newer data exists — fill the gap
-                merged.put(ts, entry.getValue());
+            if (!merged.containsKey(entry.getKey())) {
+                merged.put(entry.getKey(), entry.getValue());
+                filled++;
             }
         }
+        log.debug("Deep backfill gap-fill: {} candles added from older contract (no overwrites)", filled);
     }
 
     /**
