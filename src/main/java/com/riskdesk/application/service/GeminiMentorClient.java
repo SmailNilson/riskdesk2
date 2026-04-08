@@ -60,6 +60,27 @@ public class GeminiMentorClient implements MentorModelClient {
         - confluence_signals liste chaque signal avec son poids et timing
         - Si opposing_buffer_weight > 0, des signaux contraires existent
 
+        ### Session Context (session_context) — ANTI-LOOP
+        - recent_reviews_same_instrument : les dernières reviews pour CET INSTRUMENT dans les dernières heures.
+        - Chaque review inclut : action, verdict, trigger_price, proposed_entry, simulation_status, minutes_ago.
+        - same_entry_proposed_count : combien de fois le MÊME prix d'entrée a été proposé récemment.
+        - RÈGLE ANTI-LOOP : Si same_entry_proposed_count >= 2 et que simulation_status = MISSED ou CANCELLED pour ce prix, NE PAS reproposer la même entrée. Le marché a prouvé que ce niveau n'est pas atteignable dans le contexte actuel. Cherche un niveau alternatif plus proche.
+        - Utilise les verdicts précédents pour détecter si le marché a déjà rejeté cette idée de trade.
+
+        ### Régime Cross-Asset (cross_asset_regime)
+        - instruments : état des 4 instruments (MGC, MCL, E6, MNQ) avec prix, %% vs VWAP, direction.
+        - regime : RISK_OFF (3+ instruments baissiers), RISK_ON (3+ bullish), MIXED.
+        - Si regime = RISK_OFF et que dxy_trend = BEARISH, les corrélations normales sont CASSÉES. C'est un événement macro extrême (panic sell, tariff shock, etc.). Dans ce cas :
+          * Réduire la confiance sur tous les setups, même ceux avec bonne confluence.
+          * Mentionner explicitement le régime RISK_OFF dans l'analyse.
+          * Les corrélations DXY inversées (Gold/DXY, Oil/DXY) ne fonctionnent plus — ne pas les utiliser comme argument.
+
+        ### Contexte Trader (riskdesk_context)
+        - Si portfolio_state_shared = true, le trader a des positions ouvertes.
+        - active_positions liste les positions avec instrument, direction, entry_price, unrealized_pnl.
+        - Si le trader a déjà une position LONG sur cet instrument, ne propose PAS un autre LONG au même prix. Mentionne la position existante.
+        - Si le trader a un stop_loss ou take_profit défini, tiens-en compte dans ton analyse de risque.
+
         Évalue le setup selon ta propre analyse. Tu es libre de rejeter ou valider selon ton jugement professionnel.
 
         ## RÈGLES CRITIQUES — PAS DE REJET AUTOMATIQUE

@@ -31,6 +31,9 @@ public interface MentorSignalReviewRepositoryPort {
      */
     boolean existsRecentReview(String instrument, String category, String action, java.time.Instant since);
 
+    /** Find recent completed reviews for a specific instrument (session context for Gemini). */
+    List<MentorSignalReviewRecord> findRecentByInstrument(String instrument, java.time.Instant since, int limit);
+
     /** Mark all reviews stuck in ANALYZING as ERROR (orphaned by server restart). */
     int markAnalyzingAsError(String errorMessage);
 }

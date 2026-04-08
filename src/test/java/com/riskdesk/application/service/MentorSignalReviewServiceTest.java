@@ -77,6 +77,9 @@ class MentorSignalReviewServiceTest {
     @Mock
     private ApplicationEventPublisher eventPublisher;
 
+    @Mock
+    private ObjectProvider<PositionService> positionServiceProvider;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -93,6 +96,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            positionServiceProvider,
             true
         );
 
@@ -254,6 +258,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            positionServiceProvider,
             true
         );
 
@@ -422,6 +427,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            positionServiceProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -493,6 +499,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            positionServiceProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -542,7 +549,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, positionServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -593,7 +600,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, positionServiceProvider, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -629,7 +636,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, positionServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -654,7 +661,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, positionServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 

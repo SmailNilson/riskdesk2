@@ -27,6 +27,11 @@ public interface MentorSignalReviewJpaRepository extends JpaRepository<MentorSig
            "AND e.createdAt > ?4 AND e.status IN ('DONE', 'ANALYZING')")
     boolean existsRecentReview(String instrument, String category, String action, Instant since);
 
+    @Query("SELECT e FROM MentorSignalReviewEntity e " +
+           "WHERE e.instrument = ?1 AND e.status = 'DONE' AND e.sourceType = 'SIGNAL' AND e.createdAt > ?2 " +
+           "ORDER BY e.createdAt DESC")
+    List<MentorSignalReviewEntity> findRecentByInstrumentAndCreatedAtAfter(String instrument, Instant since);
+
     @Modifying
     @Query("UPDATE MentorSignalReviewEntity e SET e.status = 'ERROR', e.completedAt = ?2, e.errorMessage = ?1 WHERE e.status = 'ANALYZING'")
     int markAnalyzingAsError(String errorMessage, Instant completedAt);

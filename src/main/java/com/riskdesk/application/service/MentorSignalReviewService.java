@@ -8,6 +8,7 @@ import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorSignalReview;
+import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
@@ -72,7 +73,10 @@ public class MentorSignalReviewService {
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
+    private final ObjectProvider<PositionService> positionServiceProvider;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
+    private static final int SESSION_CONTEXT_LOOKBACK_HOURS = 6;
+    private static final int SESSION_CONTEXT_MAX_REVIEWS = 5;
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
     private volatile boolean autoAnalysisEnabled;
@@ -91,6 +95,7 @@ public class MentorSignalReviewService {
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
                                      ApplicationEventPublisher eventPublisher,
+                                     ObjectProvider<PositionService> positionServiceProvider,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -103,6 +108,7 @@ public class MentorSignalReviewService {
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
         this.eventPublisher = eventPublisher;
+        this.positionServiceProvider = positionServiceProvider;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -857,24 +863,10 @@ public class MentorSignalReviewService {
             "is_stop_protected_by_structure", isStopProtectedByStructure(effectiveStopLoss, candidate.action(), nearestSupport, nearestResistance),
             "price_extension_warning", isPriceExtended(currentPrice, focusSnapshot, atr)
         ));
-        payload.put("riskdesk_context", linkedMap(
-            "portfolio_state_shared", false,
-            "total_unrealized_pnl", null,
-            "today_realized_pnl", null,
-            "margin_used_pct", null,
-            "active_signals", activeSignals(focusSnapshot),
-            "recent_alerts", List.of(linkedMap(
-                "severity", alert.severity().name(),
-                "category", alert.category().name(),
-                "message", alert.message(),
-                "instrument", alert.instrument(),
-                "timestamp", alert.timestamp().toString()
-            )),
-            "chart_series_summary", linkedMap(
-                "candles_loaded", candles.size(),
-                "wave_trend_points", indicatorSeries.waveTrend().size()
-            )
-        ));
+        payload.put("riskdesk_context", buildRiskdeskContext(
+            alert, focusSnapshot, indicatorSeries, candles, candidate.instrument()));
+        payload.put("session_context", buildSessionContext(candidate.instrument().name()));
+        payload.put("cross_asset_regime", buildCrossAssetRegime(candidate.instrument()));
         return objectMapper.valueToTree(payload);
     }
 
@@ -1459,6 +1451,181 @@ public class MentorSignalReviewService {
             map.put(String.valueOf(values[i]), values[i + 1]);
         }
         return map;
+    }
+
+    // ── Session Context: recent reviews for same instrument ──
+
+    private Map<String, Object> buildSessionContext(String instrumentName) {
+        try {
+            Instant since = Instant.now().minusSeconds(SESSION_CONTEXT_LOOKBACK_HOURS * 3600L);
+            List<MentorSignalReviewRecord> recent = reviewRepository.findRecentByInstrument(
+                instrumentName, since, SESSION_CONTEXT_MAX_REVIEWS);
+            if (recent.isEmpty()) {
+                return linkedMap("recent_reviews_same_instrument", List.of(),
+                    "same_entry_proposed_count", 0);
+            }
+            List<Map<String, Object>> reviewSummaries = new ArrayList<>();
+            Map<String, Integer> entryCount = new LinkedHashMap<>();
+            for (MentorSignalReviewRecord r : recent) {
+                BigDecimal proposedEntry = extractProposedEntry(r.getAnalysisJson());
+                String entryKey = proposedEntry != null ? proposedEntry.toPlainString() : null;
+                if (entryKey != null) {
+                    entryCount.merge(entryKey, 1, Integer::sum);
+                }
+                long minutesAgo = java.time.Duration.between(r.getCreatedAt(), Instant.now()).toMinutes();
+                reviewSummaries.add(linkedMap(
+                    "review_id", r.getId(),
+                    "action", r.getAction(),
+                    "verdict", r.getVerdict(),
+                    "trigger_price", r.getTriggerPrice(),
+                    "proposed_entry", proposedEntry,
+                    "simulation_status", r.getSimulationStatus() != null ? r.getSimulationStatus().name() : null,
+                    "minutes_ago", minutesAgo
+                ));
+            }
+            int maxRepeat = entryCount.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+            return linkedMap(
+                "recent_reviews_same_instrument", reviewSummaries,
+                "same_entry_proposed_count", maxRepeat);
+        } catch (Exception e) {
+            log.debug("Session context build failed: {}", e.getMessage());
+            return linkedMap("recent_reviews_same_instrument", List.of(),
+                "same_entry_proposed_count", 0);
+        }
+    }
+
+    private BigDecimal extractProposedEntry(String analysisJson) {
+        if (analysisJson == null || analysisJson.isBlank()) return null;
+        try {
+            JsonNode analysis = objectMapper.readTree(analysisJson);
+            JsonNode entry = analysis.path("analysis").path("proposedTradePlan").path("entryPrice");
+            if (entry.isMissingNode() || entry.isNull()) {
+                entry = analysis.path("proposedTradePlan").path("entryPrice");
+            }
+            return entry.isNumber() ? entry.decimalValue() : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    // ── Cross-Asset Regime: detect risk-off / correlations broken ──
+
+    private Map<String, Object> buildCrossAssetRegime(Instrument currentInstrument) {
+        try {
+            MarketDataService mds = marketDataServiceProvider.getIfAvailable();
+            if (mds == null) {
+                return linkedMap("regime", "UNAVAILABLE", "instruments", List.of());
+            }
+            List<Map<String, Object>> instruments = new ArrayList<>();
+            int bearishCount = 0;
+            int bullishCount = 0;
+            for (Instrument inst : Instrument.exchangeTradedFutures()) {
+                MarketDataService.StoredPrice sp = mds.latestPrice(inst);
+                if (sp == null || sp.price() == null) continue;
+                BigDecimal price = sp.price();
+                BigDecimal vwap = null;
+                try {
+                    IndicatorSnapshot snap = indicatorService.computeSnapshot(inst, "10m");
+                    vwap = snap.vwap();
+                } catch (Exception ignored) {
+                    // snapshot not available for this instrument
+                }
+                String direction;
+                BigDecimal pctFromVwap = null;
+                if (vwap != null && vwap.compareTo(BigDecimal.ZERO) > 0) {
+                    pctFromVwap = price.subtract(vwap)
+                        .divide(vwap, 6, RoundingMode.HALF_UP)
+                        .multiply(BigDecimal.valueOf(100));
+                    direction = pctFromVwap.doubleValue() > 0.3 ? "BULLISH"
+                        : pctFromVwap.doubleValue() < -0.3 ? "BEARISH" : "NEUTRAL";
+                } else {
+                    direction = "UNKNOWN";
+                }
+                if ("BEARISH".equals(direction)) bearishCount++;
+                if ("BULLISH".equals(direction)) bullishCount++;
+                instruments.add(linkedMap(
+                    "symbol", inst.name(),
+                    "price", price,
+                    "pct_from_vwap", pctFromVwap,
+                    "direction", direction
+                ));
+            }
+            String regime;
+            if (bearishCount >= 3) {
+                regime = "RISK_OFF";
+            } else if (bullishCount >= 3) {
+                regime = "RISK_ON";
+            } else {
+                regime = "MIXED";
+            }
+            return linkedMap(
+                "regime", regime,
+                "bearish_count", bearishCount,
+                "bullish_count", bullishCount,
+                "instruments", instruments
+            );
+        } catch (Exception e) {
+            log.debug("Cross-asset regime build failed: {}", e.getMessage());
+            return linkedMap("regime", "UNAVAILABLE", "instruments", List.of());
+        }
+    }
+
+    // ── RiskDesk Context: portfolio + positions + alerts ──
+
+    private Map<String, Object> buildRiskdeskContext(Alert alert,
+                                                      IndicatorSnapshot focusSnapshot,
+                                                      IndicatorSeriesSnapshot indicatorSeries,
+                                                      List<Candle> candles,
+                                                      Instrument instrument) {
+        Map<String, Object> ctx = new LinkedHashMap<>();
+        boolean portfolioShared = false;
+        BigDecimal totalUnrealizedPnl = null;
+        BigDecimal todayRealizedPnl = null;
+        BigDecimal marginUsedPct = null;
+        List<Map<String, Object>> activePositions = List.of();
+        try {
+            PositionService positionService = positionServiceProvider.getIfAvailable();
+            if (positionService != null) {
+                PortfolioSummary summary = positionService.getPortfolioSummary();
+                if (summary != null && summary.openPositionCount() > 0) {
+                    portfolioShared = true;
+                    totalUnrealizedPnl = summary.totalUnrealizedPnL();
+                    todayRealizedPnl = summary.todayRealizedPnL();
+                    marginUsedPct = summary.marginUsedPct();
+                    activePositions = summary.openPositions().stream()
+                        .map(p -> linkedMap(
+                            "instrument", p.instrument(),
+                            "direction", p.side() != null ? p.side().name() : null,
+                            "entry_price", p.entryPrice(),
+                            "quantity", p.quantity(),
+                            "unrealized_pnl", p.unrealizedPnL(),
+                            "stop_loss", p.stopLoss(),
+                            "take_profit", p.takeProfit()
+                        ))
+                        .toList();
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Portfolio context build failed: {}", e.getMessage());
+        }
+        ctx.put("portfolio_state_shared", portfolioShared);
+        ctx.put("total_unrealized_pnl", totalUnrealizedPnl);
+        ctx.put("today_realized_pnl", todayRealizedPnl);
+        ctx.put("margin_used_pct", marginUsedPct);
+        ctx.put("active_positions", activePositions);
+        ctx.put("active_signals", activeSignals(focusSnapshot));
+        ctx.put("recent_alerts", List.of(linkedMap(
+            "severity", alert.severity().name(),
+            "category", alert.category().name(),
+            "message", alert.message(),
+            "instrument", alert.instrument(),
+            "timestamp", alert.timestamp().toString()
+        )));
+        ctx.put("chart_series_summary", linkedMap(
+            "candles_loaded", candles.size(),
+            "wave_trend_points", indicatorSeries.waveTrend().size()
+        ));
+        return ctx;
     }
 
     private record AlertReviewCandidate(Instrument instrument, String timeframe, String action) {

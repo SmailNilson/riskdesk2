@@ -76,6 +76,14 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     }
 
     @Override
+    public List<MentorSignalReviewRecord> findRecentByInstrument(String instrument, Instant since, int limit) {
+        return repository.findRecentByInstrumentAndCreatedAtAfter(instrument, since).stream()
+            .limit(limit)
+            .map(MentorSignalReviewEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     @Transactional
     public int markAnalyzingAsError(String errorMessage) {
         return repository.markAnalyzingAsError(errorMessage, Instant.now());
