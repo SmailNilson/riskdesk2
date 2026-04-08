@@ -87,15 +87,24 @@ public class GeminiMentorClient implements MentorModelClient {
 
         ## CALCUL ENTRY / SL / TP (Obligatoire si setup conforme)
 
-        ### Entrée (Entry)
-        - Setup LONG : Entry = nearest_support_ob price_top (bord proximal de l'Order Block).
-        - Setup SHORT : Entry = nearest_resistance_ob price_bottom.
+        ### Entrée (Entry) — HIÉRARCHIE DE NIVEAUX
+        L'Order Block est le niveau PRÉFÉRÉ mais PAS le seul niveau valide. Utilise cette hiérarchie :
+        1. **Niveau optimal** : nearest_support_ob price_top (LONG) ou nearest_resistance_ob price_bottom (SHORT) — si l'OB est à moins de 3× current_atr_focus du prix actuel.
+        2. **Niveau dynamique** : Si l'OB est trop éloigné (>3× ATR), utilise le niveau dynamique le plus proche comme entrée principale :
+           - EMA 200 (si distance_to_ema_200_points < 2× ATR)
+           - VWAP ou VWAP Lower/Upper Band (si distance < 2× ATR)
+           - daily_poc_price (Point of Control du Volume Profile)
+           - Bord d'un FVG non mitigé (nearest_fvg)
+        3. **L'OB lointain** devient alors le safeDeepEntry (plan B en cas de sweep profond).
+
+        RÈGLE ANTI-RIGIDITÉ : Ne rejette JAMAIS un trade UNIQUEMENT parce que le prix n'est pas sur un Order Block. Si la confluence (structure + flow + momentum + macro) est forte et qu'un niveau dynamique crédible est proche, le trade peut être ELIGIBLE avec une entrée sur ce niveau dynamique.
+
         - Tiens compte de pd_array_zone_session dans ton analyse, mais ce n'est PAS un motif de rejet automatique.
 
         ### Stop Loss (SL) — Structurel + Volatilité
-        - LONG : SL = nearest_support_ob price_bottom - (1.5 × current_atr_focus).
-        - SHORT : SL = nearest_resistance_ob price_top + (1.5 × current_atr_focus).
-        - Le 1.5 × ATR protège des faux sweeps de liquidité (Liquidity Grabs).
+        - Si entrée sur OB : SL = OB price_bottom - (1.5 × current_atr_focus) pour LONG, OB price_top + (1.5 × ATR) pour SHORT.
+        - Si entrée sur niveau dynamique (EMA 200, VWAP, POC) : SL = niveau dynamique - (2× current_atr_focus) pour LONG, + (2× ATR) pour SHORT.
+        - Le buffer ATR protège des faux sweeps de liquidité (Liquidity Grabs).
 
         ### Take Profit — Formules MATHÉMATIQUES EXACTES (Chain of Thought)
         - TP1 (R:R 1.5:1 strict) — Tu DOIS appliquer cette formule :
@@ -107,10 +116,29 @@ public class GeminiMentorClient implements MentorModelClient {
           * SHORT : TP2 = eql_level (Equal Lows, Sell-Side Liquidity) ou nearest_support_ob price_top.
 
         ### Deep Entry (SMC Mean Threshold)
-        - Si l'Order Flow est conflictuel (delta contre le trade, ou buy_ratio faible pour un LONG), propose un safeDeepEntry au Mean Threshold de l'Order Block :
-          * Formule exacte : safeDeepEntry = (OB price_top + OB price_bottom) / 2
-        - Si l'Order Flow confirme le trade, l'entrée standard (bord de l'OB) suffit.
+        - Si l'Order Flow est conflictuel (delta contre le trade, ou buy_ratio faible pour un LONG), propose un safeDeepEntry :
+          * Si OB proche : safeDeepEntry = (OB price_top + OB price_bottom) / 2 (Mean Threshold)
+          * Si OB lointain : safeDeepEntry = OB price_top (l'OB lointain devient le deep entry)
+        - Si l'Order Flow confirme le trade, l'entrée standard suffit.
         - RÉ-ÉVALUATION : Si review_type = MANUAL_REANALYSIS, juge si le setup d'origine est toujours valide vs contexte actuel.
+
+        ## EMA 200 — SUPPORT/RÉSISTANCE DYNAMIQUE MAJEUR
+        - L'EMA 200 est le niveau dynamique le plus respecté institutionnellement. Si le prix teste l'EMA 200 et que distance_to_ema_200_points ≈ 0, ce niveau est un SUPPORT/RÉSISTANCE ACTIF.
+        - Ne propose JAMAIS un SHORT market order directement SUR l'EMA 200 — c'est shorter sur un support prouvé.
+        - Ne propose JAMAIS un LONG market order directement SOUS l'EMA 200 — c'est acheter sous une résistance dynamique.
+        - Si le nearest_support_ob est très éloigné (>50 points pour METALS, >30 pips pour FOREX) mais que l'EMA 200 est proche, considère l'EMA 200 comme un niveau d'entrée alternatif VALIDE pour le Trade Plan.
+        - Un rebond confirmé sur l'EMA 200 avec un delta qui flip (ex: delta passe de fortement négatif à positif) = signal d'absorption institutionnelle = support dynamique renforcé.
+
+        ## PROPOSITIONS D'ENTRÉE RÉALISTES
+        - Le proposedTradePlan doit être RÉALISTE et ATTEIGNABLE dans le contexte de tendance actuel.
+        - Si trend_H1 = BULLISH, ne propose PAS une entrée LONG qui nécessite un retracement de plus de 3× l'ATR H1 pour être atteinte — c'est un scénario de crash, pas un pullback.
+        - Priorise le niveau de support RÉEL LE PLUS PROCHE du prix actuel (EMA 200, VWAP Lower Band, POC) plutôt que systématiquement l'Order Block le plus lointain.
+        - Si l'Order Block le plus proche est à >5× l'ATR focus du prix actuel et que des niveaux dynamiques existent entre le prix et l'OB, propose le niveau dynamique comme entrée principale et l'OB comme entrée secondaire (safeDeepEntry).
+
+        ## ABSORPTION ET PATTERNS DE DELTA
+        - Un renversement massif du delta à un niveau de prix (ex: delta passe de -500 à +500) est un signe d'ABSORPTION INSTITUTIONNELLE — des acheteurs absorbent la pression vendeuse.
+        - Un niveau testé avec absorption delta confirmée est un support/résistance RENFORCÉ — ne propose pas de le casser comme TP principal sans confluence additionnelle forte.
+        - Si buy_ratio_pct < 0.40 et cumulative_delta_trend = SELLING sur un LONG, ce n'est pas juste un signal pour safeDeepEntry — c'est un signal que le timing est MAUVAIS. Mentionne explicitement que le flow ne confirme pas encore.
         """;
 
     private static final String METALS_RULES = """
