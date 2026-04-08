@@ -16,11 +16,14 @@ import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -32,7 +35,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Fetches real historical OHLCV candles on startup and persists them.
  * Runs after DataInitializer (@Order(1)), loading candles from the configured historical provider.
- * If the initial fetch fails, retries every 30 minutes.
+ *
+ * <p><b>Gap-fill strategy</b>: on startup, if candles already exist in DB, only the delta
+ * since the high-water mark (latest stored timestamp) is fetched from IBKR.
+ * The full deep backfill only runs when the DB is empty (first run).
+ * Startup is non-blocking — the app serves existing (stale) data immediately while
+ * the delta backfill runs in the background.</p>
  *
  * Enabled via: riskdesk.market-data.historical.enabled=true
  */
@@ -44,6 +52,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private static final List<String> TIMEFRAMES       = List.of("5m", "10m", "1h", "4h", "1d");
     private static final int          DEFAULT_CANDLES_PER_PAIR = 500;
+    private static final int          GAP_FILL_BUFFER  = 100;
 
     private final HistoricalDataProvider historicalProvider;
     private final CandleRepositoryPort   candlePort;
@@ -95,13 +104,20 @@ public class HistoricalDataService implements ApplicationRunner {
             log.debug("Historical fetch disabled. Set riskdesk.market-data.historical.enabled=true to enable.");
             return;
         }
-        // Phase 1: quick single-contract fetch (500 candles, 1 thread) — non-blocking.
-        // Gives charts and indicators enough data to work within seconds.
-        CompletableFuture.runAsync(() -> tryFetchAndReplace("startup", DEFAULT_CANDLES_PER_PAIR, 1))
-            .exceptionally(ex -> {
-                log.error("Startup historical data fetch failed", ex);
-                return null;
-            });
+
+        boolean hasExistingData = Instrument.exchangeTradedFutures().stream()
+            .anyMatch(i -> candlePort.findLatestTimestamp(i, "5m").isPresent());
+
+        if (hasExistingData) {
+            realDataLoaded.set(true);
+            log.info("HistoricalDataService: existing candles found — starting delta backfill in background.");
+            CompletableFuture.runAsync(() -> gapFillAll("startup-delta"))
+                .exceptionally(ex -> { log.error("Startup delta backfill failed", ex); return null; });
+        } else {
+            log.info("HistoricalDataService: no existing candles — full backfill in background.");
+            CompletableFuture.runAsync(() -> tryFetchAndReplace("startup-full", DEFAULT_CANDLES_PER_PAIR, 1))
+                .exceptionally(ex -> { log.error("Startup full backfill failed", ex); return null; });
+        }
     }
 
     /**
@@ -216,7 +232,7 @@ public class HistoricalDataService implements ApplicationRunner {
         if (!enabled) {
             return Map.of("status", "disabled", "message", "Historical data fetch is disabled.");
         }
-        CompletableFuture.runAsync(() -> tryFetchAndReplace("manual", -1, 4))
+        CompletableFuture.runAsync(() -> gapFillAll("manual"))
             .exceptionally(ex -> {
                 log.error("Async historical data refresh failed", ex);
                 return null;
@@ -224,6 +240,8 @@ public class HistoricalDataService implements ApplicationRunner {
         return Map.of("status", "ok", "message", "Database refresh started in background.");
     }
 
+    // -------------------------------------------------------------------------
+    // Full backfill (deep multi-contract, from main)
     // -------------------------------------------------------------------------
 
     /**
@@ -277,10 +295,18 @@ public class HistoricalDataService implements ApplicationRunner {
                 List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
                 candles = tagWithContractMonth(candles, instrument);
                 candles = deduplicate(candles);
-                if (candles.isEmpty()) {
-                    log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
-                } else {
-                    candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+
+                // Filter out candles already in DB to avoid unique-key collisions
+                // (e.g. deep-backfill overlapping with startup-full's recent candles)
+                Optional<Instant> hwm = candlePort.findLatestTimestamp(instrument, timeframe);
+                if (hwm.isPresent()) {
+                    Instant cutoff = hwm.get();
+                    candles = candles.stream()
+                        .filter(c -> c.getTimestamp().isAfter(cutoff))
+                        .toList();
+                }
+
+                if (!candles.isEmpty()) {
                     candlePort.saveAll(candles);
                     totalSaved.addAndGet(candles.size());
                     log.debug("HistoricalDataService [{}]: {} {} fetched {} candles.", context, instrument, timeframe, candles.size());
@@ -291,6 +317,92 @@ public class HistoricalDataService implements ApplicationRunner {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Gap-fill (incremental delta fetch)
+    // -------------------------------------------------------------------------
+
+    private void gapFillAll(String context) {
+        log.info("HistoricalDataService [{}]: gap-fill — fetching delta candles (parallel by instrument)...", context);
+        AtomicInteger totalSaved = new AtomicInteger(0);
+        AtomicInteger totalFailed = new AtomicInteger(0);
+        List<Instrument> instruments = Instrument.exchangeTradedFutures();
+
+        ExecutorService pool = newBackfillPool(instruments.size());
+        List<CompletableFuture<Void>> futures = instruments.stream()
+            .map(instrument -> CompletableFuture.runAsync(() ->
+                gapFillInstrument(instrument, context, totalSaved, totalFailed), pool))
+            .toList();
+
+        awaitAll(futures, pool, context);
+
+        if (totalSaved.get() > 0) {
+            log.info("HistoricalDataService [{}]: gap-fill done — {} new candles saved.", context, totalSaved.get());
+        } else if (totalFailed.get() == 0) {
+            log.info("HistoricalDataService [{}]: gap-fill done — candles already up to date.", context);
+        } else {
+            log.warn("HistoricalDataService [{}]: gap-fill failed for {} timeframes — scheduledRetry will re-attempt.", context, totalFailed.get());
+            // Do NOT set realDataLoaded — keep scheduledRetry active
+            return;
+        }
+        realDataLoaded.set(true);
+    }
+
+    private void gapFillInstrument(Instrument instrument, String context,
+                                   AtomicInteger totalSaved, AtomicInteger totalFailed) {
+        for (String timeframe : TIMEFRAMES) {
+            if (!historicalProvider.supports(instrument, timeframe)) continue;
+            try {
+                int saved = gapFillTimeframe(instrument, timeframe, context);
+                totalSaved.addAndGet(saved);
+            } catch (Exception e) {
+                totalFailed.incrementAndGet();
+                log.debug("HistoricalDataService [{}]: {} {} gap-fill failed — {}", context, instrument, timeframe, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Core gap-fill for a single instrument/timeframe pair.
+     * Finds the high-water mark in DB, fetches only the delta from IBKR, appends new candles.
+     */
+    private int gapFillTimeframe(Instrument instrument, String timeframe, String context) {
+        Optional<Instant> hwm = candlePort.findLatestTimestamp(instrument, timeframe);
+        int limit;
+
+        if (hwm.isPresent()) {
+            long secondsSince = Duration.between(hwm.get(), Instant.now()).getSeconds();
+            long candleSeconds = timeframeSeconds(timeframe);
+            limit = (int) (secondsSince / candleSeconds) + GAP_FILL_BUFFER;
+            limit = Math.max(limit, GAP_FILL_BUFFER);
+        } else {
+            limit = candlesTargetFor(timeframe);
+        }
+
+        List<Candle> candles = historicalProvider.fetchHistory(instrument, timeframe, limit);
+        candles = tagWithContractMonth(candles, instrument);
+        candles = deduplicate(candles);
+
+        if (hwm.isPresent()) {
+            Instant cutoff = hwm.get();
+            candles = candles.stream()
+                .filter(c -> c.getTimestamp().isAfter(cutoff))
+                .toList();
+        }
+
+        if (candles.isEmpty()) {
+            log.debug("HistoricalDataService [{}]: {} {} already up to date.", context, instrument, timeframe);
+            return 0;
+        }
+
+        candlePort.saveAll(candles);
+        log.debug("HistoricalDataService [{}]: {} {} gap-filled {} new candles.", context, instrument, timeframe, candles.size());
+        return candles.size();
+    }
+
+    // -------------------------------------------------------------------------
+    // Mentor refresh (bounded, gap-fill)
+    // -------------------------------------------------------------------------
+
     private int refreshSingleInstrumentTimeframe(Instrument instrument, String timeframe, String context) {
         if (!instrument.isExchangeTradedFuture()) {
             return 0;
@@ -298,24 +410,7 @@ public class HistoricalDataService implements ApplicationRunner {
         if (!historicalProvider.supports(instrument, timeframe)) {
             return 0;
         }
-
-        try {
-            int limit = candlesTargetFor(timeframe);
-            List<Candle> candles = deduplicate(
-                tagWithContractMonth(historicalProvider.fetchHistory(instrument, timeframe, limit), instrument));
-            if (candles.isEmpty()) {
-                log.debug("HistoricalDataService [{}]: {} {} returned no candles.", context, instrument, timeframe);
-                return 0;
-            }
-
-            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
-            candlePort.saveAll(candles);
-            log.info("HistoricalDataService [{}]: refreshed {} {} with {} candles.", context, instrument, timeframe, candles.size());
-            return candles.size();
-        } catch (Exception e) {
-            log.warn("HistoricalDataService [{}]: {} {} refresh failed — {}", context, instrument, timeframe, e.getMessage());
-            return 0;
-        }
+        return gapFillTimeframe(instrument, timeframe, context);
     }
 
     private int refreshSingleInstrumentTimeframeBounded(Instrument instrument, String timeframe, String context) {
@@ -340,6 +435,28 @@ public class HistoricalDataService implements ApplicationRunner {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private ExecutorService newBackfillPool(int instrumentCount) {
+        return Executors.newFixedThreadPool(
+            Math.min(instrumentCount, 4),
+            r -> { Thread t = new Thread(r, "hist-backfill"); t.setDaemon(true); return t; }
+        );
+    }
+
+    private void awaitAll(List<CompletableFuture<Void>> futures, ExecutorService pool, String context) {
+        try {
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                .get(10, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [{}]: parallel fetch interrupted — {}", context, e.getMessage());
+        } finally {
+            pool.shutdown();
+        }
+    }
+
     private int candlesTargetFor(String timeframe) {
         return switch (timeframe) {
             case "5m"  -> minutesToCandles(backfillDays5m, 5);
@@ -357,6 +474,18 @@ public class HistoricalDataService implements ApplicationRunner {
         return Math.max(DEFAULT_CANDLES_PER_PAIR, (int) Math.ceil(candles));
     }
 
+    private long timeframeSeconds(String timeframe) {
+        return switch (timeframe) {
+            case "5m"  -> 5L * 60;
+            case "10m" -> 10L * 60;
+            case "30m" -> 30L * 60;
+            case "1h"  -> 60L * 60;
+            case "4h"  -> 4L * 60 * 60;
+            case "1d"  -> 24L * 60 * 60;
+            default    -> 60L;
+        };
+    }
+
     private List<Candle> tagWithContractMonth(List<Candle> candles, Instrument instrument) {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         if (contractMonth == null) return candles;
@@ -368,7 +497,6 @@ public class HistoricalDataService implements ApplicationRunner {
         }
         return candles;
     }
-
 
     private List<Candle> deduplicate(List<Candle> candles) {
         Map<String, Candle> unique = new LinkedHashMap<>();

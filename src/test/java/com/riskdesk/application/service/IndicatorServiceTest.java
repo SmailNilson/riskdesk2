@@ -115,6 +115,11 @@ class IndicatorServiceTest {
         }
 
         @Override
+        public java.util.Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
         public Candle save(Candle candle) {
             throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
         }

@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * JPA adapter that bridges the domain port to the Spring Data repository.
@@ -37,6 +38,11 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
                 instrument, timeframe, PageRequest.of(0, limit)).stream()
             .map(CandleEntityMapper::toDomain)
             .toList();
+    }
+
+    @Override
+    public Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe) {
+        return springDataRepo.findMaxTimestamp(instrument, timeframe);
     }
 
     @Override
