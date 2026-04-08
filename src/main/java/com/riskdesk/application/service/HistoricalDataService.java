@@ -313,31 +313,38 @@ public class HistoricalDataService implements ApplicationRunner {
     private void gapFillAll(String context) {
         log.info("HistoricalDataService [{}]: gap-fill — fetching delta candles (parallel by instrument)...", context);
         AtomicInteger totalSaved = new AtomicInteger(0);
+        AtomicInteger totalFailed = new AtomicInteger(0);
         List<Instrument> instruments = Instrument.exchangeTradedFutures();
 
         ExecutorService pool = newBackfillPool(instruments.size());
         List<CompletableFuture<Void>> futures = instruments.stream()
             .map(instrument -> CompletableFuture.runAsync(() ->
-                gapFillInstrument(instrument, context, totalSaved), pool))
+                gapFillInstrument(instrument, context, totalSaved, totalFailed), pool))
             .toList();
 
         awaitAll(futures, pool, context);
 
         if (totalSaved.get() > 0) {
             log.info("HistoricalDataService [{}]: gap-fill done — {} new candles saved.", context, totalSaved.get());
-        } else {
+        } else if (totalFailed.get() == 0) {
             log.info("HistoricalDataService [{}]: gap-fill done — candles already up to date.", context);
+        } else {
+            log.warn("HistoricalDataService [{}]: gap-fill failed for {} timeframes — scheduledRetry will re-attempt.", context, totalFailed.get());
+            // Do NOT set realDataLoaded — keep scheduledRetry active
+            return;
         }
         realDataLoaded.set(true);
     }
 
-    private void gapFillInstrument(Instrument instrument, String context, AtomicInteger totalSaved) {
+    private void gapFillInstrument(Instrument instrument, String context,
+                                   AtomicInteger totalSaved, AtomicInteger totalFailed) {
         for (String timeframe : TIMEFRAMES) {
             if (!historicalProvider.supports(instrument, timeframe)) continue;
             try {
                 int saved = gapFillTimeframe(instrument, timeframe, context);
                 totalSaved.addAndGet(saved);
             } catch (Exception e) {
+                totalFailed.incrementAndGet();
                 log.debug("HistoricalDataService [{}]: {} {} gap-fill failed — {}", context, instrument, timeframe, e.getMessage());
             }
         }
