@@ -65,7 +65,7 @@ class TradeSimulationServiceTest {
         MentorSignalReviewRecord review = review(
             "LONG",
             TradeSimulationStatus.PENDING_ENTRY,
-            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null)
+            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null, null)
         );
 
         List<Candle> candles = List.of(
@@ -86,7 +86,7 @@ class TradeSimulationServiceTest {
         MentorSignalReviewRecord review = review(
             "LONG",
             TradeSimulationStatus.PENDING_ENTRY,
-            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null)
+            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null, null)
         );
 
         List<Candle> candles = List.of(
@@ -105,7 +105,7 @@ class TradeSimulationServiceTest {
         MentorSignalReviewRecord review = review(
             "LONG",
             TradeSimulationStatus.PENDING_ENTRY,
-            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null)
+            new MentorProposedTradePlan(100.0, 98.5, 102.0, 1.33, "Test setup", null, null)
         );
 
         List<Candle> candles = List.of(

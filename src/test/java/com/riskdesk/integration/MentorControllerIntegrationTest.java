@@ -87,7 +87,8 @@ class MentorControllerIntegrationTest {
                         3035.0,
                         3.0,
                         "Plan proposé",
-                        new MentorAlternativeEntry(3008.0, "Entrée safe plus profonde.")
+                        new MentorAlternativeEntry(3008.0, "Entrée safe plus profonde."),
+                        "EQH_3035.0"
                     )
                 ),
                 "{\"verdict\":\"Trade Non-Conforme - Erreur de Processus\"}",
