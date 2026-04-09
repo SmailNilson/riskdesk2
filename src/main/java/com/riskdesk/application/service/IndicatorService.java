@@ -448,6 +448,27 @@ public class IndicatorService {
                 : OrderBlockDetector.OBType.BULLISH;
     }
 
+    /**
+     * Compute swing bias at multiple lookback depths for a given instrument/timeframe.
+     * Returns a map: lookback → bias string (BULLISH / BEARISH / UNDEFINED).
+     * Used by Mentor payload to give Gemini multi-resolution trend context (e.g. trend_H1).
+     */
+    public Map<Integer, String> computeMultiResolutionSwingBias(Instrument instrument, String timeframe) {
+        int lookback = snapshotLookback(timeframe);
+        List<Candle> candles = loadCandles(instrument, timeframe, lookback);
+        if (candles.isEmpty()) {
+            return Map.of();
+        }
+        Map<Integer, String> biases = new LinkedHashMap<>();
+        for (int swingLb : new int[]{50, 25, 9, 5, 1}) {
+            SmcStructureEngine engine = new SmcStructureEngine(5, swingLb, SMC_CONFLUENCE_FILTER);
+            SmcStructureEngine.StructureSnapshot snap = engine.computeFromHistory(candles, RECENT_BREAK_LIMIT);
+            String bias = snap.swingBias() != null ? snap.swingBias().name() : "UNDEFINED";
+            biases.put(swingLb, bias);
+        }
+        return biases;
+    }
+
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         List<Candle> candles;
