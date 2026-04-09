@@ -46,7 +46,9 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
     </div>
   );
 
-  const n = (v: number | null, d = 2) => v != null ? v.toFixed(d) : '—';
+  // Price decimals per instrument — E6 needs 5 to match IBKR tick size
+  const priceDecimals = s.instrument === 'E6' ? 5 : 2;
+  const n = (v: number | null, d?: number) => v != null ? v.toFixed(d ?? priceDecimals) : '—';
   const equalHighs = s.equalHighs ?? [];
   const equalLows = s.equalLows ?? [];
   const activeOrderBlocks = s.activeOrderBlocks ?? [];
@@ -214,14 +216,14 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
           {equalHighs.map((eq, i) => (
             <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQH" color="red" />
-              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+              <span className="text-zinc-400">{eq.price.toFixed(priceDecimals)}</span>
               <span className="text-zinc-500">x{eq.touchCount}</span>
             </div>
           ))}
           {equalLows.map((eq, i) => (
             <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
               <Badge label="EQL" color="green" />
-              <span className="text-zinc-400">{eq.price.toFixed(2)}</span>
+              <span className="text-zinc-400">{eq.price.toFixed(priceDecimals)}</span>
               <span className="text-zinc-500">x{eq.touchCount}</span>
             </div>
           ))}
@@ -238,9 +240,9 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
               <div key={`active-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
                 <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
                 <span className="text-zinc-400">
-                  {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
+                  {ob.low.toFixed(priceDecimals)} – {ob.high.toFixed(priceDecimals)}
                 </span>
-                <span className="text-zinc-500">mid {ob.mid.toFixed(4)}</span>
+                <span className="text-zinc-500">mid {ob.mid.toFixed(priceDecimals)}</span>
               </div>
             ))
           }
@@ -260,10 +262,10 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
               <div key={`breaker-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
                 <Badge label={`${ob.type} V2`} color={ob.type === 'BULLISH' ? 'blue' : 'amber'} />
                 <span className="text-zinc-400">
-                  {ob.low.toFixed(4)} – {ob.high.toFixed(4)}
+                  {ob.low.toFixed(priceDecimals)} – {ob.high.toFixed(priceDecimals)}
                 </span>
                 <span className="text-zinc-500">
-                  from {breakerOriginalType(ob).toLowerCase()} · mid {ob.mid.toFixed(4)}
+                  from {breakerOriginalType(ob).toLowerCase()} · mid {ob.mid.toFixed(priceDecimals)}
                 </span>
               </div>
             ))
