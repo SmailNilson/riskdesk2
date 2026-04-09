@@ -785,8 +785,9 @@ public class MentorSignalReviewService {
             "entry_price", roundNullable(effectiveEntry, candidate.instrument()),
             "stop_loss", roundNullable(effectiveStopLoss, candidate.instrument()),
             "take_profit", roundNullable(effectiveTakeProfit, candidate.instrument()),
+            "signal_confirmed_on_candle_close", true,
             "time_to_candle_close_seconds", timeToCandleCloseSeconds(candidate.timeframe(), contextTimestamp),
-            "is_market_order", !"ORDER_BLOCK".equals(alert.category().name()),
+            "is_market_order", false,
             "mentor_should_propose_plan", true
         ));
         if (originalAlertContext != null) {
@@ -1221,7 +1222,7 @@ public class MentorSignalReviewService {
         if (currentPrice == null || snapshot.vwap() == null || atr == null) {
             return false;
         }
-        return currentPrice.subtract(snapshot.vwap()).abs().compareTo(atr.multiply(BigDecimal.valueOf(1.5))) > 0;
+        return currentPrice.subtract(snapshot.vwap()).abs().compareTo(atr.multiply(BigDecimal.valueOf(2.5))) > 0;
     }
 
     private BigDecimal distance(BigDecimal left, BigDecimal right, Instrument instrument) {
