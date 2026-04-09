@@ -71,11 +71,10 @@ public class MarketDataService implements StreamingPriceListener {
     private final ApplicationEventPublisher eventPublisher;
     private final DxyMarketService          dxyMarketService;
 
-    private final Map<Instrument, BigDecimal>    lastPrice    = new ConcurrentHashMap<>();
-    private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
-    private final Map<Instrument, String>        lastSource   = new ConcurrentHashMap<>();
-    private final Map<CandleKey, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
-    private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
+    private record PriceSnapshot(BigDecimal price, Instant timestamp, String source) {}
+    private final Map<Instrument, PriceSnapshot>    lastPriceCache = new ConcurrentHashMap<>();
+    private final Map<CandleKey, CandleAccumulator> accumulators   = new ConcurrentHashMap<>();
+    private final Map<Instrument, Instant>          lastPushAt     = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
     // Dedicated thread pool for alert evaluation — isolated from ForkJoinPool.commonPool
@@ -124,7 +123,8 @@ public class MarketDataService implements StreamingPriceListener {
                 usedDatabaseFallback = true;
             }
 
-            if (fallbackPrice && samePrice(lastPrice.get(instrument), price)) {
+            PriceSnapshot prev = lastPriceCache.get(instrument);
+            if (fallbackPrice && prev != null && samePrice(prev.price(), price)) {
                 continue;
             }
 
@@ -138,9 +138,7 @@ public class MarketDataService implements StreamingPriceListener {
                 source = "LIVE_PROVIDER";
             }
 
-            lastPrice.put(instrument, price);
-            lastTimestamp.put(instrument, timestamp);
-            lastSource.put(instrument, source);
+            lastPriceCache.put(instrument, new PriceSnapshot(price, timestamp, source));
 
             positionService.updateMarketPrice(instrument, price);
             sendPriceUpdate(instrument, price, timestamp, source);
@@ -189,13 +187,12 @@ public class MarketDataService implements StreamingPriceListener {
         lastPushAt.put(instrument, timestamp);
 
         // Skip if price hasn't changed
-        if (samePrice(lastPrice.get(instrument), price)) {
+        PriceSnapshot prev = lastPriceCache.get(instrument);
+        if (prev != null && samePrice(prev.price(), price)) {
             return;
         }
 
-        lastPrice.put(instrument, price);
-        lastTimestamp.put(instrument, timestamp);
-        lastSource.put(instrument, "LIVE_PUSH");
+        lastPriceCache.put(instrument, new PriceSnapshot(price, timestamp, "LIVE_PUSH"));
 
         positionService.updateMarketPrice(instrument, price);
         sendPriceUpdate(instrument, price, timestamp, "LIVE_PUSH");
@@ -261,11 +258,9 @@ public class MarketDataService implements StreamingPriceListener {
         if (instrument == Instrument.DXY) {
             return dxyStoredPrice();
         }
-        BigDecimal live = lastPrice.get(instrument);
-        Instant liveTimestamp = lastTimestamp.get(instrument);
-        String source = lastSource.get(instrument);
-        if (live != null && liveTimestamp != null) {
-            return new StoredPrice(live, liveTimestamp, source != null ? source : "CACHE");
+        PriceSnapshot snap = lastPriceCache.get(instrument);
+        if (snap != null && snap.price() != null && snap.timestamp() != null) {
+            return new StoredPrice(snap.price(), snap.timestamp(), snap.source() != null ? snap.source() : "CACHE");
         }
         StoredPrice fallback = loadStoredPrice(instrument);
         if (fallback == null) {
@@ -292,9 +287,7 @@ public class MarketDataService implements StreamingPriceListener {
                 .get(INSTANT_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             if (instant != null) {
                 Instant now = Instant.now();
-                lastPrice.put(instrument, instant);
-                lastTimestamp.put(instrument, now);
-                lastSource.put(instrument, "LIVE_PROVIDER");
+                lastPriceCache.put(instrument, new PriceSnapshot(instant, now, "LIVE_PROVIDER"));
                 return new StoredPrice(instant, now, "LIVE_PROVIDER");
             }
         } catch (Exception e) {
@@ -404,9 +397,7 @@ public class MarketDataService implements StreamingPriceListener {
                 flushed++;
             }
         }
-        lastPrice.remove(instrument);
-        lastTimestamp.remove(instrument);
-        lastSource.remove(instrument);
+        lastPriceCache.remove(instrument);
         lastPushAt.remove(instrument);
         log.info("Rollover: flushed {} candle accumulators and price cache for {}", flushed, instrument);
     }

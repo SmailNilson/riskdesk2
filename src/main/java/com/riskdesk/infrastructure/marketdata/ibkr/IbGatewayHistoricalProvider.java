@@ -66,6 +66,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
                 return bars.stream()
                     .map(bar -> toCandle(instrument, timeframe, bar))
+                    .filter(c -> c.getTimestamp().getEpochSecond() > 0)
                     .sorted(Comparator.comparing(Candle::getTimestamp))
                     .toList();
             })
@@ -201,6 +202,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
             List<Candle> candles = bars.stream()
                 .map(bar -> toCandleWithMonth(instrument, timeframe, bar, contractMonth))
+                .filter(c -> c.getTimestamp().getEpochSecond() > 0)
                 .sorted(Comparator.comparing(Candle::getTimestamp))
                 .toList();
 
@@ -281,7 +283,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
         String raw = bar.timeStr();
         if (raw == null || raw.isBlank()) {
-            return Instant.now().getEpochSecond();
+            log.warn("IBKR bar has no time() and no timeStr() — skipping bar to avoid timestamp corruption");
+            return 0L;
         }
 
         String normalized = raw.trim().replaceAll("\\s+", " ");
@@ -316,8 +319,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             log.trace("IBKR bar.time() unavailable, parsed timeStr '{}' with zone {} → epoch {}", raw, zone, epochSec);
             return epochSec;
         } catch (DateTimeParseException ex) {
-            log.warn("Unable to parse IB historical bar time '{}', falling back to now.", raw);
-            return Instant.now().getEpochSecond();
+            log.warn("Unable to parse IB historical bar time '{}' — skipping bar to avoid timestamp corruption", raw);
+            return 0L;
         }
     }
 

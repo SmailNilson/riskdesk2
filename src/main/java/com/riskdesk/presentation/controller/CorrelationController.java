@@ -73,11 +73,25 @@ public class CorrelationController {
     @Operation(summary = "Updates ONIMS engine configuration (VIX threshold, blackout duration)")
     public ResponseEntity<Map<String, Object>> config(@RequestBody Map<String, Object> body) {
         if (body.containsKey("vixThreshold")) {
-            double threshold = ((Number) body.get("vixThreshold")).doubleValue();
+            Object raw = body.get("vixThreshold");
+            if (!(raw instanceof Number)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "vixThreshold must be a number"));
+            }
+            double threshold = ((Number) raw).doubleValue();
+            if (threshold < 0 || threshold > 100) {
+                return ResponseEntity.badRequest().body(Map.of("error", "vixThreshold must be in [0, 100]"));
+            }
             correlationService.setVixThreshold(threshold);
         }
         if (body.containsKey("blackoutDurationMinutes")) {
-            int minutes = ((Number) body.get("blackoutDurationMinutes")).intValue();
+            Object raw = body.get("blackoutDurationMinutes");
+            if (!(raw instanceof Number)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "blackoutDurationMinutes must be a number"));
+            }
+            int minutes = ((Number) raw).intValue();
+            if (minutes < 1 || minutes > 1440) {
+                return ResponseEntity.badRequest().body(Map.of("error", "blackoutDurationMinutes must be in [1, 1440]"));
+            }
             correlationService.setBlackoutDurationMinutes(minutes);
         }
         return ResponseEntity.ok(Map.of(

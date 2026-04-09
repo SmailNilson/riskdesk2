@@ -58,8 +58,7 @@ public class IbGatewayContractResolver {
 
     /**
      * Clears the cache for one instrument and re-resolves from IBKR targeting a specific month.
-     * Used by confirmRollover() so the new month is immediately cached without falling through
-     * to a stale cached fallback.
+     * Used by confirmRollover() so the new month is immediately cached.
      */
     public void refreshToMonth(Instrument instrument, String targetMonth) {
         // Cancel old IBKR streaming subscriptions BEFORE updating the cache,

@@ -5,6 +5,7 @@ import com.riskdesk.domain.model.Candle;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Detects a bearish VWAP rejection on a 5-minute MNQ candle.
@@ -89,15 +90,15 @@ public class VwapRejectionDetector {
 
     /**
      * Provides a detailed {@link RejectionResult} when a rejection is detected, or
-     * {@code null} if the condition is not met.
+     * {@link Optional#empty()} if the condition is not met.
      *
      * @param candle the most recently closed 5m candle for MNQ
      * @param vwap   the VWAP value for MNQ at this candle's timestamp
-     * @return a populated result or {@code null} if no rejection
+     * @return a populated result or empty if no rejection
      */
-    public RejectionResult detect(Candle candle, BigDecimal vwap) {
+    public Optional<RejectionResult> detect(Candle candle, BigDecimal vwap) {
         if (!isRejection(candle, vwap)) {
-            return null;
+            return Optional.empty();
         }
 
         // Distance of close below VWAP, expressed as percentage (positive = below)
@@ -106,11 +107,11 @@ public class VwapRejectionDetector {
                                         .multiply(BigDecimal.valueOf(100))
                                         .doubleValue();
 
-        return new RejectionResult(
+        return Optional.of(new RejectionResult(
                 candle.getClose(),
                 vwap,
                 candle.getHigh(),
                 distancePct
-        );
+        ));
     }
 }

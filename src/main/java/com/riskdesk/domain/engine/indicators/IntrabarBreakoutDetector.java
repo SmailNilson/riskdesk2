@@ -100,15 +100,16 @@ public class IntrabarBreakoutDetector {
         }
 
         // --- Volume condition: current volume > multiplier × average window volume ---
-        long totalVolume   = window.stream().mapToLong(Candle::getVolume).sum();
-        long averageVolume = totalVolume / window.size();
+        long totalVolume    = window.stream().mapToLong(Candle::getVolume).sum();
+        double avgVolumeExact = (double) totalVolume / window.size();
 
-        if (averageVolume == 0) {
-            // Cannot evaluate volume ratio without reference — skip
+        if (avgVolumeExact < 1.0) {
+            // Cannot evaluate volume ratio without meaningful reference — skip
             return Optional.empty();
         }
 
-        double volumeRatio = (double) current.getVolume() / averageVolume;
+        long averageVolume = Math.round(avgVolumeExact);
+        double volumeRatio = (double) current.getVolume() / avgVolumeExact;
         if (volumeRatio < volumeMultiplier) {
             return Optional.empty();
         }

@@ -106,8 +106,8 @@ export function useWebSocket() {
   }, [loadRecentAlerts, loadRecentMentorReviews]);
 
   useEffect(() => {
-    loadRecentAlerts();
-    loadRecentMentorReviews();
+    // Initial data loads happen inside connect()'s onConnect callback
+    // to avoid duplicate fetches on mount
     connect();
 
     // Periodic polls — recover from WebSocket disconnects
@@ -119,7 +119,7 @@ export function useWebSocket() {
       clearInterval(alertPoll);
       clientRef.current?.deactivate();
     };
-  }, [connect, loadRecentAlerts, loadRecentMentorReviews]);
+  }, [connect]);
 
   const refresh = useCallback(() => {
     fetch(`${API_URL}/api/alerts/recent`)

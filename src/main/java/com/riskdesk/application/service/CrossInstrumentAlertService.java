@@ -235,8 +235,10 @@ public class CrossInstrumentAlertService {
         Candle latest   = candles.get(candles.size() - 1);
 
         // Run VWAP rejection detector
-        VwapRejectionDetector.RejectionResult rejection = rejectionDetector.detect(latest, vwap);
-        if (rejection == null) return;
+        Optional<VwapRejectionDetector.RejectionResult> rejectionOpt = rejectionDetector.detect(latest, vwap);
+        if (rejectionOpt.isEmpty()) return;
+
+        VwapRejectionDetector.RejectionResult rejection = rejectionOpt.get();
 
         // Attempt to confirm the signal in the engine
         Optional<CrossInstrumentSignal> signal = engine.onMnqVwapRejection(
