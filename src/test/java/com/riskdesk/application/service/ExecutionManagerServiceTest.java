@@ -132,7 +132,7 @@ class ExecutionManagerServiceTest {
                 ExecutionEligibilityStatus.ELIGIBLE,
                 "Setup executable.",
                 "Wait for confirmation.",
-                new MentorProposedTradePlan(18123.38, null, 18160.24, 1.5, "Missing stop.", null)
+                new MentorProposedTradePlan(18123.38, null, 18160.24, 1.5, "Missing stop.", null, null)
             ),
             "{\"ok\":true}",
             List.of()
@@ -288,7 +288,7 @@ class ExecutionManagerServiceTest {
                 ExecutionEligibilityStatus.ELIGIBLE,
                 "Setup executable.",
                 "Wait for confirmation.",
-                new MentorProposedTradePlan(18123.38, 18099.81, 18160.24, 1.5, "Structured plan.", null)
+                new MentorProposedTradePlan(18123.38, 18099.81, 18160.24, 1.5, "Structured plan.", null, null)
             ),
             "{\"ok\":true}",
             List.of()

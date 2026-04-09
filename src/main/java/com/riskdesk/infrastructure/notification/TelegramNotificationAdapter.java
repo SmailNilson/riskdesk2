@@ -58,6 +58,7 @@ public class TelegramNotificationAdapter implements NotificationPort {
     private String formatMessage(TradeValidatedEvent e) {
         String directionEmoji = "LONG".equalsIgnoreCase(e.action()) ? "\uD83D\uDFE2" : "\uD83D\uDD34";
         String headerEmoji = "LONG".equalsIgnoreCase(e.action()) ? "\uD83D\uDCC8" : "\uD83D\uDCC9";
+        int decimals = priceDecimals(e.instrument());
 
         StringBuilder sb = new StringBuilder();
         sb.append("\uD83D\uDEA8 <b>TRADE VALID\u00C9 \u2014 ").append(e.action()).append(" ").append(e.instrument()).append("</b>\n\n");
@@ -67,12 +68,12 @@ public class TelegramNotificationAdapter implements NotificationPort {
         sb.append("\u23F1 <b>Timeframe:</b> ").append(e.timeframe()).append("\n\n");
 
         sb.append("\u2550\u2550\u2550\u2550\u2550 Plan de Trade \u2550\u2550\u2550\u2550\u2550\n");
-        sb.append("\u25B6\uFE0F <b>Entry:</b> ").append(formatPrice(e.entryPrice())).append("\n");
+        sb.append("\u25B6\uFE0F <b>Entry:</b> ").append(formatPrice(e.entryPrice(), decimals)).append("\n");
         if (e.deepEntryPrice() != null) {
-            sb.append("\uD83D\uDD3D <b>Deep Entry:</b> ").append(formatPrice(e.deepEntryPrice())).append("\n");
+            sb.append("\uD83D\uDD3D <b>Deep Entry:</b> ").append(formatPrice(e.deepEntryPrice(), decimals)).append("\n");
         }
-        sb.append("\uD83D\uDD34 <b>Stop Loss:</b> ").append(formatPrice(e.stopLoss())).append("\n");
-        sb.append("\uD83D\uDFE2 <b>Take Profit:</b> ").append(formatPrice(e.takeProfit())).append("\n");
+        sb.append("\uD83D\uDD34 <b>Stop Loss:</b> ").append(formatPrice(e.stopLoss(), decimals)).append("\n");
+        sb.append("\uD83D\uDFE2 <b>Take Profit:</b> ").append(formatPrice(e.takeProfit(), decimals)).append("\n");
         if (e.rewardToRiskRatio() != null) {
             sb.append("\uD83D\uDCD0 <b>R:R Ratio:</b> ").append(String.format("%.2f", e.rewardToRiskRatio())).append("\n");
         }
@@ -85,8 +86,15 @@ public class TelegramNotificationAdapter implements NotificationPort {
         return sb.toString();
     }
 
-    private static String formatPrice(Double price) {
-        return price != null ? String.format("%,.2f", price) : "N/A";
+    private static String formatPrice(Double price, int decimals) {
+        return price != null ? String.format("%,." + decimals + "f", price) : "N/A";
+    }
+
+    private static int priceDecimals(String instrument) {
+        return switch (instrument) {
+            case "E6", "6E" -> 5;
+            default -> 2;
+        };
     }
 
     private static String instrumentLabel(String symbol) {

@@ -81,7 +81,10 @@ export default function DxyPanel() {
   const points = sparklinePoints(history.map(row => row.dxyValue));
   const latestValue = latest?.dxyValue ?? null;
 
+  // Use backend-computed % change (baseline = IBKR close or session-open) to match TradingView.
+  // Falls back to history-based calculation only when the API field is absent.
   const pctChange: number | null = (() => {
+    if (latest?.changePercent != null) return latest.changePercent;
     if (history.length < 2) return null;
     const oldest = history[0].dxyValue;
     const newest = history[history.length - 1].dxyValue;

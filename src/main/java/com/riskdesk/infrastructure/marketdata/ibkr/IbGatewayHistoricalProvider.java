@@ -34,6 +34,10 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     private static final int MAX_BACKFILL_CHUNKS = 32;
     /** Max expired contracts to walk backward through for deep backfill. */
     private static final int MAX_CONTRACT_WALK = 24;
+    /** Pause between IBKR historical requests to respect pacing limits (~60 req/10 min). */
+    private static final long PACING_DELAY_MS = 2_000L;
+    /** Abort a contract/timeframe after this many consecutive timeouts. */
+    private static final int MAX_CONSECUTIVE_TIMEOUTS = 3;
 
     private final IbGatewayNativeClient nativeClient;
     private final IbGatewayContractResolver contractResolver;
@@ -186,7 +190,14 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         Instant endDateTime = null;
         Instant previousOldest = null;
 
+        int consecutiveTimeouts = 0;
+
         for (int chunkIndex = 0; chunkIndex < MAX_BACKFILL_CHUNKS && merged.size() < targetCount; chunkIndex++) {
+            // Throttle to respect IBKR pacing limits (~60 requests / 10 min)
+            if (chunkIndex > 0) {
+                try { Thread.sleep(PACING_DELAY_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            }
+
             List<Bar> bars = nativeClient.requestHistoricalBars(
                 contract,
                 endDateTime,
@@ -197,7 +208,16 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 false
             );
 
-            if (bars.isEmpty()) break;
+            if (bars.isEmpty()) {
+                consecutiveTimeouts++;
+                if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                    log.warn("IB Gateway backfill {} {} [{}]: {} consecutive empty responses — aborting",
+                        instrument, timeframe, contractMonth, consecutiveTimeouts);
+                    break;
+                }
+                continue;
+            }
+            consecutiveTimeouts = 0;
 
             List<Candle> candles = bars.stream()
                 .map(bar -> toCandleWithMonth(instrument, timeframe, bar, contractMonth))
