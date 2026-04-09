@@ -78,7 +78,18 @@ public class GeminiMentorClient implements MentorModelClient {
         - TRENDING_UP/DOWN : privilégier les setups de continuation (pullback sur OB/EMA).
         - RANGING : privilégier les reversals aux extrêmes (OB + WT oversold/overbought).
         - CHOPPY : le marché est instable, tiens-en compte dans ton analyse.
-        - Si htf_alignment = false, réduire la confiance et mentionner le désalignement.
+        - Si htf_aligned = false, réduire la confiance et mentionner le désalignement HTF.
+
+        ## RÉGIME DE VOLATILITÉ
+        Si volatility_regime est présent dans risk_management_gatekeeper :
+        - LOW (atr_percentile_rank < 20) : marché comprimé. Les breakouts sont violents — privilégier les entrées sur OB avec SL serré.
+        - NORMAL : comportement standard. Appliquer les règles ATR normales.
+        - EXTREME (atr_percentile_rank > 80) : volatilité anormale.
+          - EXIGER confluence >= 3 signaux pour valider un trade.
+          - Recommander 50%% de la taille standard dans improvementTip.
+          - SL doit être à minimum 2× current_atr_focus (pas 1.5×).
+          - Les TP doivent être à minimum 2× ATR du prix (pas 1×).
+          - Si le setup ne passe pas ces filtres renforcés → executionEligibilityStatus = INELIGIBLE.
 
         ## CONTEXTE MARCHÉ
         Modes d'analyse :
@@ -170,6 +181,8 @@ public class GeminiMentorClient implements MentorModelClient {
         - L'ATR en session asiatique est souvent du bruit — ne pas surpondérer les signaux Asian.
         - Le pétrole réagit fortement aux CHoCH : un CHoCH bullish suivi d'un pullback sur EMA50 avec WT bullish cross = setup de continuation classique.
         - DXY bearish = généralement bullish pour le pétrole.
+        - En volatility_regime EXTREME sur MCL (fréquent lors de crises géopolitiques ou inventaires EIA), les BOS et Supertrend flips sont souvent des faux signaux causés par des wicks de liquidation. Exiger un CHoCH confirmé ou un OB mitigé pour valider. Un simple BOS est insuffisant.
+        - Si atr_percentile_rank > 90, mentionner explicitement "volatilité extrême — réduction de taille recommandée" dans improvementTip.
         """;
 
     private static final String FOREX_RULES = """
@@ -179,6 +192,9 @@ public class GeminiMentorClient implements MentorModelClient {
         - Si dxy_trend = BULLISH → bearish pour E6, et inversement.
         - Les sessions London et New York sont les plus pertinentes pour E6.
         - En session asiatique, les mouvements E6 sont souvent des faux signaux.
+        - ANALYSE DE DIVERGENCE MONÉTAIRE : Consulter dxy_component_breakdown dans macro_correlations_dynamic. Si dxy_trend = BEARISH ET que la composante EURUSD contribue majoritairement à la baisse DXY, c'est un signal de force EUR structurelle (divergence Fed dovish vs ECB neutral/hawkish). Augmenter la confiance des signaux LONG E6 et mentionner "momentum structurel EUR" dans l'analyse. Les signaux SHORT E6 dans ce contexte sont counter-trend macro — signaler le risque et réduire eligibility.
+        - Si dxy_trend = BULLISH avec EURUSD en composante dominante de la hausse DXY, c'est un signal de faiblesse EUR structurelle. Favoriser SHORT E6, traiter les LONG avec prudence accrue.
+        - Si us10y_yield_pct_change est disponible ET positif (yields en hausse), cela renforce le USD → bearish E6.
         """;
 
     private static final String EQUITY_INDEX_RULES = """
