@@ -790,7 +790,7 @@ public class MentorSignalReviewService {
             payload.put("original_alert_context", originalAlertContext);
         }
         payload.put("market_structure_smc", linkedMap(
-            "trend_H1", h1Snapshot.marketStructureTrend(),
+            "trend_H1", buildMultiResolutionTrendH1(candidate.instrument(), h1Snapshot),
             "trend_focus", focusSnapshot.marketStructureTrend(),
             "focus_timeframe", toMentorTimeframe(candidate.timeframe()),
             "pd_array_zone_session", focusSnapshot.sessionPdZone(),
@@ -1450,6 +1450,47 @@ public class MentorSignalReviewService {
 
     private BigDecimal decimalValue(Double value) {
         return value == null ? null : BigDecimal.valueOf(value);
+    }
+
+    /**
+     * Build multi-resolution trend_H1: swing bias at lookbacks 50/25/9/5/1 + convergence label.
+     * Gives Gemini granular visibility into H1 trend state instead of a single (often lagging) string.
+     */
+    private Map<String, Object> buildMultiResolutionTrendH1(Instrument instrument,
+                                                             IndicatorSnapshot h1Snapshot) {
+        Map<Integer, String> biases = indicatorService.computeMultiResolutionSwingBias(instrument, "1h");
+        if (biases.isEmpty()) {
+            return linkedMap("primary", h1Snapshot.marketStructureTrend(),
+                             "convergence", "UNAVAILABLE");
+        }
+        String primary = biases.getOrDefault(50, "UNDEFINED");
+        long bullishCount = biases.values().stream().filter("BULLISH"::equals).count();
+        long bearishCount = biases.values().stream().filter("BEARISH"::equals).count();
+        String convergence;
+        if (bullishCount == 5) {
+            convergence = "FULL_BULLISH";
+        } else if (bearishCount == 5) {
+            convergence = "FULL_BEARISH";
+        } else if (bullishCount >= 4) {
+            convergence = "STRONG_BULLISH";
+        } else if (bearishCount >= 4) {
+            convergence = "STRONG_BEARISH";
+        } else if (bullishCount >= 3) {
+            convergence = "EMERGING_BULLISH";
+        } else if (bearishCount >= 3) {
+            convergence = "EMERGING_BEARISH";
+        } else {
+            convergence = "MIXED";
+        }
+        return linkedMap(
+            "primary", primary,
+            "lookback_50", biases.getOrDefault(50, "UNDEFINED"),
+            "lookback_25", biases.getOrDefault(25, "UNDEFINED"),
+            "lookback_9", biases.getOrDefault(9, "UNDEFINED"),
+            "lookback_5", biases.getOrDefault(5, "UNDEFINED"),
+            "lookback_1", biases.getOrDefault(1, "UNDEFINED"),
+            "convergence", convergence
+        );
     }
 
     private Map<String, Object> linkedMap(Object... values) {
