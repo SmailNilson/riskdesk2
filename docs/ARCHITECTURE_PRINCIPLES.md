@@ -219,10 +219,50 @@ Do not:
 When evaluating whether a saved Mentor trade plan was correct:
 
 - keep the replay/simulation orchestration in `application`
-- keep the simulation state as part of the persisted review model or a closely related persistence model
 - source candles only from the internal PostgreSQL-backed candle repository
 - do not recompute the original Mentor review payload during outcome evaluation
 - use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
+
+#### Simulation Decoupling Rule (TECH DEBT — active)
+
+**Current state:** Simulation fields (`simulationStatus`, `activationTime`, `resolutionTime`, `maxDrawdownPoints`, `trailingStopResult`, `trailingExitPrice`, `bestFavorablePrice`) live directly on `MentorSignalReviewRecord` and `MentorAudit`. This creates tight coupling: 29+ references across 11 files, 5 layers deep. The same model carries signal review concerns AND simulation lifecycle concerns.
+
+**Target state:** A dedicated `TradeSimulation` aggregate owns all simulation state:
+
+```
+trade_simulations
+  id                  BIGSERIAL PK
+  review_id           BIGINT UNIQUE NOT NULL  → mentor_signal_reviews(id)
+  review_type         VARCHAR(16) NOT NULL     → 'SIGNAL' | 'AUDIT'
+  instrument          VARCHAR(16) NOT NULL
+  action              VARCHAR(16) NOT NULL
+  simulation_status   VARCHAR(32) NOT NULL
+  activation_time     TIMESTAMPTZ
+  resolution_time     TIMESTAMPTZ
+  max_drawdown_points NUMERIC(19,6)
+  trailing_stop_result VARCHAR(32)
+  trailing_exit_price  NUMERIC(19,6)
+  best_favorable_price NUMERIC(19,6)
+  created_at          TIMESTAMPTZ NOT NULL
+```
+
+**Rules for new simulation-related development (effective immediately):**
+
+1. **Do not add new simulation fields to `MentorSignalReviewRecord` or `MentorAudit`.** Any new simulation concern (e.g., partial TP tracking, multi-leg simulation, paper-trading state) must be modeled on the simulation side, not the review side.
+2. **Do not query simulation state via `MentorSignalReviewRepositoryPort`.** New code should access simulation state through a dedicated port. The existing `findBySimulationStatuses()` method on the review repository is legacy and should not be duplicated or extended.
+3. **Do not push simulation updates through the review WebSocket topic.** New simulation events should emit on a dedicated `/topic/simulations` channel. The existing `/topic/mentor-alerts` push for simulation changes is legacy.
+4. **New simulation strategies (trailing stop variants, bracket orders, time-based exits) must be additive columns or new entities on the simulation aggregate**, never on the review model.
+5. **The `TradeSimulationService` is the sole writer of simulation state.** `MentorSignalReviewService.initializeSimulationState()` may set `PENDING_ENTRY` at creation time, but all subsequent state transitions belong to `TradeSimulationService`.
+
+**Migration plan (when the refactor happens):**
+
+Phase 1 — Create `trade_simulations` table with FK to reviews. Dual-write: `TradeSimulationService` writes to both old fields and new table. New code reads from new table.
+
+Phase 2 — Migrate frontend to read simulation state from new `/topic/simulations` or from a joined DTO. Remove simulation fields from `MentorSignalReview` DTO.
+
+Phase 3 — Drop simulation columns from `mentor_signal_reviews` and `mentor_audits`. Remove `findBySimulationStatuses()` from `MentorSignalReviewRepositoryPort`.
+
+**Why not now:** The refactor touches 11+ files, changes the REST API contract, requires frontend migration, and risks breaking the 60s scheduled poller that drives all simulation state. It should be a standalone PR with full regression testing, not bundled with feature work.
 
 ### Live Execution Foundation Rule
 

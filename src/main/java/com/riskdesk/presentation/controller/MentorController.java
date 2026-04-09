@@ -5,10 +5,12 @@ import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.application.dto.MentorManualReview;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.application.dto.TradeExecutionView;
+import com.riskdesk.application.dto.TrailingStopStatsResponse;
 import com.riskdesk.application.dto.HistoricalTradesDTO;
 import com.riskdesk.application.service.CreateExecutionCommand;
 import com.riskdesk.application.service.ExecutionManagerService;
 import com.riskdesk.application.service.HistoricalDataService;
+import com.riskdesk.application.service.TradeSimulationService;
 import com.riskdesk.application.service.HistoricalTradeImporterService;
 import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorIntermarketService;
@@ -53,6 +55,7 @@ public class MentorController {
     private final MentorManualReviewService mentorManualReviewService;
     private final MentorSignalReviewService mentorSignalReviewService;
     private final ExecutionManagerService executionManagerService;
+    private final TradeSimulationService tradeSimulationService;
 
     public MentorController(MentorAnalysisService mentorAnalysisService,
                             MentorIntermarketService mentorIntermarketService,
@@ -61,7 +64,8 @@ public class MentorController {
                             MentorMemoryService mentorMemoryService,
                             MentorManualReviewService mentorManualReviewService,
                             MentorSignalReviewService mentorSignalReviewService,
-                            ExecutionManagerService executionManagerService) {
+                            ExecutionManagerService executionManagerService,
+                            TradeSimulationService tradeSimulationService) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.mentorIntermarketService = mentorIntermarketService;
         this.historicalDataService = historicalDataService;
@@ -70,6 +74,7 @@ public class MentorController {
         this.mentorManualReviewService = mentorManualReviewService;
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.executionManagerService = executionManagerService;
+        this.tradeSimulationService = tradeSimulationService;
     }
 
     @PostMapping("/analyze")
@@ -257,6 +262,11 @@ public class MentorController {
         } catch (IllegalStateException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         }
+    }
+
+    @GetMapping("/simulation/trailing-stats")
+    public TrailingStopStatsResponse getTrailingStats(@RequestParam(defaultValue = "7") int days) {
+        return tradeSimulationService.computeTrailingStats(days);
     }
 
     private Alert buildAlert(MentorAlertReviewRequest request) {
