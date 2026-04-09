@@ -1030,6 +1030,7 @@ function SimulationChip({
     LOSS:          { label: 'LOSS ✗',             cls: 'bg-red-950/70 text-red-300 font-bold' },
     MISSED:        { label: 'Manqué',             cls: 'bg-violet-950/70 text-violet-300' },
     CANCELLED:     { label: '',                   cls: '' },
+    REVERSED:      { label: 'Inversé ↔',          cls: 'bg-orange-950/70 text-orange-300' },
   };
 
   const { label, cls } = configs[status];

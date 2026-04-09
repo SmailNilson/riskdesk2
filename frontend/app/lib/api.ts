@@ -499,7 +499,7 @@ export interface MentorSignalReview {
   selectedTimezone: string | null;
   executionEligibilityStatus: 'NOT_EVALUATED' | 'ELIGIBLE' | 'INELIGIBLE' | null;
   executionEligibilityReason: string | null;
-  simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | null;
+  simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | 'REVERSED' | null;
   activationTime: string | null;
   resolutionTime: string | null;
   maxDrawdownPoints: number | null;

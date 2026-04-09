@@ -20,15 +20,20 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class TradeSimulationService {
 
     private static final Logger log = LoggerFactory.getLogger(TradeSimulationService.class);
     private static final String SIMULATION_TIMEFRAME = "5m";
+    private static final Duration PENDING_ENTRY_TIMEOUT = Duration.ofHours(1);
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final MentorAuditRepositoryPort auditRepository;
@@ -124,7 +129,15 @@ public class TradeSimulationService {
             TradeSimulationStatus.ACTIVE
         ));
 
-        for (MentorSignalReviewRecord review : candidates) {
+        // --- Phase 1: Cancel expired PENDING_ENTRY (>1h without activation) ---
+        Instant now = Instant.now();
+        List<MentorSignalReviewRecord> surviving = cancelExpiredPendingEntries(candidates, now);
+
+        // --- Phase 2: Reverse conflicting trades (same instrument, opposite direction) ---
+        surviving = reverseConflictingTrades(surviving, now);
+
+        // --- Phase 3: Normal candle-based evaluation ---
+        for (MentorSignalReviewRecord review : surviving) {
             try {
                 Instrument instrument = Instrument.valueOf(review.getInstrument());
                 Instant from = review.getActivationTime() != null ? review.getActivationTime() : review.getCreatedAt();
@@ -148,6 +161,81 @@ public class TradeSimulationService {
         }
     }
 
+    /**
+     * Cancel PENDING_ENTRY reviews older than 1 hour — the entry was never triggered.
+     */
+    private List<MentorSignalReviewRecord> cancelExpiredPendingEntries(
+            List<MentorSignalReviewRecord> candidates, Instant now) {
+        List<MentorSignalReviewRecord> surviving = new ArrayList<>();
+        for (MentorSignalReviewRecord review : candidates) {
+            if (review.getSimulationStatus() == TradeSimulationStatus.PENDING_ENTRY
+                    && review.getCreatedAt() != null
+                    && Duration.between(review.getCreatedAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
+                review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+                review.setResolutionTime(now);
+                reviewRepository.save(review);
+                pushSimulationUpdate(review);
+                log.info("Simulation {} CANCELLED — PENDING_ENTRY expired after 1h (instrument={}, action={})",
+                        review.getId(), review.getInstrument(), review.getAction());
+            } else {
+                surviving.add(review);
+            }
+        }
+        return surviving;
+    }
+
+    /**
+     * When two open simulations exist for the same instrument with opposite directions,
+     * the older one is closed: PENDING_ENTRY → CANCELLED, ACTIVE → REVERSED.
+     */
+    private List<MentorSignalReviewRecord> reverseConflictingTrades(
+            List<MentorSignalReviewRecord> candidates, Instant now) {
+        // Group open simulations by instrument
+        Map<String, List<MentorSignalReviewRecord>> byInstrument = new HashMap<>();
+        for (MentorSignalReviewRecord r : candidates) {
+            if (r.getInstrument() != null && r.getAction() != null) {
+                byInstrument.computeIfAbsent(r.getInstrument(), k -> new ArrayList<>()).add(r);
+            }
+        }
+
+        List<MentorSignalReviewRecord> toClose = new ArrayList<>();
+        for (List<MentorSignalReviewRecord> group : byInstrument.values()) {
+            if (group.size() < 2) continue;
+
+            boolean hasLong = group.stream().anyMatch(r -> "LONG".equalsIgnoreCase(r.getAction()));
+            boolean hasShort = group.stream().anyMatch(r -> "SHORT".equalsIgnoreCase(r.getAction()));
+            if (!hasLong || !hasShort) continue;
+
+            // Sort by createdAt ascending — older trades first
+            group.sort(Comparator.comparing(r -> r.getCreatedAt() != null ? r.getCreatedAt() : Instant.MIN));
+
+            // The newest trade wins; all older trades in the opposite direction are closed
+            MentorSignalReviewRecord newest = group.get(group.size() - 1);
+            for (MentorSignalReviewRecord older : group) {
+                if (older == newest) continue;
+                if (older.getAction() != null && !older.getAction().equalsIgnoreCase(newest.getAction())) {
+                    toClose.add(older);
+                }
+            }
+        }
+
+        List<MentorSignalReviewRecord> surviving = new ArrayList<>(candidates);
+        for (MentorSignalReviewRecord stale : toClose) {
+            TradeSimulationStatus closeStatus = stale.getSimulationStatus() == TradeSimulationStatus.ACTIVE
+                    ? TradeSimulationStatus.REVERSED
+                    : TradeSimulationStatus.CANCELLED;
+            stale.setSimulationStatus(closeStatus);
+            stale.setResolutionTime(now);
+            reviewRepository.save(stale);
+            pushSimulationUpdate(stale);
+            surviving.remove(stale);
+            log.info("Simulation {} {} — directional reversal on {} (was {}, newer {} signal exists)",
+                    stale.getId(), closeStatus, stale.getInstrument(), stale.getAction(),
+                    "LONG".equalsIgnoreCase(stale.getAction()) ? "SHORT" : "LONG");
+        }
+        return surviving;
+    }
+
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingAuditSimulations() {
         List<MentorAudit> candidates = auditRepository.findBySimulationStatuses(List.of(
@@ -155,7 +243,56 @@ public class TradeSimulationService {
             TradeSimulationStatus.ACTIVE
         ));
 
+        // --- Phase 1: Cancel expired PENDING_ENTRY (>1h) ---
+        Instant now = Instant.now();
+        List<MentorAudit> surviving = new ArrayList<>();
         for (MentorAudit audit : candidates) {
+            if (audit.getSimulationStatus() == TradeSimulationStatus.PENDING_ENTRY
+                    && audit.getCreatedAt() != null
+                    && Duration.between(audit.getCreatedAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
+                audit.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+                audit.setResolutionTime(now);
+                auditRepository.save(audit);
+                log.info("Audit simulation {} CANCELLED — PENDING_ENTRY expired after 1h", audit.getId());
+            } else {
+                surviving.add(audit);
+            }
+        }
+
+        // --- Phase 2: Reverse conflicting trades (same instrument, opposite direction) ---
+        Map<String, List<MentorAudit>> byInstrument = new HashMap<>();
+        for (MentorAudit a : surviving) {
+            if (a.getInstrument() != null && a.getAction() != null) {
+                byInstrument.computeIfAbsent(a.getInstrument(), k -> new ArrayList<>()).add(a);
+            }
+        }
+        List<MentorAudit> toClose = new ArrayList<>();
+        for (List<MentorAudit> group : byInstrument.values()) {
+            if (group.size() < 2) continue;
+            boolean hasLong = group.stream().anyMatch(a -> "LONG".equalsIgnoreCase(a.getAction()));
+            boolean hasShort = group.stream().anyMatch(a -> "SHORT".equalsIgnoreCase(a.getAction()));
+            if (!hasLong || !hasShort) continue;
+            group.sort(Comparator.comparing(a -> a.getCreatedAt() != null ? a.getCreatedAt() : Instant.MIN));
+            MentorAudit newest = group.get(group.size() - 1);
+            for (MentorAudit older : group) {
+                if (older == newest) continue;
+                if (older.getAction() != null && !older.getAction().equalsIgnoreCase(newest.getAction())) {
+                    toClose.add(older);
+                }
+            }
+        }
+        for (MentorAudit stale : toClose) {
+            TradeSimulationStatus closeStatus = stale.getSimulationStatus() == TradeSimulationStatus.ACTIVE
+                    ? TradeSimulationStatus.REVERSED : TradeSimulationStatus.CANCELLED;
+            stale.setSimulationStatus(closeStatus);
+            stale.setResolutionTime(now);
+            auditRepository.save(stale);
+            surviving.remove(stale);
+            log.info("Audit simulation {} {} — directional reversal on {}", stale.getId(), closeStatus, stale.getInstrument());
+        }
+
+        // --- Phase 3: Normal candle-based evaluation ---
+        for (MentorAudit audit : surviving) {
             try {
                 if (audit.getInstrument() == null) continue;
                 Instrument instrument = Instrument.valueOf(audit.getInstrument());
