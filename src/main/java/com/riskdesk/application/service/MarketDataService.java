@@ -27,6 +27,8 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -76,6 +78,11 @@ public class MarketDataService implements StreamingPriceListener {
     private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
+    // Dedicated thread pool for alert evaluation — isolated from ForkJoinPool.commonPool
+    // (used by backfill) and the Spring @Async pool (used by signal scanners).
+    private final ExecutorService alertEvalExecutor = Executors.newFixedThreadPool(4,
+            r -> { Thread t = new Thread(r, "alert-eval"); t.setDaemon(true); return t; });
+
     public MarketDataService(MarketDataProvider marketDataProvider,
                              PositionService positionService,
                              AlertService alertService,
@@ -96,7 +103,8 @@ public class MarketDataService implements StreamingPriceListener {
         this.dxyMarketService      = dxyMarketService;
     }
 
-    @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
+    @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}",
+               initialDelayString = "${riskdesk.market-data.poll-initial-delay:60000}")
     public void pollPrices() {
         Map<Instrument, BigDecimal> prices = marketDataProvider.fetchPrices();
         Instant now = Instant.now();
@@ -143,16 +151,16 @@ public class MarketDataService implements StreamingPriceListener {
                     accumulate(instrument, tf, price, now);
                 }
 
-                // OPT-2: fire-and-forget on riskdesk-async- pool (core=4, max=8)
+                // OPT-2: fire-and-forget on dedicated alert-eval pool (4 threads, isolated from backfill)
                 final Instrument evalInstrument = instrument;
                 CompletableFuture.runAsync(() -> {
                     try { alertService.evaluate(evalInstrument); }
                     catch (Exception e) { log.debug("Async alert eval error for {}: {}", evalInstrument, e.getMessage()); }
-                });
+                }, alertEvalExecutor);
                 CompletableFuture.runAsync(() -> {
                     try { behaviourAlertService.evaluate(evalInstrument); }
                     catch (Exception e) { log.debug("Async behaviour eval error for {}: {}", evalInstrument, e.getMessage()); }
-                });
+                }, alertEvalExecutor);
             }
         }
 
@@ -202,11 +210,11 @@ public class MarketDataService implements StreamingPriceListener {
             CompletableFuture.runAsync(() -> {
                 try { alertService.evaluate(instrument); }
                 catch (Exception e) { log.debug("Push alert eval error for {}: {}", instrument, e.getMessage()); }
-            });
+            }, alertEvalExecutor);
             CompletableFuture.runAsync(() -> {
                 try { behaviourAlertService.evaluate(instrument); }
                 catch (Exception e) { log.debug("Push behaviour eval error for {}: {}", instrument, e.getMessage()); }
-            });
+            }, alertEvalExecutor);
         }
     }
 

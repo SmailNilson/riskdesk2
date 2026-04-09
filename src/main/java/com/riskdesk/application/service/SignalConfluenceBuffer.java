@@ -65,7 +65,7 @@ public class SignalConfluenceBuffer {
     /**
      * Polls every 5s for buffers whose fixed window has expired.
      */
-    @Scheduled(fixedDelay = 5000)
+    @Scheduled(fixedDelay = 5000, initialDelay = 30_000)
     public void flushExpiredBuffers() {
         Instant now = Instant.now();
         buffers.forEach((key, entry) -> {
