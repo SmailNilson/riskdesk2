@@ -267,7 +267,9 @@ public class AlertService {
             snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().high() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().low() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().high() : null,
-            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null,
+            snapshot.stochSignal(),
+            snapshot.stochCrossover()
         );
     }
 

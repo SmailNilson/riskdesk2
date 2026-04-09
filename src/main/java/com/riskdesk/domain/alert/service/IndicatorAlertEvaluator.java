@@ -519,7 +519,15 @@ public class IndicatorAlertEvaluator {
         new TransitionSignalDef("chk", null, AlertCategory.CHAIKIN,
             IndicatorAlertSnapshot::chaikinCrossover, Map.of(
                 "BULLISH_CROSS", new SignalVariant("bullish", AlertSeverity.INFO,    "Chaikin Oscillator Bullish Cross"),
-                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Chaikin Oscillator Bearish Cross")))
+                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Chaikin Oscillator Bearish Cross"))),
+        new TransitionSignalDef("stoch", null, AlertCategory.STOCHASTIC,
+            IndicatorAlertSnapshot::stochSignal, Map.of(
+                "OVERSOLD",   new SignalVariant("oversold",   AlertSeverity.INFO,    "Stochastic Oversold"),
+                "OVERBOUGHT", new SignalVariant("overbought", AlertSeverity.WARNING, "Stochastic Overbought"))),
+        new TransitionSignalDef("stoch", "cross", AlertCategory.STOCHASTIC,
+            IndicatorAlertSnapshot::stochCrossover, Map.of(
+                "BULLISH_CROSS", new SignalVariant("bullish", AlertSeverity.INFO,    "Stochastic Bullish Cross"),
+                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Stochastic Bearish Cross")))
     );
 
     private record MtfLevelDef(

@@ -68,6 +68,7 @@ public class IndicatorService {
     private final BollingerBandsIndicator bb = new BollingerBandsIndicator(BB_PERIOD, 2.0, BB_TREND_FAST_PERIOD, BB_TREND_SLOW_PERIOD, 2.0);
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
+    private final StochasticIndicator stochastic = new StochasticIndicator(14, 3, 3);
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     // UC-SMC-010: FVG detector with threshold filtering and visual extension
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(
@@ -156,6 +157,9 @@ public class IndicatorService {
 
         // WaveTrend
         WaveTrendIndicator.WaveTrendResult wt = waveTrend.current(candles);
+
+        // Stochastic
+        StochasticIndicator.StochasticResult stoch = stochastic.current(candles);
 
         // ── SMC (UC-SMC-002: Internal + Swing structure) ─────────────────────────
 
@@ -339,6 +343,11 @@ public class IndicatorService {
                 wt != null ? wt.diff()      : null,
                 wt != null ? wt.crossover() : null,
                 wt != null ? wt.signal()    : null,
+                // Stochastic
+                stoch != null ? stoch.k()         : null,
+                stoch != null ? stoch.d()         : null,
+                stoch != null ? stoch.signal()    : null,
+                stoch != null ? stoch.crossover() : null,
                 // SMC: Internal
                 internalBias, internalHigh, internalLow,
                 internalHighTime, internalLowTime, lastInternalBreak,
@@ -597,6 +606,8 @@ public class IndicatorService {
                 null, false, null,
                 null, null, null, null,
                 null, null, null, null, null,
+                // Stochastic
+                null, null, null, null,
                 // SMC: Internal
                 null, null, null, null, null, null,
                 // SMC: Swing

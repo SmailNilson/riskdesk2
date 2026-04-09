@@ -195,6 +195,7 @@ class AlertServiceTest {
             null,
             "WT_BEARISH",
             "OVERBOUGHT",
+            null, null, null, null,  // Stochastic
             "BEARISH",
             null,
             null,

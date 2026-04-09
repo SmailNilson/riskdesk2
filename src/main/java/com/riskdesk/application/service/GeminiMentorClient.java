@@ -49,7 +49,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - Note : si "source" = "CLV_ESTIMATED", fiabilité réduite
 
         ### Momentum (momentum_oscillators + dynamic_levels)
-        - WaveTrend (signal, niveaux), RSI, Chaikin Money Flow
+        - WaveTrend (signal, niveaux), RSI, Stochastic (%K/%D, OB/OS), Chaikin Money Flow
         - VWAP + bandes, EMA (9/50/200), Bollinger Bands
 
         ### Macro (macro_correlations_dynamic)

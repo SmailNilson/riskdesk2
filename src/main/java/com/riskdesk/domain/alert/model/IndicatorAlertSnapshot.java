@@ -44,7 +44,11 @@ public record IndicatorAlertSnapshot(
     BigDecimal mtfWeeklyHigh,
     BigDecimal mtfWeeklyLow,
     BigDecimal mtfMonthlyHigh,
-    BigDecimal mtfMonthlyLow
+    BigDecimal mtfMonthlyLow,
+    /** Stochastic %K signal: "OVERSOLD", "OVERBOUGHT", "NEUTRAL". */
+    String stochSignal,
+    /** Stochastic %K/%D crossover: "BULLISH_CROSS" or "BEARISH_CROSS". */
+    String stochCrossover
 ) {
     public record OrderBlockZone(String type, BigDecimal high, BigDecimal low) {}
 

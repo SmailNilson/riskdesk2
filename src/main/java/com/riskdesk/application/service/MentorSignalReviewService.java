@@ -823,6 +823,10 @@ public class MentorSignalReviewService {
             "wavetrend_is_oversold", focusSnapshot.wtWt1() != null && focusSnapshot.wtWt1().doubleValue() < -53,
             "rsi_value", focusSnapshot.rsi(),
             "rsi_signal", focusSnapshot.rsiSignal(),
+            "stochastic_k", focusSnapshot.stochK(),
+            "stochastic_d", focusSnapshot.stochD(),
+            "stochastic_signal", focusSnapshot.stochSignal(),
+            "stochastic_crossover", focusSnapshot.stochCrossover(),
             "chaikin_money_flow_cmf", focusSnapshot.cmf(),
             "money_flow_state", inferMoneyFlowState(focusSnapshot),
             "money_flow_trend", inferMoneyFlowTrend(focusSnapshot)

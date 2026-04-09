@@ -7,19 +7,18 @@ import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.marketdata.event.MarketPriceUpdated;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Profile;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
-
-import com.riskdesk.domain.model.AssetClass;
-import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.math.BigDecimal;
 import java.time.Duration;
