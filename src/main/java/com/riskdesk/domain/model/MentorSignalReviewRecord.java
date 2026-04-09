@@ -29,6 +29,9 @@ public class MentorSignalReviewRecord {
     private Instant activationTime;
     private Instant resolutionTime;
     private java.math.BigDecimal maxDrawdownPoints;
+    private TrailingStopResult trailingStopResult;
+    private java.math.BigDecimal trailingExitPrice;
+    private java.math.BigDecimal bestFavorablePrice;
     private String sourceType = "SIGNAL";
     private java.math.BigDecimal triggerPrice;
 
@@ -230,6 +233,30 @@ public class MentorSignalReviewRecord {
 
     public void setMaxDrawdownPoints(java.math.BigDecimal maxDrawdownPoints) {
         this.maxDrawdownPoints = maxDrawdownPoints;
+    }
+
+    public TrailingStopResult getTrailingStopResult() {
+        return trailingStopResult;
+    }
+
+    public void setTrailingStopResult(TrailingStopResult trailingStopResult) {
+        this.trailingStopResult = trailingStopResult;
+    }
+
+    public java.math.BigDecimal getTrailingExitPrice() {
+        return trailingExitPrice;
+    }
+
+    public void setTrailingExitPrice(java.math.BigDecimal trailingExitPrice) {
+        this.trailingExitPrice = trailingExitPrice;
+    }
+
+    public java.math.BigDecimal getBestFavorablePrice() {
+        return bestFavorablePrice;
+    }
+
+    public void setBestFavorablePrice(java.math.BigDecimal bestFavorablePrice) {
+        this.bestFavorablePrice = bestFavorablePrice;
     }
 
     public String getSourceType() {

@@ -208,6 +208,9 @@ class MentorControllerIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
                 null
             )
         ));
@@ -247,6 +250,9 @@ class MentorControllerIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
                 null
             ),
             new MentorSignalReview(
@@ -267,6 +273,9 @@ class MentorControllerIntegrationTest {
                 "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -314,6 +323,9 @@ class MentorControllerIntegrationTest {
                 "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,

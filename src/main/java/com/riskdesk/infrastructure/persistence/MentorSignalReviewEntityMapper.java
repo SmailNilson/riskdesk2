@@ -35,6 +35,9 @@ final class MentorSignalReviewEntityMapper {
         entity.setActivationTime(review.getActivationTime());
         entity.setResolutionTime(review.getResolutionTime());
         entity.setMaxDrawdownPoints(review.getMaxDrawdownPoints());
+        entity.setTrailingStopResult(review.getTrailingStopResult());
+        entity.setTrailingExitPrice(review.getTrailingExitPrice());
+        entity.setBestFavorablePrice(review.getBestFavorablePrice());
         entity.setSourceType(review.getSourceType());
         entity.setTriggerPrice(review.getTriggerPrice());
         return entity;
@@ -67,6 +70,9 @@ final class MentorSignalReviewEntityMapper {
         review.setActivationTime(entity.getActivationTime());
         review.setResolutionTime(entity.getResolutionTime());
         review.setMaxDrawdownPoints(entity.getMaxDrawdownPoints());
+        review.setTrailingStopResult(entity.getTrailingStopResult());
+        review.setTrailingExitPrice(entity.getTrailingExitPrice());
+        review.setBestFavorablePrice(entity.getBestFavorablePrice());
         review.setSourceType(entity.getSourceType());
         review.setTriggerPrice(entity.getTriggerPrice());
         return review;

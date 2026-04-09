@@ -670,6 +670,9 @@ public class MentorSignalReviewService {
             review.getActivationTime() == null ? null : review.getActivationTime().toString(),
             review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
             review.getMaxDrawdownPoints() == null ? null : review.getMaxDrawdownPoints().doubleValue(),
+            review.getTrailingStopResult(),
+            review.getTrailingExitPrice() == null ? null : review.getTrailingExitPrice().doubleValue(),
+            review.getBestFavorablePrice() == null ? null : review.getBestFavorablePrice().doubleValue(),
             analysis,
             review.getErrorMessage(),
             review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue()

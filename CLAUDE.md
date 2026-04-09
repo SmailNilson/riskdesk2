@@ -204,11 +204,33 @@ These paths use different persistence tables and endpoints. Do not merge them.
 
 Qualified alert reviews with valid Entry/SL/TP plans are tracked as simulated trade outcomes:
 - States: `PENDING_ENTRY` → `ACTIVE` → `WIN` | `LOSS` | `MISSED` | `CANCELLED`
-- Uses internal 1m candles from PostgreSQL only (no external replay feeds)
+- Uses internal 5m candles from PostgreSQL only (no external replay feeds)
 - Pessimistic rule: if one candle crosses both SL and TP, result is `LOSS`
 - If TP is hit before Entry, result is `MISSED`
 - `maxDrawdownPoints` records worst adverse excursion before resolution
 - Scheduled backend service (`TradeSimulationService`) polls reviews in `PENDING_ENTRY` or `ACTIVE`
+
+### Trailing Stop (Dual-Track)
+
+- Runs in parallel with fixed SL/TP — both results are persisted on the same review
+- `trailingStopResult`: `TRAILING_WIN` | `TRAILING_BE` | `TRAILING_LOSS` | null
+- `trailingExitPrice`: dynamic exit price from trailing stop
+- `bestFavorablePrice`: Maximum Favorable Excursion (MFE) — best price reached before exit
+- ATR-based trailing: `bestPrice - (ATR * multiplier)` for LONG, `bestPrice + (ATR * multiplier)` for SHORT
+- Activation gate: trailing only engages after +0.5R favorable move (configurable)
+- Config: `riskdesk.simulation.trailing-stop.{enabled,multiplier,activation-threshold}`
+- Stats endpoint: `GET /api/mentor/simulation/trailing-stats?days=7`
+
+### Simulation Decoupling Rule (TECH DEBT)
+
+**Simulation fields currently live on `MentorSignalReviewRecord` and `MentorAudit` — this is legacy coupling.** See `docs/ARCHITECTURE_PRINCIPLES.md` § "Simulation Decoupling Rule" for the full migration plan.
+
+**Immediate rules for all agents:**
+1. Do NOT add new simulation fields to `MentorSignalReviewRecord` or `MentorAudit`
+2. Do NOT extend `findBySimulationStatuses()` on the review repository port
+3. Do NOT push new simulation events through `/topic/mentor-alerts`
+4. New simulation concerns go on the simulation side, not the review side
+5. `TradeSimulationService` is the sole writer of simulation state after initial `PENDING_ENTRY`
 
 ## Execution Workflow
 

@@ -3,14 +3,18 @@ package com.riskdesk.application.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.dto.TrailingStopStatsResponse;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
+import com.riskdesk.domain.engine.indicators.AtrCalculator;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.model.TrailingStopResult;
+import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -34,6 +38,8 @@ public class TradeSimulationService {
     private static final Logger log = LoggerFactory.getLogger(TradeSimulationService.class);
     private static final String SIMULATION_TIMEFRAME = "5m";
     private static final Duration PENDING_ENTRY_TIMEOUT = Duration.ofHours(1);
+    private static final int ATR_PERIOD = 14;
+    private static final BigDecimal BE_TOLERANCE = new BigDecimal("0.0001");
 
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final MentorAuditRepositoryPort auditRepository;
@@ -41,19 +47,22 @@ public class TradeSimulationService {
     private final ObjectMapper objectMapper;
     private final ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
+    private final TrailingStopProperties trailingStopProperties;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
                                   CandleRepositoryPort candleRepositoryPort,
                                   ObjectMapper objectMapper,
                                   ObjectProvider<MentorSignalReviewService> reviewServiceProvider,
-                                  ObjectProvider<SimpMessagingTemplate> messagingProvider) {
+                                  ObjectProvider<SimpMessagingTemplate> messagingProvider,
+                                  TrailingStopProperties trailingStopProperties) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
         this.objectMapper = objectMapper;
         this.reviewServiceProvider = reviewServiceProvider;
         this.messagingProvider = messagingProvider;
+        this.trailingStopProperties = trailingStopProperties;
     }
 
     public SimulationResult evaluateTradeOutcome(MentorSignalReviewRecord review, List<Candle> subsequentCandles) {
@@ -78,25 +87,35 @@ public class TradeSimulationService {
         BigDecimal maxDrawdown = zero(review.getMaxDrawdownPoints());
         boolean active = currentStatus == TradeSimulationStatus.ACTIVE;
 
-        for (Candle candle : orderedCandles) {
+        // --- Fixed SL/TP evaluation (unchanged) ---
+        SimulationResult fixedResult = null;
+        int activationIndex = -1;
+
+        for (int i = 0; i < orderedCandles.size(); i++) {
+            Candle candle = orderedCandles.get(i);
             if (!active) {
                 if (isMissed(plan, candle)) {
-                    return new SimulationResult(TradeSimulationStatus.MISSED, null, candle.getTimestamp(), maxDrawdown);
+                    fixedResult = new SimulationResult(TradeSimulationStatus.MISSED, null, candle.getTimestamp(), maxDrawdown);
+                    break;
                 }
 
                 if (touchesEntry(plan, candle)) {
                     active = true;
                     activationTime = candle.getTimestamp();
+                    activationIndex = i;
                     maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
 
                     if (touchesStopAndTarget(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                        fixedResult = new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                        break;
                     }
                     if (touchesStop(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                        fixedResult = new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                        break;
                     }
                     if (touchesTarget(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+                        fixedResult = new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+                        break;
                     }
                 }
                 continue;
@@ -104,22 +123,159 @@ public class TradeSimulationService {
 
             maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
             if (touchesStopAndTarget(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                fixedResult = new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                break;
             }
             if (touchesStop(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                fixedResult = new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
+                break;
             }
             if (touchesTarget(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+                fixedResult = new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
+                break;
             }
         }
 
+        if (fixedResult == null) {
+            fixedResult = new SimulationResult(
+                active ? TradeSimulationStatus.ACTIVE : TradeSimulationStatus.PENDING_ENTRY,
+                activationTime, null, maxDrawdown
+            );
+        }
+
+        // --- Trailing stop second-pass evaluation ---
+        if (!trailingStopProperties.isEnabled() || !active) {
+            return withTrailingFromReview(fixedResult, review);
+        }
+
+        TrailingResult trailing = evaluateTrailingStop(
+                plan, orderedCandles, activationIndex,
+                zero(review.getBestFavorablePrice()));
         return new SimulationResult(
-            active ? TradeSimulationStatus.ACTIVE : TradeSimulationStatus.PENDING_ENTRY,
-            activationTime,
-            null,
-            maxDrawdown
+            fixedResult.status(), fixedResult.activationTime(), fixedResult.resolutionTime(),
+            fixedResult.maxDrawdownPoints(),
+            trailing.result(), trailing.exitPrice(), trailing.bestFavorablePrice()
         );
+    }
+
+    /**
+     * Second-pass trailing stop evaluation. Walks candles from activation forward,
+     * tracking best favorable price (MFE) and computing dynamic trailing SL.
+     */
+    private TrailingResult evaluateTrailingStop(TradePlan plan, List<Candle> orderedCandles,
+                                               int activationIndex, BigDecimal existingBestPrice) {
+        if (activationIndex < 0) {
+            return new TrailingResult(null, null, existingBestPrice);
+        }
+        BigDecimal atr = computeAtrAtActivation(orderedCandles, activationIndex);
+        if (atr == null || atr.compareTo(BigDecimal.ZERO) == 0) {
+            return new TrailingResult(null, null, existingBestPrice);
+        }
+
+        BigDecimal multiplier = BigDecimal.valueOf(trailingStopProperties.getMultiplier());
+        BigDecimal activationThreshold = BigDecimal.valueOf(trailingStopProperties.getActivationThreshold());
+        BigDecimal riskSize = plan.entryPrice().subtract(plan.stopLoss()).abs();
+        BigDecimal activationDistance = riskSize.multiply(activationThreshold);
+
+        BigDecimal bestPrice = existingBestPrice.compareTo(BigDecimal.ZERO) > 0
+                ? existingBestPrice : plan.entryPrice();
+        boolean trailingActivated = false;
+
+        for (int i = Math.max(0, activationIndex); i < orderedCandles.size(); i++) {
+            Candle candle = orderedCandles.get(i);
+
+            // Update MFE
+            if (plan.isLong()) {
+                bestPrice = bestPrice.max(candle.getHigh());
+            } else {
+                bestPrice = bestPrice.min(candle.getLow());
+            }
+
+            // Check activation gate
+            BigDecimal favorableMove = plan.isLong()
+                    ? bestPrice.subtract(plan.entryPrice())
+                    : plan.entryPrice().subtract(bestPrice);
+
+            if (!trailingActivated && favorableMove.compareTo(activationDistance) >= 0) {
+                trailingActivated = true;
+            }
+
+            if (!trailingActivated) {
+                continue;
+            }
+
+            // Compute trailing SL
+            BigDecimal trailingSL = plan.isLong()
+                    ? bestPrice.subtract(atr.multiply(multiplier))
+                    : bestPrice.add(atr.multiply(multiplier));
+
+            // Only use trailing if it's more favorable than original SL
+            BigDecimal effectiveSL;
+            if (plan.isLong()) {
+                effectiveSL = trailingSL.compareTo(plan.stopLoss()) > 0 ? trailingSL : plan.stopLoss();
+            } else {
+                effectiveSL = trailingSL.compareTo(plan.stopLoss()) < 0 ? trailingSL : plan.stopLoss();
+            }
+
+            // Check if candle hits effective trailing SL
+            boolean trailingHit = plan.isLong()
+                    ? candle.getLow().compareTo(effectiveSL) <= 0
+                    : candle.getHigh().compareTo(effectiveSL) >= 0;
+
+            if (trailingHit) {
+                BigDecimal exitPrice = effectiveSL.setScale(6, RoundingMode.HALF_UP);
+                TrailingStopResult result = classifyTrailingExit(plan, exitPrice);
+                return new TrailingResult(result, exitPrice, bestPrice.setScale(6, RoundingMode.HALF_UP));
+            }
+        }
+
+        // Trade still active or not resolved by trailing — return best price tracked so far
+        return new TrailingResult(null, null, bestPrice.setScale(6, RoundingMode.HALF_UP));
+    }
+
+    private BigDecimal computeAtrAtActivation(List<Candle> orderedCandles, int activationIndex) {
+        // Use candles before activation to compute ATR
+        int endIdx = Math.max(0, activationIndex);
+        int startIdx = Math.max(0, endIdx - ATR_PERIOD - 1);
+        if (endIdx - startIdx < ATR_PERIOD) {
+            // Not enough candles before activation — use all available
+            startIdx = 0;
+        }
+        List<Candle> atrCandles = orderedCandles.subList(startIdx, Math.min(endIdx + 1, orderedCandles.size()));
+        return AtrCalculator.compute(atrCandles, ATR_PERIOD);
+    }
+
+    private TrailingStopResult classifyTrailingExit(TradePlan plan, BigDecimal exitPrice) {
+        BigDecimal diff = exitPrice.subtract(plan.entryPrice());
+        if (plan.isLong()) {
+            if (diff.abs().compareTo(BE_TOLERANCE) <= 0) {
+                return TrailingStopResult.TRAILING_BE;
+            }
+            return diff.compareTo(BigDecimal.ZERO) > 0
+                    ? TrailingStopResult.TRAILING_WIN
+                    : TrailingStopResult.TRAILING_LOSS;
+        } else {
+            BigDecimal inverseDiff = plan.entryPrice().subtract(exitPrice);
+            if (inverseDiff.abs().compareTo(BE_TOLERANCE) <= 0) {
+                return TrailingStopResult.TRAILING_BE;
+            }
+            return inverseDiff.compareTo(BigDecimal.ZERO) > 0
+                    ? TrailingStopResult.TRAILING_WIN
+                    : TrailingStopResult.TRAILING_LOSS;
+        }
+    }
+
+    private SimulationResult withTrailingFromReview(SimulationResult fixedResult, MentorSignalReviewRecord review) {
+        return new SimulationResult(
+            fixedResult.status(), fixedResult.activationTime(), fixedResult.resolutionTime(),
+            fixedResult.maxDrawdownPoints(),
+            review.getTrailingStopResult(),
+            review.getTrailingExitPrice(),
+            review.getBestFavorablePrice()
+        );
+    }
+
+    private record TrailingResult(TrailingStopResult result, BigDecimal exitPrice, BigDecimal bestFavorablePrice) {
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
@@ -152,6 +308,9 @@ public class TradeSimulationService {
                     review.setActivationTime(result.activationTime());
                     review.setResolutionTime(result.resolutionTime());
                     review.setMaxDrawdownPoints(result.maxDrawdownPoints());
+                    review.setTrailingStopResult(result.trailingStopResult());
+                    review.setTrailingExitPrice(result.trailingExitPrice());
+                    review.setBestFavorablePrice(result.bestFavorablePrice());
                     reviewRepository.save(review);
                     pushSimulationUpdate(review);
                 }
@@ -399,7 +558,10 @@ public class TradeSimulationService {
         return review.getSimulationStatus() != result.status()
             || !sameInstant(review.getActivationTime(), result.activationTime())
             || !sameInstant(review.getResolutionTime(), result.resolutionTime())
-            || zero(review.getMaxDrawdownPoints()).compareTo(zero(result.maxDrawdownPoints())) != 0;
+            || zero(review.getMaxDrawdownPoints()).compareTo(zero(result.maxDrawdownPoints())) != 0
+            || review.getTrailingStopResult() != result.trailingStopResult()
+            || zero(review.getTrailingExitPrice()).compareTo(zero(result.trailingExitPrice())) != 0
+            || zero(review.getBestFavorablePrice()).compareTo(zero(result.bestFavorablePrice())) != 0;
     }
 
     private boolean sameInstant(Instant left, Instant right) {
@@ -493,6 +655,66 @@ public class TradeSimulationService {
         return value == null ? BigDecimal.ZERO.setScale(6, RoundingMode.HALF_UP) : value.setScale(6, RoundingMode.HALF_UP);
     }
 
+    public TrailingStopStatsResponse computeTrailingStats(int days) {
+        List<MentorSignalReviewRecord> resolved = reviewRepository.findBySimulationStatuses(
+                List.of(TradeSimulationStatus.WIN, TradeSimulationStatus.LOSS));
+
+        Instant cutoff = Instant.now().minus(Duration.ofDays(days));
+        List<MentorSignalReviewRecord> recent = resolved.stream()
+                .filter(r -> r.getResolutionTime() != null && r.getResolutionTime().isAfter(cutoff))
+                .toList();
+
+        int fixedTrades = 0, fixedWins = 0;
+        double fixedNetPnl = 0.0;
+        int trailingTrades = 0, trailingWins = 0;
+        double trailingNetPnl = 0.0;
+
+        for (MentorSignalReviewRecord r : recent) {
+            TradePlan plan = extractPlan(r);
+            if (plan == null) continue;
+
+            fixedTrades++;
+            double entryPrice = plan.entryPrice().doubleValue();
+            double sl = plan.stopLoss().doubleValue();
+            double tp = plan.takeProfit().doubleValue();
+
+            if (r.getSimulationStatus() == TradeSimulationStatus.WIN) {
+                fixedWins++;
+                fixedNetPnl += plan.isLong() ? (tp - entryPrice) : (entryPrice - tp);
+            } else {
+                fixedNetPnl += plan.isLong() ? (sl - entryPrice) : (entryPrice - sl);
+            }
+
+            if (r.getTrailingStopResult() != null) {
+                trailingTrades++;
+                if (r.getTrailingStopResult() == TrailingStopResult.TRAILING_WIN
+                        || r.getTrailingStopResult() == TrailingStopResult.TRAILING_BE) {
+                    trailingWins++;
+                }
+                if (r.getTrailingExitPrice() != null) {
+                    double exitPrice = r.getTrailingExitPrice().doubleValue();
+                    trailingNetPnl += plan.isLong() ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
+                }
+            }
+        }
+
+        double fixedWinRate = fixedTrades > 0 ? (double) fixedWins / fixedTrades : 0.0;
+        double trailingWinRate = trailingTrades > 0 ? (double) trailingWins / trailingTrades : 0.0;
+
+        return new TrailingStopStatsResponse(
+            "last_" + days + "_days",
+            new TrailingStopStatsResponse.TrackStats(fixedTrades, fixedWins,
+                    Math.round(fixedWinRate * 100.0) / 100.0,
+                    Math.round(fixedNetPnl * 100.0) / 100.0),
+            new TrailingStopStatsResponse.TrackStats(trailingTrades, trailingWins,
+                    Math.round(trailingWinRate * 100.0) / 100.0,
+                    Math.round(trailingNetPnl * 100.0) / 100.0),
+            new TrailingStopStatsResponse.Improvement(
+                    Math.round((trailingWinRate - fixedWinRate) * 100.0) / 100.0,
+                    Math.round((trailingNetPnl - fixedNetPnl) * 100.0) / 100.0)
+        );
+    }
+
     private record TradePlan(boolean isLong, BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {
     }
 
@@ -500,7 +722,14 @@ public class TradeSimulationService {
         TradeSimulationStatus status,
         Instant activationTime,
         Instant resolutionTime,
-        BigDecimal maxDrawdownPoints
+        BigDecimal maxDrawdownPoints,
+        TrailingStopResult trailingStopResult,
+        BigDecimal trailingExitPrice,
+        BigDecimal bestFavorablePrice
     ) {
+        SimulationResult(TradeSimulationStatus status, Instant activationTime,
+                         Instant resolutionTime, BigDecimal maxDrawdownPoints) {
+            this(status, activationTime, resolutionTime, maxDrawdownPoints, null, null, null);
+        }
     }
 }
