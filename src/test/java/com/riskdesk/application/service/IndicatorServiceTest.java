@@ -24,14 +24,15 @@ class IndicatorServiceTest {
     void computeSnapshotLoadsSnapshotLookbackAndReturnsLatestTimestamp() {
         FakeCandleRepositoryPort candlePort = new FakeCandleRepositoryPort();
         ActiveContractRegistry contractRegistry = new ActiveContractRegistry();
-        List<Candle> history = buildHistory(2_100);
-        candlePort.stubRecentCandles(Instrument.MCL, "10m", 2_000, descendingTail(history, 2_000));
+        List<Candle> history = buildHistory(1_100);
+        candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_000, descendingTail(history, 1_000));
 
         IndicatorService service = new IndicatorService(candlePort, contractRegistry);
 
         IndicatorSnapshot snapshot = service.computeSnapshot(Instrument.MCL, "10m");
 
-        assertEquals(List.of("MCL:10m:2000", "MCL:1d:2", "MCL:1w:2", "MCL:1M:2"), candlePort.recentRequests());
+        // 10m uses tiered lookback of 1000 (not the default 2000)
+        assertEquals(List.of("MCL:10m:1000", "MCL:1d:2", "MCL:1w:2", "MCL:1M:2"), candlePort.recentRequests());
         assertEquals("MCL", snapshot.instrument());
         assertEquals("10m", snapshot.timeframe());
         assertNotNull(snapshot.activeFairValueGaps());

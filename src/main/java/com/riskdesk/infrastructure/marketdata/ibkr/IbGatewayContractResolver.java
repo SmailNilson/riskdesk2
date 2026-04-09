@@ -203,16 +203,14 @@ public class IbGatewayContractResolver {
                 buildQuery("MGC", "COMEX", "USD", null, null)
             );
             case MNQ -> List.of(
-                buildQuery("MNQ", "GLOBEX", "USD", "2", "MNQ"),
-                buildQuery("MNQ", "GLOBEX", "USD", null, "MNQ"),
+                buildQuery("MNQ", "CME", "USD", "2", "MNQ"),
                 buildQuery("MNQ", "CME", "USD", null, "MNQ"),
                 buildQuery("MNQ", "CME", "USD", null, null)
             );
             case E6 -> List.of(
-                buildQuery("EUR", "GLOBEX", "USD", "125000", "6E"),
-                buildQuery("EUR", "GLOBEX", "USD", null, "6E"),
+                buildQuery("EUR", "CME", "USD", "125000", "6E"),
                 buildQuery("EUR", "CME", "USD", null, "6E"),
-                buildQuery("6E", "GLOBEX", "USD", null, "6E")
+                buildQuery("6E", "CME", "USD", null, "6E")
             );
             case DXY -> List.of();
         };

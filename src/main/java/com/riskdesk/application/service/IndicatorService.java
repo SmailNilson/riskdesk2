@@ -21,7 +21,16 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class IndicatorService {
 
-    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;
+    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;  // default for 1h+
+
+    /** Tiered lookback: shorter timeframes need fewer bars (EMA200 warmup = 200 minimum). */
+    private static int snapshotLookback(String timeframe) {
+        return switch (timeframe) {
+            case "5m"        -> 500;   // ~1.7 trading days — enough for EMA200 + SMC
+            case "10m"       -> 1_000; // ~7 trading days
+            default          -> SNAPSHOT_LOOKBACK_BARS; // 2000 for 1h, 4h, 1d, etc.
+        };
+    }
     private static final int SERIES_LIMIT = 500;
     private static final int SERIES_WARMUP_BARS = 1_000;
     private static final int FVG_LOOKBACK_BARS = SNAPSHOT_LOOKBACK_BARS;
@@ -67,10 +76,19 @@ public class IndicatorService {
             FVG_EXTENSION_BARS
     );
 
-    // OPT-1: TTL-based snapshot cache — eliminates 55% duplicate computations per poll cycle
+    // OPT-1: TTL-based snapshot cache — tiered by timeframe to avoid recomputing slow-changing HTF
     private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos) {}
     private final ConcurrentHashMap<String, CachedSnapshot> snapshotCache = new ConcurrentHashMap<>();
-    private static final long CACHE_TTL_NANOS = 3_000_000_000L; // 3 seconds, matches poll interval
+
+    private static long cacheTtlNanos(String timeframe) {
+        return switch (timeframe) {
+            case "5m", "10m"       -> 3_000_000_000L;   //  3s — fast-moving, keep responsive
+            case "30m", "1h"       -> 30_000_000_000L;   // 30s — changes once per candle close
+            case "4h"              -> 60_000_000_000L;   // 60s
+            case "1d", "1w", "1M"  -> 300_000_000_000L;  //  5 min — daily candle changes once/day
+            default                -> 3_000_000_000L;
+        };
+    }
 
     public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
         this.candlePort       = candlePort;
@@ -98,7 +116,8 @@ public class IndicatorService {
             return cached.snapshot();
         }
 
-        List<Candle> candles = loadCandles(instrument, timeframe, SNAPSHOT_LOOKBACK_BARS);
+        int lookback = snapshotLookback(timeframe);
+        List<Candle> candles = loadCandles(instrument, timeframe, lookback);
         if (candles.isEmpty()) {
             return emptySnapshot(instrument, timeframe);
         }
@@ -348,7 +367,7 @@ public class IndicatorService {
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
-        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + CACHE_TTL_NANOS));
+        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe)));
         return result;
     }
 

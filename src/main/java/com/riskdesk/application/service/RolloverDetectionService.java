@@ -150,6 +150,11 @@ public class RolloverDetectionService {
             return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
         }
 
+        // If we are already on or past the next month (post-rollover), no need to warn.
+        if (currentMonth.compareTo(nextMonth) >= 0) {
+            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
+        }
+
         // Strategy 1: OI comparison — next OI > current OI → recommend roll
         OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
         OptionalLong nextOI    = openInterestProvider.fetchOpenInterest(instrument, nextMonth);

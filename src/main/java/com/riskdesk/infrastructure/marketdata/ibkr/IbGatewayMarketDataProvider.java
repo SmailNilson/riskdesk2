@@ -123,8 +123,8 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
         switch (instrument) {
             case MCL -> { c.symbol("MCL"); c.exchange("NYMEX"); c.currency("USD"); c.tradingClass("MCL"); }
             case MGC -> { c.symbol("MGC"); c.exchange("COMEX"); c.currency("USD"); c.tradingClass("MGC"); }
-            case MNQ -> { c.symbol("MNQ"); c.exchange("GLOBEX"); c.currency("USD"); c.tradingClass("MNQ"); }
-            case E6  -> { c.symbol("EUR"); c.exchange("GLOBEX"); c.currency("USD"); c.tradingClass("6E"); }
+            case MNQ -> { c.symbol("MNQ"); c.exchange("CME"); c.currency("USD"); c.tradingClass("MNQ"); }
+            case E6  -> { c.symbol("EUR"); c.exchange("CME"); c.currency("USD"); c.tradingClass("6E"); }
             default  -> { return null; }
         }
         return c;
