@@ -106,32 +106,27 @@ public class GeminiMentorClient implements MentorModelClient {
         - Si entrée sur niveau dynamique (EMA 200, VWAP, POC) : SL = niveau dynamique - (2× current_atr_focus) pour LONG, + (2× ATR) pour SHORT.
         - Le buffer ATR protège des faux sweeps de liquidité (Liquidity Grabs).
 
-        ### Take Profit — CIBLE STRUCTURELLE DYNAMIQUE (Chain of Thought)
-        Le TP est basé sur la première cible de liquidité réaliste, PAS sur un R:R fixe.
-        Le R:R est un RÉSULTAT du calcul (Entry/SL/TP), pas une contrainte — un R:R de 5.1 est excellent si la structure le justifie.
+        ### Take Profit — DUAL TP (Formule + Structurel)
+        Calcule TOUJOURS les deux TP, puis sélectionne le meilleur :
 
-        **Hiérarchie des cibles (LONG = au-dessus du prix, SHORT = en dessous) :**
-        1. EQH/EQL (Equal Highs/Lows) — aimants de liquidité institutionnelle, priorité maximale
+        **TP1 (Formule R:R 1.5 — plancher garanti) :**
+          * LONG : TP1 = Entry + ((Entry - SL) * 1.5)
+          * SHORT : TP1 = Entry - ((SL - Entry) * 1.5)
+
+        **TP2 (Cible structurelle — si elle donne un meilleur R:R) :**
+        Cherche la première cible de liquidité réaliste dans cette hiérarchie :
+        1. EQH/EQL (Equal Highs/Lows) — aimants de liquidité institutionnelle
         2. OB distal (nearest_resistance_ob pour LONG, nearest_support_ob pour SHORT)
         3. Niveau dynamique (VWAP Upper/Lower Band, EMA200, daily_poc_price)
         4. Swing High/Low
+        Applique une marge de sécurité : TP2 = cible - (0.5 × current_atr_focus) pour LONG, + (0.5 × ATR) pour SHORT.
 
-        **Règles de sélection :**
-        - Ignorer les cibles à moins de 1× current_atr_focus du prix (trop proches, R:R faible).
-        - Prendre la PREMIÈRE cible au-delà de 1× ATR, pas la plus lointaine.
-        - TP = cible_prix - (0.5 × current_atr_focus) pour LONG, + (0.5 × ATR) pour SHORT (marge de sécurité, le prix sweep rarement le niveau exact).
-        - Indique dans l'analyse quelle cible tu as utilisée et pourquoi (ex: "TP sur EQH 1.17120 — 4 touches, pool de liquidité buy-side").
-
-        **Validation R:R :**
-        - R:R = |Entry → TP| / |Entry → SL|
-        - R:R >= 1.0 → trade éligible
-        - R:R < 1.0 → trade INÉLIGIBLE (reward insuffisant pour le risque pris)
+        **Sélection du TP final :**
+        - Calcule R:R_structural = |Entry → TP2| / |Entry → SL|
+        - Si R:R_structural >= 1.5 → utilise TP2 (la structure offre un meilleur reward)
+        - Sinon → utilise TP1 (le plancher R:R 1.5 garanti)
         - Pas de R:R maximum — si la structure donne un R:R de 3.0 ou 5.0, c'est un excellent setup.
-
-        **Fallback :** Si AUCUNE cible structurelle n'est trouvée dans les données du payload :
-          * LONG : TP = Entry + ((Entry - SL) * 1.5)
-          * SHORT : TP = Entry - ((SL - Entry) * 1.5)
-          * Mentionne "TP fallback R:R 1.5 — aucune cible structurelle identifiée" dans l'analyse.
+        - Indique dans tpSource quelle cible a été retenue (ex: "EQH_1.17120", "OB_DISTAL", "FORMULA_1.5").
 
         ### Deep Entry (SMC Mean Threshold)
         - Si l'Order Flow est conflictuel (delta contre le trade, ou buy_ratio faible pour un LONG), propose un safeDeepEntry :
@@ -250,10 +245,10 @@ public class GeminiMentorClient implements MentorModelClient {
         Map<String, Object> tradePlanProps = new LinkedHashMap<>();
         tradePlanProps.put("entryPrice", Map.of("type", "NUMBER", "description", "Entry price at OB proximal edge or dynamic level"));
         tradePlanProps.put("stopLoss", Map.of("type", "NUMBER", "description", "SL = level edge +/- ATR buffer"));
-        tradePlanProps.put("takeProfit", Map.of("type", "NUMBER", "description", "TP at structural target minus safety margin"));
-        tradePlanProps.put("rewardToRiskRatio", Map.of("type", "NUMBER", "description", "Computed R:R = |Entry-TP| / |Entry-SL|"));
+        tradePlanProps.put("takeProfit", Map.of("type", "NUMBER", "description", "TP = max(formula R:R 1.5, structural target). Always >= 1.5 R:R"));
+        tradePlanProps.put("rewardToRiskRatio", Map.of("type", "NUMBER", "description", "Computed R:R = |Entry-TP| / |Entry-SL|. Always >= 1.5"));
         tradePlanProps.put("tpSource", Map.of("type", "STRING", "nullable", true,
-            "description", "Which structural target was used for TP (e.g. EQH_1.17120, OB_DISTAL, VWAP_UPPER, FALLBACK_1.5)"));
+            "description", "Which target was used: FORMULA_1.5 (R:R floor) or structural (e.g. EQH_1.17120, OB_DISTAL, VWAP_UPPER)"));
         tradePlanProps.put("rationale", Map.of("type", "STRING"));
         tradePlanProps.put("safeDeepEntry", Map.of(
             "type", "OBJECT", "nullable", true,
