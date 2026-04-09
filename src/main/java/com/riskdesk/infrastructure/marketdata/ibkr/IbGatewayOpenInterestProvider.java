@@ -81,13 +81,13 @@ public class IbGatewayOpenInterestProvider implements OpenInterestProvider {
             }
             case MNQ -> {
                 contract.symbol("MNQ");
-                contract.exchange("GLOBEX");
+                contract.exchange("CME");
                 contract.multiplier("2");
                 contract.tradingClass("MNQ");
             }
             case E6 -> {
                 contract.symbol("EUR");
-                contract.exchange("GLOBEX");
+                contract.exchange("CME");
                 contract.multiplier("125000");
                 contract.tradingClass("6E");
             }
