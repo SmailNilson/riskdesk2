@@ -141,10 +141,16 @@ public class AlertService {
 
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
-                        // Route to confluence buffer — standalone signals (3.0) flush immediately
                         SignalWeight sw = SignalWeight.fromAlert(alert);
                         String direction = SignalPreFilterService.extractDirection(alert);
-                        if (sw != null && direction != null) {
+                        if (sw == null || direction == null) continue;
+
+                        if ("1h".equals(timeframe)) {
+                            // H1: every qualified signal triggers a Mentor review immediately
+                            // (no confluence buffer — H1 signals are rare and high-value)
+                            mentorSignalReviewService.captureInitialReview(alert, snap);
+                        } else {
+                            // 5m/10m: route to confluence buffer — standalone signals (3.0) flush immediately
                             confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
                         }
                     }
