@@ -106,10 +106,10 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         String currentMonth = normalizeMonth(contract.lastTradeDateOrContractMonth());
         int contractsUsed = 1;
 
-        // Phase 1: fetch from current (front-month) contract
-        fetchChunksFromContract(instrument, timeframe, targetCount, contract, currentMonth, merged);
+        // Phase 1: fetch from current (front-month) contract — no throttle (few chunks)
+        fetchChunksFromContract(instrument, timeframe, targetCount, contract, currentMonth, merged, false);
 
-        // Phase 2: walk backward through expired contracts with volume-based rollover
+        // Phase 2: walk backward through expired contracts — throttled (many requests)
         int maxWalk = maxContractWalk(instrument, timeframe);
         String prevMonth = currentMonth;
 
@@ -125,7 +125,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
             // Fetch older contract into a separate map for volume comparison
             Map<Instant, Candle> olderData = new LinkedHashMap<>();
-            fetchChunksFromContract(instrument, timeframe, targetCount, prevResolved.get().contract(), prevMonth, olderData);
+            fetchChunksFromContract(instrument, timeframe, targetCount, prevResolved.get().contract(), prevMonth, olderData, true);
 
             if (olderData.isEmpty()) {
                 log.debug("IB Gateway backfill: {} {} returned no data, stopping walk", instrument, prevMonth);
@@ -184,7 +184,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
      */
     private void fetchChunksFromContract(Instrument instrument, String timeframe, int targetCount,
                                          com.ib.client.Contract contract, String contractMonth,
-                                         Map<Instant, Candle> merged) {
+                                         Map<Instant, Candle> merged, boolean throttle) {
         HistoricalQuery chunkQuery = chunkQueryFor(timeframe);
         long stepSeconds = timeframeSeconds(timeframe);
         Instant endDateTime = null;
@@ -193,8 +193,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         int consecutiveTimeouts = 0;
 
         for (int chunkIndex = 0; chunkIndex < MAX_BACKFILL_CHUNKS && merged.size() < targetCount; chunkIndex++) {
-            // Throttle to respect IBKR pacing limits (~60 requests / 10 min)
-            if (chunkIndex > 0) {
+            // Throttle only during deep backfill (expired contract walk) to respect IBKR pacing
+            if (throttle && chunkIndex > 0) {
                 try { Thread.sleep(PACING_DELAY_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
             }
 
