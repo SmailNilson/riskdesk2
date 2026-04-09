@@ -128,6 +128,22 @@ public class HistoricalDataService implements ApplicationRunner {
     @Scheduled(initialDelay = 5 * 60 * 1000, fixedDelay = 24 * 60 * 60 * 1000)
     public void deepBackfill() {
         if (!enabled || deepBackfillDone.get()) return;
+
+        // Skip deep backfill if gap-fill already loaded recent data (common restart case).
+        // Deep backfill is only needed for first-run or after prolonged downtime.
+        if (realDataLoaded.get()) {
+            boolean allFresh = Instrument.exchangeTradedFutures().stream()
+                .allMatch(i -> {
+                    Optional<Instant> hwm = candlePort.findLatestTimestamp(i, "5m");
+                    return hwm.isPresent() && Duration.between(hwm.get(), Instant.now()).toMinutes() < 30;
+                });
+            if (allFresh) {
+                log.info("HistoricalDataService: skipping deep backfill — gap-fill already covered all instruments.");
+                deepBackfillDone.set(true);
+                return;
+            }
+        }
+
         log.info("HistoricalDataService: starting deep multi-contract backfill...");
         tryFetchAndReplace("deep-backfill", -1, 1);
         deepBackfillDone.set(true);
@@ -440,8 +456,10 @@ public class HistoricalDataService implements ApplicationRunner {
     // -------------------------------------------------------------------------
 
     private ExecutorService newBackfillPool(int instrumentCount) {
+        // Cap at 2 threads to respect IBKR pacing limits (~60 req/10 min).
+        // 4 parallel instruments caused request storms and cascading timeouts.
         return Executors.newFixedThreadPool(
-            Math.min(instrumentCount, 4),
+            Math.min(instrumentCount, 2),
             r -> { Thread t = new Thread(r, "hist-backfill"); t.setDaemon(true); return t; }
         );
     }
