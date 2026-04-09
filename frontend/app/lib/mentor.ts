@@ -171,6 +171,32 @@ export function buildMentorAlertKey(alert: { timestamp: string; instrument: stri
   return `${alert.timestamp}:${alert.instrument ?? 'GLOBAL'}:${alert.category}:${alert.message}`;
 }
 
+/** Build multi-resolution trend_H1 matching backend format (with convergence label). */
+function buildMultiResolutionTrendH1(h1: IndicatorSnapshot): Record<string, string> | string {
+  const mr = h1.multiResolutionBias;
+  if (!mr) return h1.marketStructureTrend;
+  const biases = [mr.swing50, mr.swing25, mr.swing9, mr.internal5, mr.micro1];
+  const bullish = biases.filter((b) => b === 'BULLISH').length;
+  const bearish = biases.filter((b) => b === 'BEARISH').length;
+  let convergence: string;
+  if (bullish === 5) convergence = 'FULL_BULLISH';
+  else if (bearish === 5) convergence = 'FULL_BEARISH';
+  else if (bullish >= 4) convergence = 'STRONG_BULLISH';
+  else if (bearish >= 4) convergence = 'STRONG_BEARISH';
+  else if (bullish >= 3) convergence = 'EMERGING_BULLISH';
+  else if (bearish >= 3) convergence = 'EMERGING_BEARISH';
+  else convergence = 'MIXED';
+  return {
+    primary: mr.swing50 ?? 'UNDEFINED',
+    lookback_50: mr.swing50 ?? 'UNDEFINED',
+    lookback_25: mr.swing25 ?? 'UNDEFINED',
+    lookback_9: mr.swing9 ?? 'UNDEFINED',
+    lookback_5: mr.internal5 ?? 'UNDEFINED',
+    lookback_1: mr.micro1 ?? 'UNDEFINED',
+    convergence,
+  };
+}
+
 export function buildMentorPayload(params: {
   instrument: Instrument;
   timeframe: Timeframe;
@@ -228,15 +254,7 @@ export function buildMentorPayload(params: {
       mentor_should_propose_plan: !hasPlan,
     },
     market_structure_smc: {
-      trend_H1: params.h1Snapshot.multiResolutionBias
-        ? {
-            swing_50: params.h1Snapshot.multiResolutionBias.swing50,
-            swing_25: params.h1Snapshot.multiResolutionBias.swing25,
-            swing_9: params.h1Snapshot.multiResolutionBias.swing9,
-            internal_5: params.h1Snapshot.multiResolutionBias.internal5,
-            micro_1: params.h1Snapshot.multiResolutionBias.micro1,
-          }
-        : params.h1Snapshot.marketStructureTrend,
+      trend_H1: buildMultiResolutionTrendH1(params.h1Snapshot),
       trend_focus: params.snapshot.marketStructureTrend,
       internal_bias: params.snapshot.internalBias,
       swing_bias: params.snapshot.swingBias,

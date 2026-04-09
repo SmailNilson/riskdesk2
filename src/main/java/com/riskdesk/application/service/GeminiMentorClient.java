@@ -315,7 +315,7 @@ public class GeminiMentorClient implements MentorModelClient {
 
                 ## RÈGLES D'EXÉCUTION ET DE TIMING
                 1. executionEligibilityStatus = "ELIGIBLE" UNIQUEMENT SI le setup passe tous les filtres ET qu'il n'y a pas de conflit majeur. Sinon, "INELIGIBLE".
-                2. Timing de la Bougie : Regarde "time_to_candle_close_seconds". Si la bougie clôture dans moins de 30 secondes, privilégie une entrée au marché (si setup parfait). Si elle clôture dans longtemps (>60s), exige une entrée en Limit Order sur le safeDeepEntry pour éviter les mèches (sweeps).
+                2. Timing de la Bougie et Confirmation : Si "signal_confirmed_on_candle_close" = true, le signal est déjà validé par la clôture de la bougie précédente. "time_to_candle_close_seconds" réfère à la NOUVELLE bougie en cours. Dans ce cas, évalue le setup sur ses mérites (structure, Order Flow, macro) et propose un plan d'entrée optimal (market order si le prix est sur un niveau clé, limit order sur OB/FVG sinon). NE PAS rejeter pour raison de timing — le signal est confirmé. Si "signal_confirmed_on_candle_close" = false ou absent, c'est une review manuelle intra-bougie : <30s → market order possible (si setup parfait), >60s → exige Limit Order sur safeDeepEntry pour éviter les mèches (sweeps).
                 3. Optimal Entry : Choisis clairement entre l'Entry standard (bord de l'Order Block) et le safeDeepEntry (Mean Threshold = 50%% de l'OB). Justifie ton choix par la qualité de l'Order Flow (Delta). Si le Delta est contre le trade, exige le safeDeepEntry. Si le Delta confirme, l'Entry standard suffit.
                 4. proposedTradePlan = null UNIQUEMENT si les données techniques sont insuffisantes pour proposer une entrée fiable.
 
