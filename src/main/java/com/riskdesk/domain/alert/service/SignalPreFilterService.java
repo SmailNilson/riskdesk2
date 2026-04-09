@@ -18,8 +18,8 @@ import java.util.regex.Pattern;
  * Pre-filters indicator alerts before they reach the mentor review pipeline.
  *
  * Rule 1 — HTF Trend Filter:
- *   If H1 trend is UPTREND, block all SHORT signals on lower timeframes (10m).
- *   If H1 trend is DOWNTREND, block all LONG signals on lower timeframes (10m).
+ *   If H1 trend is BULLISH, block all SHORT signals on lower timeframes (10m).
+ *   If H1 trend is BEARISH, block all LONG signals on lower timeframes (10m).
  *
  * Rule 3 — Anti-Chop (Conflicting Signal Suppression):
  *   If both LONG and SHORT signals appear for the same instrument within 60 seconds,
@@ -63,7 +63,7 @@ public class SignalPreFilterService {
      *
      * @param alerts    Candidate alerts for a given instrument+timeframe
      * @param timeframe The LTF timeframe label (e.g. "10m")
-     * @param h1Trend   H1 marketStructureTrend ("UPTREND" / "DOWNTREND" / "UNDEFINED")
+     * @param h1Trend   H1 marketStructureTrend ("BULLISH" / "BEARISH" / "UNDEFINED")
      */
     public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend) {
         if (alerts.isEmpty()) return alerts;
@@ -87,13 +87,13 @@ public class SignalPreFilterService {
 
         // Rule 1: HTF Trend Filter — only applied on lower timeframes with directional signals
         if (isLtf && direction != null) {
-            if ("UPTREND".equals(h1Trend) && "SHORT".equals(direction)) {
+            if ("BULLISH".equals(h1Trend) && "SHORT".equals(direction)) {
                 return new FilterResult(false,
-                        "HTF UPTREND blocks SHORT signal on " + timeframe);
+                        "HTF BULLISH blocks SHORT signal on " + timeframe);
             }
-            if ("DOWNTREND".equals(h1Trend) && "LONG".equals(direction)) {
+            if ("BEARISH".equals(h1Trend) && "LONG".equals(direction)) {
                 return new FilterResult(false,
-                        "HTF DOWNTREND blocks LONG signal on " + timeframe);
+                        "HTF BEARISH blocks LONG signal on " + timeframe);
             }
         }
 
