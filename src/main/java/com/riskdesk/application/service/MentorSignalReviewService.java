@@ -17,6 +17,8 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
+import com.riskdesk.domain.engine.indicators.AtrCalculator;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -58,6 +60,7 @@ public class MentorSignalReviewService {
     private static final String STATUS_DONE = "DONE";
     private static final String STATUS_ERROR = "ERROR";
     private static final String TRIGGER_INITIAL = "INITIAL";
+    private final MarketRegimeDetector marketRegimeDetector = new MarketRegimeDetector();
     private static final String TRIGGER_MANUAL_REANALYSIS = "MANUAL_REANALYSIS";
     private static final String AUTO_SELECTED_TIMEZONE = "UTC";
 
@@ -857,8 +860,29 @@ public class MentorSignalReviewService {
             "correlation_alignment", macroCorrelation.correlationAlignment(),
             "data_availability", macroCorrelation.dataAvailability()
         ));
+        // Market regime from EMA alignment + BB expansion
+        String focusRegime = marketRegimeDetector.detect(
+            focusSnapshot.ema9(), focusSnapshot.ema50(), focusSnapshot.ema200(),
+            Boolean.TRUE.equals(focusSnapshot.bbTrendExpanding()));
+        String h1Regime = marketRegimeDetector.detect(
+            h1Snapshot.ema9(), h1Snapshot.ema50(), h1Snapshot.ema200(),
+            Boolean.TRUE.equals(h1Snapshot.bbTrendExpanding()));
+        boolean htfAligned = marketRegimeDetector.htfAligned(focusRegime, h1Regime);
+        payload.put("market_regime_context", linkedMap(
+            "regime", focusRegime,
+            "htf_regime", h1Regime,
+            "htf_aligned", htfAligned
+        ));
+
+        Integer atrPctRank = computeAtrPercentileRank(candles, 14);
+        String volatilityRegime = atrPctRank == null ? null
+            : atrPctRank > 80 ? "EXTREME"
+            : atrPctRank < 20 ? "LOW"
+            : "NORMAL";
         payload.put("risk_management_gatekeeper", linkedMap(
             "current_atr_focus", atr,
+            "atr_percentile_rank", atrPctRank,
+            "volatility_regime", volatilityRegime,
             "stop_loss_size_points", roundNullable(stopLossSizePoints, candidate.instrument()),
             "reward_to_risk_ratio", rewardToRiskRatio,
             "is_stop_protected_by_structure", isStopProtectedByStructure(effectiveStopLoss, candidate.action(), nearestSupport, nearestResistance),
@@ -1097,6 +1121,30 @@ public class MentorSignalReviewService {
         BigDecimal sum = last.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal avg = sum.divide(BigDecimal.valueOf(last.size()), 6, RoundingMode.HALF_UP);
         return avg.compareTo(BigDecimal.ZERO) > 0 ? round(avg, instrument) : null;
+    }
+
+    /**
+     * Compute ATR percentile rank (0-100) over rolling windows from loaded candles.
+     * Uses AtrCalculator (Wilder's smoothing) on sliding windows of the given period.
+     */
+    private Integer computeAtrPercentileRank(List<Candle> candles, int period) {
+        int minWindows = 20;
+        if (candles.size() < period * 2 + minWindows) {
+            return null;
+        }
+        List<BigDecimal> atrHistory = new ArrayList<>();
+        for (int end = period * 2; end <= candles.size(); end++) {
+            BigDecimal atrVal = AtrCalculator.compute(candles.subList(0, end), period);
+            if (atrVal != null) {
+                atrHistory.add(atrVal);
+            }
+        }
+        if (atrHistory.size() < minWindows) {
+            return null;
+        }
+        BigDecimal currentAtr = atrHistory.get(atrHistory.size() - 1);
+        long below = atrHistory.stream().filter(a -> a.compareTo(currentAtr) < 0).count();
+        return (int) Math.round(100.0 * below / atrHistory.size());
     }
 
     private Map<String, Object> findNearestOrderBlock(IndicatorSnapshot snapshot, BigDecimal currentPrice, String bias) {
