@@ -259,12 +259,26 @@ public class MentorMemoryService {
             payload.path("metadata").path("timeframe_focus").asText(""),
             payload.path("metadata").path("market_session").asText(""),
             payload.path("trade_intention").path("action").asText(""),
-            payload.path("market_structure_the_king").path("trend_H1").asText(""),
+            extractTrendH1(payload),
             payload.path("market_structure_the_king").path("trend_focus").asText(""),
             payload.path("market_structure_the_king").path("last_event").asText(""),
             payload.path("momentum_and_flow_the_trigger").path("money_flow_state").asText(""),
             payload.path("risk_and_emotional_check").path("reward_to_risk_ratio").asText("")
         );
+    }
+
+    /** Extract trend_H1 for semantic query — handles both string and multi-resolution object. */
+    private String extractTrendH1(JsonNode payload) {
+        // Try both payload key variants (market_structure_smc / market_structure_the_king)
+        JsonNode smc = payload.path("market_structure_smc");
+        if (smc.isMissingNode()) smc = payload.path("market_structure_the_king");
+        JsonNode trendH1 = smc.path("trend_H1");
+        if (trendH1.isTextual()) return trendH1.asText("");
+        if (trendH1.isObject()) {
+            // Use swing_50 (macro) as the dominant bias for semantic search
+            return trendH1.path("swing_50").asText(trendH1.path("swing_25").asText(""));
+        }
+        return "";
     }
 
     private List<Double> parseEmbedding(String json) {

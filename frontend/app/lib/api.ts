@@ -201,6 +201,14 @@ export interface IndicatorSnapshot {
   equilibriumLevel: number | null;
   discountZoneBottom: number | null;
   currentZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
+  // SMC: Multi-resolution bias (5 lookback scales)
+  multiResolutionBias: {
+    swing50: string | null;
+    swing25: string | null;
+    swing9: string | null;
+    internal5: string | null;
+    micro1: string | null;
+  } | null;
   // SMC: Legacy / derived (backward compat)
   marketStructureTrend: string;
   strongHigh: number | null;

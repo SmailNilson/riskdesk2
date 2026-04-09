@@ -245,6 +245,8 @@ class BehaviourAlertServiceTest {
                 null, null, null, null, null, null,
                 // SMC: UC-SMC-008
                 false,
+                // SMC: Multi-resolution bias
+                null,
                 // SMC: Legacy
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,

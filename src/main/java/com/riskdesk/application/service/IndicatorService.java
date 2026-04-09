@@ -183,6 +183,14 @@ public class IndicatorService {
         Long swingHighTime = smcSnap.swingHigh() != null ? smcSnap.swingHigh().timestamp().getEpochSecond() : null;
         Long swingLowTime  = smcSnap.swingLow()  != null ? smcSnap.swingLow().timestamp().getEpochSecond()  : null;
 
+        // ── Multi-resolution bias (5 lookback scales for richer Gemini context) ────
+        // Reuse existing swing_50 and internal_5, compute 3 extra passes
+        String swing25Bias = biasFromEngine(candles, 5, 25);
+        String swing9Bias  = biasFromEngine(candles, 5, 9);
+        String micro1Bias  = biasFromEngine(candles, 1, 1);
+        IndicatorSnapshot.MultiResolutionBias multiResBias = new IndicatorSnapshot.MultiResolutionBias(
+                swingBias, swing25Bias, swing9Bias, internalBias, micro1Bias);
+
         // Legacy derived fields (backward compat until frontend migrates to internal/swing)
         // marketStructureTrend: prefer swing bias if available, else internal
         String marketStructureTrend = swingBias != null ? swingBias : (internalBias != null ? internalBias : "UNDEFINED");
@@ -356,6 +364,8 @@ public class IndicatorService {
                 swingHighTime, swingLowTime, lastSwingBreak,
                 // SMC: UC-SMC-008 confluence filter state
                 SMC_CONFLUENCE_FILTER,
+                // SMC: Multi-resolution bias
+                multiResBias,
                 // SMC: Legacy / derived
                 marketStructureTrend,
                 strongHigh, strongLow, weakHigh, weakLow,
@@ -512,6 +522,14 @@ public class IndicatorService {
         return event.type().name() + "_" + event.newBias().name();
     }
 
+    /** Run a lightweight SMC pass and return the swing bias as a string (null → null). */
+    private static String biasFromEngine(List<Candle> candles, int internalLookback, int swingLookback) {
+        SmcStructureEngine engine = new SmcStructureEngine(internalLookback, swingLookback);
+        SmcStructureEngine.StructureSnapshot snap = engine.computeFromHistory(candles, 0);
+        SmcStructureEngine.Bias b = snap.swingBias();
+        return b != null ? b.name() : null;
+    }
+
     private int liquidityToleranceTicks(String timeframe) {
         return switch (timeframe) {
             case "5m" -> 3;
@@ -635,6 +653,8 @@ public class IndicatorService {
                 null, null, null, null, null, null,
                 // SMC: UC-SMC-008 confluence filter state
                 false,
+                // SMC: Multi-resolution bias
+                null,
                 // SMC: Legacy / derived
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,
