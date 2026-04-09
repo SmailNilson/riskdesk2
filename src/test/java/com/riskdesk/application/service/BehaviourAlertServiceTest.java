@@ -237,6 +237,8 @@ class BehaviourAlertServiceTest {
                 null, false, null,
                 null, null, null, null,
                 null, null, null, null, null,
+                // Stochastic
+                null, null, null, null,
                 // SMC: Internal
                 null, null, null, null, null, null,
                 // SMC: Swing

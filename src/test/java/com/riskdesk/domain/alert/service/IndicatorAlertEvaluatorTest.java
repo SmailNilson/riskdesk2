@@ -78,7 +78,8 @@ class IndicatorAlertEvaluatorTest {
             obEvents == null ? Collections.emptyList() : obEvents,
             lastCandleTimestamp,
             null, null, close, null, Collections.emptyList(), Collections.emptyList(),
-            null, null, null, null, null, null, null, null
+            null, null, null, null, null, null, null, null,
+            null, null
         );
     }
 
@@ -93,7 +94,8 @@ class IndicatorAlertEvaluatorTest {
                 null, Collections.emptyList(), Collections.emptyList(),
                 lastCandleTimestamp,
                 null, null, null, null, Collections.emptyList(), Collections.emptyList(),
-                null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null,
+            null, null
         );
     }
 

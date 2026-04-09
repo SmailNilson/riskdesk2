@@ -711,6 +711,8 @@ class MentorSignalReviewServiceTest {
             null,
             "WT_BEARISH",
             "OVERBOUGHT",
+            // Stochastic
+            null, null, null, null,
             // SMC: Internal structure
             "BEARISH",                          // internalBias
             null,                               // internalHigh

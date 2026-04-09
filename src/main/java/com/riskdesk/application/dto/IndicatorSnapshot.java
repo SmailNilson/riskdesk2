@@ -41,6 +41,11 @@ public record IndicatorSnapshot(
     BigDecimal wtDiff,
     String wtCrossover,
     String wtSignal,
+    // ── Stochastic Oscillator ───────────────────────────────────────────
+    BigDecimal stochK,
+    BigDecimal stochD,
+    String stochSignal,
+    String stochCrossover,
     // ── SMC: Internal structure ────────────────────────────────────────
     String internalBias,
     BigDecimal internalHigh,
