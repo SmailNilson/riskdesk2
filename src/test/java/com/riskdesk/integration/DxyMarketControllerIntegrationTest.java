@@ -2,8 +2,8 @@ package com.riskdesk.integration;
 
 import com.riskdesk.application.dto.DxyHealthComponentView;
 import com.riskdesk.application.dto.DxyHealthView;
-import com.riskdesk.application.dto.DxySnapshotView;
 import com.riskdesk.application.service.DxyMarketService;
+import com.riskdesk.domain.marketdata.model.DxySnapshot;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -35,8 +36,7 @@ class DxyMarketControllerIntegrationTest {
 
     @Test
     void latest_returnsSnapshotWhenAvailable() throws Exception {
-        when(dxyMarketService.supported()).thenReturn(true);
-        when(dxyMarketService.latestView()).thenReturn(Optional.of(new DxySnapshotView(
+        DxySnapshot snapshot = new DxySnapshot(
             Instant.parse("2026-04-01T10:00:00Z"),
             new BigDecimal("1.08110000"),
             new BigDecimal("149.22000000"),
@@ -47,7 +47,11 @@ class DxyMarketControllerIntegrationTest {
             new BigDecimal("103.456789"),
             "IBKR_SYNTHETIC",
             true
-        )));
+        );
+        when(dxyMarketService.supported()).thenReturn(true);
+        when(dxyMarketService.latestResolvedSnapshot()).thenReturn(
+            Optional.of(new DxyMarketService.ResolvedSnapshot(snapshot, "IBKR_SYNTHETIC")));
+        when(dxyMarketService.findBaselineSnapshot(any())).thenReturn(Optional.empty());
 
         mockMvc.perform(get("/api/market/dxy/latest"))
             .andExpect(status().isOk())

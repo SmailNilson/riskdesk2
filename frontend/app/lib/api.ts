@@ -325,6 +325,9 @@ export interface DxySnapshotView {
   dxyValue: number;
   source: string;
   isComplete: boolean;
+  changePercent?: number;
+  baselineValue?: number;
+  baselineTimestamp?: string;
 }
 
 export interface DxyHealthComponentView {
