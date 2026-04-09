@@ -793,7 +793,7 @@ public class MentorSignalReviewService {
             payload.put("original_alert_context", originalAlertContext);
         }
         payload.put("market_structure_smc", linkedMap(
-            "trend_H1", h1Snapshot.marketStructureTrend(),
+            "trend_H1", buildMultiResTrend(h1Snapshot),
             "trend_focus", focusSnapshot.marketStructureTrend(),
             "focus_timeframe", toMentorTimeframe(candidate.timeframe()),
             "pd_array_zone_session", focusSnapshot.sessionPdZone(),
@@ -1274,6 +1274,20 @@ public class MentorSignalReviewService {
         };
         BigDecimal rounded = price.divide(step, 0, RoundingMode.HALF_UP).multiply(step);
         return round(rounded, instrument);
+    }
+
+    private Object buildMultiResTrend(IndicatorSnapshot snapshot) {
+        IndicatorSnapshot.MultiResolutionBias mr = snapshot.multiResolutionBias();
+        if (mr == null) {
+            return snapshot.marketStructureTrend();
+        }
+        return linkedMap(
+            "swing_50", mr.swing50(),
+            "swing_25", mr.swing25(),
+            "swing_9", mr.swing9(),
+            "internal_5", mr.internal5(),
+            "micro_1", mr.micro1()
+        );
     }
 
     private Map<String, Object> buildLiquidityPools(IndicatorSnapshot snapshot) {

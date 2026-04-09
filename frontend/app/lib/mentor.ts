@@ -228,7 +228,15 @@ export function buildMentorPayload(params: {
       mentor_should_propose_plan: !hasPlan,
     },
     market_structure_smc: {
-      trend_H1: params.h1Snapshot.marketStructureTrend,
+      trend_H1: params.h1Snapshot.multiResolutionBias
+        ? {
+            swing_50: params.h1Snapshot.multiResolutionBias.swing50,
+            swing_25: params.h1Snapshot.multiResolutionBias.swing25,
+            swing_9: params.h1Snapshot.multiResolutionBias.swing9,
+            internal_5: params.h1Snapshot.multiResolutionBias.internal5,
+            micro_1: params.h1Snapshot.multiResolutionBias.micro1,
+          }
+        : params.h1Snapshot.marketStructureTrend,
       trend_focus: params.snapshot.marketStructureTrend,
       internal_bias: params.snapshot.internalBias,
       swing_bias: params.snapshot.swingBias,

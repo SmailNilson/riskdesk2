@@ -155,7 +155,8 @@ public class GeminiMentorClient implements MentorModelClient {
 
         ## PROPOSITIONS D'ENTRÉE RÉALISTES
         - Le proposedTradePlan doit être RÉALISTE et ATTEIGNABLE dans le contexte de tendance actuel.
-        - Si trend_H1 = BULLISH, ne propose PAS une entrée LONG qui nécessite un retracement de plus de 3× l'ATR H1 pour être atteinte — c'est un scénario de crash, pas un pullback.
+        - trend_H1 est un objet multi-résolution avec 5 échelles : swing_50 (macro), swing_25 (mid), swing_9 (fast), internal_5 (rapide), micro_1 (immédiat). Évalue la CONVERGENCE : si 4/5 disent BULLISH et swing_50 dit BEARISH, c'est un lag du swing_50 — pas un vrai signal baissier. Si la majorité est d'accord, la tendance est claire ; si les résolutions divergent, c'est un contexte MIXTE à traiter avec prudence.
+        - Si la majorité des résolutions trend_H1 indiquent BULLISH, ne propose PAS une entrée LONG qui nécessite un retracement de plus de 3× l'ATR H1 — c'est un scénario de crash, pas un pullback.
         - Priorise le niveau de support RÉEL LE PLUS PROCHE du prix actuel (EMA 200, VWAP Lower Band, POC) plutôt que systématiquement l'Order Block le plus lointain.
         - Si l'Order Block le plus proche est à >5× l'ATR focus du prix actuel et que des niveaux dynamiques existent entre le prix et l'OB, propose le niveau dynamique comme entrée principale et l'OB comme entrée secondaire (safeDeepEntry).
 

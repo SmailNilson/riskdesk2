@@ -209,6 +209,7 @@ class AlertServiceTest {
             null,
             null,
             false,
+            null,   // multiResolutionBias
             "BEARISH",
             new BigDecimal("24520.00"),
             new BigDecimal("24320.00"),

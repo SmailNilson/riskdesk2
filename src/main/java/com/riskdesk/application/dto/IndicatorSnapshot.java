@@ -65,6 +65,9 @@ public record IndicatorSnapshot(
     // ── SMC: UC-SMC-008 confluence filter state ──────────────────────
     boolean internalConfluenceFilterEnabled,
 
+    // ── SMC: Multi-resolution bias (swing lookbacks 50/25/9, internal 5, micro 1)
+    MultiResolutionBias multiResolutionBias,
+
     // ── SMC: Legacy / derived (kept for frontend backward compat) ────
     String marketStructureTrend,
     BigDecimal strongHigh,
@@ -134,4 +137,7 @@ public record IndicatorSnapshot(
 
     /** UC-SMC-005: Multi-timeframe OHLC levels (daily, weekly, monthly). Null means no data for that timeframe. */
     public record MtfLevelsView(MtfLevelView daily, MtfLevelView weekly, MtfLevelView monthly) {}
+
+    /** Multi-resolution market structure bias — 5 lookback scales for richer Gemini context. */
+    public record MultiResolutionBias(String swing50, String swing25, String swing9, String internal5, String micro1) {}
 }
