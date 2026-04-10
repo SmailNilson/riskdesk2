@@ -67,13 +67,13 @@ public class SignalPreFilterService {
      */
     public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend) {
         if (alerts.isEmpty()) return alerts;
-        boolean isLtf = !"4h".equals(timeframe);
+        boolean isLtf = !"4h".equals(timeframe) && !"1h".equals(timeframe);
 
         return alerts.stream()
                 .filter(alert -> {
                     FilterResult r = applyFilters(alert, timeframe, h1Trend, isLtf);
                     if (!r.allowed()) {
-                        log.debug("PRE-FILTER [{}] blocked '{}' — {}", timeframe, alert.message(), r.reason());
+                        log.info("PRE-FILTER [{}] blocked '{}' — {}", timeframe, alert.message(), r.reason());
                     }
                     return r.allowed();
                 })
@@ -85,15 +85,21 @@ public class SignalPreFilterService {
     private FilterResult applyFilters(Alert alert, String timeframe, String h1Trend, boolean isLtf) {
         String direction = extractDirection(alert);
 
-        // Rule 1: HTF Trend Filter — only applied on lower timeframes with directional signals
+        // Rule 1: HTF Trend Filter — only applied on lower timeframes (5m/10m) with directional signals.
+        // Standalone signals (weight >= 3.0: CHoCH, BOS, WT cross, OB touch, CMF extreme)
+        // bypass this filter — structural breaks are inherently counter-trend and should not be suppressed.
         if (isLtf && direction != null) {
-            if ("BULLISH".equals(h1Trend) && "SHORT".equals(direction)) {
-                return new FilterResult(false,
-                        "HTF BULLISH blocks SHORT signal on " + timeframe);
-            }
-            if ("BEARISH".equals(h1Trend) && "LONG".equals(direction)) {
-                return new FilterResult(false,
-                        "HTF BEARISH blocks LONG signal on " + timeframe);
+            SignalWeight htfSw = SignalWeight.fromAlert(alert);
+            boolean isStandalone = htfSw != null && htfSw.weight() >= 3.0f;
+            if (!isStandalone) {
+                if ("BULLISH".equals(h1Trend) && "SHORT".equals(direction)) {
+                    return new FilterResult(false,
+                            "HTF BULLISH blocks SHORT signal on " + timeframe);
+                }
+                if ("BEARISH".equals(h1Trend) && "LONG".equals(direction)) {
+                    return new FilterResult(false,
+                            "HTF BEARISH blocks LONG signal on " + timeframe);
+                }
             }
         }
 
@@ -158,7 +164,10 @@ public class SignalPreFilterService {
         Map.entry(AlertCategory.EQUAL_LEVEL,  new DirectionRule(AlertCategory.EQUAL_LEVEL,  p("EQL"),                          p("EQH"))),
         Map.entry(AlertCategory.DELTA_FLOW,   new DirectionRule(AlertCategory.DELTA_FLOW,   p("BUYING"),                       p("SELLING"))),
         Map.entry(AlertCategory.CHAIKIN,      new DirectionRule(AlertCategory.CHAIKIN,      p("Bullish"),                      p("Bearish"))),
-        Map.entry(AlertCategory.MTF_LEVEL,    new DirectionRule(AlertCategory.MTF_LEVEL,    p("above"),                        p("below")))
+        Map.entry(AlertCategory.MTF_LEVEL,    new DirectionRule(AlertCategory.MTF_LEVEL,    p("above"),                        p("below"))),
+        Map.entry(AlertCategory.SUPPORT_RESISTANCE, new DirectionRule(AlertCategory.SUPPORT_RESISTANCE,
+            p("STRONG_LOW|WEAK_LOW"),    // touching support → LONG
+            p("STRONG_HIGH|WEAK_HIGH"))) // touching resistance → SHORT
     );
 
     /**

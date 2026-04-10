@@ -367,6 +367,50 @@ Why:
 - CLV-based delta estimation lacks precision for real order flow analysis; the tick infrastructure prepares for real data
 - the decision hierarchy prevents Gemini from weighting contradictory indicators equally
 
+### 10. Alert pipeline overhaul — 5 fixes for signal coverage gaps
+
+Files:
+
+- `src/main/java/com/riskdesk/domain/alert/service/IndicatorAlertEvaluator.java`
+- `src/main/java/com/riskdesk/domain/alert/model/IndicatorAlertSnapshot.java`
+- `src/main/java/com/riskdesk/domain/alert/model/SignalWeight.java`
+- `src/main/java/com/riskdesk/domain/alert/service/SignalPreFilterService.java`
+- `src/main/java/com/riskdesk/application/service/AlertService.java`
+- `src/main/java/com/riskdesk/application/service/BehaviourAlertService.java`
+
+What changed:
+
+**Fix A — Order Block TOUCH events:**
+- `IndicatorAlertEvaluator` now fires an `ORDER_BLOCK` alert when price enters an active OB zone (transition-based: OUTSIDE→INSIDE on candle close)
+- Previously only MITIGATION and INVALIDATION lifecycle events generated OB alerts
+- `SignalWeight.fromAlert()` now qualifies OB messages containing "ENTERED" (in addition to MITIGATED/INVALIDATED), yielding weight 3.0 (standalone flush)
+
+**Fix B — Strong S/R touch → confluence pipeline:**
+- `BehaviourAlertService` now routes `STRONG_HIGH` and `STRONG_LOW` S/R touches through `SignalConfluenceBuffer` in addition to the existing MONITOR behaviour review
+- New `SignalWeight.SR_TOUCH` (1.0, family "Niveaux") added for SUPPORT_RESISTANCE alerts
+- Direction inference: STRONG_LOW → LONG (support bounce), STRONG_HIGH → SHORT (resistance rejection)
+- S/R touches contribute to confluence weight but do not flush standalone
+
+**Fix C — Pre-filter: H1 excluded from LTF + standalone bypass:**
+- `SignalPreFilterService.isLtf` changed from `!"4h"` to `!"4h" && !"1h"` — H1 signals are no longer subject to HTF trend filtering
+- Standalone signals (weight ≥ 3.0: CHoCH, BOS, WaveTrend, OB, CMF extreme) now bypass the HTF trend filter even on 5m/10m — structural breaks are inherently counter-trend and should not be suppressed
+- Weak signals (EMA, MACD, RSI, Stochastic, etc. at weight 1.0) remain filtered by HTF trend on 5m/10m
+
+**Fix D — Pre-filter logging visible in prod:**
+- `log.debug` → `log.info` for blocked signal messages in `SignalPreFilterService` — blocked signals are now visible in production logs
+
+**Fix E — CMF extreme dual-path into qualified pipeline:**
+- New `cmfExtremeSignal` field added to `IndicatorAlertSnapshot` (ACCUMULATION / DISTRIBUTION / NEUTRAL)
+- `IndicatorAlertEvaluator` now fires a `CHAIKIN` category alert on CMF extreme transitions (>0.40 or <-0.40)
+- These alerts enter the normal qualified pipeline with weight 3.0 (standalone flush to Mentor)
+- The existing `ExtremeCmfZoneRule` behaviour path remains active in parallel for MONITOR reviews
+
+Why:
+
+- Production audit revealed multiple signal coverage gaps: OB zone entries, strong S/R levels, and CMF extremes were either invisible to the qualified pipeline or routed exclusively through the passive MONITOR path
+- H1 counter-trend signals were passing the pre-filter (H4 trend = UNDEFINED) but wasting Gemini API quota — excluding H1 from LTF prevents future waste when H4 data becomes available
+- Standalone structural signals (CHoCH, BOS) are counter-trend by definition — blocking them via HTF filter defeated their purpose
+
 ## Suggested Next Improvements
 
 - wire `reqTickByTickData("AllLast")` into `IbGatewayNativeClient` and connect to `IbkrTickDataAdapter.onTickByTickTrade()`

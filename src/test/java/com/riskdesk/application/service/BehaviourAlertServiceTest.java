@@ -31,12 +31,13 @@ class BehaviourAlertServiceTest {
     @Mock private BehaviourAlertEvaluator evaluator;
     @Mock private SimpMessagingTemplate  messagingTemplate;
     @Mock private MentorSignalReviewService mentorSignalReviewService;
+    @Mock private SignalConfluenceBuffer confluenceBuffer;
 
     private BehaviourAlertService service;
 
     @BeforeEach
     void setUp() {
-        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate, mentorSignalReviewService);
+        service = new BehaviourAlertService(indicatorService, evaluator, messagingTemplate, mentorSignalReviewService, confluenceBuffer);
     }
 
     @Test

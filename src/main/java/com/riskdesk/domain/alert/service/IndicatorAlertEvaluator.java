@@ -421,6 +421,47 @@ public class IndicatorAlertEvaluator {
             }
         }
 
+        // Order Block TOUCH events — fires when price enters an active OB zone (transition-based)
+        if (snap.activeOrderBlocks() != null && !snap.activeOrderBlocks().isEmpty() && snap.close() != null) {
+            for (IndicatorAlertSnapshot.OrderBlockZone ob : snap.activeOrderBlocks()) {
+                if (ob.high() == null || ob.low() == null) continue;
+                if (!isObProximate(snap.close(), ob.high(), ob.low())) continue;
+
+                boolean isInside = snap.close().compareTo(ob.low()) >= 0
+                        && snap.close().compareTo(ob.high()) <= 0;
+                String state = isInside ? "INSIDE" : "OUTSIDE";
+
+                EvalKey obTouchKey = key("ob-touch", instrument, timeframe, ob.type(), ob.high(), ob.low());
+                if (isConfirmedTransition(obTouchKey, state, candleKey(obTouchKey), snap.lastCandleTimestamp())) {
+                    if ("INSIDE".equals(state)) {
+                        alerts.add(new Alert(
+                            "ob:touch:" + ob.type().toLowerCase() + ":" + tf, AlertSeverity.INFO,
+                            String.format("%s [%s] — %s OB zone entered [%.5f – %.5f]",
+                                instrument.getDisplayName(), timeframe, ob.type(),
+                                ob.low().doubleValue(), ob.high().doubleValue()),
+                            AlertCategory.ORDER_BLOCK, instrument.name()));
+                    }
+                }
+            }
+        }
+
+        // CMF extreme zone — fires when CMF crosses into accumulation (>0.40) or distribution (<-0.40)
+        if (snap.cmfExtremeSignal() != null) {
+            EvalKey cmfKey = key("cmf", instrument, timeframe, "extreme");
+            if (isConfirmedTransition(cmfKey, snap.cmfExtremeSignal(),
+                    candleKey(cmfKey), snap.lastCandleTimestamp())) {
+                if ("ACCUMULATION".equals(snap.cmfExtremeSignal())) {
+                    alerts.add(new Alert("cmf:extreme:bullish:" + tf, AlertSeverity.WARNING,
+                        instrument.getDisplayName() + " [" + timeframe + "] — CMF Extreme Bullish Accumulation",
+                        AlertCategory.CHAIKIN, instrument.name()));
+                } else if ("DISTRIBUTION".equals(snap.cmfExtremeSignal())) {
+                    alerts.add(new Alert("cmf:extreme:bearish:" + tf, AlertSeverity.WARNING,
+                        instrument.getDisplayName() + " [" + timeframe + "] — CMF Extreme Bearish Distribution",
+                        AlertCategory.CHAIKIN, instrument.name()));
+                }
+            }
+        }
+
         // ── V2 transition signals (data-driven) ────────────────────────────
         for (TransitionSignalDef def : V2_TRANSITION_SIGNALS) {
             String signal = def.signalExtractor().apply(snap);

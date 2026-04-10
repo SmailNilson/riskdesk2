@@ -48,7 +48,9 @@ public record IndicatorAlertSnapshot(
     /** Stochastic %K signal: "OVERSOLD", "OVERBOUGHT", "NEUTRAL". */
     String stochSignal,
     /** Stochastic %K/%D crossover: "BULLISH_CROSS" or "BEARISH_CROSS". */
-    String stochCrossover
+    String stochCrossover,
+    /** CMF extreme zone signal: "ACCUMULATION" (CMF > 0.40), "DISTRIBUTION" (CMF < -0.40), "NEUTRAL". */
+    String cmfExtremeSignal
 ) {
     public record OrderBlockZone(String type, BigDecimal high, BigDecimal low) {}
 

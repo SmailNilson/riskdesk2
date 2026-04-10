@@ -166,7 +166,9 @@ public class AlertService {
                 || alert.category().name().equals("RSI")
                 || alert.category().name().equals("SMC")
                 || alert.category().name().equals("ORDER_BLOCK")
-                || alert.category().name().equals("ORDER_BLOCK_VWAP")) {
+                || alert.category().name().equals("ORDER_BLOCK_VWAP")
+                || alert.category().name().equals("CHAIKIN")
+                || alert.category().name().equals("SUPPORT_RESISTANCE")) {
                 continue;
             }
             publishAlert(alert, null);
@@ -269,8 +271,18 @@ public class AlertService {
             snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().high() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null,
             snapshot.stochSignal(),
-            snapshot.stochCrossover()
+            snapshot.stochCrossover(),
+            deriveCmfExtremeSignal(snapshot.cmf())
         );
+    }
+
+    private static final java.math.BigDecimal CMF_EXTREME_THRESHOLD = new java.math.BigDecimal("0.40");
+
+    private static String deriveCmfExtremeSignal(java.math.BigDecimal cmf) {
+        if (cmf == null) return "NEUTRAL";
+        if (cmf.compareTo(CMF_EXTREME_THRESHOLD) > 0) return "ACCUMULATION";
+        if (cmf.compareTo(CMF_EXTREME_THRESHOLD.negate()) < 0) return "DISTRIBUTION";
+        return "NEUTRAL";
     }
 
     /**

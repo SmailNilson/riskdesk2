@@ -186,6 +186,12 @@ Alert evaluation must use transition-based detection, not state-based:
 - this is a domain concern and must stay in the domain layer
 - `AlertService` in `application` orchestrates publishing and mentor review batching
 - indicator alert dedup remains key-based with a short shared cooldown; do not reintroduce timeframe-length blocking windows that suppress otherwise valid multiple alerts on `10m` or `1h`
+- the HTF trend pre-filter applies only to lower timeframes (5m, 10m) — H1 and 4h are excluded (`isLtf = !"4h" && !"1h"`)
+- standalone signals (weight ≥ 3.0: CHoCH, BOS, WaveTrend, OB, CMF extreme) bypass the HTF trend filter even on 5m/10m — structural breaks are inherently counter-trend
+- weak signals (weight < 3.0: EMA, MACD, RSI, Stochastic, etc.) remain filtered by HTF trend on LTF
+- Order Block TOUCH events (price entering an active OB zone) are qualified signals with weight 3.0, alongside MITIGATION and INVALIDATION
+- Strong S/R touches (STRONG_HIGH, STRONG_LOW) route through both the behaviour MONITOR path AND the qualified confluence pipeline (weight 1.0)
+- CMF extreme signals (|CMF| > 0.40) route through both the behaviour path AND the qualified pipeline as CHAIKIN category (weight 3.0)
 - when multiple indicators fire in the same polling cycle for the same instrument/timeframe/direction, the application layer batches them into a single mentor review via `captureGroupReview`
 - individual alerts are still published to WebSocket separately for the UI
 

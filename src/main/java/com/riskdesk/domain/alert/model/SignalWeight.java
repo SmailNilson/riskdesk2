@@ -27,7 +27,8 @@ public enum SignalWeight {
     MACD       (1.0f, "Momentum",       11),
     DELTA_FLOW (1.0f, "Flow",           12),
     RSI        (1.0f, "Oscillateur_RSI", 13),
-    STOCHASTIC (1.0f, "Oscillateur_Stoch", 14);
+    STOCHASTIC (1.0f, "Oscillateur_Stoch", 14),
+    SR_TOUCH   (1.0f, "Niveaux",           15);
 
     private static final Set<String> NON_CUMUL_FAMILIES = Set.of("Momentum", "Flow");
 
@@ -59,10 +60,11 @@ public enum SignalWeight {
 
         return switch (alert.category()) {
             case ORDER_BLOCK, ORDER_BLOCK_VWAP -> {
-                if (msg.contains("MITIGATED") || msg.contains("INVALIDATED"))
+                if (msg.contains("MITIGATED") || msg.contains("INVALIDATED") || msg.contains("ENTERED"))
                     yield SignalWeight.ORDER_BLOCK;
                 yield null;
             }
+            case SUPPORT_RESISTANCE -> SignalWeight.SR_TOUCH;
             case SMC -> {
                 if (msg.contains("CHOCH")) yield SignalWeight.CHOCH;
                 if (msg.contains("BOS"))   yield SignalWeight.BOS;

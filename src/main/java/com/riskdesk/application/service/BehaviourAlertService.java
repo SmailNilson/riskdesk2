@@ -1,6 +1,12 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IndicatorSnapshot;
+import com.riskdesk.domain.alert.model.Alert;
+import com.riskdesk.domain.alert.model.AlertCategory;
+import com.riskdesk.domain.alert.model.AlertSeverity;
+import com.riskdesk.domain.alert.model.SignalWeight;
+import com.riskdesk.domain.alert.service.SignalPreFilterService;
+import com.riskdesk.domain.behaviouralert.model.BehaviourAlertCategory;
 import com.riskdesk.domain.behaviouralert.model.BehaviourAlertContext;
 import com.riskdesk.domain.behaviouralert.model.BehaviourAlertContext.SrLevel;
 import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
@@ -18,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -39,11 +46,14 @@ public class BehaviourAlertService {
     /** Timeframes from which S/R levels are sourced (HTF only). */
     private static final String[] SR_SOURCE_TIMEFRAMES = {"1h", "4h", "1d"};
     private static final long DEDUP_COOLDOWN_SECONDS = 900L;
+    /** Strong S/R level types that also route through the confluence pipeline. */
+    private static final Set<String> STRONG_SR_TYPES = Set.of("STRONG_HIGH", "STRONG_LOW");
 
     private final IndicatorService indicatorService;
     private final BehaviourAlertEvaluator evaluator;
     private final SimpMessagingTemplate messagingTemplate;
     private final MentorSignalReviewService mentorSignalReviewService;
+    private final SignalConfluenceBuffer confluenceBuffer;
 
     // Independent key-based deduplication (cooldown per signal key)
     private final Map<String, Instant> lastFired = new ConcurrentHashMap<>();
@@ -51,11 +61,13 @@ public class BehaviourAlertService {
     public BehaviourAlertService(IndicatorService indicatorService,
                                   BehaviourAlertEvaluator evaluator,
                                   SimpMessagingTemplate messagingTemplate,
-                                  MentorSignalReviewService mentorSignalReviewService) {
+                                  MentorSignalReviewService mentorSignalReviewService,
+                                  SignalConfluenceBuffer confluenceBuffer) {
         this.indicatorService  = indicatorService;
         this.evaluator         = evaluator;
         this.messagingTemplate = messagingTemplate;
         this.mentorSignalReviewService = mentorSignalReviewService;
+        this.confluenceBuffer  = confluenceBuffer;
     }
 
     public void evaluate(Instrument instrument) {
@@ -72,6 +84,11 @@ public class BehaviourAlertService {
                     if (published && firstPublished == null) {
                         firstPublished = signal;
                     }
+                    // Route strong S/R touches through the qualified confluence pipeline
+                    if (published && signal.category() == BehaviourAlertCategory.SUPPORT_RESISTANCE
+                            && isStrongSrTouch(signal.message())) {
+                        routeStrongSrToConfluence(signal, tf, snap, instrument);
+                    }
                 }
                 if (firstPublished != null) {
                     try {
@@ -84,6 +101,35 @@ public class BehaviourAlertService {
                 log.debug("BehaviourAlertService error for {} {}: {}", instrument, tf, e.getMessage());
             }
         }
+    }
+
+    /**
+     * Routes a strong S/R touch signal through the qualified confluence pipeline.
+     * STRONG_HIGH → SHORT direction (price hitting resistance → rejection potential).
+     * STRONG_LOW  → LONG direction  (price hitting support → bounce potential).
+     */
+    private void routeStrongSrToConfluence(BehaviourAlertSignal signal, String timeframe,
+                                            IndicatorSnapshot snap, Instrument instrument) {
+        try {
+            Alert srAlert = new Alert(
+                signal.key(), AlertSeverity.WARNING, signal.message(),
+                AlertCategory.SUPPORT_RESISTANCE, instrument.name(), signal.timestamp()
+            );
+            String direction = SignalPreFilterService.extractDirection(srAlert);
+            if (direction == null) {
+                log.debug("Strong S/R touch direction could not be determined: {}", signal.message());
+                return;
+            }
+            log.info("STRONG S/R → confluence: {} {} {} direction={}",
+                    instrument.name(), timeframe, signal.message(), direction);
+            confluenceBuffer.accumulate(srAlert, timeframe, direction, snap, SignalWeight.SR_TOUCH);
+        } catch (Exception e) {
+            log.debug("Failed to route strong S/R to confluence: {}", e.getMessage());
+        }
+    }
+
+    private static boolean isStrongSrTouch(String message) {
+        return message != null && STRONG_SR_TYPES.stream().anyMatch(message::contains);
     }
 
     // -----------------------------------------------------------------------

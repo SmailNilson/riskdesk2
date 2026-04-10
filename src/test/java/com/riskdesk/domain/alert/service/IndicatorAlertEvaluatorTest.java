@@ -79,7 +79,7 @@ class IndicatorAlertEvaluatorTest {
             lastCandleTimestamp,
             null, null, close, null, Collections.emptyList(), Collections.emptyList(),
             null, null, null, null, null, null, null, null,
-            null, null
+            null, null, null
         );
     }
 
@@ -95,7 +95,7 @@ class IndicatorAlertEvaluatorTest {
                 lastCandleTimestamp,
                 null, null, null, null, Collections.emptyList(), Collections.emptyList(),
                 null, null, null, null, null, null, null, null,
-            null, null
+            null, null, null
         );
     }
 
