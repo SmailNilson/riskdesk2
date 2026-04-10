@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -1185,27 +1186,65 @@ public class MentorSignalReviewService {
         return (int) Math.round(100.0 * below / atrHistory.size());
     }
 
+    /**
+     * Finds the nearest Order Block for a given directional bias.
+     *
+     * <p>Search priority:
+     * <ol>
+     *   <li>Active OBs (untested demand/supply zones) — highest conviction</li>
+     *   <li>Breaker OBs (invalidated + type-flipped zones) — recently broken levels
+     *       acting as support/resistance in opposite direction, often closer to price</li>
+     *   <li>Structural swing levels (weakLow/strongLow/weakHigh/strongHigh) — last resort</li>
+     * </ol>
+     *
+     * The closest OB across both active and breaker pools wins. Breaker blocks are
+     * tagged with {@code DEMAND_BREAKER} / {@code SUPPLY_BREAKER} so Gemini can
+     * differentiate them from untested zones.
+     */
     private Map<String, Object> findNearestOrderBlock(IndicatorSnapshot snapshot, BigDecimal currentPrice, String bias) {
-        if (currentPrice == null || snapshot.activeOrderBlocks() == null) {
+        if (currentPrice == null) {
             return null;
         }
 
-        List<IndicatorSnapshot.OrderBlockView> filtered = snapshot.activeOrderBlocks().stream()
-            .filter(block -> "BULLISH".equals(bias)
-                ? block.mid().compareTo(currentPrice) <= 0
-                : block.mid().compareTo(currentPrice) >= 0)
-            .sorted((left, right) -> left.mid().subtract(currentPrice).abs().compareTo(right.mid().subtract(currentPrice).abs()))
-            .toList();
-        if (!filtered.isEmpty()) {
-            IndicatorSnapshot.OrderBlockView nearest = filtered.get(0);
+        // Merge active + breaker OBs into a single candidate pool
+        record Candidate(IndicatorSnapshot.OrderBlockView ob, boolean isBreaker) {}
+        List<Candidate> candidates = new ArrayList<>();
+
+        if (snapshot.activeOrderBlocks() != null) {
+            for (IndicatorSnapshot.OrderBlockView ob : snapshot.activeOrderBlocks()) {
+                candidates.add(new Candidate(ob, false));
+            }
+        }
+        if (snapshot.breakerOrderBlocks() != null) {
+            for (IndicatorSnapshot.OrderBlockView ob : snapshot.breakerOrderBlocks()) {
+                candidates.add(new Candidate(ob, true));
+            }
+        }
+
+        // Filter by bias direction: BULLISH → OBs below price, BEARISH → OBs above price
+        Optional<Candidate> nearest = candidates.stream()
+            .filter(c -> "BULLISH".equals(bias)
+                ? c.ob().mid().compareTo(currentPrice) <= 0
+                : c.ob().mid().compareTo(currentPrice) >= 0)
+            .min(Comparator.comparing(c -> c.ob().mid().subtract(currentPrice).abs()));
+
+        if (nearest.isPresent()) {
+            Candidate c = nearest.get();
+            String type;
+            if (c.isBreaker()) {
+                type = "BULLISH".equals(bias) ? "DEMAND_BREAKER" : "SUPPLY_BREAKER";
+            } else {
+                type = "BULLISH".equals(bias) ? "DEMAND" : "SUPPLY";
+            }
             return Map.of(
-                "type", "BULLISH".equals(bias) ? "DEMAND" : "SUPPLY",
-                "price_top", nearest.high(),
-                "price_bottom", nearest.low(),
-                "is_tested", false
+                "type", type,
+                "price_top", c.ob().high(),
+                "price_bottom", c.ob().low(),
+                "is_tested", c.isBreaker()
             );
         }
 
+        // Fallback: structural swing levels
         BigDecimal structuralLevel = "BULLISH".equals(bias)
             ? pickNearestLevel(currentPrice, Stream.of(snapshot.weakLow(), snapshot.strongLow()).filter(Objects::nonNull).toList(), true)
             : pickNearestLevel(currentPrice, Stream.of(snapshot.weakHigh(), snapshot.strongHigh()).filter(Objects::nonNull).toList(), false);

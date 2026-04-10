@@ -9,6 +9,7 @@ import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.contract.event.ContractRolloverEvent;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
@@ -48,6 +49,7 @@ public class AlertService {
     private final MentorSignalReviewService mentorSignalReviewService;
     private final SignalConfluenceBuffer    confluenceBuffer;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final MarketRegimeDetector      regimeDetector = new MarketRegimeDetector();
 
     // Recent alerts buffer (last 50) for REST endpoint
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
@@ -135,9 +137,14 @@ public class AlertService {
 
                 signalPreFilterService.recordSignals(indicatorAlerts, timeframe);
 
+                // Compute market regime for this timeframe to gate oscillator noise
+                String regime = regimeDetector.detect(
+                        snap.ema9(), snap.ema50(), snap.ema200(), snap.bbTrendExpanding());
+
                 // H4 trend filters 1H signals; H1 trend filters 5m/10m signals
                 String htfTrend = "1h".equals(timeframe) ? h4Trend : h1Trend;
-                List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, htfTrend);
+                List<Alert> filteredAlerts = signalPreFilterService.filter(
+                        indicatorAlerts, timeframe, htfTrend, regime);
 
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
