@@ -80,4 +80,10 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     public int markAnalyzingAsError(String errorMessage) {
         return repository.markAnalyzingAsError(errorMessage, Instant.now());
     }
+
+    @Override
+    @Transactional
+    public int markStaleAnalyzingAsError(String errorMessage, Instant createdBefore) {
+        return repository.markStaleAnalyzingAsError(errorMessage, createdBefore, Instant.now());
+    }
 }

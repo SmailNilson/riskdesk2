@@ -30,4 +30,8 @@ public interface MentorSignalReviewJpaRepository extends JpaRepository<MentorSig
     @Modifying
     @Query("UPDATE MentorSignalReviewEntity e SET e.status = 'ERROR', e.completedAt = ?2, e.errorMessage = ?1 WHERE e.status = 'ANALYZING'")
     int markAnalyzingAsError(String errorMessage, Instant completedAt);
+
+    @Modifying
+    @Query("UPDATE MentorSignalReviewEntity e SET e.status = 'ERROR', e.completedAt = ?3, e.errorMessage = ?1 WHERE e.status = 'ANALYZING' AND e.createdAt < ?2")
+    int markStaleAnalyzingAsError(String errorMessage, Instant createdBefore, Instant completedAt);
 }

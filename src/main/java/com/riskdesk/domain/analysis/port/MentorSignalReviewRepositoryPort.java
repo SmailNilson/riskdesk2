@@ -33,4 +33,7 @@ public interface MentorSignalReviewRepositoryPort {
 
     /** Mark all reviews stuck in ANALYZING as ERROR (orphaned by server restart). */
     int markAnalyzingAsError(String errorMessage);
+
+    /** Mark reviews stuck in ANALYZING created before cutoff as ERROR (runtime safety net). */
+    int markStaleAnalyzingAsError(String errorMessage, java.time.Instant createdBefore);
 }
