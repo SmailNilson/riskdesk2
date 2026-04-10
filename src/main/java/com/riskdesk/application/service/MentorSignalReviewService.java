@@ -33,6 +33,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -48,6 +49,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 @Service
@@ -76,6 +80,13 @@ public class MentorSignalReviewService {
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
+
+    /** Dedicated executor for Gemini analysis — avoids ForkJoinPool.commonPool() starvation. */
+    private final ExecutorService mentorExecutor = Executors.newFixedThreadPool(4,
+            r -> { Thread t = new Thread(r, "mentor-analysis"); t.setDaemon(true); return t; });
+
+    /** Max seconds a CompletableFuture may run before auto-failing the review. */
+    private static final long ANALYSIS_TIMEOUT_SECONDS = 180;
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
     private volatile boolean autoAnalysisEnabled;
@@ -114,6 +125,17 @@ public class MentorSignalReviewService {
         int cleaned = reviewRepository.markAnalyzingAsError("Server restarted while analysis was in progress.");
         if (cleaned > 0) {
             log.info("MentorSignalReviewService: marked {} stale ANALYZING reviews as ERROR on startup.", cleaned);
+        }
+    }
+
+    /** Safety net: mark reviews stuck in ANALYZING for > 5 minutes as ERROR (runs every 2 min). */
+    @Scheduled(fixedDelay = 120_000, initialDelay = 300_000)
+    void cleanupStaleAnalyzingReviewsPeriodic() {
+        Instant cutoff = Instant.now().minusSeconds(300);
+        int cleaned = reviewRepository.markStaleAnalyzingAsError(
+                "Analysis timed out (stuck > 5 min).", cutoff);
+        if (cleaned > 0) {
+            log.warn("Periodic cleanup: marked {} stale ANALYZING reviews as ERROR.", cleaned);
         }
     }
 
@@ -238,7 +260,7 @@ public class MentorSignalReviewService {
 
         if (snapshotError == null && payload != null) {
             JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
+            submitAnalysis(saved.getId(), reviewPayload);
         }
     }
 
@@ -343,11 +365,7 @@ public class MentorSignalReviewService {
 
         if (snapshotError == null && payload != null) {
             JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload))
-                .exceptionally(ex -> {
-                    log.error("Async analysis failed for review {}", saved.getId(), ex);
-                    return null;
-                });
+            submitAnalysis(saved.getId(), reviewPayload);
         }
     }
 
@@ -482,11 +500,7 @@ public class MentorSignalReviewService {
             publish(saved);
             JsonNode reviewPayload = payload;
             Long savedReviewId = saved.getId();
-            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload))
-                .exceptionally(ex -> {
-                    log.error("Async reanalysis failed for review {}", savedReviewId, ex);
-                    return null;
-                });
+            submitAnalysis(savedReviewId, reviewPayload);
         } catch (Exception e) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -560,9 +574,28 @@ public class MentorSignalReviewService {
         return null;
     }
 
+    /**
+     * Submits a Gemini analysis on the dedicated mentor executor with timeout and error recovery.
+     */
+    private void submitAnalysis(Long reviewId, JsonNode payload) {
+        CompletableFuture.runAsync(() -> analyzeAndPersist(reviewId, payload), mentorExecutor)
+            .orTimeout(ANALYSIS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .exceptionally(ex -> {
+                log.error("Async analysis failed or timed out for review {}", reviewId, ex);
+                completeWithError(reviewId, "Analysis timed out or failed: " + ex.getMessage());
+                return null;
+            });
+    }
+
     private void analyzeAndPersist(Long reviewId, JsonNode payload) {
         if (payload == null) {
             completeWithError(reviewId, "Saved alert snapshot is not available.");
+            return;
+        }
+
+        // Guard: skip if review was already completed (e.g. by timeout or cleanup)
+        MentorSignalReviewRecord guard = reviewRepository.findById(reviewId).orElse(null);
+        if (guard == null || !STATUS_ANALYZING.equals(guard.getStatus())) {
             return;
         }
 
