@@ -999,26 +999,30 @@ public class MentorSignalReviewService {
             + ":" + alert.category().name() + ":" + alert.message();
     }
 
-    /** Timeframe-aware semantic dedup window: base duration × 5. */
     /**
-     * Semantic dedup window = 2× the timeframe duration.
-     * Previous ×5 multiplier was too aggressive — blocked re-evaluation when
-     * market conditions changed (e.g. LONG rejected at 02:00, price moved 20pts
-     * by 02:40 but dedup still active for 50 min on 10m).
+     * Semantic dedup window — prevents duplicate reviews for the same signal type.
+     *
+     * <p>Lower timeframes (5m, 10m): 2× the candle period so rapid-fire signals
+     * within two candle closes are deduped (e.g. 10m → 20 min window).
+     *
+     * <p>H1: window must be LESS than one candle period (45 min) because H1 signals
+     * bypass the confluence buffer and each candle close is independently valuable.
+     * A 2× multiplier (2h) blocked consecutive H1 candles when a signal persisted
+     * (e.g. WaveTrend stays oversold for 2h → second candle's review was silently
+     * dropped while the frontend showed "No Review" with 3 signals).
      */
     static long semanticDedupWindowSeconds(String timeframe) {
-        long base = switch (timeframe) {
-            case "1m"  -> 60;
-            case "5m"  -> 300;
-            case "10m" -> 600;
-            case "15m" -> 900;
-            case "30m" -> 1800;
-            case "1h"  -> 3600;
-            case "4h"  -> 14400;
-            case "1d"  -> 86400;
-            default    -> 3600;
+        return switch (timeframe) {
+            case "1m"  -> 60 * 2;
+            case "5m"  -> 300 * 2;
+            case "10m" -> 600 * 2;
+            case "15m" -> 900 * 2;
+            case "30m" -> 1800 * 2;
+            case "1h"  -> 2700;     // 45 min — less than one candle so each H1 close gets its own review
+            case "4h"  -> 14400 * 2;
+            case "1d"  -> 86400 * 2;
+            default    -> 3600 * 2;
         };
-        return base * 2;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {
