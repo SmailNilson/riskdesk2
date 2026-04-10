@@ -264,8 +264,13 @@ public class IndicatorAlertEvaluator {
         return true;
     }
 
-    /** OB zone midpoint must be within 1.5% of current price to generate an alert. */
-    private static final BigDecimal OB_PROXIMITY_THRESHOLD = new BigDecimal("0.015");
+    /**
+     * OB zone midpoint must be within 5% of current price to generate an alert.
+     * Widened from 1.5% — the previous threshold silently filtered OBs that were
+     * within valid structural range (2-5× ATR). Noise is now controlled upstream
+     * by the regime gate and structural anchor requirement in the confluence buffer.
+     */
+    private static final BigDecimal OB_PROXIMITY_THRESHOLD = new BigDecimal("0.05");
 
     private static boolean isObProximate(BigDecimal price, BigDecimal obHigh, BigDecimal obLow) {
         if (price == null || obHigh == null || obLow == null || price.signum() == 0) return false;

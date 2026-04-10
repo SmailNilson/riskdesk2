@@ -34,6 +34,18 @@ public class SignalConfluenceBuffer {
     private static final Logger log = LoggerFactory.getLogger(SignalConfluenceBuffer.class);
     private static final float FLUSH_THRESHOLD = 3.0f;
 
+    /**
+     * Families that count as "structural anchor" — Gemini's decision hierarchy is
+     * Structure 50% > Order Flow 30% > Momentum 20%. A confluence flush without
+     * at least one structural signal produces reviews that Gemini systematically rejects.
+     */
+    private static final Set<String> STRUCTURAL_FAMILIES = Set.of(
+            "Structure",     // ORDER_BLOCK
+            "SMC",           // CHoCH, BOS
+            "Liquidite",     // EQH/EQL sweeps
+            "Structure_FVG"  // Fair Value Gaps
+    );
+
     private final ConcurrentHashMap<String, BufferEntry> buffers = new ConcurrentHashMap<>();
     private final MentorSignalReviewService mentorSignalReviewService;
 
@@ -84,6 +96,15 @@ public class SignalConfluenceBuffer {
         Alert primary = entry.primarySignal();
 
         if (weight >= FLUSH_THRESHOLD && primary != null) {
+            // Structural anchor check: reject pure oscillator/momentum accumulation.
+            // Gemini's hierarchy is Structure 50% > Flow 30% > Momentum 20%.
+            // Without structural backing, reviews are systematically rejected.
+            if (!entry.hasStructuralAnchor()) {
+                log.info("CONFLUENCE REJECTED [{}] weight={} signals={} — no structural anchor, "
+                        + "pure oscillator/momentum noise discarded", key, weight, entry.signals.size());
+                return;
+            }
+
             // Read opposing buffer weight
             String oppositeKey = oppositeKey(key);
             float opposingWeight = Optional.ofNullable(buffers.get(oppositeKey))
@@ -123,6 +144,8 @@ public class SignalConfluenceBuffer {
         private final Map<String, Float> nonCumulWeights = new HashMap<>();
         /** Cumulative families: first-signal-wins per type. */
         private final Map<String, Float> cumulWeights = new HashMap<>();
+        /** Tracks which signal families contributed to this buffer. */
+        private final Set<String> presentFamilies = new HashSet<>();
         IndicatorSnapshot latestSnapshot;
         final Instant firstSignalTime;
         final String timeframe;
@@ -137,11 +160,21 @@ public class SignalConfluenceBuffer {
         void addSignal(Alert alert, IndicatorSnapshot snap, SignalWeight sw) {
             signals.add(alert);
             latestSnapshot = snap;
+            presentFamilies.add(sw.family());
             if (SignalWeight.isNonCumulFamily(sw.family())) {
                 nonCumulWeights.merge(sw.family(), sw.weight(), Math::max);
             } else {
                 cumulWeights.merge(sw.family() + ":" + sw.name(), sw.weight(), (old, v) -> old);
             }
+        }
+
+        /**
+         * Returns true if the buffer contains at least one signal from a structural family
+         * (Structure, SMC, Liquidite, FVG). Pure oscillator/momentum/flow combinations
+         * without structural backing are systematically rejected by Gemini.
+         */
+        boolean hasStructuralAnchor() {
+            return presentFamilies.stream().anyMatch(STRUCTURAL_FAMILIES::contains);
         }
 
         float effectiveWeight() {
