@@ -94,7 +94,7 @@ public class SignalPreFilterService {
 
     // ── Filter logic ──────────────────────────────────────────────────────────
 
-    /** Signal families suppressed in CHOPPY/RANGING regimes — pure noise without trend backing. */
+    /** Signal families suppressed in CHOPPY regimes — pure noise without trend backing. */
     private static final Set<String> NOISE_FAMILIES_IN_CHOP = Set.of(
             "Momentum",          // EMA crosses, MACD histogram whispers
             "Oscillateur",       // WaveTrend threshold bouncing
@@ -109,11 +109,12 @@ public class SignalPreFilterService {
         String direction = extractDirection(alert);
 
         // Rule 5: Regime-Aware Noise Suppression — block oscillator/momentum signals
-        // in CHOPPY/RANGING regimes where they produce only whipsaw noise.
+        // in CHOPPY regimes where they produce only whipsaw noise.
+        // RANGING is allowed: most valid trades happen in BB CONTRACTING / RANGING markets.
         // Only applied on LTF (5m/10m). H1 signals are rare + high-value and always pass.
         // Structural signals (SMC, OrderBlock, EqualLevel, FVG, Flow) always pass.
         if (isLtf && !"1h".equals(timeframe)
-                && ("CHOPPY".equals(regime) || "RANGING".equals(regime))) {
+                && "CHOPPY".equals(regime)) {
             SignalWeight sw = SignalWeight.fromAlert(alert);
             if (sw != null && NOISE_FAMILIES_IN_CHOP.contains(sw.family())) {
                 log.debug("REGIME-GATE [{}] blocked '{}' family={} — {} regime suppresses oscillator noise",

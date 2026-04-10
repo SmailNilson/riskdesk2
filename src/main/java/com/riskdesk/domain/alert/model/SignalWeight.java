@@ -7,10 +7,10 @@ import java.util.Set;
  * Confluence weight, family, and structural priority for each qualified signal type.
  *
  * <p><b>Arm &amp; Fire model:</b> Signals with weight 3.0 ("standalone") ARM a HTF buffer
- * on their own. Only ORDER_BLOCK and CHoCH qualify — they represent rare structural
- * events with high conviction. Signals at 2.0 ("semi-standalone") need at least one
- * confirming signal (+1.0) to reach the flush threshold. Signals at 1.0 require broader
- * confluence (3 signals or 1 semi-standalone + 1 secondary).
+ * on their own. ORDER_BLOCK, CHoCH, and BOS qualify — they represent structural
+ * events with high conviction. Signals at 2.5 ("near-standalone") need one secondary
+ * signal (+1.0) to reach the flush threshold. Signals at 2.0 need at least one
+ * confirming signal. Signals at 1.0 require broader confluence.
  *
  * <p>Non-cumul rule: within families {@code Momentum} and {@code Flow},
  * only the maximum weight counts (EMA + MACD = 1.0, not 2.0).
@@ -19,8 +19,8 @@ public enum SignalWeight {
 
     ORDER_BLOCK(3.0f, "Structure",       1),
     CHOCH      (3.0f, "SMC",             2),
-    WAVETREND  (2.0f, "Oscillateur",     3),   // downgraded: oscillator, needs +1.0 confluence
-    BOS        (2.0f, "SMC",             4),   // downgraded: continuation break, noisy in chop
+    WAVETREND  (2.5f, "Oscillateur",     3),   // near-standalone: needs +1.0 secondary to flush
+    BOS        (3.0f, "SMC",             4),   // standalone: structural break, 100% win rate in backtest
     CHAIKIN    (2.0f, "Flow",            5),   // downgraded: flow oscillator, needs structure
     EQUAL_LEVEL(1.0f, "Liquidite",       6),
     FVG        (1.0f, "Structure_FVG",   7),
