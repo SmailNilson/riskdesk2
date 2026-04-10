@@ -517,6 +517,7 @@ export interface MentorSignalReview {
   analysis: MentorAnalyzeResponse | null;
   errorMessage: string | null;
   triggerPrice: number | null;
+  opusAnnotation: string | null;
 }
 
 export interface MentorAlertReviewRequest {

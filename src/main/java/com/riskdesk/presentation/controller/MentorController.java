@@ -158,6 +158,15 @@ public class MentorController {
         }
     }
 
+    @PatchMapping("/auto-alerts/{id}/annotation")
+    public MentorSignalReview annotateReview(@PathVariable Long id, @RequestBody Map<String, String> body) {
+        String annotation = body.get("annotation");
+        if (annotation == null || annotation.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "annotation is required");
+        }
+        return mentorSignalReviewService.annotateReview(id, annotation);
+    }
+
     @PostMapping("/executions")
     public TradeExecutionView createExecution(@Valid @RequestBody CreateTradeExecutionRequest request) {
         try {

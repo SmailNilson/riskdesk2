@@ -31,6 +31,7 @@ public record MentorSignalReview(
     Double bestFavorablePrice,
     MentorAnalyzeResponse analysis,
     String errorMessage,
-    Double triggerPrice
+    Double triggerPrice,
+    String opusAnnotation
 ) {
 }

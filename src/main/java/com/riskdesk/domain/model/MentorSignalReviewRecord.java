@@ -23,6 +23,7 @@ public class MentorSignalReviewRecord {
     private String analysisJson;
     private String verdict;
     private String errorMessage;
+    private String opusAnnotation;
     private ExecutionEligibilityStatus executionEligibilityStatus;
     private String executionEligibilityReason;
     private TradeSimulationStatus simulationStatus;
@@ -185,6 +186,14 @@ public class MentorSignalReviewRecord {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public String getOpusAnnotation() {
+        return opusAnnotation;
+    }
+
+    public void setOpusAnnotation(String opusAnnotation) {
+        this.opusAnnotation = opusAnnotation;
     }
 
     public ExecutionEligibilityStatus getExecutionEligibilityStatus() {

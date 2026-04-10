@@ -90,6 +90,9 @@ public class MentorSignalReviewEntity {
     @Column(columnDefinition = "TEXT")
     private String errorMessage;
 
+    @Column(columnDefinition = "TEXT")
+    private String opusAnnotation;
+
     @Enumerated(EnumType.STRING)
     @Column(length = 32)
     private ExecutionEligibilityStatus executionEligibilityStatus = ExecutionEligibilityStatus.NOT_EVALUATED;
@@ -276,6 +279,14 @@ public class MentorSignalReviewEntity {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public String getOpusAnnotation() {
+        return opusAnnotation;
+    }
+
+    public void setOpusAnnotation(String opusAnnotation) {
+        this.opusAnnotation = opusAnnotation;
     }
 
     public ExecutionEligibilityStatus getExecutionEligibilityStatus() {

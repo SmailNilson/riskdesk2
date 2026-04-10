@@ -803,6 +803,13 @@ export default function MentorSignalPanel({
                             Analyse structuree indisponible pour cette review sauvegardee.
                           </div>
                         ) : null}
+
+                        {review.opusAnnotation ? (
+                          <div className="mt-2 rounded border border-purple-900/40 bg-purple-950/20 px-3 py-2 text-[11px]">
+                            <div className="mb-1 text-[10px] font-bold uppercase tracking-widest text-purple-400">Opus Audit</div>
+                            <div className="whitespace-pre-wrap text-purple-200">{review.opusAnnotation}</div>
+                          </div>
+                        ) : null}
                       </div>
                     ))}
                   </div>

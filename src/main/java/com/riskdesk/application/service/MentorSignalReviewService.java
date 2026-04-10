@@ -711,8 +711,17 @@ public class MentorSignalReviewService {
             review.getBestFavorablePrice() == null ? null : review.getBestFavorablePrice().doubleValue(),
             analysis,
             review.getErrorMessage(),
-            review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue()
+            review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue(),
+            review.getOpusAnnotation()
         );
+    }
+
+    public MentorSignalReview annotateReview(Long reviewId, String annotation) {
+        MentorSignalReviewRecord review = reviewRepository.findById(reviewId)
+                .orElseThrow(() -> new IllegalArgumentException("Review not found: " + reviewId));
+        review.setOpusAnnotation(annotation);
+        MentorSignalReviewRecord saved = reviewRepository.save(review);
+        return toDto(saved);
     }
 
     private void initializeSimulationState(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {

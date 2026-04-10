@@ -29,6 +29,7 @@ final class MentorSignalReviewEntityMapper {
         entity.setAnalysisJson(review.getAnalysisJson());
         entity.setVerdict(review.getVerdict());
         entity.setErrorMessage(review.getErrorMessage());
+        entity.setOpusAnnotation(review.getOpusAnnotation());
         entity.setExecutionEligibilityStatus(review.getExecutionEligibilityStatus());
         entity.setExecutionEligibilityReason(review.getExecutionEligibilityReason());
         entity.setSimulationStatus(review.getSimulationStatus());
@@ -64,6 +65,7 @@ final class MentorSignalReviewEntityMapper {
         review.setAnalysisJson(entity.getAnalysisJson());
         review.setVerdict(entity.getVerdict());
         review.setErrorMessage(entity.getErrorMessage());
+        review.setOpusAnnotation(entity.getOpusAnnotation());
         review.setExecutionEligibilityStatus(entity.getExecutionEligibilityStatus());
         review.setExecutionEligibilityReason(entity.getExecutionEligibilityReason());
         review.setSimulationStatus(entity.getSimulationStatus());
