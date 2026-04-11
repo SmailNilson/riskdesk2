@@ -7,6 +7,7 @@ import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayResolvedContract;
+import com.riskdesk.infrastructure.marketdata.ibkr.SubscriptionRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -15,6 +16,7 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -38,6 +40,7 @@ public class OrderFlowOrchestrator {
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final SimpMessagingTemplate messagingTemplate;
     private final TickLogService tickLogService;
+    private final SubscriptionRegistry subscriptionRegistry;
 
     private volatile boolean tickByTickSubscribed = false;
     private volatile boolean depthSubscribed = false;
@@ -47,13 +50,22 @@ public class OrderFlowOrchestrator {
                                   OrderFlowProperties properties,
                                   ObjectProvider<TickDataPort> tickDataPortProvider,
                                   SimpMessagingTemplate messagingTemplate,
-                                  TickLogService tickLogService) {
+                                  TickLogService tickLogService,
+                                  SubscriptionRegistry subscriptionRegistry) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
         this.properties = properties;
         this.tickDataPortProvider = tickDataPortProvider;
         this.messagingTemplate = messagingTemplate;
         this.tickLogService = tickLogService;
+        this.subscriptionRegistry = subscriptionRegistry;
+    }
+
+    @PostConstruct
+    void wireReconnectionSupport() {
+        nativeClient.setSubscriptionRegistry(subscriptionRegistry);
+        nativeClient.setContractResolver(contractResolver);
+        nativeClient.setDepthNumRows(properties.getDepth().getNumRows());
     }
 
     // -------------------------------------------------------------------------
@@ -175,6 +187,44 @@ public class OrderFlowOrchestrator {
             payload.put("timestamp", java.time.Instant.now().toString());
 
             messagingTemplate.convertAndSend("/topic/order-flow", payload);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Connection health check — UC-OF-015
+    // -------------------------------------------------------------------------
+
+    /**
+     * Periodically checks connection health and triggers resubscription if needed.
+     * If the connection is down, logs a warning. If the connection is up but
+     * subscriptions were previously active and may have been lost, triggers
+     * resubscribeAll() to restore them.
+     */
+    @Scheduled(fixedDelay = 60_000, initialDelay = 120_000)
+    public void checkConnectionHealth() {
+        if (!nativeClient.isConnected()) {
+            log.warn("Connection health check: IBKR not connected — subscriptions may be stale");
+            return;
+        }
+
+        // If tick-by-tick was subscribed but no real tick data is flowing,
+        // trigger resubscription
+        if (tickByTickSubscribed) {
+            TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
+            if (tickDataPort == null) return;
+
+            boolean anyDataFlowing = false;
+            for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+                if (tickDataPort.isRealTickDataAvailable(instrument)) {
+                    anyDataFlowing = true;
+                    break;
+                }
+            }
+
+            if (!anyDataFlowing) {
+                log.warn("Connection health check: connected but no tick data flowing — triggering resubscribeAll");
+                nativeClient.resubscribeAll();
+            }
         }
     }
 

@@ -99,6 +99,9 @@ public class IbGatewayNativeClient {
     private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
     private volatile StreamingPriceListener priceListener;
     private volatile IbkrTickDataAdapter tickDataAdapter;
+    private volatile SubscriptionRegistry subscriptionRegistry;
+    private volatile IbGatewayContractResolver contractResolverRef;
+    private volatile int depthNumRows = 10;
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
@@ -110,6 +113,29 @@ public class IbGatewayNativeClient {
      */
     public void setTickDataAdapter(IbkrTickDataAdapter adapter) {
         this.tickDataAdapter = adapter;
+    }
+
+    /**
+     * Registers the subscription registry that tracks intended subscriptions
+     * for reconnection resilience (UC-OF-015).
+     */
+    public void setSubscriptionRegistry(SubscriptionRegistry registry) {
+        this.subscriptionRegistry = registry;
+    }
+
+    /**
+     * Registers the contract resolver used by {@link #resubscribeAll()} to map
+     * instruments back to IBKR contracts after a reconnection.
+     */
+    public void setContractResolver(IbGatewayContractResolver resolver) {
+        this.contractResolverRef = resolver;
+    }
+
+    /**
+     * Sets the default depth row count for resubscription.
+     */
+    public void setDepthNumRows(int numRows) {
+        this.depthNumRows = numRows;
     }
 
     /**
@@ -165,6 +191,13 @@ public class IbGatewayNativeClient {
                     try { ctrl.cancelTickByTickData(oldTick); } catch (Exception ignored) {}
                     log.info("Rollover: cancelled tick-by-tick for old contract {}", describeContract(oldContract));
                 }
+
+                // Cancel depth subscription for old contract
+                DepthSubscription oldDepth = depthSubscriptions.remove(oldKey);
+                if (oldDepth != null && ctrl != null) {
+                    try { ctrl.cancelDeepMktData(false, oldDepth); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled depth for old contract {}", describeContract(oldContract));
+                }
             }
         }
 
@@ -178,6 +211,10 @@ public class IbGatewayNativeClient {
             // Re-subscribe tick-by-tick if adapter is wired
             if (tickDataAdapter != null && instrument != null) {
                 subscribeTickByTick(newContract, instrument);
+            }
+            // Re-subscribe depth if adapter is wired
+            if (depthAdapter != null && instrument != null) {
+                subscribeDepth(newContract, instrument, depthNumRows);
             }
             log.info("Rollover: subscribed to new contract {}", describeContract(newContract));
         }
@@ -613,6 +650,13 @@ public class IbGatewayNativeClient {
             controller.reqRealTimeBars(contract, WhatToShow.TRADES, false, subscription);
             streamingSubscriptions.put(key, subscription);
             log.info("IB Gateway live stream subscribed for {}", describeContract(contract));
+
+            // Register in subscription registry for reconnection resilience
+            SubscriptionRegistry reg = subscriptionRegistry;
+            Instrument inst = contractKeyToInstrument.get(key);
+            if (reg != null && inst != null) {
+                reg.register(inst, SubscriptionRegistry.SubscriptionType.PRICE);
+            }
         }
     }
 
@@ -737,6 +781,12 @@ public class IbGatewayNativeClient {
             controller.reqTickByTickData(contract, "AllLast", 0, false, subscription);
             tickByTickSubscriptions.put(key, subscription);
             log.info("IB Gateway tick-by-tick AllLast subscribed for {} ({})", instrument, describeContract(contract));
+
+            // Register in subscription registry for reconnection resilience
+            SubscriptionRegistry reg = subscriptionRegistry;
+            if (reg != null) {
+                reg.register(instrument, SubscriptionRegistry.SubscriptionType.TICK_BY_TICK);
+            }
         }
     }
 
@@ -789,6 +839,12 @@ public class IbGatewayNativeClient {
             controller.reqDeepMktData(contract, numRows, false, subscription);
             depthSubscriptions.put(key, subscription);
             log.info("IB Gateway market depth subscribed for {} ({} rows)", instrument, numRows);
+
+            // Register in subscription registry for reconnection resilience
+            SubscriptionRegistry reg = subscriptionRegistry;
+            if (reg != null) {
+                reg.register(instrument, SubscriptionRegistry.SubscriptionType.DEPTH);
+            }
         }
     }
 
@@ -809,6 +865,61 @@ public class IbGatewayNativeClient {
                 adapter.onDepthUpdate(instrument, position,
                     operation.name(), side.name(), price,
                     size != null ? size.longValue() : 0);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Reconnection resilience — UC-OF-015
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-subscribes all entries from the {@link SubscriptionRegistry}.
+     * Called after a reconnection to restore price, quote, tick-by-tick, and depth streams.
+     *
+     * <p>Requires a contract resolver to have been set via {@link #setContractResolver}.
+     * Entries whose contracts cannot be resolved are skipped with a warning.</p>
+     */
+    public void resubscribeAll() {
+        SubscriptionRegistry reg = subscriptionRegistry;
+        IbGatewayContractResolver resolver = contractResolverRef;
+
+        if (reg == null || resolver == null) {
+            log.warn("resubscribeAll: registry or contract resolver not wired — skipping");
+            return;
+        }
+
+        if (!isConnected()) {
+            log.warn("resubscribeAll: not connected — skipping");
+            return;
+        }
+
+        var entries = reg.allEntries();
+        log.info("resubscribeAll: restoring {} subscriptions after reconnect", entries.size());
+
+        for (var entry : entries) {
+            Instrument instrument = entry.instrument();
+            if (!instrument.isExchangeTradedFuture()) continue;
+
+            Optional<IbGatewayResolvedContract> resolved = resolver.resolve(instrument);
+            if (resolved.isEmpty()) {
+                log.warn("resubscribeAll: cannot resolve contract for {} — skipping", instrument);
+                continue;
+            }
+
+            Contract contract = resolved.get().contract();
+            registerInstrumentMapping(contract, instrument);
+
+            try {
+                switch (entry.type()) {
+                    case PRICE -> ensureStreamingPriceSubscription(contract);
+                    case QUOTE -> ensureStreamingQuoteSubscription(contract);
+                    case TICK_BY_TICK -> subscribeTickByTick(contract, instrument);
+                    case DEPTH -> subscribeDepth(contract, instrument, depthNumRows);
+                }
+            } catch (Exception e) {
+                log.warn("resubscribeAll: failed to resubscribe {} {} — {}",
+                    entry.type(), instrument, e.getMessage());
             }
         }
     }

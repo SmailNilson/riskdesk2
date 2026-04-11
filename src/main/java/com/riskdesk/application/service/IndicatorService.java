@@ -14,6 +14,8 @@ import com.riskdesk.domain.orderflow.model.*;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.orderflow.service.SmcOrderFlowEnricher;
 import com.riskdesk.domain.shared.CandleSeriesNormalizer;
+import com.riskdesk.domain.shared.SessionPhase;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -77,6 +79,7 @@ public class IndicatorService {
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
     private final StochasticIndicator stochastic = new StochasticIndicator(14, 3, 3);
+    private final VolumeProfileCalculator volumeProfile = new VolumeProfileCalculator();
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     // UC-SMC-010: FVG detector with threshold filtering and visual extension
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(
@@ -312,6 +315,16 @@ public class IndicatorService {
         IndicatorSnapshot.MtfLevelsView mtfLevels =
                 new IndicatorSnapshot.MtfLevelsView(dailyLevel, weeklyLevel, monthlyLevel);
 
+        // ── UC-OF-012: Volume Profile ───────────────────────────────────────
+        VolumeProfileCalculator.VolumeProfileResult vpResult = volumeProfile.compute(
+                candles, instrument.getTickSize(), 10);
+        Double pocPrice = vpResult != null ? vpResult.pocPrice().doubleValue() : null;
+        Double vaHigh   = vpResult != null ? vpResult.valueAreaHigh().doubleValue() : null;
+        Double vaLow    = vpResult != null ? vpResult.valueAreaLow().doubleValue() : null;
+
+        // ── UC-OF-013: Session CME Context ──────────────────────────────────
+        String sessionPhase = TradingSessionResolver.currentPhase().name();
+
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
         IndicatorSnapshot result = new IndicatorSnapshot(
@@ -377,6 +390,10 @@ public class IndicatorService {
                 mtfLevels,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                pocPrice, vaHigh, vaLow,
+                // UC-OF-013: Session CME Context
+                sessionPhase,
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
@@ -826,6 +843,10 @@ public class IndicatorService {
                 null,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                null, null, null,
+                // UC-OF-013: Session CME Context
+                TradingSessionResolver.currentPhase().name(),
                 null,
                 null
         );

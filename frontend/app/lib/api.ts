@@ -252,6 +252,12 @@ export interface IndicatorSnapshot {
   sessionLow: number | null;
   sessionEquilibrium: number | null;
   sessionPdZone: 'PREMIUM' | 'DISCOUNT' | 'EQUILIBRIUM' | null;
+  // UC-OF-012: Volume Profile
+  pocPrice: number | null;
+  valueAreaHigh: number | null;
+  valueAreaLow: number | null;
+  // UC-OF-013: Session CME Context
+  sessionPhase: 'ASIAN' | 'LONDON' | 'NY_AM' | 'NY_PM' | 'CLOSE' | 'CLOSED' | null;
 }
 
 

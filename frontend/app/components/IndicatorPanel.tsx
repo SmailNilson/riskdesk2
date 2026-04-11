@@ -62,8 +62,38 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
   const visibleBreakers = relevantBreakerBlocks(s, currentPrice);
   const hiddenBreakerCount = Math.max((s.breakerOrderBlocks ?? []).length - visibleBreakers.length, 0);
 
+  const sessionPhaseColor = (phase: string | null): 'green' | 'red' | 'amber' | 'blue' | 'gray' => {
+    if (!phase) return 'gray';
+    switch (phase) {
+      case 'NY_AM': return 'green';
+      case 'LONDON': return 'blue';
+      case 'ASIAN': return 'amber';
+      case 'NY_PM': return 'amber';
+      case 'CLOSE': return 'red';
+      case 'CLOSED': return 'gray';
+      default: return 'gray';
+    }
+  };
+
+  const sessionPhaseLabel = (phase: string | null): string => {
+    if (!phase) return 'UNKNOWN';
+    switch (phase) {
+      case 'NY_AM': return 'NY AM';
+      case 'NY_PM': return 'NY PM';
+      default: return phase;
+    }
+  };
+
   return (
     <div className="grid grid-cols-2 gap-3">
+      {/* UC-OF-013: Session Phase Badge */}
+      {s.sessionPhase && (
+        <div className="col-span-2 flex items-center gap-2">
+          <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Session</span>
+          <Badge label={sessionPhaseLabel(s.sessionPhase)} color={sessionPhaseColor(s.sessionPhase)} />
+        </div>
+      )}
+
       {/* RSI */}
       <Section title="RSI (14)">
         <Row label="Value" value={n(s.rsi)} />
@@ -131,6 +161,24 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
           </div>
         )}
       </Section>
+
+      {/* UC-OF-012: Volume Profile */}
+      {s.pocPrice != null && (
+        <Section title="Volume Profile">
+          <Row label="POC" value={n(s.pocPrice)} />
+          <Row label="VA High" value={n(s.valueAreaHigh)} />
+          <Row label="VA Low" value={n(s.valueAreaLow)} />
+          {currentPrice != null && s.valueAreaHigh != null && s.valueAreaLow != null && (
+            <div className="flex justify-between items-center py-0.5">
+              <span className="text-zinc-500 text-xs">Position</span>
+              <Badge
+                label={currentPrice > s.valueAreaHigh ? 'ABOVE VA' : currentPrice < s.valueAreaLow ? 'BELOW VA' : 'IN VA'}
+                color={currentPrice > s.valueAreaHigh ? 'red' : currentPrice < s.valueAreaLow ? 'green' : 'blue'}
+              />
+            </div>
+          )}
+        </Section>
+      )}
 
       {/* WaveTrend */}
       <Section title="WT_X WaveTrend (10/21/4)">

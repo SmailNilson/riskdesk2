@@ -106,6 +106,14 @@ public record IndicatorSnapshot(
     BigDecimal sessionEquilibrium,
     String sessionPdZone,
 
+    // ── UC-OF-012: Volume Profile ─────────────────────────────────────
+    Double pocPrice,
+    Double valueAreaHigh,
+    Double valueAreaLow,
+
+    // ── UC-OF-013: Session CME Context ────────────────────────────────
+    String sessionPhase,
+
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
     Instant lastCandleTimestamp,
 

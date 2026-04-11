@@ -20,6 +20,7 @@ import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
 import com.riskdesk.domain.engine.indicators.AtrCalculator;
 import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -809,6 +810,7 @@ public class MentorSignalReviewService {
             "current_price", roundNullable(currentPrice, candidate.instrument()),
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
+            "session_phase", TradingSessionResolver.currentPhase(contextTimestamp).name(),
             "dashboard_connection_status", "LIVE",
             "selected_timezone", normalizeSelectedTimezone(selectedTimezone)
         ));
