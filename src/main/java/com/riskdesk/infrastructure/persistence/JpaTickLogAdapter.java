@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.persistence;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.port.TickLogPort;
 import com.riskdesk.infrastructure.persistence.entity.DepthSnapshotEntity;
+import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.TickLogEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +23,14 @@ public class JpaTickLogAdapter implements TickLogPort {
 
     private final JpaTickLogRepository tickLogRepository;
     private final JpaDepthSnapshotRepository depthSnapshotRepository;
+    private final JpaFootprintBarRepository footprintBarRepository;
 
     public JpaTickLogAdapter(JpaTickLogRepository tickLogRepository,
-                             JpaDepthSnapshotRepository depthSnapshotRepository) {
+                             JpaDepthSnapshotRepository depthSnapshotRepository,
+                             JpaFootprintBarRepository footprintBarRepository) {
         this.tickLogRepository = tickLogRepository;
         this.depthSnapshotRepository = depthSnapshotRepository;
+        this.footprintBarRepository = footprintBarRepository;
     }
 
     @Override
@@ -53,12 +57,24 @@ public class JpaTickLogAdapter implements TickLogPort {
 
     @Override
     @Transactional
+    public void saveFootprintBar(Instrument instrument, String timeframe, Instant barTimestamp,
+                                 double pocPrice, long totalBuyVolume, long totalSellVolume,
+                                 long totalDelta, String profileJson) {
+        var entity = new FootprintBarEntity(instrument, timeframe, barTimestamp,
+                                            pocPrice, totalBuyVolume, totalSellVolume,
+                                            totalDelta, profileJson);
+        footprintBarRepository.save(entity);
+    }
+
+    @Override
+    @Transactional
     public void purgeOlderThan(Instant cutoff) {
         int ticksDeleted = tickLogRepository.deleteByTimestampBefore(cutoff);
         int depthDeleted = depthSnapshotRepository.deleteByTimestampBefore(cutoff);
-        if (ticksDeleted > 0 || depthDeleted > 0) {
-            log.info("Purged order flow data older than {}: {} ticks, {} depth snapshots",
-                     cutoff, ticksDeleted, depthDeleted);
+        int footprintDeleted = footprintBarRepository.deleteByTimestampBefore(cutoff);
+        if (ticksDeleted > 0 || depthDeleted > 0 || footprintDeleted > 0) {
+            log.info("Purged order flow data older than {}: {} ticks, {} depth snapshots, {} footprint bars",
+                     cutoff, ticksDeleted, depthDeleted, footprintDeleted);
         }
     }
 }
