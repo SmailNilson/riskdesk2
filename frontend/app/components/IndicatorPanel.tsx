@@ -162,21 +162,23 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
         )}
       </Section>
 
-      {/* UC-OF-012: Volume Profile */}
-      {s.pocPrice != null && (
-        <Section title="Volume Profile">
-          <Row label="POC" value={n(s.pocPrice)} />
-          <Row label="VA High" value={n(s.valueAreaHigh)} />
-          <Row label="VA Low" value={n(s.valueAreaLow)} />
-          {currentPrice != null && s.valueAreaHigh != null && s.valueAreaLow != null && (
-            <div className="flex justify-between items-center py-0.5">
-              <span className="text-zinc-500 text-xs">Position</span>
-              <Badge
-                label={currentPrice > s.valueAreaHigh ? 'ABOVE VA' : currentPrice < s.valueAreaLow ? 'BELOW VA' : 'IN VA'}
-                color={currentPrice > s.valueAreaHigh ? 'red' : currentPrice < s.valueAreaLow ? 'green' : 'blue'}
-              />
-            </div>
-          )}
+      {/* Premium / Discount / Equilibrium */}
+      {s.equilibriumLevel != null && (
+        <Section title="Premium / Discount">
+          <Row label="Premium Top" value={n(s.premiumZoneTop)} />
+          <Row label="Equilibrium" value={n(s.equilibriumLevel)} />
+          <Row label="Discount Bot" value={n(s.discountZoneBottom)} />
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Zone</span>
+            <Badge
+              label={s.currentZone ?? '—'}
+              color={s.currentZone === 'PREMIUM' ? 'red' : s.currentZone === 'DISCOUNT' ? 'green' : 'blue'}
+            />
+          </div>
+          <div className="mt-1.5 w-full bg-zinc-800 rounded-full h-1.5 relative overflow-hidden">
+            <div className="absolute inset-y-0 left-0 w-1/2 bg-emerald-900/60 rounded-l-full" />
+            <div className="absolute inset-y-0 right-0 w-1/2 bg-red-900/60 rounded-r-full" />
+          </div>
         </Section>
       )}
 
@@ -241,47 +243,28 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
         )}
       </Section>
 
-      {/* Premium / Discount / Equilibrium */}
-      {s.equilibriumLevel != null && (
-        <Section title="Premium / Discount">
-          <Row label="Premium Top" value={n(s.premiumZoneTop)} />
-          <Row label="Equilibrium" value={n(s.equilibriumLevel)} />
-          <Row label="Discount Bot" value={n(s.discountZoneBottom)} />
-          <div className="flex justify-between items-center py-0.5">
-            <span className="text-zinc-500 text-xs">Zone</span>
-            <Badge
-              label={s.currentZone ?? '—'}
-              color={s.currentZone === 'PREMIUM' ? 'red' : s.currentZone === 'DISCOUNT' ? 'green' : 'blue'}
-            />
-          </div>
-          <div className="mt-1.5 w-full bg-zinc-800 rounded-full h-1.5 relative overflow-hidden">
-            <div className="absolute inset-y-0 left-0 w-1/2 bg-emerald-900/60 rounded-l-full" />
-            <div className="absolute inset-y-0 right-0 w-1/2 bg-red-900/60 rounded-r-full" />
-          </div>
-        </Section>
-      )}
-
-      {/* FVG — Fair Value Gaps with quality score */}
-      {(s.activeFairValueGaps ?? []).length > 0 && (
-        <Section title={`FVG (${(s.activeFairValueGaps ?? []).length})`}>
-          {[...(s.activeFairValueGaps ?? [])].sort((a, b) => b.top - a.top).map((fvg, i) => (
-            <div key={`fvg-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
-              <Badge label={fvg.bias} color={fvg.bias === 'BULLISH' ? 'green' : 'red'} />
-              <span className="text-zinc-400 tabular-nums">{fvg.bottom.toFixed(priceDecimals)}–{fvg.top.toFixed(priceDecimals)}</span>
-              {fvg.fvgQualityScore != null && (
-                <div className="flex items-center gap-1 min-w-[50px]">
-                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${barColor(fvg.fvgQualityScore)}`} style={{ width: `${Math.min(fvg.fvgQualityScore, 100)}%` }} />
-                  </div>
-                  <span className={`text-[9px] font-bold tabular-nums ${textColor(fvg.fvgQualityScore)}`}>{Math.round(fvg.fvgQualityScore)}</span>
-                </div>
-              )}
+      {/* UC-OF-012: Volume Profile */}
+      {s.pocPrice != null && (
+        <Section title="Volume Profile">
+          <Row label="POC" value={n(s.pocPrice)} />
+          <Row label="VA High" value={n(s.valueAreaHigh)} />
+          <Row label="VA Low" value={n(s.valueAreaLow)} />
+          {currentPrice != null && s.valueAreaHigh != null && s.valueAreaLow != null && (
+            <div className="flex justify-between items-center py-0.5">
+              <span className="text-zinc-500 text-xs">Position</span>
+              <Badge
+                label={currentPrice > s.valueAreaHigh ? 'ABOVE VA' : currentPrice < s.valueAreaLow ? 'BELOW VA' : 'IN VA'}
+                color={currentPrice > s.valueAreaHigh ? 'red' : currentPrice < s.valueAreaLow ? 'green' : 'blue'}
+              />
             </div>
-          ))}
+          )}
         </Section>
       )}
 
-      {/* BOS/CHoCH — Structure Breaks with confidence score */}
+      {/* Left column: Breaks + Order Blocks (stacked) */}
+      <div className="space-y-3">
+
+      {/* Breaks */}
       {(s.recentBreaks ?? []).length > 0 && (
         <Section title={`Breaks (${(s.recentBreaks ?? []).length})`}>
           {(s.recentBreaks ?? []).map((brk, i) => (
@@ -306,45 +289,7 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
         </Section>
       )}
 
-      {/* EQH / EQL — Liquidity with depth confirmation */}
-      {(equalHighs.length > 0 || equalLows.length > 0) && (
-        <Section title={`EQH/EQL (${equalHighs.length + equalLows.length})`}>
-          {equalHighs.map((eq, i) => (
-            <div key={`eqh-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
-              <Badge label="EQH" color="red" />
-              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
-              <span className="text-zinc-500">x{eq.touchCount}</span>
-              {eq.liquidityConfirmScore != null && (
-                <div className="flex items-center gap-1 min-w-[40px]">
-                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
-                  </div>
-                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
-                </div>
-              )}
-              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
-            </div>
-          ))}
-          {equalLows.map((eq, i) => (
-            <div key={`eql-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
-              <Badge label="EQL" color="green" />
-              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
-              <span className="text-zinc-500">x{eq.touchCount}</span>
-              {eq.liquidityConfirmScore != null && (
-                <div className="flex items-center gap-1 min-w-[40px]">
-                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
-                  </div>
-                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
-                </div>
-              )}
-              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
-            </div>
-          ))}
-        </Section>
-      )}
-
-      {/* Order Blocks */}
+      {/* Order Blocks (under Breaks, same left column) */}
       <Section title={`Order Blocks (${activeOrderBlocks.length + visibleBreakers.length})`}>
         <table className="w-full text-xs font-mono">
           <thead>
@@ -395,9 +340,72 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
           <span className="text-zinc-600 text-xs">No active OBs</span>
         )}
       </Section>
+      </div>
 
-      {/* Order Flow panel injected here — fills the column next to OBs */}
+      {/* Right column: FVG + EQH/EQL (stacked) */}
+      <div className="space-y-3">
+
+      {/* FVG */}
+      {(s.activeFairValueGaps ?? []).length > 0 && (
+        <Section title={`FVG (${(s.activeFairValueGaps ?? []).length})`}>
+          {[...(s.activeFairValueGaps ?? [])].sort((a, b) => b.top - a.top).map((fvg, i) => (
+            <div key={`fvg-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+              <Badge label={fvg.bias} color={fvg.bias === 'BULLISH' ? 'green' : 'red'} />
+              <span className="text-zinc-400 tabular-nums">{fvg.bottom.toFixed(priceDecimals)}–{fvg.top.toFixed(priceDecimals)}</span>
+              {fvg.fvgQualityScore != null && (
+                <div className="flex items-center gap-1 min-w-[50px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(fvg.fvgQualityScore)}`} style={{ width: `${Math.min(fvg.fvgQualityScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(fvg.fvgQualityScore)}`}>{Math.round(fvg.fvgQualityScore)}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {/* EQH/EQL */}
+      {(equalHighs.length > 0 || equalLows.length > 0) && (
+        <Section title={`EQH/EQL (${equalHighs.length + equalLows.length})`}>
+          {equalHighs.map((eq, i) => (
+            <div key={`eqh-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+              <Badge label="EQH" color="red" />
+              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
+              <span className="text-zinc-500">x{eq.touchCount}</span>
+              {eq.liquidityConfirmScore != null && (
+                <div className="flex items-center gap-1 min-w-[40px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
+                </div>
+              )}
+              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
+            </div>
+          ))}
+          {equalLows.map((eq, i) => (
+            <div key={`eql-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+              <Badge label="EQL" color="green" />
+              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
+              <span className="text-zinc-500">x{eq.touchCount}</span>
+              {eq.liquidityConfirmScore != null && (
+                <div className="flex items-center gap-1 min-w-[40px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
+                </div>
+              )}
+              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {/* Order Flow panel — under EQH/EQL in right column */}
       {children}
+      </div>
     </div>
   );
 }
