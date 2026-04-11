@@ -120,14 +120,60 @@ public record IndicatorSnapshot(
         BigDecimal mid,
         long startTime,
         String originalType,
-        Long breakerTime
-    ) {}
+        Long breakerTime,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double formationDelta,
+        Double obFormationScore,
+        Double obLiveScore,
+        Boolean defended,
+        Double absorptionScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public OrderBlockView(String type, String status, BigDecimal high, BigDecimal low,
+                              BigDecimal mid, long startTime, String originalType, Long breakerTime) {
+            this(type, status, high, low, mid, startTime, originalType, breakerTime,
+                 null, null, null, null, null);
+        }
+    }
 
-    public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {}
+    public record FairValueGapView(
+        String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double gapDelta,
+        Double fvgQualityScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {
+            this(bias, top, bottom, startTime, extensionEndTime, null, null);
+        }
+    }
 
-    public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
+    public record StructureBreakView(
+        String type, String trend, BigDecimal level, long barTime, String structureLevel,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double breakDelta,
+        Double volumeSpike,
+        Boolean confirmed,
+        Double breakConfidenceScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {
+            this(type, trend, level, barTime, structureLevel, null, null, null, null);
+        }
+    }
 
-    public record EqualLevelView(String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount) {}
+    public record EqualLevelView(
+        String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Boolean ordersVisible,
+        Long depthSizeAtLevel,
+        Double liquidityConfirmScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public EqualLevelView(String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount) {
+            this(type, price, firstBarTime, lastBarTime, touchCount, null, null, null);
+        }
+    }
 
     /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
     public record OrderBlockEventView(String eventType, String obType, BigDecimal high, BigDecimal low, long eventTime) {}

@@ -90,6 +90,12 @@ export interface OrderBlockView {
   startTime: number;   // epoch seconds of formation candle
   originalType?: 'BULLISH' | 'BEARISH';
   breakerTime?: number | null; // epoch seconds of invalidation candle when status=BREAKER
+  // Order Flow enrichment (nullable — null when ticks unavailable)
+  formationDelta?: number | null;
+  obFormationScore?: number | null;
+  obLiveScore?: number | null;
+  defended?: boolean | null;
+  absorptionScore?: number | null;
 }
 
 /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
@@ -107,6 +113,9 @@ export interface FairValueGapView {
   bottom: number;
   startTime: number;       // epoch seconds
   extensionEndTime: number; // UC-SMC-010: visual zone extension end time
+  // Order Flow enrichment (nullable)
+  gapDelta?: number | null;
+  fvgQualityScore?: number | null;
 }
 
 export interface EqualLevelView {
@@ -115,6 +124,10 @@ export interface EqualLevelView {
   firstBarTime: number;   // epoch seconds
   lastBarTime: number;    // epoch seconds
   touchCount: number;
+  // Order Flow enrichment (nullable — requires Level 2 depth)
+  ordersVisible?: boolean | null;
+  depthSizeAtLevel?: number | null;
+  liquidityConfirmScore?: number | null;
 }
 
 /** UC-SMC-005: OHLC for a single higher-timeframe candle. */
@@ -138,6 +151,11 @@ export interface StructureBreakView {
   level: number;
   barTime: number;     // epoch seconds
   structureLevel: 'INTERNAL' | 'SWING' | null;
+  // Order Flow enrichment (nullable)
+  breakDelta?: number | null;
+  volumeSpike?: number | null;
+  confirmed?: boolean | null;
+  breakConfidenceScore?: number | null;
 }
 
 export interface IndicatorSnapshot {

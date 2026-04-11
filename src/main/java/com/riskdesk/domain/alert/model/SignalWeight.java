@@ -30,7 +30,11 @@ public enum SignalWeight {
     MACD       (1.0f, "Momentum",       11),
     DELTA_FLOW (1.0f, "Flow",           12),
     RSI        (1.0f, "Oscillateur_RSI", 13),
-    STOCHASTIC (1.0f, "Oscillateur_Stoch", 14);
+    STOCHASTIC (1.0f, "Oscillateur_Stoch", 14),
+    /** Institutional absorption — real order flow. Separate "OrderFlow" family (not "Flow") avoids non-cumul collision. */
+    ABSORPTION      (2.0f, "OrderFlow", 15),
+    /** Real delta oscillator: EMA(3)-EMA(10) of tick-by-tick delta. */
+    DELTA_OSCILLATOR(1.5f, "OrderFlow", 16);
 
     private static final Set<String> NON_CUMUL_FAMILIES = Set.of("Momentum", "Flow");
 
@@ -81,7 +85,9 @@ public enum SignalWeight {
             case CHAIKIN    -> SignalWeight.CHAIKIN;
             case DELTA_FLOW -> SignalWeight.DELTA_FLOW;
             case RSI        -> SignalWeight.RSI;
-            case STOCHASTIC -> SignalWeight.STOCHASTIC;
+            case STOCHASTIC       -> SignalWeight.STOCHASTIC;
+            case ABSORPTION       -> SignalWeight.ABSORPTION;
+            case DELTA_OSCILLATOR -> SignalWeight.DELTA_OSCILLATOR;
             default -> null;
         };
     }

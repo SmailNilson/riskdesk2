@@ -7,9 +7,14 @@ import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.engine.indicators.*;
 import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.model.*;
+import com.riskdesk.domain.orderflow.port.MarketDepthPort;
+import com.riskdesk.domain.orderflow.service.SmcOrderFlowEnricher;
 import com.riskdesk.domain.shared.CandleSeriesNormalizer;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
@@ -55,6 +60,9 @@ public class IndicatorService {
 
     private final CandleRepositoryPort  candlePort;
     private final ActiveContractRegistry contractRegistry;
+    private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final ObjectProvider<MarketDepthPort> marketDepthPortProvider;
+    private final SmcOrderFlowEnricher smcOrderFlowEnricher = new SmcOrderFlowEnricher();
 
     // Indicators — initialized with TradingView defaults
     private final EMAIndicator ema9   = new EMAIndicator(EMA_9_PERIOD);
@@ -91,9 +99,14 @@ public class IndicatorService {
         };
     }
 
-    public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
+    public IndicatorService(CandleRepositoryPort candlePort,
+                            ActiveContractRegistry contractRegistry,
+                            ObjectProvider<TickDataPort> tickDataPortProvider,
+                            ObjectProvider<MarketDepthPort> marketDepthPortProvider) {
         this.candlePort       = candlePort;
         this.contractRegistry = contractRegistry;
+        this.tickDataPortProvider = tickDataPortProvider;
+        this.marketDepthPortProvider = marketDepthPortProvider;
     }
 
     public void clearSnapshotCache() {
@@ -214,29 +227,21 @@ public class IndicatorService {
 
         List<IndicatorSnapshot.StructureBreakView> recentBreaks = smcSnap.events().stream()
                 .sorted(Comparator.comparingInt(SmcStructureEngine.StructureEvent::barIndex).reversed())
-                .map(event -> new IndicatorSnapshot.StructureBreakView(
-                        event.type().name(),
-                        event.newBias().name(),
-                        BigDecimal.valueOf(event.breakPrice()),
-                        event.timestamp().getEpochSecond(),
-                        event.level().name()))
+                .map(event -> enrichedBreakView(event, candles))
                 .toList();
 
         // Order Blocks + lifecycle events (UC-SMC-009)
         OrderBlockDetector.DetectionResult obResult = obDetector.detectWithEvents(candles);
+
+        // ── OF enrichment: compute ATR for OB defended check ────────────────
+        BigDecimal atrValue = AtrCalculator.compute(candles, 14);
+        double atrTicks = atrValue != null ? atrValue.doubleValue() : 1.0;
+
         List<IndicatorSnapshot.OrderBlockView> obViews = obResult.activeOrderBlocks().stream()
-                .map(ob -> new IndicatorSnapshot.OrderBlockView(
-                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
-                        ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
-                        ob.type().name(),
-                        null))
+                .map(ob -> enrichedObView(ob, candles, atrTicks, ob.type().name(), null))
                 .toList();
         List<IndicatorSnapshot.OrderBlockView> breakerViews = obResult.breakerOrderBlocks().stream()
-                .map(ob -> new IndicatorSnapshot.OrderBlockView(
-                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
-                        ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
+                .map(ob -> enrichedObView(ob, candles, atrTicks,
                         oppositeType(ob.type()).name(),
                         ob.mitigationIndex() >= 0 && ob.mitigationIndex() < candles.size()
                                 ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null))
@@ -254,8 +259,7 @@ public class IndicatorService {
                 : candles;
         List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(fvgCandles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
-                .map(f -> new IndicatorSnapshot.FairValueGapView(
-                        f.bias(), f.top(), f.bottom(), f.startBarTime(), f.extensionEndTime()))
+                .map(f -> enrichedFvgView(f, fvgCandles))
                 .toList();
 
         // ── Premium / Discount / Equilibrium (UC-SMC-004) ──────────────────
@@ -294,21 +298,11 @@ public class IndicatorService {
         );
         List<IndicatorSnapshot.EqualLevelView> eqhViews = liquidityPools.stream()
                 .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQH)
-                .map(pool -> new IndicatorSnapshot.EqualLevelView(
-                        "EQH",
-                        BigDecimal.valueOf(pool.price()),
-                        pool.firstTime().getEpochSecond(),
-                        pool.lastTime().getEpochSecond(),
-                        pool.touchCount()))
+                .map(pool -> enrichedEqualLevelView("EQH", pool, instrument))
                 .toList();
         List<IndicatorSnapshot.EqualLevelView> eqlViews = liquidityPools.stream()
                 .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQL)
-                .map(pool -> new IndicatorSnapshot.EqualLevelView(
-                        "EQL",
-                        BigDecimal.valueOf(pool.price()),
-                        pool.firstTime().getEpochSecond(),
-                        pool.lastTime().getEpochSecond(),
-                        pool.touchCount()))
+                .map(pool -> enrichedEqualLevelView("EQL", pool, instrument))
                 .toList();
 
         // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ──────────
@@ -456,6 +450,168 @@ public class IndicatorService {
         return type == OrderBlockDetector.OBType.BULLISH
                 ? OrderBlockDetector.OBType.BEARISH
                 : OrderBlockDetector.OBType.BULLISH;
+    }
+
+    // ── Phase 5a: SMC × Order Flow enrichment helpers ─────────────────────────────
+
+    /**
+     * Compute CLV-based delta for a single candle.
+     * CLV = ((Close - Low) - (High - Close)) / (High - Low), range [-1, +1].
+     * Delta = volume * CLV (positive = buying pressure, negative = selling pressure).
+     */
+    private static double clvDelta(Candle c) {
+        double h = c.getHigh().doubleValue();
+        double l = c.getLow().doubleValue();
+        double cl = c.getClose().doubleValue();
+        double range = h - l;
+        if (range <= 0) return 0.0;
+        double clv = ((cl - l) - (h - cl)) / range;
+        return c.getVolume() * clv;
+    }
+
+    /**
+     * Enrich an Order Block with CLV-based order flow data.
+     * Uses the candle at formationIndex for delta/volume and the SmcOrderFlowEnricher for scoring.
+     */
+    private IndicatorSnapshot.OrderBlockView enrichedObView(
+            OrderBlockDetector.OrderBlock ob, List<Candle> candles,
+            double atrTicks, String originalType, Long breakerTime) {
+        long startTime = ob.formationIndex() < candles.size()
+                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L;
+
+        // Compute formation delta/volume from the impulse candle
+        if (ob.formationIndex() >= 0 && ob.formationIndex() < candles.size()) {
+            Candle formationCandle = candles.get(ob.formationIndex());
+            double formationDelta = clvDelta(formationCandle);
+            double formationVolume = formationCandle.getVolume();
+
+            OrderBlockEnrichment enrichment = smcOrderFlowEnricher.enrichOrderBlock(
+                    formationDelta, formationVolume,
+                    null, null, null,  // absorption/depth not available in snapshot context
+                    0.0, atrTicks);
+
+            return new IndicatorSnapshot.OrderBlockView(
+                    ob.type().name(), ob.status().name(),
+                    ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                    startTime, originalType, breakerTime,
+                    enrichment.formationDelta(),
+                    enrichment.obFormationScore(),
+                    enrichment.obLiveScore(),
+                    enrichment.defended(),
+                    enrichment.absorptionScore());
+        }
+        // Fallback: no enrichment data
+        return new IndicatorSnapshot.OrderBlockView(
+                ob.type().name(), ob.status().name(),
+                ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                startTime, originalType, breakerTime);
+    }
+
+    /**
+     * Enrich a Fair Value Gap with CLV-based order flow data.
+     * Uses delta across the 3-candle gap formation window.
+     */
+    private IndicatorSnapshot.FairValueGapView enrichedFvgView(
+            FairValueGapDetector.FairValueGap fvg, List<Candle> fvgCandles) {
+        // FVG startBarTime is epoch seconds — find candles near that timestamp for delta
+        double gapDelta = 0.0;
+        double gapVolume = 0.0;
+        boolean found = false;
+        for (int i = 0; i < fvgCandles.size(); i++) {
+            if (fvgCandles.get(i).getTimestamp().getEpochSecond() == fvg.startBarTime()) {
+                // Sum delta/volume for the 3-candle window (i-1, i, i+1)
+                int start = Math.max(0, i - 1);
+                int end = Math.min(fvgCandles.size(), i + 2);
+                for (int j = start; j < end; j++) {
+                    gapDelta += clvDelta(fvgCandles.get(j));
+                    gapVolume += fvgCandles.get(j).getVolume();
+                }
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            FvgEnrichment enrichment = smcOrderFlowEnricher.enrichFvg(gapDelta, gapVolume);
+            return new IndicatorSnapshot.FairValueGapView(
+                    fvg.bias(), fvg.top(), fvg.bottom(), fvg.startBarTime(), fvg.extensionEndTime(),
+                    enrichment.gapDelta(), enrichment.fvgQualityScore());
+        }
+        return new IndicatorSnapshot.FairValueGapView(
+                fvg.bias(), fvg.top(), fvg.bottom(), fvg.startBarTime(), fvg.extensionEndTime());
+    }
+
+    /**
+     * Enrich a BOS/CHoCH structure break with CLV-based order flow data.
+     * Uses the break candle delta, volume, and average volume of preceding candles.
+     */
+    private IndicatorSnapshot.StructureBreakView enrichedBreakView(
+            SmcStructureEngine.StructureEvent event, List<Candle> candles) {
+        int idx = event.barIndex();
+        if (idx >= 0 && idx < candles.size()) {
+            Candle breakCandle = candles.get(idx);
+            double breakDelta = clvDelta(breakCandle);
+            double breakVolume = breakCandle.getVolume();
+
+            // Compute average volume of the 20 candles preceding the break
+            int avgStart = Math.max(0, idx - 20);
+            double avgVolume = 0.0;
+            int count = 0;
+            for (int j = avgStart; j < idx; j++) {
+                avgVolume += candles.get(j).getVolume();
+                count++;
+            }
+            avgVolume = count > 0 ? avgVolume / count : 1.0;
+
+            boolean isLongBreak = event.newBias() == SmcStructureEngine.Bias.BULLISH;
+            BreakEnrichment enrichment = smcOrderFlowEnricher.enrichBreak(
+                    breakDelta, breakVolume, avgVolume, isLongBreak);
+
+            return new IndicatorSnapshot.StructureBreakView(
+                    event.type().name(), event.newBias().name(),
+                    BigDecimal.valueOf(event.breakPrice()),
+                    event.timestamp().getEpochSecond(),
+                    event.level().name(),
+                    enrichment.breakDelta(), enrichment.volumeSpike(),
+                    enrichment.confirmed(), enrichment.breakConfidenceScore());
+        }
+        return new IndicatorSnapshot.StructureBreakView(
+                event.type().name(), event.newBias().name(),
+                BigDecimal.valueOf(event.breakPrice()),
+                event.timestamp().getEpochSecond(),
+                event.level().name());
+    }
+
+    /**
+     * Enrich an Equal Level liquidity pool with Level 2 depth data (if available).
+     * Falls back to no enrichment if MarketDepthPort is null or depth unavailable.
+     */
+    private IndicatorSnapshot.EqualLevelView enrichedEqualLevelView(
+            String type, EqualLevelDetector.LiquidityPool pool, Instrument instrument) {
+        MarketDepthPort depthPort = marketDepthPortProvider.getIfAvailable();
+        if (depthPort != null && depthPort.isDepthAvailable(instrument)) {
+            var depthOpt = depthPort.currentDepth(instrument);
+            if (depthOpt.isPresent()) {
+                DepthMetrics depth = depthOpt.get();
+                long totalSize = depth.totalBidSize() + depth.totalAskSize();
+                double avgLevelSize = totalSize > 0 ? totalSize / 20.0 : 1.0; // approximate 10 bid + 10 ask levels
+                // Estimate size at this specific level from total book imbalance
+                long sizeEstimate = "EQH".equals(type) ? depth.totalAskSize() / 10 : depth.totalBidSize() / 10;
+                boolean ordersVisible = sizeEstimate > 0;
+
+                LiquidityEnrichment enrichment = smcOrderFlowEnricher.enrichLiquidity(
+                        ordersVisible, sizeEstimate, avgLevelSize);
+                return new IndicatorSnapshot.EqualLevelView(
+                        type, BigDecimal.valueOf(pool.price()),
+                        pool.firstTime().getEpochSecond(), pool.lastTime().getEpochSecond(),
+                        pool.touchCount(),
+                        enrichment.ordersVisibleAtLevel(), enrichment.totalSizeAtLevel(),
+                        enrichment.liquidityConfirmScore());
+            }
+        }
+        return new IndicatorSnapshot.EqualLevelView(
+                type, BigDecimal.valueOf(pool.price()),
+                pool.firstTime().getEpochSecond(), pool.lastTime().getEpochSecond(),
+                pool.touchCount());
     }
 
     /**

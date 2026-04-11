@@ -1,11 +1,12 @@
 'use client';
 
-import { IndicatorSnapshot } from '@/app/lib/api';
+import { IndicatorSnapshot, OrderBlockView } from '@/app/lib/api';
 import { breakerOriginalType, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 
 interface Props {
   snapshot: IndicatorSnapshot | null;
   currentPrice: number | null;
+  children?: React.ReactNode;
 }
 
 function Row({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -39,7 +40,7 @@ function signalColor(signal: string | null): 'green' | 'red' | 'amber' | 'gray' 
   return 'gray';
 }
 
-export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
+export default function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
   if (!s) return (
     <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 text-zinc-500 text-sm">
       Loading indicators…
@@ -49,9 +50,11 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
   // Price decimals per instrument — E6 needs 5 to match IBKR tick size
   const priceDecimals = s.instrument === 'E6' ? 5 : 2;
   const n = (v: number | null, d?: number) => v != null ? v.toFixed(d ?? priceDecimals) : '—';
-  const equalHighs = s.equalHighs ?? [];
-  const equalLows = s.equalLows ?? [];
-  const activeOrderBlocks = s.activeOrderBlocks ?? [];
+  const price = currentPrice ?? 0;
+  const proximityFilter = (eq: { price: number }) => price > 0 ? Math.abs(eq.price - price) / price < 0.05 : true;
+  const equalHighs = (s.equalHighs ?? []).filter(proximityFilter);
+  const equalLows = (s.equalLows ?? []).filter(proximityFilter);
+  const activeOrderBlocks = [...(s.activeOrderBlocks ?? [])].sort((a, b) => b.mid - a.mid);
   const chaikinFlow = s.cmf == null ? { label: '—', color: 'gray' as const }
     : s.cmf > 0 ? { label: 'BUYING', color: 'green' as const }
     : s.cmf < 0 ? { label: 'SELLING', color: 'red' as const }
@@ -210,68 +213,181 @@ export default function IndicatorPanel({ snapshot: s, currentPrice }: Props) {
         </Section>
       )}
 
-      {/* EQH / EQL */}
+      {/* FVG — Fair Value Gaps with quality score */}
+      {(s.activeFairValueGaps ?? []).length > 0 && (
+        <Section title={`FVG (${(s.activeFairValueGaps ?? []).length})`}>
+          {[...(s.activeFairValueGaps ?? [])].sort((a, b) => b.top - a.top).map((fvg, i) => (
+            <div key={`fvg-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+              <Badge label={fvg.bias} color={fvg.bias === 'BULLISH' ? 'green' : 'red'} />
+              <span className="text-zinc-400 tabular-nums">{fvg.bottom.toFixed(priceDecimals)}–{fvg.top.toFixed(priceDecimals)}</span>
+              {fvg.fvgQualityScore != null && (
+                <div className="flex items-center gap-1 min-w-[50px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(fvg.fvgQualityScore)}`} style={{ width: `${Math.min(fvg.fvgQualityScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(fvg.fvgQualityScore)}`}>{Math.round(fvg.fvgQualityScore)}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {/* BOS/CHoCH — Structure Breaks with confidence score */}
+      {(s.recentBreaks ?? []).length > 0 && (
+        <Section title={`Breaks (${(s.recentBreaks ?? []).length})`}>
+          {(s.recentBreaks ?? []).map((brk, i) => (
+            <div key={`brk-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+              <Badge label={`${brk.type}`} color={brk.trend === 'BULLISH' ? 'green' : 'red'} />
+              <span className="text-zinc-400 tabular-nums">{brk.level.toFixed(priceDecimals)}</span>
+              <span className="text-[10px] text-zinc-600">{brk.structureLevel?.toLowerCase()}</span>
+              {brk.breakConfidenceScore != null ? (
+                <div className="flex items-center gap-1 min-w-[50px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(brk.breakConfidenceScore)}`} style={{ width: `${Math.min(brk.breakConfidenceScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(brk.breakConfidenceScore)}`}>{Math.round(brk.breakConfidenceScore)}</span>
+                  {brk.confirmed && <span className="text-[9px] text-emerald-400 font-bold">OK</span>}
+                  {brk.confirmed === false && <span className="text-[9px] text-red-400 font-bold">FAKE?</span>}
+                </div>
+              ) : (
+                <span className="text-zinc-600 text-[10px]">—</span>
+              )}
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {/* EQH / EQL — Liquidity with depth confirmation */}
       {(equalHighs.length > 0 || equalLows.length > 0) && (
         <Section title={`EQH/EQL (${equalHighs.length + equalLows.length})`}>
           {equalHighs.map((eq, i) => (
-            <div key={`eqh-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+            <div key={`eqh-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
               <Badge label="EQH" color="red" />
-              <span className="text-zinc-400">{eq.price.toFixed(priceDecimals)}</span>
+              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
               <span className="text-zinc-500">x{eq.touchCount}</span>
+              {eq.liquidityConfirmScore != null && (
+                <div className="flex items-center gap-1 min-w-[40px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
+                </div>
+              )}
+              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
             </div>
           ))}
           {equalLows.map((eq, i) => (
-            <div key={`eql-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
+            <div key={`eql-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
               <Badge label="EQL" color="green" />
-              <span className="text-zinc-400">{eq.price.toFixed(priceDecimals)}</span>
+              <span className="text-zinc-400 tabular-nums">{eq.price.toFixed(priceDecimals)}</span>
               <span className="text-zinc-500">x{eq.touchCount}</span>
+              {eq.liquidityConfirmScore != null && (
+                <div className="flex items-center gap-1 min-w-[40px]">
+                  <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${barColor(eq.liquidityConfirmScore)}`} style={{ width: `${Math.min(eq.liquidityConfirmScore, 100)}%` }} />
+                  </div>
+                  <span className={`text-[9px] font-bold tabular-nums ${textColor(eq.liquidityConfirmScore)}`}>{Math.round(eq.liquidityConfirmScore)}</span>
+                </div>
+              )}
+              {eq.ordersVisible && <span className="text-[9px] text-emerald-400 font-bold">L2</span>}
             </div>
           ))}
         </Section>
       )}
 
       {/* Order Blocks */}
-      <Section title={`Order Blocks V1/V2 (${activeOrderBlocks.length + visibleBreakers.length})`} fullWidth>
-        <div className="space-y-1.5">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500">V1 Active</div>
-          {activeOrderBlocks.length === 0
-            ? <span className="text-zinc-600 text-xs">No active OBs</span>
-            : activeOrderBlocks.map((ob, i) => (
-              <div key={`active-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
-                <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
-                <span className="text-zinc-400">
-                  {ob.low.toFixed(priceDecimals)} – {ob.high.toFixed(priceDecimals)}
-                </span>
-                <span className="text-zinc-500">mid {ob.mid.toFixed(priceDecimals)}</span>
-              </div>
-            ))
-          }
-        </div>
-        <div className="mt-3 space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-[10px] uppercase tracking-widest text-zinc-500">V2 Breaker</div>
-            {hiddenBreakerCount > 0 && (
-              <span className="text-[10px] text-zinc-600">
-                {hiddenBreakerCount} offside
-              </span>
+      <Section title={`Order Blocks (${activeOrderBlocks.length + visibleBreakers.length})`}>
+        <table className="w-full text-xs font-mono">
+          <thead>
+            <tr className="text-[9px] uppercase tracking-widest text-zinc-600 text-center">
+              <th className="pb-1 font-normal">Zone</th>
+              <th className="pb-1 font-normal">Range</th>
+              <th className="pb-1 font-normal">F<span className="mx-2 text-zinc-700">|</span>L</th>
+              <th className="pb-1 font-normal">Mid</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activeOrderBlocks.map((ob, i) => (
+              <tr key={`a-${i}`} className="border-t border-zinc-800/50">
+                <td className="py-1 pr-2">
+                  <Badge label={ob.type} color={ob.type === 'BULLISH' ? 'green' : 'red'} />
+                </td>
+                <td className="py-1 pr-2 text-zinc-400 tabular-nums">
+                  {ob.low.toFixed(priceDecimals)}–{ob.high.toFixed(priceDecimals)}
+                </td>
+                <td className="py-1 pr-2">
+                  <OBScoreBar ob={ob} showLive />
+                </td>
+                <td className="py-1 text-right text-zinc-500 tabular-nums">{ob.mid.toFixed(priceDecimals)}</td>
+              </tr>
+            ))}
+            {visibleBreakers.length > 0 && (
+              <tr><td colSpan={4} className="pt-2 pb-1 text-[9px] uppercase tracking-widest text-zinc-600">Breaker {hiddenBreakerCount > 0 && <span className="normal-case tracking-normal">({hiddenBreakerCount} offside)</span>}</td></tr>
             )}
-          </div>
-          {visibleBreakers.length === 0
-            ? <span className="text-zinc-600 text-xs">No breaker OBs near current price</span>
-            : visibleBreakers.map((ob, i) => (
-              <div key={`breaker-${i}`} className="flex justify-between items-center text-xs font-mono py-0.5">
-                <Badge label={`${ob.type} V2`} color={ob.type === 'BULLISH' ? 'blue' : 'amber'} />
-                <span className="text-zinc-400">
-                  {ob.low.toFixed(priceDecimals)} – {ob.high.toFixed(priceDecimals)}
-                </span>
-                <span className="text-zinc-500">
-                  from {breakerOriginalType(ob).toLowerCase()} · mid {ob.mid.toFixed(priceDecimals)}
-                </span>
-              </div>
-            ))
-          }
-        </div>
+            {visibleBreakers.map((ob, i) => (
+              <tr key={`b-${i}`} className="border-t border-zinc-800/50">
+                <td className="py-1 pr-2">
+                  <Badge label={`${ob.type[0]}v2`} color={ob.type === 'BULLISH' ? 'blue' : 'amber'} />
+                </td>
+                <td className="py-1 pr-2 text-zinc-400 tabular-nums">
+                  {ob.low.toFixed(priceDecimals)}–{ob.high.toFixed(priceDecimals)}
+                </td>
+                <td className="py-1 pr-2">
+                  <OBScoreBar ob={ob} />
+                </td>
+                <td className="py-1 text-right text-zinc-500 tabular-nums text-[10px]">
+                  {breakerOriginalType(ob).toLowerCase()} · {ob.mid.toFixed(priceDecimals)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {activeOrderBlocks.length === 0 && visibleBreakers.length === 0 && (
+          <span className="text-zinc-600 text-xs">No active OBs</span>
+        )}
       </Section>
+
+      {/* Order Flow panel injected here — fills the column next to OBs */}
+      {children}
+    </div>
+  );
+}
+
+function barColor(s: number) {
+  return s >= 70 ? 'bg-emerald-500' : s >= 40 ? 'bg-yellow-500' : 'bg-red-500';
+}
+function textColor(s: number) {
+  return s >= 70 ? 'text-emerald-400' : s >= 40 ? 'text-yellow-400' : 'text-red-400';
+}
+
+/** Dual bar: Formation (left) | Live (right) — OB quality indicator */
+function OBScoreBar({ ob, showLive }: { ob: OrderBlockView; showLive?: boolean }) {
+  const f = ob.obFormationScore;
+  const l = showLive ? ob.obLiveScore : null;
+  if (f == null) return <span className="text-zinc-600 text-[10px]">—</span>;
+
+  return (
+    <div className="flex items-center gap-1 min-w-[120px]">
+      {/* Formation half */}
+      <span className={`text-[9px] font-bold tabular-nums ${textColor(f)}`}>{Math.round(f)}</span>
+      <div className="flex-1 flex gap-px">
+        <div className="flex-1 h-1.5 bg-zinc-800 rounded-l-full overflow-hidden" title={`Formation: ${Math.round(f)}`}>
+          <div className={`h-full rounded-l-full ${barColor(f)}`} style={{ width: `${Math.min(f, 100)}%` }} />
+        </div>
+        {/* Live half */}
+        <div className="flex-1 h-1.5 bg-zinc-800 rounded-r-full overflow-hidden" title={`Live: ${l != null ? Math.round(l) : '—'}`}>
+          {l != null && (
+            <div className={`h-full rounded-r-full ${barColor(l)}`} style={{ width: `${Math.min(l, 100)}%` }} />
+          )}
+        </div>
+      </div>
+      <span className={`text-[9px] font-bold tabular-nums ${l != null ? textColor(l) : 'text-zinc-600'}`}>
+        {l != null ? Math.round(l) : '—'}
+      </span>
+      {showLive && ob.defended && (
+        <span className="text-[9px] px-1 rounded bg-emerald-500/20 text-emerald-400 font-bold">DEF</span>
+      )}
     </div>
   );
 }
