@@ -16,6 +16,8 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -103,6 +105,12 @@ public class RolloverDetectionService {
     @Scheduled(fixedDelay = 6 * 60 * 60 * 1000L, initialDelay = 60 * 1000L)
     public void checkRollovers() {
         if (!ibkrProperties.isEnabled()) return;
+        // Skip rollover checks when market is closed (weekends/holidays) — OI data is stale or zero,
+        // causing false positive rollovers. Keep the current contract until market reopens.
+        if (!TradingSessionResolver.isMarketOpen(Instant.now())) {
+            log.debug("Rollover check skipped — market closed. Current contracts preserved.");
+            return;
+        }
 
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             RolloverInfo info = computeInfo(instrument);
