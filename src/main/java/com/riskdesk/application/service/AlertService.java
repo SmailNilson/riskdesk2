@@ -11,6 +11,7 @@ import com.riskdesk.domain.alert.service.SignalPreFilterService;
 import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.SessionPhase;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
@@ -126,6 +127,10 @@ public class AlertService {
         for (String timeframe : List.of("5m", "10m", "1h")) {
             if (mutedTimeframes.contains(timeframe)) continue;
             if ("5m".equals(timeframe) && !TradingSessionResolver.isWithinKillZone(Instant.now())) continue;
+            // E6 Asian session gate — signals are noise during 17:00-02:00 ET (low liquidity)
+            if (instrument == Instrument.E6
+                    && TradingSessionResolver.currentPhase() == SessionPhase.ASIAN
+                    && !"1h".equals(timeframe)) continue;
             try {
                 IndicatorSnapshot snap;
                 if ("1h".equals(timeframe)) snap = h1Snap;
