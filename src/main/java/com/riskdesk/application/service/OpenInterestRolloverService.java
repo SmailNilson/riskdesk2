@@ -16,6 +16,9 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import com.riskdesk.domain.shared.TradingSessionResolver;
+
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +64,7 @@ public class OpenInterestRolloverService {
     @Scheduled(fixedDelay = 6 * 60 * 60 * 1000L, initialDelay = 2 * 60 * 1000L)
     public void checkOpenInterestRollovers() {
         if (!ibkrProperties.isEnabled()) return;
+        if (!TradingSessionResolver.isMarketOpen(Instant.now())) return;
 
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             try {
