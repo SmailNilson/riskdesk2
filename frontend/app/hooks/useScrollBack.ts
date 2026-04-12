@@ -126,14 +126,14 @@ export function useScrollBack({
       }, 200);
     };
 
-    const subscription = chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
 
     return () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
         debounceRef.current = null;
       }
-      subscription();
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange);
     };
   }, [chart, fetchOlderBars]);
 
