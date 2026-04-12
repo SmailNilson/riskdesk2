@@ -90,9 +90,6 @@ public class RolloverDetectionService {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
 
-        // Reset deep backfill so the scheduled task re-runs with the new contract
-        historicalDataService.resetDeepBackfill();
-
         if (oldMonth != null && !oldMonth.equals(contractMonth)) {
             ContractRolloverEvent event = new ContractRolloverEvent(
                     instrument, oldMonth, contractMonth, Instant.now());

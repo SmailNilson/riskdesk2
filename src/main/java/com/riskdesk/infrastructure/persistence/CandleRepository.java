@@ -26,6 +26,10 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     @Query("SELECT MAX(c.timestamp) FROM CandleEntity c WHERE c.instrument = :instrument AND c.timeframe = :timeframe")
     Optional<Instant> findMaxTimestamp(@Param("instrument") Instrument instrument, @Param("timeframe") String timeframe);
 
+    /** Fetches candles within a time range, ordered oldest-first. */
+    List<CandleEntity> findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
+            Instrument instrument, String timeframe, Instant from, Instant to);
+
     /** Fetches candles for a specific contract month, newest-first. */
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
             Instrument instrument, String timeframe, String contractMonth, Pageable pageable);
