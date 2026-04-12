@@ -31,6 +31,12 @@ public interface CandleRepositoryPort {
      */
     Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe);
 
+    /**
+     * Returns candles within a time range, ordered oldest-first.
+     * Used by the on-demand candle service for scroll-back and range queries.
+     */
+    List<Candle> findCandlesBetween(Instrument instrument, String timeframe, Instant from, Instant to);
+
     Candle save(Candle candle);
 
     List<Candle> saveAll(List<Candle> candles);

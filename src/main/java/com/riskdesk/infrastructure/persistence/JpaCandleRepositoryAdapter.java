@@ -41,6 +41,14 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     }
 
     @Override
+    public List<Candle> findCandlesBetween(Instrument instrument, String timeframe, Instant from, Instant to) {
+        return springDataRepo.findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
+                instrument, timeframe, from, to).stream()
+            .map(CandleEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     public Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe) {
         return springDataRepo.findMaxTimestamp(instrument, timeframe);
     }
