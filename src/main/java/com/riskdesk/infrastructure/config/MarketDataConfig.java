@@ -103,6 +103,33 @@ public class MarketDataConfig {
         return new Object(); // marker bean
     }
 
+    /**
+     * Wires the tick-by-tick data adapter so that AllLast trade ticks from IBKR
+     * are classified (Lee-Ready) and routed to the TickByTickAggregator pipeline.
+     * The actual subscriptions are triggered by {@link com.riskdesk.application.service.OrderFlowOrchestrator}.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayTickDataWiring(IbGatewayNativeClient nativeClient,
+                                           IbkrTickDataAdapter tickDataAdapter) {
+        nativeClient.setTickDataAdapter(tickDataAdapter);
+        log.info("Tick-by-tick data adapter wired to IB Gateway native client");
+        return new Object(); // marker bean
+    }
+
+    /**
+     * Wires the market depth adapter so that Level 2 order book updates
+     * are routed to the MutableOrderBook infrastructure.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayDepthWiring(IbGatewayNativeClient nativeClient,
+                                        IbkrMarketDepthAdapter depthAdapter) {
+        nativeClient.setDepthAdapter(depthAdapter);
+        log.info("Market depth adapter wired to IB Gateway native client");
+        return new Object(); // marker bean
+    }
+
     // -------------------------------------------------------------------------
     // Primary composite providers
     // -------------------------------------------------------------------------

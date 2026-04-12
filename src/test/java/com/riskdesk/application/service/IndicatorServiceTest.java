@@ -7,6 +7,7 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -27,7 +28,7 @@ class IndicatorServiceTest {
         List<Candle> history = buildHistory(1_100);
         candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_000, descendingTail(history, 1_000));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry);
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider());
 
         IndicatorSnapshot snapshot = service.computeSnapshot(Instrument.MCL, "10m");
 
@@ -46,7 +47,7 @@ class IndicatorServiceTest {
         List<Candle> history = buildHistory(1_600);
         candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_500, descendingTail(history, 1_500));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry);
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider());
 
         IndicatorSeriesSnapshot series = service.computeSeries(Instrument.MCL, "10m", 500);
 
@@ -148,5 +149,16 @@ class IndicatorServiceTest {
         private String key(Instrument instrument, String timeframe, int limit) {
             return instrument.name() + ":" + timeframe + ":" + limit;
         }
+    }
+
+    /** Returns an ObjectProvider that always resolves to null (no bean available). */
+    @SuppressWarnings("unchecked")
+    private static <T> ObjectProvider<T> emptyProvider() {
+        return new ObjectProvider<>() {
+            @Override public T getObject(Object... args) { return null; }
+            @Override public T getIfAvailable() { return null; }
+            @Override public T getIfUnique() { return null; }
+            @Override public T getObject() { return null; }
+        };
     }
 }

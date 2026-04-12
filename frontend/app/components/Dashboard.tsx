@@ -12,6 +12,8 @@ import AiMentorDesk from './AiMentorDesk';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
+import OrderFlowPanel from './OrderFlowPanel';
+import FlashCrashPanel from './FlashCrashPanel';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -158,8 +160,13 @@ export default function Dashboard() {
           livePrice={prices[instrument]}
         />
 
-        {/* Indicators */}
-        <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
+        {/* Indicators + Order Flow side by side */}
+        <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null}>
+          <OrderFlowPanel selectedInstrument={instrument} />
+        </IndicatorPanel>
+
+        {/* Flash Crash Detection */}
+        <FlashCrashPanel />
 
         <DxyPanel />
 

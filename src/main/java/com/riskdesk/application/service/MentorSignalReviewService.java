@@ -20,6 +20,7 @@ import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
 import com.riskdesk.domain.engine.indicators.AtrCalculator;
 import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -809,6 +810,7 @@ public class MentorSignalReviewService {
             "current_price", roundNullable(currentPrice, candidate.instrument()),
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
+            "session_phase", TradingSessionResolver.currentPhase(contextTimestamp).name(),
             "dashboard_connection_status", "LIVE",
             "selected_timezone", normalizeSelectedTimezone(selectedTimezone)
         ));
@@ -881,6 +883,11 @@ public class MentorSignalReviewService {
                     && currentPrice.compareTo(vpResult.valueAreaLow()) >= 0
                     && currentPrice.compareTo(vpResult.valueAreaHigh()) <= 0
             ));
+        }
+        // ── Phase 5a: SMC × Order Flow enrichment scores for Gemini ────────────────
+        Map<String, Object> smcOfScores = buildSmcOrderFlowScores(focusSnapshot);
+        if (!smcOfScores.isEmpty()) {
+            orderFlow.put("smc_order_flow_scores", smcOfScores);
         }
         payload.put("order_flow_and_volume", orderFlow);
         payload.put("macro_correlations_dynamic", linkedMap(
@@ -1413,6 +1420,100 @@ public class MentorSignalReviewService {
             "delta_divergence_detected", false,
             "source", TickAggregation.SOURCE_CLV_ESTIMATED
         );
+    }
+
+    /**
+     * Phase 5a: Build SMC x Order Flow enrichment scores for the Gemini payload.
+     * Extracts OF scores from the enriched IndicatorSnapshot views and assembles
+     * them into a structured map that Gemini can use for zone quality assessment.
+     * Returns an empty map if no enrichment data is available.
+     */
+    private Map<String, Object> buildSmcOrderFlowScores(IndicatorSnapshot focusSnapshot) {
+        Map<String, Object> scores = new LinkedHashMap<>();
+
+        // Order Block scores — top 3 by formation score
+        if (focusSnapshot.activeOrderBlocks() != null && !focusSnapshot.activeOrderBlocks().isEmpty()) {
+            List<Map<String, Object>> obScores = focusSnapshot.activeOrderBlocks().stream()
+                    .filter(ob -> ob.obFormationScore() != null)
+                    .sorted((a, b) -> Double.compare(
+                            b.obFormationScore() != null ? b.obFormationScore() : 0,
+                            a.obFormationScore() != null ? a.obFormationScore() : 0))
+                    .limit(3)
+                    .map(ob -> linkedMap(
+                            "type", ob.type(),
+                            "price_range", ob.low() + " - " + ob.high(),
+                            "formation_delta", ob.formationDelta(),
+                            "formation_score", ob.obFormationScore(),
+                            "live_score", ob.obLiveScore(),
+                            "defended", ob.defended(),
+                            "absorption_score", ob.absorptionScore()
+                    ))
+                    .toList();
+            if (!obScores.isEmpty()) {
+                scores.put("order_block_scores", obScores);
+            }
+        }
+
+        // FVG scores — top 3 by quality score
+        if (focusSnapshot.activeFairValueGaps() != null && !focusSnapshot.activeFairValueGaps().isEmpty()) {
+            List<Map<String, Object>> fvgScores = focusSnapshot.activeFairValueGaps().stream()
+                    .filter(fvg -> fvg.fvgQualityScore() != null)
+                    .sorted((a, b) -> Double.compare(
+                            b.fvgQualityScore() != null ? b.fvgQualityScore() : 0,
+                            a.fvgQualityScore() != null ? a.fvgQualityScore() : 0))
+                    .limit(3)
+                    .map(fvg -> linkedMap(
+                            "bias", fvg.bias(),
+                            "price_range", fvg.bottom() + " - " + fvg.top(),
+                            "gap_delta", fvg.gapDelta(),
+                            "quality_score", fvg.fvgQualityScore()
+                    ))
+                    .toList();
+            if (!fvgScores.isEmpty()) {
+                scores.put("fvg_scores", fvgScores);
+            }
+        }
+
+        // Structure break scores — top 3 most recent with enrichment
+        if (focusSnapshot.recentBreaks() != null && !focusSnapshot.recentBreaks().isEmpty()) {
+            List<Map<String, Object>> breakScores = focusSnapshot.recentBreaks().stream()
+                    .filter(br -> br.breakConfidenceScore() != null)
+                    .limit(3)
+                    .map(br -> linkedMap(
+                            "type", br.type(),
+                            "trend", br.trend(),
+                            "level", br.level(),
+                            "break_delta", br.breakDelta(),
+                            "volume_spike", br.volumeSpike(),
+                            "confirmed", br.confirmed(),
+                            "confidence_score", br.breakConfidenceScore()
+                    ))
+                    .toList();
+            if (!breakScores.isEmpty()) {
+                scores.put("structure_break_scores", breakScores);
+            }
+        }
+
+        // Liquidity pool scores — all enriched pools
+        List<IndicatorSnapshot.EqualLevelView> allPools = new ArrayList<>();
+        if (focusSnapshot.equalHighs() != null) allPools.addAll(focusSnapshot.equalHighs());
+        if (focusSnapshot.equalLows() != null) allPools.addAll(focusSnapshot.equalLows());
+        List<Map<String, Object>> poolScores = allPools.stream()
+                .filter(eq -> eq.liquidityConfirmScore() != null)
+                .map(eq -> linkedMap(
+                        "type", eq.type(),
+                        "price", eq.price(),
+                        "touch_count", eq.touchCount(),
+                        "orders_visible", eq.ordersVisible(),
+                        "depth_size_at_level", eq.depthSizeAtLevel(),
+                        "liquidity_confirm_score", eq.liquidityConfirmScore()
+                ))
+                .toList();
+        if (!poolScores.isEmpty()) {
+            scores.put("liquidity_pool_scores", poolScores);
+        }
+
+        return scores;
     }
 
     private boolean isStopProtectedByStructure(BigDecimal stopLoss, String action,

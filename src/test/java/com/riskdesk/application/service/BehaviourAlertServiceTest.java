@@ -262,6 +262,10 @@ class BehaviourAlertServiceTest {
                 null,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                null, null, null,
+                // UC-OF-013: Session CME Context
+                "NY_AM",
                 null,
                 null  // lastPrice
         );

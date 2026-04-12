@@ -173,6 +173,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - DXY bearish + Gold en DISCOUNT OB = signal d'achat fort.
         - US10Y en hausse met une pression baissière sur l'or — mentionner dans l'analyse.
         - Corrélation DXY inversée : si dxy_trend = BULLISH, être prudent sur les LONG Gold.
+        - ORDER FLOW METALS : Si absorption bullish dans OB demand Gold + Silver (SI) en hausse → catch-up trade haute conviction (confluences structure + flow + macro alignées).
         """;
 
     private static final String ENERGY_RULES = """
@@ -184,6 +185,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - DXY bearish = généralement bullish pour le pétrole.
         - En volatility_regime EXTREME sur MCL (fréquent lors de crises géopolitiques ou inventaires EIA), les BOS et Supertrend flips sont souvent des faux signaux causés par des wicks de liquidation. Exiger un CHoCH confirmé ou un OB mitigé pour valider. Un simple BOS est insuffisant.
         - Si atr_percentile_rank > 90, mentionner explicitement "volatilité extrême — réduction de taille recommandée" dans improvementTip.
+        - ORDER FLOW ENERGY : Si flash crash sur MCL pendant EIA news → attendre crashPhase = REVERSING avant d'entrer. Absorption pendant EIA = signal fort car liquidité réelle (pas du bruit).
         """;
 
     private static final String FOREX_RULES = """
@@ -196,6 +198,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - ANALYSE DE DIVERGENCE MONÉTAIRE : Consulter dxy_component_breakdown dans macro_correlations_dynamic. Si dxy_trend = BEARISH ET que la composante EURUSD contribue majoritairement à la baisse DXY, c'est un signal de force EUR structurelle (divergence Fed dovish vs ECB neutral/hawkish). Augmenter la confiance des signaux LONG E6 et mentionner "momentum structurel EUR" dans l'analyse. Les signaux SHORT E6 dans ce contexte sont counter-trend macro — signaler le risque et réduire eligibility.
         - Si dxy_trend = BULLISH avec EURUSD en composante dominante de la hausse DXY, c'est un signal de faiblesse EUR structurelle. Favoriser SHORT E6, traiter les LONG avec prudence accrue.
         - Si us10y_yield_pct_change est disponible ET positif (yields en hausse), cela renforce le USD → bearish E6.
+        - ORDER FLOW FOREX : Delta divergence sur E6 + DXY confirmant → signal de retournement haute confiance. Si depth_imbalance disponible, l'utiliser comme filtre de timing (< 0.3 = ne pas fader).
         """;
 
     private static final String EQUITY_INDEX_RULES = """
@@ -205,6 +208,7 @@ public class GeminiMentorClient implements MentorModelClient {
         - US10Y yield en forte hausse = pression baissière sur le tech/Nasdaq.
         - ES (S&P 500) est le leader sectoriel. Si ES et NQ baissent ensemble (convergent) = tendance saine. Si NQ baisse mais ES tient = divergence à surveiller.
         - Les premières 30 minutes de New York Open sont souvent un piège (stop hunt) — ne pas entrer en market order pendant cette fenêtre.
+        - ORDER FLOW EQUITY : Si VIX spike >20%% + depth_imbalance < 0.3 sur MNQ → ne pas acheter même avec OB demand. Attendre stabilisation depth (imbalance > 0.5) avant toute entrée LONG.
         """;
 
     private static final Map<String, String> ASSET_CLASS_RULES = Map.of(
@@ -213,6 +217,71 @@ public class GeminiMentorClient implements MentorModelClient {
         "FOREX", FOREX_RULES,
         "EQUITY_INDEX", EQUITY_INDEX_RULES
     );
+
+    private static final String ORDER_FLOW_INTELLIGENCE = """
+
+        ## ORDER FLOW INTELLIGENCE
+
+        ### Sources de données Order Flow
+        Les métriques order flow proviennent de deux sources (champ `source` dans order_flow_and_volume) :
+        - `REAL_TICKS` : delta calculé trade par trade via classification Lee-Ready (bid/ask). HAUTE confiance — chaque contrat est classifié individuellement.
+        - `CLV_ESTIMATED` : approximation via Close Location Value (position du close dans la range de la bougie). Confiance MOYENNE — utiliser comme indicatif seulement, NE PAS baser de décision dessus.
+
+        ### Métriques Order Flow disponibles
+        - `delta_flow_current` : (buyVolume - sellVolume) sur fenêtre glissante 5 min. Positif = acheteurs agressifs dominent.
+        - `cumulative_delta_trend` : direction du delta cumulé depuis début de session CME (BUYING/SELLING/NEUTRAL).
+        - `buy_ratio_pct` : %% de volume acheteur agressif. >55%% = pression acheteuse. <45%% = pression vendeuse.
+        - `delta_divergence_detected` + `delta_divergence_type` : prix vs delta en désaccord. BEARISH_DIVERGENCE = prix monte mais delta baisse (vendeurs cachés). BULLISH_DIVERGENCE = prix baisse mais delta monte (acheteurs cachés). C'est un signal FORT.
+
+        ### Scores Order Flow des Zones SMC (smc_order_flow_scores)
+        Chaque zone SMC porte un score de qualité 0-100 basé sur l'order flow réel :
+        - `obFormationScore` / `obLiveScore` : qualité de l'Order Block. Formation = delta de l'impulsion à la création. Live = absorption + depth en temps réel. >70 = institutionnel fort. <40 = zone fragile.
+        - `defended` : true si absorption détectée + prix stable dans la zone = acheteur/vendeur passif massif. C'est LE signal institutionnel le plus fiable.
+        - `fvgQualityScore` : intensité directionnelle du Fair Value Gap. >70 = vraie imbalance institutionnelle. <30 = gap vide sans conviction.
+        - `breakConfidenceScore` + `confirmed` : fiabilité du BOS/CHoCH. confirmed=true = volume spike >2× + delta aligné. confirmed=false = possible fakeout.
+        - `liquidityConfirmScore` : ordres visibles au niveau EQH/EQL dans le carnet Level 2.
+
+        ### Corrélation Order Flow × Zones SMC
+
+        1. **ABSORPTION dans un OB** :
+           - absorptionScore > 2.0 dans un OB demand → confiance LONG +20 points
+           - absorptionScore > 2.0 dans un OB supply → confiance SHORT +20 points
+           - OB avec `defended: true` → zone institutionnelle CONFIRMÉE, traiter comme HIGH CONVICTION
+
+        2. **DELTA DIVERGENCE** :
+           - BEARISH_DIVERGENCE dans zone supply → signal SHORT renforcé (vendeurs cachés absorbent les achats)
+           - BULLISH_DIVERGENCE dans zone demand → signal LONG renforcé (acheteurs cachés absorbent les ventes)
+
+        3. **SPOOFING** (si spoofing_detected dans smc_order_flow_scores) :
+           - Spoofing ASK près d'une supply zone → le "mur" vendeur est faux, breakout probable → ignorer la résistance
+           - Spoofing BID près d'une demand zone → le "plancher" acheteur est faux, breakdown probable → ignorer le support
+
+        4. **ICEBERG** (si iceberg_detected dans smc_order_flow_scores) :
+           - Iceberg BID détecté → acheteur institutionnel caché, biais LONG
+           - Iceberg ASK détecté → vendeur institutionnel caché, biais SHORT
+
+        5. **FLASH CRASH** (si crash_phase présent) :
+           - crashPhase = REVERSING + reversalScore > 70 dans zone demand → signal LONG haute conviction
+           - crashPhase = ACCELERATING → NE PAS fader le mouvement, attendre DECELERATING/REVERSING
+
+        6. **DEPTH IMBALANCE** (si depth_imbalance présent) :
+           - depthImbalance < 0.3 → bids en fuite, momentum baissier, ne pas acheter
+           - depthImbalance > 0.7 → asks en fuite, momentum haussier, ne pas vendre
+
+        ### Pondération selon la source
+        Si `source: "REAL_TICKS"` :
+          - Order flow = CONFIRMATIONS PRINCIPALES. Pondérer : Structure 40%% > Order Flow 35%% > Momentum 25%%
+          - L'absorption et le delta divergence sont des signaux DÉCISIONNELS
+          - Un OB avec obLiveScore > 80 + defended = prioriser cette zone sur tout autre niveau
+
+        Si `source: "CLV_ESTIMATED"` :
+          - Volume = INDICATIF seulement. Pondérer : Structure 50%% > Momentum 30%% > Volume 20%%
+          - NE PAS utiliser les divergences delta comme signal décisionnel
+          - NE PAS mentionner l'absorption ou le depth (données non disponibles en CLV)
+
+        ### Règle de priorisation des zones
+        Toujours prioriser les zones avec les scores OF les plus élevés. Un OB à formationScore=90 dans un contexte de confluence est plus fiable qu'un OB à formationScore=30 même avec d'autres confirmations momentum.
+        """;
 
     private static final String WINNING_PATTERNS = """
 
@@ -243,6 +312,7 @@ public class GeminiMentorClient implements MentorModelClient {
 
     private String buildSystemPrompt(String assetClass) {
         StringBuilder prompt = new StringBuilder(BASE_SYSTEM_PROMPT);
+        prompt.append(ORDER_FLOW_INTELLIGENCE);
         if (assetClass != null && ASSET_CLASS_RULES.containsKey(assetClass)) {
             prompt.append(ASSET_CLASS_RULES.get(assetClass));
         }
@@ -271,6 +341,13 @@ public class GeminiMentorClient implements MentorModelClient {
             "type", "OBJECT", "nullable", true,
             "properties", safeDeepEntryProps
         ));
+        tradePlanProps.put("orderFlowConfidence", Map.of(
+            "type", "INTEGER", "nullable", true,
+            "description", "0-100 confidence score based on order flow data quality and alignment. null if source=CLV_ESTIMATED."));
+        tradePlanProps.put("orderFlowFactors", Map.of(
+            "type", "ARRAY", "nullable", true,
+            "items", Map.of("type", "STRING"),
+            "description", "Key OF factors that influenced the decision (e.g. 'Absorption bullish score 3.2 in demand OB', 'Delta divergence bearish')"));
 
         Map<String, Object> topProps = new LinkedHashMap<>();
         topProps.put("technicalQuickAnalysis", Map.of("type", "STRING", "description", "2 phrases max, clinique et factuel"));
@@ -348,6 +425,7 @@ public class GeminiMentorClient implements MentorModelClient {
                 ),
                 "generationConfig", Map.of(
                     "temperature", 0.1,
+                    "maxOutputTokens", 1500,
                     "responseMimeType", "application/json",
                     "responseSchema", buildResponseSchema()
                 )
@@ -363,7 +441,19 @@ public class GeminiMentorClient implements MentorModelClient {
                 + properties.getModel()
                 + ":generateContent";
 
+            // Measure latency + payload size
+            long startMs = System.currentTimeMillis();
+            int payloadLength = payloadJson.length();
+            int ragLength = similarAuditsJson.length();
+            int systemPromptLength = systemPrompt.length();
+
             JsonNode root = executeWithRetry(endpoint, request);
+
+            long latencyMs = System.currentTimeMillis() - startMs;
+
+            // Cost + latency tracking
+            logUsageMetadata(root, assetClass, latencyMs, systemPromptLength, payloadLength, ragLength);
+
             String text = extractText(root);
             if (text == null || text.isBlank()) {
                 throw new IllegalStateException("Gemini returned an empty response.");
@@ -425,6 +515,34 @@ public class GeminiMentorClient implements MentorModelClient {
             current = current.getCause();
         }
         return false;
+    }
+
+    private void logUsageMetadata(JsonNode root, String assetClass,
+                                   long latencyMs, int systemPromptChars,
+                                   int payloadChars, int ragChars) {
+        try {
+            JsonNode usage = root.path("usageMetadata");
+            int inputTokens = usage.isMissingNode() ? 0 : usage.path("promptTokenCount").asInt(0);
+            int outputTokens = usage.isMissingNode() ? 0 : usage.path("candidatesTokenCount").asInt(0);
+            int cachedTokens = usage.isMissingNode() ? 0 : usage.path("cachedContentTokenCount").asInt(0);
+            int totalTokens = usage.isMissingNode() ? 0 : usage.path("totalTokenCount").asInt(inputTokens + outputTokens);
+
+            log.info("Gemini review — latency: {}ms | tokens in: {} out: {} cached: {} total: {} | "
+                     + "chars system: {} payload: {} rag: {} | asset: {}",
+                     latencyMs, inputTokens, outputTokens, cachedTokens, totalTokens,
+                     systemPromptChars, payloadChars, ragChars,
+                     assetClass != null ? assetClass : "unknown");
+
+            if (latencyMs > 20_000) {
+                log.warn("Gemini SLOW review — {}ms for {} input tokens (asset: {}). "
+                         + "Consider: reduce RAG audits (rag chars: {}), "
+                         + "switch to gemini-2.5-flash for auto reviews, "
+                         + "or check if preview model is throttled.",
+                         latencyMs, inputTokens, assetClass, ragChars);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to extract Gemini usage metadata: {}", e.getMessage());
+        }
     }
 
     private String sanitizeJsonText(String text) {

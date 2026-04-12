@@ -182,4 +182,47 @@ public final class TradingSessionResolver {
         return (t.compareTo(LocalTime.of(2, 0)) >= 0 && t.isBefore(LocalTime.of(5, 0)))
             || (t.compareTo(LocalTime.of(8, 30)) >= 0 && t.isBefore(LocalTime.of(11, 0)));
     }
+
+    /**
+     * Returns the current CME session phase for the given timestamp.
+     * <p>
+     * Session phases (all in America/New_York, DST-aware):
+     * <ul>
+     *   <li>CLOSED  — Weekend: Friday 17:00 ET through Sunday 17:00 ET</li>
+     *   <li>ASIAN   — 17:00–02:00 ET (CME Globex Asia / overnight)</li>
+     *   <li>LONDON  — 02:00–08:30 ET (London + European open)</li>
+     *   <li>NY_AM   — 08:30–12:00 ET (NY morning, highest volume)</li>
+     *   <li>NY_PM   — 12:00–16:00 ET (NY afternoon, lower volume)</li>
+     *   <li>CLOSE   — 16:00–17:00 ET (settlement / maintenance)</li>
+     * </ul>
+     */
+    public static SessionPhase currentPhase(Instant timestamp) {
+        if (!isMarketOpen(timestamp)) {
+            return SessionPhase.CLOSED;
+        }
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        // 17:00–02:00 ET = ASIAN (spans midnight)
+        if (!t.isBefore(CME_SESSION_CLOSE) || t.isBefore(LocalTime.of(2, 0))) {
+            return SessionPhase.ASIAN;
+        }
+        // 02:00–08:30 ET = LONDON
+        if (t.isBefore(LocalTime.of(8, 30))) {
+            return SessionPhase.LONDON;
+        }
+        // 08:30–12:00 ET = NY_AM
+        if (t.isBefore(LocalTime.of(12, 0))) {
+            return SessionPhase.NY_AM;
+        }
+        // 12:00–16:00 ET = NY_PM
+        if (t.isBefore(LocalTime.of(16, 0))) {
+            return SessionPhase.NY_PM;
+        }
+        // 16:00–17:00 ET = CLOSE
+        return SessionPhase.CLOSE;
+    }
+
+    /** Convenience overload using the current wall-clock time. */
+    public static SessionPhase currentPhase() {
+        return currentPhase(Instant.now());
+    }
 }
