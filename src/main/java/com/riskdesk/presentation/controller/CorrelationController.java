@@ -49,7 +49,7 @@ public class CorrelationController {
         payload.put("engineState",          state.name());
         payload.put("vixThreshold",         correlationService.getVixThreshold());
         payload.put("cachedVixPrice",       correlationService.getCachedVixPrice());
-        payload.put("blackoutActive",       isBlackoutActive(blackout, correlationService.getBlackoutDurationMinutes()));
+        payload.put("blackoutActive",       correlationService.isBlackoutActive());
         payload.put("blackoutStart",        blackout != null ? blackout.toString() : null);
         payload.put("blackoutDurationMins", correlationService.getBlackoutDurationMinutes());
         return ResponseEntity.ok(payload);
@@ -73,11 +73,25 @@ public class CorrelationController {
     @Operation(summary = "Updates ONIMS engine configuration (VIX threshold, blackout duration)")
     public ResponseEntity<Map<String, Object>> config(@RequestBody Map<String, Object> body) {
         if (body.containsKey("vixThreshold")) {
-            double threshold = ((Number) body.get("vixThreshold")).doubleValue();
+            Object raw = body.get("vixThreshold");
+            if (!(raw instanceof Number)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "vixThreshold must be a number"));
+            }
+            double threshold = ((Number) raw).doubleValue();
+            if (threshold < 0) {
+                return ResponseEntity.badRequest().body(Map.of("error", "vixThreshold must be non-negative"));
+            }
             correlationService.setVixThreshold(threshold);
         }
         if (body.containsKey("blackoutDurationMinutes")) {
-            int minutes = ((Number) body.get("blackoutDurationMinutes")).intValue();
+            Object raw = body.get("blackoutDurationMinutes");
+            if (!(raw instanceof Number)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "blackoutDurationMinutes must be a number"));
+            }
+            int minutes = ((Number) raw).intValue();
+            if (minutes <= 0) {
+                return ResponseEntity.badRequest().body(Map.of("error", "blackoutDurationMinutes must be positive"));
+            }
             correlationService.setBlackoutDurationMinutes(minutes);
         }
         return ResponseEntity.ok(Map.of(
@@ -95,9 +109,10 @@ public class CorrelationController {
     @Operation(summary = "Activates an announcement blackout window starting now (OPEC+, EIA, etc.)")
     public ResponseEntity<Map<String, Object>> activateBlackout() {
         correlationService.activateBlackout();
+        Instant start = correlationService.getBlackoutStart();
         return ResponseEntity.ok(Map.of(
                 "status",               "blackout_activated",
-                "blackoutStart",        correlationService.getBlackoutStart().toString(),
+                "blackoutStart",        start != null ? start.toString() : "",
                 "blackoutDurationMins", correlationService.getBlackoutDurationMinutes()
         ));
     }
@@ -113,13 +128,4 @@ public class CorrelationController {
         return ResponseEntity.ok(Map.of("status", "reset", "engineState", CorrelationState.IDLE.name()));
     }
 
-    // -----------------------------------------------------------------------
-    // Helper
-    // -----------------------------------------------------------------------
-
-    private boolean isBlackoutActive(Instant start, int durationMinutes) {
-        if (start == null) return false;
-        long elapsed = java.time.Duration.between(start, Instant.now()).toMinutes();
-        return elapsed >= 0 && elapsed < durationMinutes;
-    }
 }

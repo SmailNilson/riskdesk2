@@ -385,4 +385,8 @@ public class CrossInstrumentAlertService {
     public int getBlackoutDurationMinutes() {
         return blackoutDurationMinutes;
     }
+
+    public boolean isBlackoutActive() {
+        return isInBlackout(Instant.now());
+    }
 }

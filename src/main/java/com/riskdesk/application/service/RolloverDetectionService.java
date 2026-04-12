@@ -109,7 +109,7 @@ public class RolloverDetectionService {
                 .map(this::parseExpiry)
                 .orElse(null);
         } catch (Exception e) {
-            log.debug("RolloverDetectionService: could not resolve expiry for {} — {}", instrument, e.getMessage());
+            log.warn("RolloverDetectionService: could not resolve expiry for {} — {}", instrument, e.getMessage());
             return null;
         }
     }
@@ -129,7 +129,9 @@ public class RolloverDetectionService {
                     1
                 ).withDayOfMonth(1).plusMonths(1).minusDays(1);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            log.debug("RolloverDetectionService: failed to parse expiry '{}' — {}", raw, e.getMessage());
+        }
         return null;
     }
 
