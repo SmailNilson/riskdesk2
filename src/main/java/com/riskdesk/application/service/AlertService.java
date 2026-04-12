@@ -153,6 +153,9 @@ public class AlertService {
 
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
+                        // MGC: alerts published to dashboard but NOT routed to Gemini auto-review
+                        if (instrument == Instrument.MGC) continue;
+
                         SignalWeight sw = SignalWeight.fromAlert(alert);
                         String direction = SignalPreFilterService.extractDirection(alert);
                         if (sw == null || direction == null) continue;
