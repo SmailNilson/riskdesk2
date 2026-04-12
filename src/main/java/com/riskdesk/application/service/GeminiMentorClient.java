@@ -441,10 +441,18 @@ public class GeminiMentorClient implements MentorModelClient {
                 + properties.getModel()
                 + ":generateContent";
 
+            // Measure latency + payload size
+            long startMs = System.currentTimeMillis();
+            int payloadLength = payloadJson.length();
+            int ragLength = similarAuditsJson.length();
+            int systemPromptLength = systemPrompt.length();
+
             JsonNode root = executeWithRetry(endpoint, request);
 
-            // Cost tracking — extract token usage from Gemini response
-            logUsageMetadata(root, assetClass);
+            long latencyMs = System.currentTimeMillis() - startMs;
+
+            // Cost + latency tracking
+            logUsageMetadata(root, assetClass, latencyMs, systemPromptLength, payloadLength, ragLength);
 
             String text = extractText(root);
             if (text == null || text.isBlank()) {
@@ -509,17 +517,29 @@ public class GeminiMentorClient implements MentorModelClient {
         return false;
     }
 
-    private void logUsageMetadata(JsonNode root, String assetClass) {
+    private void logUsageMetadata(JsonNode root, String assetClass,
+                                   long latencyMs, int systemPromptChars,
+                                   int payloadChars, int ragChars) {
         try {
             JsonNode usage = root.path("usageMetadata");
-            if (usage.isMissingNode()) return;
-            int inputTokens = usage.path("promptTokenCount").asInt(0);
-            int outputTokens = usage.path("candidatesTokenCount").asInt(0);
-            int cachedTokens = usage.path("cachedContentTokenCount").asInt(0);
-            int totalTokens = usage.path("totalTokenCount").asInt(inputTokens + outputTokens);
-            log.info("Gemini usage — input: {}, output: {}, cached: {}, total: {}, asset: {}",
-                     inputTokens, outputTokens, cachedTokens, totalTokens,
+            int inputTokens = usage.isMissingNode() ? 0 : usage.path("promptTokenCount").asInt(0);
+            int outputTokens = usage.isMissingNode() ? 0 : usage.path("candidatesTokenCount").asInt(0);
+            int cachedTokens = usage.isMissingNode() ? 0 : usage.path("cachedContentTokenCount").asInt(0);
+            int totalTokens = usage.isMissingNode() ? 0 : usage.path("totalTokenCount").asInt(inputTokens + outputTokens);
+
+            log.info("Gemini review — latency: {}ms | tokens in: {} out: {} cached: {} total: {} | "
+                     + "chars system: {} payload: {} rag: {} | asset: {}",
+                     latencyMs, inputTokens, outputTokens, cachedTokens, totalTokens,
+                     systemPromptChars, payloadChars, ragChars,
                      assetClass != null ? assetClass : "unknown");
+
+            if (latencyMs > 20_000) {
+                log.warn("Gemini SLOW review — {}ms for {} input tokens (asset: {}). "
+                         + "Consider: reduce RAG audits (rag chars: {}), "
+                         + "switch to gemini-2.5-flash for auto reviews, "
+                         + "or check if preview model is throttled.",
+                         latencyMs, inputTokens, assetClass, ragChars);
+            }
         } catch (Exception e) {
             log.debug("Failed to extract Gemini usage metadata: {}", e.getMessage());
         }
