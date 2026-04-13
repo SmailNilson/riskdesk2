@@ -1,11 +1,14 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.ib.client.Contract;
+import com.ib.client.Decimal;
 import com.ib.client.DefaultEWrapper;
 import com.ib.client.EClientSocket;
 import com.ib.client.EJavaSignal;
 import com.ib.client.EReader;
 import com.ib.client.EReaderSignal;
+import com.ib.client.TickAttribLast;
+import com.ib.client.TickType;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,28 +16,30 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Dedicated EClientSocket connection for real-time trade data via RTVolume (tick type 233).
+ * Dedicated EClientSocket connection for tick-by-tick AllLast data.
  *
- * <p>Uses {@code reqMktData} with generic tick "233" (RTVolume) instead of
- * {@code reqTickByTickData} because the latter requires an API-eligible market data
- * subscription that is not available on "Trader Workstation" channel subscriptions.
- * RTVolume delivers trade data at ~250ms aggregation via the {@code tickString()} callback,
- * which is sufficient for delta calculation, absorption detection, and order flow scoring.</p>
- *
- * <p>Runs on a separate IBKR clientId to avoid interfering with the main
- * ApiController connection (prices, quotes, depth, orders).</p>
- *
- * <p>RTVolume format: {@code price;size;timeMs;totalVolume;vwap;singleTradeFlag}</p>
+ * <p>Uses direct EClientSocket (bypasses ApiController) with 5 critical fixes:
+ * <ol>
+ *   <li>EReader loop catches ALL exceptions (not just IOException)</li>
+ *   <li>reqId management — AtomicInteger, never reuse</li>
+ *   <li>tickByTickAllLast is exception-safe (swallows, never propagates to EReader)</li>
+ *   <li>Contract fully specified (symbol, secType, exchange, currency, lastTradeDate)</li>
+ *   <li>Watchdog detects silent stream death and resubscribes with NEW reqId</li>
+ * </ol>
  */
 @Component
 public class TickByTickClient {
 
     private static final Logger log = LoggerFactory.getLogger(TickByTickClient.class);
-    private static final int TICK_TYPE_RT_VOLUME = 48; // TickType.RT_VOLUME
+    private static final long STREAM_DEAD_THRESHOLD_MS = 60_000; // 60s no tick = dead
+    private static final long WATCHDOG_INTERVAL_MS = 30_000; // check every 30s
 
     private final IbkrProperties properties;
     private volatile IbkrTickDataAdapter tickDataAdapter;
@@ -46,13 +51,18 @@ public class TickByTickClient {
     private volatile EReaderSignal signal;
     private volatile boolean connected = false;
 
-    // Subscription tracking: reqId → instrument
-    private final ConcurrentHashMap<Integer, SubscriptionInfo> subscriptions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Integer> instrumentReqIds = new ConcurrentHashMap<>();
-    private final AtomicInteger nextReqId = new AtomicInteger(1);
+    // Fix 2: reqId management — NEVER reuse, always increment
+    private final AtomicInteger nextReqId = new AtomicInteger(1000);
+
+    // Subscription tracking
+    private final ConcurrentHashMap<Integer, SubscriptionInfo> activeSubscriptions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, Long> lastTickTime = new ConcurrentHashMap<>();
     private final AtomicLong totalTicksReceived = new AtomicLong(0);
 
-    private record SubscriptionInfo(Instrument instrument, Contract contract, boolean loggedFirstTick) {}
+    // Fix 5: Watchdog scheduler
+    private ScheduledExecutorService watchdog;
+
+    private record SubscriptionInfo(Instrument instrument, Contract contract) {}
 
     public TickByTickClient(IbkrProperties properties) {
         this.properties = properties;
@@ -80,7 +90,7 @@ public class TickByTickClient {
 
         try {
             signal = new EJavaSignal();
-            RTVolumeEWrapper wrapper = new RTVolumeEWrapper();
+            TickEWrapper wrapper = new TickEWrapper();
             client = new EClientSocket(wrapper, signal);
             client.eConnect(host, port, clientId);
 
@@ -89,52 +99,66 @@ public class TickByTickClient {
                 return;
             }
 
+            // Start EReader
             reader = new EReader(client, signal);
             reader.start();
+            log.info("TickByTickClient: EReader thread started");
 
+            // Fix 1: EReader processing loop catches ALL exceptions
             Thread processingThread = new Thread(() -> {
+                log.info("TickByTickClient: processing thread started");
                 while (client != null && client.isConnected()) {
                     signal.waitForSignal();
                     try {
                         reader.processMsgs();
                     } catch (Exception e) {
-                        log.warn("TickByTickClient processing error: {}", e.getMessage());
+                        // CRITICAL: catch ALL exceptions, not just IOException
+                        // Prevents silent thread death
+                        log.error("TickByTickClient: EReader processing error (thread alive)", e);
+                        // do NOT break — keep the loop alive
                     }
                 }
-                log.info("TickByTickClient processing thread exited");
+                log.warn("TickByTickClient: processing thread exited (client disconnected)");
             }, "tick-by-tick-processor");
             processingThread.setDaemon(true);
             processingThread.start();
 
             connected = true;
-            log.info("TickByTickClient connected to {}:{} with clientId={} (RTVolume mode)", host, port, clientId);
+            log.info("TickByTickClient: connected to {}:{} clientId={}", host, port, clientId);
+
+            // Fix 5: Start watchdog to detect silent stream death
+            startWatchdog();
 
         } catch (Exception e) {
-            log.error("TickByTickClient connection failed: {}", e.getMessage(), e);
+            log.error("TickByTickClient: connection failed", e);
             connected = false;
         }
     }
 
     public synchronized void disconnect() {
         connected = false;
-        subscriptions.clear();
-        instrumentReqIds.clear();
+        stopWatchdog();
+        activeSubscriptions.clear();
+        lastTickTime.clear();
         if (client != null && client.isConnected()) {
             try { client.eDisconnect(); } catch (Exception e) { /* ignore */ }
         }
         client = null;
         reader = null;
         signal = null;
-        log.info("TickByTickClient disconnected");
+        log.info("TickByTickClient: disconnected");
     }
 
     public boolean isConnected() {
         return connected && client != null && client.isConnected();
     }
 
+    // -------------------------------------------------------------------------
+    // Fix 2: Subscription with unique reqId (never reuse)
+    // -------------------------------------------------------------------------
+
     /**
-     * Subscribe to RTVolume (tick type 233) for real-time trade data.
-     * Uses reqMktData instead of reqTickByTickData — works with all subscription types.
+     * Subscribe to tick-by-tick AllLast data. Uses a unique reqId every time.
      */
     public void subscribeTickByTick(Contract contract, Instrument instrument) {
         if (!isConnected()) {
@@ -146,118 +170,151 @@ public class TickByTickClient {
             return;
         }
 
-        String key = instrumentKey(instrument);
-        if (instrumentReqIds.containsKey(key)) {
-            return;
+        // Check if already subscribed for this instrument
+        for (var entry : activeSubscriptions.entrySet()) {
+            if (entry.getValue().instrument() == instrument) {
+                return; // already subscribed
+            }
         }
 
-        int reqId = nextReqId.getAndIncrement();
-        subscriptions.put(reqId, new SubscriptionInfo(instrument, contract, false));
-        instrumentReqIds.put(key, reqId);
+        int reqId = nextReqId.getAndIncrement(); // NEVER reuse
+        activeSubscriptions.put(reqId, new SubscriptionInfo(instrument, contract));
+        lastTickTime.put(reqId, System.currentTimeMillis()); // initial timestamp
 
-        // reqMktData with generic tick "233" (RTVolume) — continuous trade stream
-        client.reqMktData(reqId, contract, "233", false, false, null);
-        log.info("TickByTickClient: subscribed RTVolume for {} (reqId={}, conId={})",
-                 instrument, reqId, contract.conid());
+        client.reqTickByTickData(reqId, contract, "AllLast", 0, false);
+        log.info("TickByTickClient: SUBSCRIBE reqId={} {} conId={} lastTradeDate={}",
+                 reqId, instrument, contract.conid(), contract.lastTradeDateOrContractMonth());
     }
 
     public void cancelTickByTick(Instrument instrument) {
-        String key = instrumentKey(instrument);
-        Integer reqId = instrumentReqIds.remove(key);
-        if (reqId != null) {
-            subscriptions.remove(reqId);
-            if (client != null && client.isConnected()) {
-                try { client.cancelMktData(reqId); } catch (Exception e) { /* ignore */ }
+        activeSubscriptions.forEach((reqId, info) -> {
+            if (info.instrument() == instrument) {
+                client.cancelTickByTickData(reqId);
+                activeSubscriptions.remove(reqId);
+                lastTickTime.remove(reqId);
+                log.info("TickByTickClient: CANCEL reqId={} {}", reqId, instrument);
             }
-        }
+        });
     }
 
     public long getTotalTicksReceived() {
         return totalTicksReceived.get();
     }
 
-    private String instrumentKey(Instrument instrument) {
-        return instrument.name();
+    // -------------------------------------------------------------------------
+    // Fix 5: Watchdog — detect silent stream death and resubscribe
+    // -------------------------------------------------------------------------
+
+    private void startWatchdog() {
+        stopWatchdog();
+        watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "tick-watchdog");
+            t.setDaemon(true);
+            return t;
+        });
+        watchdog.scheduleAtFixedRate(this::checkStreams, WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        log.info("TickByTickClient: watchdog started (interval={}s, threshold={}s)",
+                 WATCHDOG_INTERVAL_MS / 1000, STREAM_DEAD_THRESHOLD_MS / 1000);
     }
 
-    // -------------------------------------------------------------------------
-    // RTVolume parsing
-    // -------------------------------------------------------------------------
+    private void stopWatchdog() {
+        if (watchdog != null) {
+            watchdog.shutdownNow();
+            watchdog = null;
+        }
+    }
 
-    /**
-     * Parse RTVolume string: "price;size;timeMs;totalVolume;vwap;singleTradeFlag"
-     */
-    private void processRTVolume(int reqId, String rtVolumeStr) {
-        SubscriptionInfo info = subscriptions.get(reqId);
-        if (info == null) return;
+    private void checkStreams() {
+        if (!isConnected()) return;
 
+        long now = System.currentTimeMillis();
+        activeSubscriptions.forEach((reqId, info) -> {
+            Long last = lastTickTime.get(reqId);
+            if (last != null && (now - last) > STREAM_DEAD_THRESHOLD_MS) {
+                log.warn("TickByTickClient: STREAM DEAD reqId={} {} — no tick for {}s. Resubscribing with new reqId.",
+                         reqId, info.instrument(), (now - last) / 1000);
+                resubscribe(reqId, info);
+            }
+        });
+    }
+
+    private void resubscribe(int oldReqId, SubscriptionInfo info) {
         try {
-            String[] parts = rtVolumeStr.split(";");
-            if (parts.length < 6) return;
+            // Cancel old subscription
+            client.cancelTickByTickData(oldReqId);
+            activeSubscriptions.remove(oldReqId);
+            lastTickTime.remove(oldReqId);
 
-            String priceStr = parts[0].trim();
-            String sizeStr = parts[1].trim();
-            String timeMsStr = parts[2].trim();
+            // Subscribe with a BRAND NEW reqId (never reuse)
+            int newReqId = nextReqId.getAndIncrement();
+            activeSubscriptions.put(newReqId, info);
+            lastTickTime.put(newReqId, System.currentTimeMillis());
 
-            if (priceStr.isEmpty() || sizeStr.isEmpty() || timeMsStr.isEmpty()) return;
-
-            double price = Double.parseDouble(priceStr);
-            long size = (long) Double.parseDouble(sizeStr);
-            long timeMs = Long.parseLong(timeMsStr);
-
-            if (price <= 0 || size <= 0) return;
-
-            long count = totalTicksReceived.incrementAndGet();
-
-            if (!info.loggedFirstTick()) {
-                subscriptions.put(reqId, new SubscriptionInfo(info.instrument(), info.contract(), true));
-                log.info("TickByTickClient: first RTVolume tick for {} — price={}, size={}, time={}",
-                         info.instrument(), price, size, Instant.ofEpochMilli(timeMs));
-            }
-
-            if (count % 1000 == 0) {
-                log.info("TickByTickClient: {} total ticks received across all instruments", count);
-            }
-
-            // Get bid/ask from main connection for Lee-Ready classification
-            double bid = 0;
-            double ask = 0;
-            IbGatewayNativeClient nc = nativeClient;
-            if (nc != null) {
-                var quote = nc.latestStreamingQuote(info.contract());
-                if (quote.isPresent()) {
-                    IbGatewayNativeClient.NativeMarketQuote q = quote.get();
-                    bid = q.bid() != null ? q.bid().doubleValue() : 0;
-                    ask = q.ask() != null ? q.ask().doubleValue() : 0;
-                }
-            }
-
-            TickByTickAggregator.TickClassification classification =
-                IbkrTickDataAdapter.classifyTrade(price, bid, ask);
-
-            IbkrTickDataAdapter adapter = tickDataAdapter;
-            if (adapter != null) {
-                adapter.onTickByTickTrade(info.instrument(), price, size, classification,
-                                          Instant.ofEpochMilli(timeMs));
-            }
-
-        } catch (NumberFormatException e) {
-            log.debug("TickByTickClient: malformed RTVolume: {}", rtVolumeStr);
+            client.reqTickByTickData(newReqId, info.contract(), "AllLast", 0, false);
+            log.info("TickByTickClient: RESUBSCRIBE {} old reqId={} → new reqId={}",
+                     info.instrument(), oldReqId, newReqId);
         } catch (Exception e) {
-            log.warn("TickByTickClient: error processing RTVolume: {}", e.getMessage());
+            log.error("TickByTickClient: resubscribe failed for {}", info.instrument(), e);
         }
     }
 
     // -------------------------------------------------------------------------
-    // EWrapper — RTVolume via tickString()
+    // Fix 3: Exception-safe EWrapper
     // -------------------------------------------------------------------------
 
-    private class RTVolumeEWrapper extends DefaultEWrapper {
+    private class TickEWrapper extends DefaultEWrapper {
 
         @Override
-        public void tickString(int tickerId, int tickType, String value) {
-            if (tickType == TICK_TYPE_RT_VOLUME && value != null && !value.isEmpty()) {
-                processRTVolume(tickerId, value);
+        public void tickByTickAllLast(int reqId, int tickType, long time, double price,
+                                       Decimal size, TickAttribLast attribs,
+                                       String exchange, String specialConditions) {
+            try {
+                // Fix 3: entire handler wrapped in try/catch — NEVER propagate to EReader
+                if (price <= 0 || size == null) return;
+
+                long sizeVal = size.longValue();
+                if (sizeVal <= 0) return;
+
+                Instant timestamp = Instant.ofEpochSecond(time);
+                long count = totalTicksReceived.incrementAndGet();
+
+                // Update watchdog timestamp
+                lastTickTime.put(reqId, System.currentTimeMillis());
+
+                // Log EVERY tick (for diagnosis — can reduce to DEBUG later)
+                SubscriptionInfo info = activeSubscriptions.get(reqId);
+                String instrument = info != null ? info.instrument().name() : "UNKNOWN";
+
+                if (count <= 20 || count % 100 == 0) {
+                    log.info("TICK #{} reqId={} {} price={} size={} time={} exchange={}",
+                             count, reqId, instrument, price, sizeVal, timestamp, exchange);
+                }
+
+                // Get bid/ask from main connection for Lee-Ready classification
+                double bid = 0;
+                double ask = 0;
+                if (info != null) {
+                    IbGatewayNativeClient nc = nativeClient;
+                    if (nc != null) {
+                        var quote = nc.latestStreamingQuote(info.contract());
+                        if (quote.isPresent()) {
+                            IbGatewayNativeClient.NativeMarketQuote q = quote.get();
+                            bid = q.bid() != null ? q.bid().doubleValue() : 0;
+                            ask = q.ask() != null ? q.ask().doubleValue() : 0;
+                        }
+                    }
+
+                    TickByTickAggregator.TickClassification classification =
+                        IbkrTickDataAdapter.classifyTrade(price, bid, ask);
+
+                    IbkrTickDataAdapter adapter = tickDataAdapter;
+                    if (adapter != null) {
+                        adapter.onTickByTickTrade(info.instrument(), price, sizeVal, classification, timestamp);
+                    }
+                }
+            } catch (Exception e) {
+                // Fix 3: swallow ALL exceptions — NEVER propagate to EReader thread
+                log.error("TickByTickClient: exception in tickByTickAllLast reqId={}", reqId, e);
             }
         }
 
@@ -270,41 +327,45 @@ public class TickByTickClient {
 
         @Override
         public void connectionClosed() {
-            log.warn("TickByTickClient: connection closed by IBKR");
+            log.warn("TickByTickClient: CONNECTION CLOSED by IBKR");
             connected = false;
         }
 
         @Override
         public void error(int id, long errorTime, int errorCode, String errorMsg, String advancedOrderRejectJson) {
-            if (errorCode == 2104 || errorCode == 2106 || errorCode == 2158 || errorCode == 2108 || errorCode == 2107) {
-                return;
-            }
-            if (errorCode == 10197) {
-                log.warn("TickByTickClient: no market data during competing session (code 10197) reqId={}", id);
-            } else if (errorCode == 10167) {
-                log.warn("TickByTickClient: delayed market data (code 10167) reqId={}", id);
-            } else if (errorCode == 354) {
-                log.warn("TickByTickClient: not subscribed to market data (code 354) reqId={}", id);
-            } else if (id == -1) {
-                log.debug("TickByTickClient: system message code={} msg={}", errorCode, errorMsg);
-            } else {
-                log.warn("TickByTickClient: error id={} code={} msg={}", id, errorCode, errorMsg);
+            // Log ALL errors — especially the critical ones
+            switch (errorCode) {
+                case 2104, 2106, 2158, 2108, 2107 -> { /* noisy info */ }
+                case 10197 -> log.warn("TickByTickClient: COMPETING SESSION stealing data (code 10197) reqId={}", id);
+                case 10167 -> log.warn("TickByTickClient: DELAYED DATA substituted (code 10167) reqId={}", id);
+                case 354   -> log.warn("TickByTickClient: NOT SUBSCRIBED to data (code 354) reqId={}", id);
+                case 10089 -> log.warn("TickByTickClient: MISSING tick-by-tick subscription (code 10089) reqId={}", id);
+                case 1100  -> log.warn("TickByTickClient: CONNECTIVITY LOST (code 1100)");
+                case 1101  -> log.info("TickByTickClient: CONNECTIVITY RESTORED (code 1101)");
+                case 1102  -> log.info("TickByTickClient: CONNECTIVITY RESTORED with data loss (code 1102)");
+                default -> {
+                    if (id == -1) {
+                        log.debug("TickByTickClient: system code={} msg={}", errorCode, errorMsg);
+                    } else {
+                        log.warn("TickByTickClient: ERROR id={} code={} msg={}", id, errorCode, errorMsg);
+                    }
+                }
             }
         }
 
         @Override
         public void error(Exception e) {
-            log.warn("TickByTickClient: exception — {}", e.getMessage());
+            log.error("TickByTickClient: EXCEPTION", e);
         }
 
         @Override
         public void error(String str) {
-            log.warn("TickByTickClient: error — {}", str);
+            log.warn("TickByTickClient: ERROR — {}", str);
         }
 
         @Override
         public void nextValidId(int orderId) {
-            log.info("TickByTickClient: nextValidId={} — connection ready (RTVolume mode)", orderId);
+            log.info("TickByTickClient: nextValidId={} — connection ready", orderId);
         }
     }
 }
