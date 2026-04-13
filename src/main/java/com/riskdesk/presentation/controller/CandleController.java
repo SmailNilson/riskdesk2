@@ -57,6 +57,9 @@ public class CandleController {
             candles = candlePort.findRecentCandlesByContractMonth(inst, timeframe, contractMonth, limit);
             if (candles.isEmpty()) {
                 candles = candlePort.findRecentCandles(inst, timeframe, limit);
+                candles = candles.stream()
+                    .filter(c -> c.getContractMonth() == null || contractMonth.equals(c.getContractMonth()))
+                    .toList();
             }
         } else {
             candles = candlePort.findRecentCandles(inst, timeframe, limit);
