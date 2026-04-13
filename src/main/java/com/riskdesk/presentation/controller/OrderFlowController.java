@@ -4,6 +4,8 @@ import com.riskdesk.application.service.OrderFlowOrchestrator;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.model.DepthMetrics;
+import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -24,11 +26,14 @@ public class OrderFlowController {
 
     private final ObjectProvider<OrderFlowOrchestrator> orchestratorProvider;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final ObjectProvider<MarketDepthPort> depthPortProvider;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
-                                ObjectProvider<TickDataPort> tickDataPortProvider) {
+                                ObjectProvider<TickDataPort> tickDataPortProvider,
+                                ObjectProvider<MarketDepthPort> depthPortProvider) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
+        this.depthPortProvider = depthPortProvider;
     }
 
     /**
@@ -81,6 +86,49 @@ public class OrderFlowController {
             result.put("source", a.source());
             result.put("windowStart", a.windowStart() != null ? a.windowStart().toString() : null);
             result.put("windowEnd", a.windowEnd() != null ? a.windowEnd().toString() : null);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/depth/{instrument}
+     * Returns the current market depth metrics for the given instrument.
+     */
+    @GetMapping("/depth/{instrument}")
+    public ResponseEntity<Map<String, Object>> getDepth(@PathVariable String instrument) {
+        MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
+        if (depthPort == null) {
+            return ResponseEntity.ok(Map.of("error", "MarketDepthPort not available"));
+        }
+
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            java.util.Optional<DepthMetrics> depth = depthPort.currentDepth(inst);
+
+            if (depth.isEmpty()) {
+                return ResponseEntity.ok(Map.of("instrument", inst.name(), "available", false));
+            }
+
+            DepthMetrics d = depth.get();
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("instrument", inst.name());
+            result.put("available", true);
+            result.put("totalBidSize", d.totalBidSize());
+            result.put("totalAskSize", d.totalAskSize());
+            result.put("depthImbalance", d.depthImbalance());
+            result.put("bestBid", d.bestBid());
+            result.put("bestAsk", d.bestAsk());
+            result.put("spread", d.spread());
+            result.put("spreadTicks", d.spreadTicks());
+            if (d.bidWall() != null) {
+                result.put("bidWall", Map.of("price", d.bidWall().price(), "size", d.bidWall().size()));
+            }
+            if (d.askWall() != null) {
+                result.put("askWall", Map.of("price", d.askWall().price(), "size", d.askWall().size()));
+            }
+            result.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : null);
             return ResponseEntity.ok(result);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
