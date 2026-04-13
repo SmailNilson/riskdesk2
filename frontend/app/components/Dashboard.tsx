@@ -13,6 +13,7 @@ import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
+import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -163,6 +164,7 @@ export default function Dashboard() {
         {/* Indicators + Order Flow side by side */}
         <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null}>
           <OrderFlowPanel selectedInstrument={instrument} />
+          <FootprintChart selectedInstrument={instrument} />
         </IndicatorPanel>
 
         {/* Flash Crash Detection */}

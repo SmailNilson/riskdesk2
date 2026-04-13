@@ -55,6 +55,25 @@ export interface FlashCrashState {
   reversalScore: number;
 }
 
+export interface FootprintLevel {
+  price: number;
+  buyVolume: number;
+  sellVolume: number;
+  delta: number;
+  imbalance: boolean;
+}
+
+export interface FootprintBar {
+  instrument: string;
+  timeframe: string;
+  barTimestamp: number;
+  levels: Record<string, FootprintLevel>;
+  pocPrice: number;
+  totalBuyVolume: number;
+  totalSellVolume: number;
+  totalDelta: number;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -81,6 +100,7 @@ export function useOrderFlow() {
   const [absorptionEvents, setAbsorptionEvents] = useState<AbsorptionEvent[]>([]);
   const [spoofingEvents, setSpoofingEvents] = useState<SpoofingEvent[]>([]);
   const [flashCrashState, setFlashCrashState] = useState<Map<string, FlashCrashState>>(new Map());
+  const [footprintData, setFootprintData] = useState<Map<string, FootprintBar>>(new Map());
   const [connected, setConnected] = useState(false);
 
   const connect = useCallback(() => {
@@ -126,6 +146,15 @@ export function useOrderFlow() {
             return next;
           });
         });
+
+        client.subscribe('/topic/footprint', (msg: IMessage) => {
+          const bar: FootprintBar = JSON.parse(msg.body);
+          setFootprintData(prev => {
+            const next = new Map(prev);
+            next.set(bar.instrument, bar);
+            return next;
+          });
+        });
       },
       onDisconnect: () => setConnected(false),
       onStompError: () => setConnected(false),
@@ -148,6 +177,7 @@ export function useOrderFlow() {
     absorptionEvents,
     spoofingEvents,
     flashCrashState,
+    footprintData,
     connected,
   };
 }

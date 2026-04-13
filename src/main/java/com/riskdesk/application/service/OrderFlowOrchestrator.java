@@ -1,11 +1,16 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.engine.indicators.AtrCalculator;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
+import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
+import com.riskdesk.domain.orderflow.model.FootprintBar;
+import com.riskdesk.domain.orderflow.port.FootprintPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.orderflow.service.AbsorptionDetector;
 import org.springframework.context.ApplicationEventPublisher;
@@ -24,9 +29,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrates the Order Flow subsystem: subscribes tick-by-tick and depth feeds,
@@ -50,8 +58,13 @@ public class OrderFlowOrchestrator {
     private final SubscriptionRegistry subscriptionRegistry;
     private final TickByTickClient tickByTickClient;
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
+    private final ObjectProvider<FootprintPort> footprintPortProvider;
     private final ApplicationEventPublisher eventPublisher;
+    private final CandleRepositoryPort candleRepository;
     private final AbsorptionDetector absorptionDetector = new AbsorptionDetector();
+
+    /** Cached ATR(14) per instrument from 5m candles — refreshed every 60s. */
+    private final ConcurrentHashMap<Instrument, Double> atrCache = new ConcurrentHashMap<>();
 
     private volatile boolean tickByTickSubscribed = false;
     private volatile boolean depthSubscribed = false;
@@ -66,7 +79,9 @@ public class OrderFlowOrchestrator {
                                   SubscriptionRegistry subscriptionRegistry,
                                   TickByTickClient tickByTickClient,
                                   ObjectProvider<MarketDepthPort> depthPortProvider,
-                                  ApplicationEventPublisher eventPublisher) {
+                                  ObjectProvider<FootprintPort> footprintPortProvider,
+                                  ApplicationEventPublisher eventPublisher,
+                                  CandleRepositoryPort candleRepository) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
         this.properties = properties;
@@ -76,7 +91,9 @@ public class OrderFlowOrchestrator {
         this.subscriptionRegistry = subscriptionRegistry;
         this.tickByTickClient = tickByTickClient;
         this.depthPortProvider = depthPortProvider;
+        this.footprintPortProvider = footprintPortProvider;
         this.eventPublisher = eventPublisher;
+        this.candleRepository = candleRepository;
     }
 
     @PostConstruct
@@ -226,17 +243,39 @@ public class OrderFlowOrchestrator {
      * Evaluate absorption for an instrument based on current tick aggregation.
      * Publishes AbsorptionDetected domain event when absorption score > 2.0.
      */
+    /**
+     * Refreshes cached ATR(14) for each instrument from 5m candles.
+     * Runs every 60s — absorption evaluation reads from cache to avoid DB hits every 5s.
+     */
+    @Scheduled(fixedDelay = 60_000, initialDelay = 20_000)
+    public void refreshAtrCache() {
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+            try {
+                List<Candle> candles = candleRepository.findRecentCandles(instrument, "5m", 20);
+                BigDecimal atrValue = AtrCalculator.compute(candles, 14);
+                if (atrValue != null && atrValue.doubleValue() > 0) {
+                    atrCache.put(instrument, atrValue.doubleValue());
+                }
+            } catch (Exception e) {
+                // best-effort — keep stale value in cache
+            }
+        }
+    }
+
     private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
         try {
-            // Simple absorption check: high delta + we need ATR for proper scoring
-            // For now, use delta and volume as primary signals
-            double deltaThreshold = 50; // configurable later via calibration
+            double deltaThreshold = 50;
             double avgVolume = (agg.buyVolume() + agg.sellVolume()) / 2.0;
             if (avgVolume <= 0) return;
 
-            // Price move approximation (we don't have ATR here, use 1.0 as placeholder)
-            double priceMoveTicks = 0; // ideally from price change, not available in aggregation
-            double atr = 1.0; // placeholder
+            // Real price move from tick window high/low
+            double priceMoveTicks = 0;
+            if (!Double.isNaN(agg.highPrice()) && !Double.isNaN(agg.lowPrice())) {
+                priceMoveTicks = agg.highPrice() - agg.lowPrice();
+            }
+
+            // Real ATR from cache (falls back to 1.0 only before first cache refresh)
+            double atr = atrCache.getOrDefault(instrument, 1.0);
 
             java.util.Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
                 instrument, agg.delta(), priceMoveTicks,
@@ -252,6 +291,8 @@ public class OrderFlowOrchestrator {
                 eventPayload.put("side", s.side().name());
                 eventPayload.put("score", s.absorptionScore());
                 eventPayload.put("delta", s.aggressiveDelta());
+                eventPayload.put("priceMove", priceMoveTicks);
+                eventPayload.put("atr", atr);
                 eventPayload.put("timestamp", java.time.Instant.now().toString());
                 messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
             }
@@ -300,6 +341,31 @@ public class OrderFlowOrchestrator {
                 messagingTemplate.convertAndSend("/topic/depth", payload);
             } catch (Exception e) {
                 // ignore — instrument may not have depth
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // WebSocket publication — /topic/footprint
+    // -------------------------------------------------------------------------
+
+    /**
+     * Publishes current footprint bar snapshot to WebSocket every 5 seconds
+     * for each instrument with real tick data flowing.
+     */
+    @Scheduled(fixedDelay = 5_000, initialDelay = 20_000)
+    public void publishFootprintData() {
+        FootprintPort footprintPort = footprintPortProvider.getIfAvailable();
+        if (footprintPort == null) return;
+
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+            try {
+                Optional<FootprintBar> bar = footprintPort.currentBar(instrument, "5m");
+                if (bar.isEmpty()) continue;
+
+                messagingTemplate.convertAndSend("/topic/footprint", bar.get());
+            } catch (Exception e) {
+                // ignore — instrument may not have footprint data
             }
         }
     }

@@ -620,6 +620,25 @@ export interface MacroCorrelationSnapshot {
   dataAvailability: string;
 }
 
+export interface FootprintLevel {
+  price: number;
+  buyVolume: number;
+  sellVolume: number;
+  delta: number;
+  imbalance: boolean;
+}
+
+export interface FootprintBar {
+  instrument: string;
+  timeframe: string;
+  barTimestamp: number;
+  levels: Record<string, FootprintLevel>;
+  pocPrice: number;
+  totalBuyVolume: number;
+  totalSellVolume: number;
+  totalDelta: number;
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
@@ -666,6 +685,8 @@ export const api = {
     get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
   toggleAutoAnalysis: () =>
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
+  getFootprint: (instrument: string, timeframe = '5m') =>
+    get<FootprintBar>(`/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`),
   refreshDb: () => post<{ status: string; message: string }>('/api/backtest/refresh-db', {}),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
