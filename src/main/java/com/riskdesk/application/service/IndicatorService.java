@@ -658,14 +658,8 @@ public class IndicatorService {
         if (contractMonth != null) {
             candles = candlePort.findRecentCandlesByContractMonth(instrument, timeframe, contractMonth, limit);
             if (candles.isEmpty()) {
-                // Fallback: load unfiltered but REMOVE candles from other contract months.
-                // This handles legacy untagged rows (contractMonth=null) while preventing
-                // the critical bug of mixing old contract prices (e.g., 96) with new (e.g., 104)
-                // which corrupts all indicators (EMA, RSI, MACD, Volume Profile, etc.).
+                // Migration path: no tagged candles yet — fall back to legacy untagged rows
                 candles = candlePort.findRecentCandles(instrument, timeframe, limit);
-                candles = candles.stream()
-                    .filter(c -> c.getContractMonth() == null || contractMonth.equals(c.getContractMonth()))
-                    .toList();
             }
         } else {
             candles = candlePort.findRecentCandles(instrument, timeframe, limit);
