@@ -3,6 +3,12 @@ package com.riskdesk.application.service;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
+import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
+import com.riskdesk.domain.orderflow.model.DepthMetrics;
+import com.riskdesk.domain.orderflow.port.MarketDepthPort;
+import com.riskdesk.domain.orderflow.service.AbsorptionDetector;
+import org.springframework.context.ApplicationEventPublisher;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
@@ -43,6 +49,9 @@ public class OrderFlowOrchestrator {
     private final TickLogService tickLogService;
     private final SubscriptionRegistry subscriptionRegistry;
     private final TickByTickClient tickByTickClient;
+    private final ObjectProvider<MarketDepthPort> depthPortProvider;
+    private final ApplicationEventPublisher eventPublisher;
+    private final AbsorptionDetector absorptionDetector = new AbsorptionDetector();
 
     private volatile boolean tickByTickSubscribed = false;
     private volatile boolean depthSubscribed = false;
@@ -55,7 +64,9 @@ public class OrderFlowOrchestrator {
                                   SimpMessagingTemplate messagingTemplate,
                                   TickLogService tickLogService,
                                   SubscriptionRegistry subscriptionRegistry,
-                                  TickByTickClient tickByTickClient) {
+                                  TickByTickClient tickByTickClient,
+                                  ObjectProvider<MarketDepthPort> depthPortProvider,
+                                  ApplicationEventPublisher eventPublisher) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
         this.properties = properties;
@@ -64,6 +75,8 @@ public class OrderFlowOrchestrator {
         this.tickLogService = tickLogService;
         this.subscriptionRegistry = subscriptionRegistry;
         this.tickByTickClient = tickByTickClient;
+        this.depthPortProvider = depthPortProvider;
+        this.eventPublisher = eventPublisher;
     }
 
     @PostConstruct
@@ -203,6 +216,91 @@ public class OrderFlowOrchestrator {
             payload.put("timestamp", java.time.Instant.now().toString());
 
             messagingTemplate.convertAndSend("/topic/order-flow", payload);
+
+            // Evaluate absorption on each cycle (UC-OF-004)
+            evaluateAbsorption(instrument, a);
+        }
+    }
+
+    /**
+     * Evaluate absorption for an instrument based on current tick aggregation.
+     * Publishes AbsorptionDetected domain event when absorption score > 2.0.
+     */
+    private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
+        try {
+            // Simple absorption check: high delta + we need ATR for proper scoring
+            // For now, use delta and volume as primary signals
+            double deltaThreshold = 50; // configurable later via calibration
+            double avgVolume = (agg.buyVolume() + agg.sellVolume()) / 2.0;
+            if (avgVolume <= 0) return;
+
+            // Price move approximation (we don't have ATR here, use 1.0 as placeholder)
+            double priceMoveTicks = 0; // ideally from price change, not available in aggregation
+            double atr = 1.0; // placeholder
+
+            java.util.Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
+                instrument, agg.delta(), priceMoveTicks,
+                agg.buyVolume() + agg.sellVolume(), atr,
+                deltaThreshold, avgVolume, java.time.Instant.now());
+
+            if (signal.isPresent()) {
+                AbsorptionSignal s = signal.get();
+                eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, java.time.Instant.now()));
+
+                Map<String, Object> eventPayload = new LinkedHashMap<>();
+                eventPayload.put("instrument", instrument.name());
+                eventPayload.put("side", s.side().name());
+                eventPayload.put("score", s.absorptionScore());
+                eventPayload.put("delta", s.aggressiveDelta());
+                eventPayload.put("timestamp", java.time.Instant.now().toString());
+                messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
+            }
+        } catch (Exception e) {
+            // swallow — absorption evaluation is best-effort
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // WebSocket publication — /topic/depth
+    // -------------------------------------------------------------------------
+
+    /**
+     * Publishes current market depth metrics to WebSocket every 500ms
+     * for each instrument with depth data (MNQ, MCL, MGC).
+     */
+    @Scheduled(fixedDelay = 500, initialDelay = 30_000)
+    public void publishDepthMetrics() {
+        MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
+        if (depthPort == null) return;
+
+        for (String instrumentName : properties.getDepth().getInstruments()) {
+            try {
+                Instrument instrument = Instrument.valueOf(instrumentName);
+                java.util.Optional<DepthMetrics> depth = depthPort.currentDepth(instrument);
+                if (depth.isEmpty()) continue;
+
+                DepthMetrics d = depth.get();
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("instrument", instrument.name());
+                payload.put("totalBidSize", d.totalBidSize());
+                payload.put("totalAskSize", d.totalAskSize());
+                payload.put("imbalance", d.depthImbalance());
+                payload.put("bestBid", d.bestBid());
+                payload.put("bestAsk", d.bestAsk());
+                payload.put("spread", d.spread());
+                payload.put("spreadTicks", d.spreadTicks());
+                if (d.bidWall() != null) {
+                    payload.put("bidWall", Map.of("price", d.bidWall().price(), "size", d.bidWall().size()));
+                }
+                if (d.askWall() != null) {
+                    payload.put("askWall", Map.of("price", d.askWall().price(), "size", d.askWall().size()));
+                }
+                payload.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : java.time.Instant.now().toString());
+
+                messagingTemplate.convertAndSend("/topic/depth", payload);
+            } catch (Exception e) {
+                // ignore — instrument may not have depth
+            }
         }
     }
 
