@@ -19,7 +19,7 @@ import {
 import { IndicatorSnapshot, api } from '@/app/lib/api';
 import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
-import { useScrollBack } from '@/app/hooks/useScrollBack';
+// useScrollBack removed — scroll-back feature deferred
 import { makeChartTickFormatter, makeChartTimeFormatter } from '@/app/lib/datetime';
 
 interface Props {
@@ -274,15 +274,6 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       // backend unavailable
     }
   }, [instrument, timeframe]);
-
-  // ── Scroll-back: on-demand older candle loading ────────────────────────────
-  const scrollBack = useScrollBack({
-    chart: chartRef.current,
-    candleSeries: candleRef.current,
-    instrument,
-    timeframe,
-    allBarsRef,
-  });
 
   const toggle = (key: keyof typeof vis) => {
     setVis(prev => {
@@ -776,8 +767,8 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         {/* SMC zone boxes (OB + FVG) — overlay canvas above the chart canvas */}
         <canvas ref={smcCanvasRef} className="absolute inset-0 pointer-events-none" style={{ zIndex: 20 }} />
 
-        {/* Scroll-back loading indicator */}
-        {scrollBack.loading && (
+        {/* Scroll-back loading indicator — deferred */}
+        {false && (
           <div className="absolute top-2 right-3 text-xs text-zinc-400 bg-zinc-900/80 px-2 py-1 rounded z-30 pointer-events-none">
             Loading...
           </div>
