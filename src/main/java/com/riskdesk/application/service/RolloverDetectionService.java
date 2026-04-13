@@ -92,6 +92,8 @@ public class RolloverDetectionService {
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
 
+        // Rollover acknowledged — historical candles preserved, gap-fill handles new contract
+
         if (oldMonth != null && !oldMonth.equals(contractMonth)) {
             ContractRolloverEvent event = new ContractRolloverEvent(
                     instrument, oldMonth, contractMonth, Instant.now());

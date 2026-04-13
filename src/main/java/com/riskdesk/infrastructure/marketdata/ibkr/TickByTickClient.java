@@ -285,27 +285,38 @@ public class TickByTickClient {
                 SubscriptionInfo info = activeSubscriptions.get(reqId);
                 String instrument = info != null ? info.instrument().name() : "UNKNOWN";
 
-                if (count <= 20 || count % 100 == 0) {
-                    log.info("TICK #{} reqId={} {} price={} size={} time={} exchange={}",
-                             count, reqId, instrument, price, sizeVal, timestamp, exchange);
-                }
-
                 // Get bid/ask from main connection for Lee-Ready classification
                 double bid = 0;
                 double ask = 0;
                 if (info != null) {
                     IbGatewayNativeClient nc = nativeClient;
                     if (nc != null) {
+                        // Try streaming quote first
                         var quote = nc.latestStreamingQuote(info.contract());
                         if (quote.isPresent()) {
                             IbGatewayNativeClient.NativeMarketQuote q = quote.get();
                             bid = q.bid() != null ? q.bid().doubleValue() : 0;
                             ask = q.ask() != null ? q.ask().doubleValue() : 0;
                         }
+                        // Fallback: try streaming price (which may have bid/ask cached)
+                        if (bid <= 0 || ask <= 0) {
+                            var priceOpt = nc.latestStreamingPrice(info.contract());
+                            if (priceOpt.isPresent()) {
+                                // No bid/ask from price subscription — use price as mid estimate
+                                double mid = priceOpt.get().doubleValue();
+                                if (bid <= 0) bid = mid - info.instrument().getTickSize().doubleValue();
+                                if (ask <= 0) ask = mid + info.instrument().getTickSize().doubleValue();
+                            }
+                        }
                     }
 
                     TickByTickAggregator.TickClassification classification =
                         IbkrTickDataAdapter.classifyTrade(price, bid, ask);
+
+                    if (count <= 20 || count % 100 == 0) {
+                        log.info("TICK #{} reqId={} {} price={} size={} bid={} ask={} class={} time={}",
+                                 count, reqId, instrument, price, sizeVal, bid, ask, classification, timestamp);
+                    }
 
                     IbkrTickDataAdapter adapter = tickDataAdapter;
                     if (adapter != null) {
