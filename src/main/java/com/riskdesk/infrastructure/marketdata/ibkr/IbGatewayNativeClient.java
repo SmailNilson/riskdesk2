@@ -3,15 +3,11 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Decimal;
-import com.ib.client.HistoricalTick;
-import com.ib.client.HistoricalTickBidAsk;
-import com.ib.client.HistoricalTickLast;
 import com.ib.client.Order;
 import com.ib.client.OrderState;
 import com.ib.client.OrderStatus;
 import com.ib.client.OrderType;
 import com.ib.client.TickAttrib;
-import com.ib.client.TickAttribLast;
 import com.ib.client.TickType;
 import com.ib.client.Types.Action;
 import com.ib.client.Types.BarSize;
@@ -95,24 +91,14 @@ public class IbGatewayNativeClient {
     private volatile String lastConnectionFailure = "uninitialized";
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
-    private final Map<String, TickByTickSubscription> tickByTickSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
     private volatile StreamingPriceListener priceListener;
-    private volatile IbkrTickDataAdapter tickDataAdapter;
     private volatile SubscriptionRegistry subscriptionRegistry;
     private volatile IbGatewayContractResolver contractResolverRef;
     private volatile int depthNumRows = 10;
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
-    }
-
-    /**
-     * Registers the tick data adapter that will receive classified ticks from
-     * tick-by-tick AllLast subscriptions. Must be called before subscribing.
-     */
-    public void setTickDataAdapter(IbkrTickDataAdapter adapter) {
-        this.tickDataAdapter = adapter;
     }
 
     /**
@@ -185,13 +171,6 @@ public class IbGatewayNativeClient {
 
                 contractKeyToInstrument.remove(oldKey);
 
-                // Cancel tick-by-tick subscription for old contract
-                TickByTickSubscription oldTick = tickByTickSubscriptions.remove(oldKey);
-                if (oldTick != null && ctrl != null) {
-                    try { ctrl.cancelTickByTickData(oldTick); } catch (Exception ignored) {}
-                    log.info("Rollover: cancelled tick-by-tick for old contract {}", describeContract(oldContract));
-                }
-
                 // Cancel depth subscription for old contract
                 DepthSubscription oldDepth = depthSubscriptions.remove(oldKey);
                 if (oldDepth != null && ctrl != null) {
@@ -208,10 +187,6 @@ public class IbGatewayNativeClient {
             }
             ensureStreamingPriceSubscription(newContract);
             ensureStreamingQuoteSubscription(newContract);
-            // Re-subscribe tick-by-tick if adapter is wired
-            if (tickDataAdapter != null && instrument != null) {
-                subscribeTickByTick(newContract, instrument);
-            }
             // Re-subscribe depth if adapter is wired
             if (depthAdapter != null && instrument != null) {
                 subscribeDepth(newContract, instrument, depthNumRows);
@@ -737,79 +712,6 @@ public class IbGatewayNativeClient {
     }
 
     // -------------------------------------------------------------------------
-    // Tick-by-tick data (AllLast) — UC-OF-001
-    // -------------------------------------------------------------------------
-
-    /**
-     * Subscribes to tick-by-tick AllLast data for the given contract.
-     * Each trade tick is classified via Lee-Ready rule and routed to
-     * {@link IbkrTickDataAdapter#onTickByTickTrade}.
-     *
-     * <p>Follows the same idempotence pattern as {@link #ensureStreamingPriceSubscription}:
-     * if a subscription already exists and is active, this is a no-op.
-     * IBKR supports max ~5 concurrent tick-by-tick subscriptions per connection.</p>
-     *
-     * @param contract   the IBKR contract to subscribe
-     * @param instrument the domain instrument for routing
-     */
-    public void subscribeTickByTick(Contract contract, Instrument instrument) {
-        if (contract == null || !ensureConnected()) {
-            return;
-        }
-        if (tickDataAdapter == null) {
-            log.warn("Cannot subscribe tick-by-tick for {} — tickDataAdapter not wired", instrument);
-            return;
-        }
-
-        String key = subscriptionKey(contract);
-        synchronized (streamingLock) {
-            TickByTickSubscription existing = tickByTickSubscriptions.get(key);
-            if (existing != null && existing.isActive()) {
-                return;
-            }
-
-            // Cancel stale subscription before creating a fresh one
-            if (existing != null) {
-                ApiController ctrl = controller;
-                if (ctrl != null) {
-                    try { ctrl.cancelTickByTickData(existing); } catch (Exception ignored) {}
-                }
-                log.warn("IB Gateway detected stale tick-by-tick stream for {} — re-subscribing", instrument);
-            }
-
-            TickByTickSubscription subscription = new TickByTickSubscription(contract, instrument);
-            controller.reqTickByTickData(contract, "AllLast", 0, false, subscription);
-            tickByTickSubscriptions.put(key, subscription);
-            log.info("IB Gateway tick-by-tick AllLast subscribed for {} ({})", instrument, describeContract(contract));
-
-            // Register in subscription registry for reconnection resilience
-            SubscriptionRegistry reg = subscriptionRegistry;
-            if (reg != null) {
-                reg.register(instrument, SubscriptionRegistry.SubscriptionType.TICK_BY_TICK);
-            }
-        }
-    }
-
-    /**
-     * Cancels tick-by-tick subscription for a specific contract.
-     * Called during rollover cleanup.
-     */
-    public void cancelTickByTickSubscription(Contract contract) {
-        if (contract == null) return;
-        String key = subscriptionKey(contract);
-        synchronized (streamingLock) {
-            TickByTickSubscription sub = tickByTickSubscriptions.remove(key);
-            if (sub != null) {
-                ApiController ctrl = controller;
-                if (ctrl != null) {
-                    try { ctrl.cancelTickByTickData(sub); } catch (Exception ignored) {}
-                }
-                log.info("IB Gateway cancelled tick-by-tick for {}", sub.instrument);
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // Market depth (Level 2) — UC-OF-003
     // -------------------------------------------------------------------------
 
@@ -914,7 +816,6 @@ public class IbGatewayNativeClient {
                 switch (entry.type()) {
                     case PRICE -> ensureStreamingPriceSubscription(contract);
                     case QUOTE -> ensureStreamingQuoteSubscription(contract);
-                    case TICK_BY_TICK -> subscribeTickByTick(contract, instrument);
                     case DEPTH -> subscribeDepth(contract, instrument, depthNumRows);
                 }
             } catch (Exception e) {
@@ -1699,102 +1600,4 @@ public class IbGatewayNativeClient {
                                     Instant timestamp) {
     }
 
-    // -------------------------------------------------------------------------
-    // Tick-by-tick AllLast subscription handler — UC-OF-001
-    // -------------------------------------------------------------------------
-
-    /**
-     * Handles tick-by-tick AllLast callbacks from IBKR. Each trade tick is
-     * classified via Lee-Ready and routed to the IbkrTickDataAdapter.
-     *
-     * <p>Called on the IBKR EReader thread. Must be non-blocking.</p>
-     */
-    private final class TickByTickSubscription implements ApiController.ITickByTickDataHandler {
-
-        private final Contract contract;
-        private final Instrument instrument;
-        private volatile boolean active = true;
-        private volatile Instant lastTickAt = null;
-        private volatile boolean loggedFirstTick = false;
-
-        TickByTickSubscription(Contract contract, Instrument instrument) {
-            this.contract = contract;
-            this.instrument = instrument;
-        }
-
-        @Override
-        public void tickByTickAllLast(int reqId, int tickType, long time, double price,
-                                       Decimal size, TickAttribLast attribs,
-                                       String exchange, String specialConditions) {
-            lastTickAt = Instant.now();
-
-            if (!loggedFirstTick) {
-                loggedFirstTick = true;
-                log.info("IB Gateway first tick-by-tick trade for {} — price={}, size={}, exchange={}",
-                         instrument, price, size, exchange);
-            }
-
-            long sizeVal = size != null ? size.longValue() : 0;
-            if (sizeVal <= 0 || price <= 0) return;
-
-            // Retrieve current bid/ask from the quote subscription cache for Lee-Ready
-            double bid = 0;
-            double ask = 0;
-            String key = subscriptionKey(contract);
-            StreamingQuoteSubscription quotesSub = streamingQuoteSubscriptions.get(key);
-            if (quotesSub != null) {
-                var quote = quotesSub.quote();
-                if (quote.isPresent()) {
-                    NativeMarketQuote q = quote.get();
-                    bid = q.bid() != null ? q.bid().doubleValue() : 0;
-                    ask = q.ask() != null ? q.ask().doubleValue() : 0;
-                }
-            }
-
-            // Classify the trade via Lee-Ready
-            TickByTickAggregator.TickClassification classification =
-                IbkrTickDataAdapter.classifyTrade(price, bid, ask);
-
-            // Route to the adapter (which manages per-instrument aggregators)
-            IbkrTickDataAdapter adapter = tickDataAdapter;
-            if (adapter != null) {
-                adapter.onTickByTickTrade(instrument, price, sizeVal, classification,
-                                          Instant.ofEpochSecond(time));
-            }
-        }
-
-        @Override
-        public void tickByTickBidAsk(int reqId, long time, double bidPrice, double askPrice,
-                                      Decimal bidSize, Decimal askSize,
-                                      com.ib.client.TickAttribBidAsk attribs) {
-            // Not used for AllLast subscription
-        }
-
-        @Override
-        public void tickByTickMidPoint(int reqId, long time, double midPoint) {
-            // Not used for AllLast subscription
-        }
-
-        @Override
-        public void tickByTickHistoricalTickAllLast(int reqId, java.util.List<HistoricalTickLast> ticks) {
-            // Historical ticks sent once at subscription start — ignored
-        }
-
-        @Override
-        public void tickByTickHistoricalTickBidAsk(int reqId, java.util.List<HistoricalTickBidAsk> ticks) {
-            // Not applicable
-        }
-
-        @Override
-        public void tickByTickHistoricalTick(int reqId, java.util.List<HistoricalTick> ticks) {
-            // Not applicable
-        }
-
-        boolean isActive() {
-            if (!active) return false;
-            if (!TradingSessionResolver.isMarketOpen(Instant.now())) return true;
-            if (lastTickAt == null) return true; // new subscription, grace period
-            return lastTickAt.isAfter(Instant.now().minusSeconds(STALE_PRICE_SECONDS));
-        }
-    }
 }
