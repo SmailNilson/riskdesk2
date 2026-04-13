@@ -28,7 +28,7 @@ class IndicatorServiceTest {
         List<Candle> history = buildHistory(1_100);
         candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_000, descendingTail(history, 1_000));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider());
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider(), emptyProvider());
 
         IndicatorSnapshot snapshot = service.computeSnapshot(Instrument.MCL, "10m");
 
@@ -47,7 +47,7 @@ class IndicatorServiceTest {
         List<Candle> history = buildHistory(1_600);
         candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_500, descendingTail(history, 1_500));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider());
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider(), emptyProvider());
 
         IndicatorSeriesSnapshot series = service.computeSeries(Instrument.MCL, "10m", 500);
 
@@ -149,6 +149,11 @@ class IndicatorServiceTest {
         @Override
         public long count() {
             throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
+        public int countCandles(Instrument instrument, String timeframe) {
+            return 0;
         }
 
         private String key(Instrument instrument, String timeframe, int limit) {

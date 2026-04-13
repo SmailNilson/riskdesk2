@@ -64,6 +64,7 @@ public class IndicatorService {
     private final ActiveContractRegistry contractRegistry;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ObjectProvider<MarketDepthPort> marketDepthPortProvider;
+    private final ObjectProvider<OnDemandCandleService> onDemandCandleProvider;
     private final SmcOrderFlowEnricher smcOrderFlowEnricher = new SmcOrderFlowEnricher();
 
     // Indicators — initialized with TradingView defaults
@@ -105,11 +106,13 @@ public class IndicatorService {
     public IndicatorService(CandleRepositoryPort candlePort,
                             ActiveContractRegistry contractRegistry,
                             ObjectProvider<TickDataPort> tickDataPortProvider,
-                            ObjectProvider<MarketDepthPort> marketDepthPortProvider) {
+                            ObjectProvider<MarketDepthPort> marketDepthPortProvider,
+                            ObjectProvider<OnDemandCandleService> onDemandCandleProvider) {
         this.candlePort       = candlePort;
         this.contractRegistry = contractRegistry;
         this.tickDataPortProvider = tickDataPortProvider;
         this.marketDepthPortProvider = marketDepthPortProvider;
+        this.onDemandCandleProvider = onDemandCandleProvider;
     }
 
     public void clearSnapshotCache() {
@@ -653,6 +656,13 @@ public class IndicatorService {
     }
 
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
+        // Ensure enough candles exist in DB for proper indicator convergence
+        // (EMA-200 needs ~1500 bars to fully converge, WaveTrend needs ~500)
+        OnDemandCandleService onDemand = onDemandCandleProvider.getIfAvailable();
+        if (onDemand != null) {
+            onDemand.ensureMinimumBars(instrument, timeframe, limit);
+        }
+
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         List<Candle> candles;
         if (contractMonth != null) {

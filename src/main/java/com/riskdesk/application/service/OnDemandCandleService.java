@@ -196,6 +196,54 @@ public class OnDemandCandleService {
         return instrument + ":" + timeframe + ":" + fromBucket + ":" + toBucket;
     }
 
+    /**
+     * Ensures at least {@code minBars} candles exist in DB for the given instrument/timeframe.
+     * Called by IndicatorService before computing indicators so that EMA-200/WaveTrend/MACD
+     * have enough data to converge properly.
+     *
+     * <p>If DB already has enough bars, returns immediately (no IBKR call).
+     * Otherwise, fetches the gap from IBKR synchronously (with coalescing + cooldown).</p>
+     *
+     * @return actual number of candles available in DB after the call
+     */
+    public int ensureMinimumBars(Instrument instrument, String timeframe, int minBars) {
+        int dbCount = candlePort.countCandles(instrument, timeframe);
+        if (dbCount >= minBars) {
+            return dbCount;
+        }
+
+        if (historicalProvider == null || !historicalProvider.supports(instrument, timeframe)) {
+            return dbCount;
+        }
+
+        // Cooldown: reuse the same mechanism — keyed on instrument:timeframe:ensure
+        String cooldownKey = instrument + ":" + timeframe + ":ensure";
+        Instant lastFetch = cooldowns.get(cooldownKey);
+        if (lastFetch != null && Instant.now().toEpochMilli() - lastFetch.toEpochMilli() < COOLDOWN_MS) {
+            return dbCount;
+        }
+
+        int needed = minBars - dbCount;
+        log.info("ensureMinimumBars {}/{}: DB has {} bars, need {} — fetching {} from IBKR",
+            instrument, timeframe, dbCount, minBars, needed);
+
+        String inflightKey = instrument + ":" + timeframe + ":ensure:" + minBars;
+        try {
+            CompletableFuture<List<Candle>> future = inflight.computeIfAbsent(inflightKey,
+                key -> CompletableFuture.supplyAsync(() ->
+                    fetchAndPersist(instrument, timeframe, Instant.now(), minBars)));
+
+            future.get(45, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("ensureMinimumBars {}/{}: IBKR fetch failed — {}", instrument, timeframe, e.getMessage());
+        } finally {
+            inflight.remove(inflightKey);
+        }
+
+        cooldowns.put(cooldownKey, Instant.now());
+        return candlePort.countCandles(instrument, timeframe);
+    }
+
     private static long timeframeSeconds(String timeframe) {
         return switch (timeframe) {
             case "5m"  -> 300L;
