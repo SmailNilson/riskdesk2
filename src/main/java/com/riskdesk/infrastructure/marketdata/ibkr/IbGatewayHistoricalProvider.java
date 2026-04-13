@@ -80,6 +80,37 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     }
 
     @Override
+    public List<Candle> fetchHistoryBefore(Instrument instrument, String timeframe, Instant endTime, int count) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return List.of();
+        }
+        if (!supports(instrument, timeframe)) {
+            return List.of();
+        }
+        return contractResolver.resolve(instrument)
+            .map(resolved -> {
+                HistoricalQuery query = queryFor(timeframe, count);
+                List<Bar> bars = nativeClient.requestHistoricalBars(
+                    resolved.contract(),
+                    endTime,
+                    query.duration(),
+                    query.durationUnit(),
+                    query.barSize(),
+                    WhatToShow.TRADES,
+                    false
+                );
+                return bars.stream()
+                    .map(bar -> toCandle(instrument, timeframe, bar))
+                    .sorted(Comparator.comparing(Candle::getTimestamp))
+                    .toList();
+            })
+            .orElseGet(() -> {
+                log.warn("IB Gateway fetchHistoryBefore skipped for {} {}: no contract resolved", instrument, timeframe);
+                return List.of();
+            });
+    }
+
+    @Override
     public boolean supports(Instrument instrument, String timeframe) {
         if (!instrument.isExchangeTradedFuture()) {
             return false;
