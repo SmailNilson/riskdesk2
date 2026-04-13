@@ -128,8 +128,8 @@ function EventLogEntry({ event, type }: { event: AbsorptionEvent | SpoofingEvent
       </span>
       <span className="text-zinc-500 truncate">
         {isAbsorption
-          ? `Score: ${absEvent.score.toFixed(2)} | Delta: ${absEvent.delta.toLocaleString()}`
-          : `@${spoofEvent.priceLevel.toFixed(2)} | Size: ${spoofEvent.wallSize.toLocaleString()} | Score: ${spoofEvent.spoofScore.toFixed(2)}`
+          ? `Score: ${absEvent.score?.toFixed(2) ?? '—'} | Delta: ${absEvent.delta?.toLocaleString() ?? '—'}`
+          : `@${spoofEvent.priceLevel?.toFixed(2) ?? '—'} | Size: ${spoofEvent.wallSize?.toLocaleString() ?? '—'} | Score: ${spoofEvent.spoofScore?.toFixed(2) ?? '—'}`
         }
       </span>
       <span className="ml-auto text-zinc-600 shrink-0">{time}</span>
