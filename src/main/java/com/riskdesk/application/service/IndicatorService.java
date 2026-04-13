@@ -64,6 +64,7 @@ public class IndicatorService {
     private final ActiveContractRegistry contractRegistry;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ObjectProvider<MarketDepthPort> marketDepthPortProvider;
+    private final AbsorptionCache absorptionCache;
     private final SmcOrderFlowEnricher smcOrderFlowEnricher = new SmcOrderFlowEnricher();
 
     // Indicators — initialized with TradingView defaults
@@ -105,11 +106,13 @@ public class IndicatorService {
     public IndicatorService(CandleRepositoryPort candlePort,
                             ActiveContractRegistry contractRegistry,
                             ObjectProvider<TickDataPort> tickDataPortProvider,
-                            ObjectProvider<MarketDepthPort> marketDepthPortProvider) {
+                            ObjectProvider<MarketDepthPort> marketDepthPortProvider,
+                            AbsorptionCache absorptionCache) {
         this.candlePort       = candlePort;
         this.contractRegistry = contractRegistry;
         this.tickDataPortProvider = tickDataPortProvider;
         this.marketDepthPortProvider = marketDepthPortProvider;
+        this.absorptionCache = absorptionCache;
     }
 
     public void clearSnapshotCache() {
@@ -241,13 +244,14 @@ public class IndicatorService {
         double atrTicks = atrValue != null ? atrValue.doubleValue() : 1.0;
 
         List<IndicatorSnapshot.OrderBlockView> obViews = obResult.activeOrderBlocks().stream()
-                .map(ob -> enrichedObView(ob, candles, atrTicks, ob.type().name(), null))
+                .map(ob -> enrichedObView(ob, candles, atrTicks, ob.type().name(), null, instrument))
                 .toList();
         List<IndicatorSnapshot.OrderBlockView> breakerViews = obResult.breakerOrderBlocks().stream()
                 .map(ob -> enrichedObView(ob, candles, atrTicks,
                         oppositeType(ob.type()).name(),
                         ob.mitigationIndex() >= 0 && ob.mitigationIndex() < candles.size()
-                                ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null))
+                                ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null,
+                        instrument))
                 .toList();
         List<IndicatorSnapshot.OrderBlockEventView> obEventViews = obResult.events().stream()
                 .map(evt -> new IndicatorSnapshot.OrderBlockEventView(
@@ -492,7 +496,8 @@ public class IndicatorService {
      */
     private IndicatorSnapshot.OrderBlockView enrichedObView(
             OrderBlockDetector.OrderBlock ob, List<Candle> candles,
-            double atrTicks, String originalType, Long breakerTime) {
+            double atrTicks, String originalType, Long breakerTime,
+            Instrument instrument) {
         long startTime = ob.formationIndex() < candles.size()
                 ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L;
 
@@ -502,10 +507,16 @@ public class IndicatorService {
             double formationDelta = clvDelta(formationCandle);
             double formationVolume = formationCandle.getVolume();
 
+            // Query real-time absorption from cache (fed by OrderFlowOrchestrator)
+            var absorption = absorptionCache.latest(instrument);
+            Double absScore = absorption.map(AbsorptionSignal::absorptionScore).orElse(null);
+            String absSide = absorption.map(s -> s.side().name()).orElse(null);
+            double priceMove = absorption.map(AbsorptionSignal::priceMoveTicks).orElse(0.0);
+
             OrderBlockEnrichment enrichment = smcOrderFlowEnricher.enrichOrderBlock(
                     formationDelta, formationVolume,
-                    null, null, null,  // absorption/depth not available in snapshot context
-                    0.0, atrTicks);
+                    absScore, absSide, null,
+                    priceMove, atrTicks);
 
             return new IndicatorSnapshot.OrderBlockView(
                     ob.type().name(), ob.status().name(),
