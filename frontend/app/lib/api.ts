@@ -636,19 +636,6 @@ export const api = {
     get<IndicatorSeriesSnapshot>(`/api/indicators/${instrument}/${timeframe}/series?limit=${limit}`),
   getCandles: (instrument: string, timeframe: string, limit = 300) =>
     get<CandleBar[]>(`/api/candles/${instrument}/${timeframe}?limit=${limit}`),
-  getCandlesV2: (instrument: string, timeframe: string, params: {
-    to?: number;
-    countBack?: number;
-    from?: number;
-  }) => {
-    const p = new URLSearchParams();
-    if (params.to !== undefined) p.set('to', String(params.to));
-    if (params.countBack !== undefined) p.set('countBack', String(params.countBack));
-    if (params.from !== undefined) p.set('from', String(params.from));
-    return get<{ bars: CandleBar[]; noData: boolean; nextTime: number | null }>(
-      `/api/v2/candles/${instrument}/${timeframe}?${p.toString()}`
-    );
-  },
   getRecentAlerts: () => get<AlertPayload[]>('/api/alerts/recent'),
   getLivePrice: (instrument: string) => get<LivePriceView>(`/api/live-price/${instrument}`),
   getDxyLatest: () => get<DxySnapshotView>('/api/market/dxy/latest'),
