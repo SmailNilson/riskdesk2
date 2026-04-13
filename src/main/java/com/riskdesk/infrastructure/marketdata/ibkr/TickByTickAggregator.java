@@ -62,6 +62,8 @@ public class TickByTickAggregator {
         long sellVol = 0;
         double firstPrice = Double.NaN;
         double latestPrice = Double.NaN;
+        double highPrice = Double.NaN;
+        double lowPrice = Double.NaN;
         Instant windowStart = null;
         Instant windowEnd = null;
 
@@ -69,9 +71,13 @@ public class TickByTickAggregator {
             if (windowStart == null) {
                 windowStart = tick.timestamp();
                 firstPrice = tick.price();
+                highPrice = tick.price();
+                lowPrice = tick.price();
             }
             windowEnd = tick.timestamp();
             latestPrice = tick.price();
+            if (tick.price() > highPrice) highPrice = tick.price();
+            if (tick.price() < lowPrice) lowPrice = tick.price();
 
             if (tick.classification() == TickClassification.BUY) {
                 buyVol += tick.size();
@@ -83,7 +89,8 @@ public class TickByTickAggregator {
         if (windowStart == null) {
             return new TickAggregation(instrument, 0, 0, 0, 0, 0.0,
                 TickAggregation.TREND_FLAT, false, null,
-                now, now, TickAggregation.SOURCE_REAL_TICKS);
+                now, now, TickAggregation.SOURCE_REAL_TICKS,
+                Double.NaN, Double.NaN);
         }
 
         long delta = buyVol - sellVol;
@@ -125,7 +132,8 @@ public class TickByTickAggregator {
         return new TickAggregation(instrument, buyVol, sellVol, delta, cumulativeDelta,
             Math.round(buyRatio * 10.0) / 10.0, // round to 1 decimal
             deltaTrend, divergenceDetected, divergenceType,
-            windowStart, windowEnd, TickAggregation.SOURCE_REAL_TICKS);
+            windowStart, windowEnd, TickAggregation.SOURCE_REAL_TICKS,
+            highPrice, lowPrice);
     }
 
     /**

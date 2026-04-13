@@ -19,7 +19,8 @@ class TickAggregationTest {
             TickAggregation.TREND_RISING,
             false, null,
             now.minusSeconds(300), now,
-            TickAggregation.SOURCE_REAL_TICKS
+            TickAggregation.SOURCE_REAL_TICKS,
+            72.50, 71.80
         );
 
         assertEquals(Instrument.MCL, agg.instrument());
@@ -32,6 +33,8 @@ class TickAggregationTest {
         assertFalse(agg.divergenceDetected());
         assertNull(agg.divergenceType());
         assertEquals("REAL_TICKS", agg.source());
+        assertEquals(72.50, agg.highPrice(), 0.001);
+        assertEquals(71.80, agg.lowPrice(), 0.001);
     }
 
     @Test
@@ -44,7 +47,8 @@ class TickAggregationTest {
             TickAggregation.TREND_FALLING,
             true, TickAggregation.DIVERGENCE_BEARISH,
             now.minusSeconds(300), now,
-            TickAggregation.SOURCE_CLV_ESTIMATED
+            TickAggregation.SOURCE_CLV_ESTIMATED,
+            Double.NaN, Double.NaN
         );
 
         assertTrue(agg.divergenceDetected());
