@@ -1,6 +1,5 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
@@ -30,7 +29,6 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Application-layer orchestrator for the Oil-Nasdaq Inverse Momentum Scalp (ONIMS) strategy.
@@ -49,9 +47,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <h2>Thread Safety</h2>
  * The {@link CrossInstrumentCorrelationEngine} is thread-safe internally.
- * This service's own mutable state ({@link #signalHistory}, {@link #vixPrice},
- * {@link #config}) is protected by appropriate primitives (volatile / ConcurrentHashMap
- * / synchronized). The {@link CandleRepositoryPort} calls are read-only and stateless.
+ * This service's own mutable state ({@link #signalHistory}, {@link #vixPrice})
+ * is protected by appropriate primitives (volatile / synchronized).
+ * The {@link CandleRepositoryPort} calls are read-only and stateless.
  *
  * <h2>VIX Filter — Architect Note</h2>
  * Per the Lead Tech review: use {@code VIX=F} futures via IBKR rather than computing a
@@ -206,8 +204,9 @@ public class CrossInstrumentAlertService {
                     breakout.resistanceLevel()
             );
             if (triggered) {
-                log.info("ONIMS: MCL breakout detected — close={} above resistance={} vol_ratio={:.2f}",
-                        breakout.breakoutClose(), breakout.resistanceLevel(), breakout.volumeRatio());
+                log.info("ONIMS: MCL breakout detected — close={} above resistance={} vol_ratio={}",
+                        breakout.breakoutClose(), breakout.resistanceLevel(),
+                        String.format("%.2f", breakout.volumeRatio()));
             }
         });
     }
@@ -244,9 +243,9 @@ public class CrossInstrumentAlertService {
         );
 
         signal.ifPresent(s -> {
-            log.info("ONIMS: CONFIRMED — lag={}s MCL_close={} MNQ_close={} VWAP={} dist={:.3f}%",
+            log.info("ONIMS: CONFIRMED — lag={}s MCL_close={} MNQ_close={} VWAP={} dist={}%",
                     s.lagSeconds(), s.leaderBreakoutPrice(), s.followerClosePrice(),
-                    s.followerVwap(), rejection.distanceBelowPct());
+                    s.followerVwap(), String.format("%.3f", rejection.distanceBelowPct()));
             publishSignal(s);
         });
     }

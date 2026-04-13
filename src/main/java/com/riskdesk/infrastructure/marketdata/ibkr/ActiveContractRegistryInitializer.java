@@ -115,12 +115,19 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 selected = topTwo.get(0);
             }
 
+            String month = normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
+            if (month == null) {
+                log.warn("ActiveContractRegistry: {} — normalizeMonth returned null for '{}', skipping",
+                        instrument, selected.contract().lastTradeDateOrContractMonth());
+                return null;
+            }
+
             // Seed resolver cache so downstream resolve() uses the OI-selected contract
             resolver.setResolved(instrument, selected);
 
-            return normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
+            return month;
         } catch (Exception e) {
-            log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
+            log.warn("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
     }
