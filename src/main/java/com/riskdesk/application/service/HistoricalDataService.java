@@ -103,22 +103,15 @@ public class HistoricalDataService implements ApplicationRunner {
             return;
         }
 
-        // Startup gap-fill: fill candle gaps for ALL instruments × timeframes since last shutdown.
-        // This ensures indicators (EMA, RSI, MACD, etc.) have fresh data immediately.
-        // On-demand loading (OnDemandCandleService) handles scroll-back for deeper history.
-        boolean hasExistingData = Instrument.exchangeTradedFutures().stream()
-            .anyMatch(i -> candlePort.findLatestTimestamp(i, "5m").isPresent());
-
-        if (hasExistingData) {
-            realDataLoaded.set(true);
-            log.info("HistoricalDataService: existing candles found — starting delta gap-fill in background.");
-            CompletableFuture.runAsync(() -> gapFillAll("startup-delta"))
-                .exceptionally(ex -> { log.error("Startup delta gap-fill failed", ex); return null; });
-        } else {
-            log.info("HistoricalDataService: no existing candles — gap-fill for all instruments.");
-            CompletableFuture.runAsync(() -> gapFillAll("startup-fresh"))
-                .exceptionally(ex -> { log.error("Startup fresh gap-fill failed", ex); return null; });
-        }
+        // Minimal warm-up: gap-fill 10m for the first exchange-traded instrument only.
+        // All other data is loaded on-demand via OnDemandCandleService.
+        CompletableFuture.runAsync(() -> {
+            Instrument inst = Instrument.exchangeTradedFutures().get(0);
+            gapFillTimeframe(inst, "10m", "startup-warmup");
+        }).exceptionally(ex -> {
+            log.warn("Startup warm-up failed: {}", ex.getMessage());
+            return null;
+        });
     }
 
     public Map<String, Integer> refreshInstrumentContext(Instrument instrument, List<String> requestedTimeframes) {
