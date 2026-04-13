@@ -22,6 +22,8 @@ public class IbkrProperties {
     private String  nativeHost        = "127.0.0.1";
     private int     nativePort        = 4002;
     private int     nativeClientId    = 7;
+    /** Separate clientId for the tick-by-tick EClientSocket connection (bypasses ApiController). */
+    private int     nativeTickClientId = -1; // -1 = auto (nativeClientId + 1)
     private boolean nativeReadOnly    = true;
     private boolean sslVerify         = false;
     private int     connectTimeoutMs  = 5000;
@@ -44,6 +46,9 @@ public class IbkrProperties {
 
     public int getNativeClientId()              { return nativeClientId; }
     public void setNativeClientId(int v)        { nativeClientId = v; }
+
+    public int getNativeTickClientId()          { return nativeTickClientId < 0 ? nativeClientId + 1 : nativeTickClientId; }
+    public void setNativeTickClientId(int v)    { nativeTickClientId = v; }
 
     public boolean isNativeReadOnly()           { return nativeReadOnly; }
     public void setNativeReadOnly(boolean v)    { nativeReadOnly = v; }

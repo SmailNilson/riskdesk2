@@ -8,6 +8,7 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayResolvedContract;
 import com.riskdesk.infrastructure.marketdata.ibkr.SubscriptionRegistry;
+import com.riskdesk.infrastructure.marketdata.ibkr.TickByTickClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -41,6 +42,7 @@ public class OrderFlowOrchestrator {
     private final SimpMessagingTemplate messagingTemplate;
     private final TickLogService tickLogService;
     private final SubscriptionRegistry subscriptionRegistry;
+    private final TickByTickClient tickByTickClient;
 
     private volatile boolean tickByTickSubscribed = false;
     private volatile boolean depthSubscribed = false;
@@ -52,7 +54,8 @@ public class OrderFlowOrchestrator {
                                   ObjectProvider<TickDataPort> tickDataPortProvider,
                                   SimpMessagingTemplate messagingTemplate,
                                   TickLogService tickLogService,
-                                  SubscriptionRegistry subscriptionRegistry) {
+                                  SubscriptionRegistry subscriptionRegistry,
+                                  TickByTickClient tickByTickClient) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
         this.properties = properties;
@@ -60,6 +63,7 @@ public class OrderFlowOrchestrator {
         this.messagingTemplate = messagingTemplate;
         this.tickLogService = tickLogService;
         this.subscriptionRegistry = subscriptionRegistry;
+        this.tickByTickClient = tickByTickClient;
     }
 
     @PostConstruct
@@ -84,8 +88,18 @@ public class OrderFlowOrchestrator {
             return;
         }
 
+        // Wait for main connection to be up (needed for contract resolution + bid/ask quotes)
         if (!nativeClient.isConnected()) {
             return;
+        }
+
+        // Connect the dedicated tick-by-tick EClientSocket (separate clientId)
+        if (!tickByTickClient.isConnected()) {
+            tickByTickClient.connect();
+            if (!tickByTickClient.isConnected()) {
+                log.debug("TickByTickClient not yet connected — deferring subscriptions");
+                return;
+            }
         }
 
         int subscribed = 0;
@@ -100,7 +114,7 @@ public class OrderFlowOrchestrator {
                     continue;
                 }
 
-                nativeClient.subscribeTickByTick(resolved.get().contract(), instrument);
+                tickByTickClient.subscribeTickByTick(resolved.get().contract(), instrument);
                 subscribed++;
             } catch (IllegalArgumentException e) {
                 log.warn("Unknown instrument in tick-by-tick config: {}", instrumentName);
@@ -112,7 +126,7 @@ public class OrderFlowOrchestrator {
         if (subscribed == properties.getTickByTick().getInstruments().size()) {
             tickByTickSubscribed = true;
             tickByTickSubscribedAt = System.currentTimeMillis();
-            log.info("Order flow: tick-by-tick subscribed for all {} instruments", subscribed);
+            log.info("Order flow: tick-by-tick subscribed for all {} instruments (via dedicated EClientSocket)", subscribed);
         }
     }
 
