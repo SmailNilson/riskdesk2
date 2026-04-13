@@ -33,4 +33,7 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     /** Fetches candles for a specific contract month, newest-first. */
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
             Instrument instrument, String timeframe, String contractMonth, Pageable pageable);
+
+    /** Counts candles for a given instrument/timeframe pair. */
+    long countByInstrumentAndTimeframe(Instrument instrument, String timeframe);
 }

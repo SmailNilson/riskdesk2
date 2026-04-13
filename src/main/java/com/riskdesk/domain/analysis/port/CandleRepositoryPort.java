@@ -46,4 +46,10 @@ public interface CandleRepositoryPort {
     void deleteByInstrumentAndTimeframe(Instrument instrument, String timeframe);
 
     long count();
+
+    /**
+     * Returns the number of candles stored for a given instrument/timeframe pair.
+     * Used by on-demand service to decide whether IBKR backfill is needed.
+     */
+    int countCandles(Instrument instrument, String timeframe);
 }

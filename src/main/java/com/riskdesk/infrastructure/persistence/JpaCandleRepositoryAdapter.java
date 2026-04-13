@@ -90,4 +90,9 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     public long count() {
         return springDataRepo.count();
     }
+
+    @Override
+    public int countCandles(Instrument instrument, String timeframe) {
+        return (int) springDataRepo.countByInstrumentAndTimeframe(instrument, timeframe);
+    }
 }
