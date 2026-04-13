@@ -28,19 +28,24 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class IndicatorService {
 
-    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;  // default for 1h+
-
-    /** Tiered lookback: shorter timeframes need fewer bars (EMA200 warmup = 200 minimum). */
+    /**
+     * Lookback bars for indicator calculation, tiered by timeframe.
+     * These values are calibrated to match TradingView's indicator computation depth.
+     * TV typically loads ~500 bars for 1h charts; using the same avoids EMA divergence
+     * caused by stale historical prices pulling the average down.
+     */
     private static int snapshotLookback(String timeframe) {
         return switch (timeframe) {
-            case "5m"        -> 500;   // ~1.7 trading days — enough for EMA200 + SMC
-            case "10m"       -> 1_000; // ~7 trading days
-            default          -> SNAPSHOT_LOOKBACK_BARS; // 2000 for 1h, 4h, 1d, etc.
+            case "5m"        -> 500;   // ~1.7 trading days
+            case "10m"       -> 500;   // ~3.5 trading days
+            case "1h"        -> 500;   // ~21 trading days — matches TV chart depth
+            case "4h"        -> 500;   // ~83 trading days
+            default          -> 500;   // 1d, 1w, 1M
         };
     }
     private static final int SERIES_LIMIT = 500;
-    private static final int SERIES_WARMUP_BARS = 1_000;
-    private static final int FVG_LOOKBACK_BARS = SNAPSHOT_LOOKBACK_BARS;
+    private static final int SERIES_WARMUP_BARS = 200; // EMA-200 needs exactly 200 bars warmup
+    private static final int FVG_LOOKBACK_BARS = 500;
     private static final int EMA_9_PERIOD = 9;
     private static final int EMA_50_PERIOD = 50;
     private static final int EMA_200_PERIOD = 200;
