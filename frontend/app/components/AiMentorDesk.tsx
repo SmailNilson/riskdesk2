@@ -8,8 +8,9 @@ import { isSignalReview, isBehaviourReview, BEHAVIOUR_CATEGORIES } from '@/app/l
 import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
+import PlaybookPanel from './PlaybookPanel';
 
-type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL';
+type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK';
 
 interface TabDef {
   key: TabKey;
@@ -22,6 +23,7 @@ const TABS: TabDef[] = [
   { key: 'SIGNALS', label: 'SIGNAUX', icon: '\uD83E\uDD16' },
   { key: 'BEHAVIOUR', label: 'BEHAVIOUR', icon: '\uD83D\uDCD0' },
   { key: 'MANUAL', label: 'MANUEL', icon: '\uD83D\uDC64' },
+  { key: 'PLAYBOOK', label: 'PLAYBOOK', icon: '\uD83D\uDCCB' },
 ];
 
 interface AiMentorDeskProps {
@@ -78,7 +80,8 @@ export default function AiMentorDesk({
     ALL: reviews.length,
     SIGNALS: signalReviews.length,
     BEHAVIOUR: behaviourReviews.length,
-    MANUAL: 0, // manual reviews are loaded internally by MentorPanel
+    MANUAL: 0,
+    PLAYBOOK: 0,
   }), [reviews.length, signalReviews.length, behaviourReviews.length]);
 
   return (
@@ -173,6 +176,12 @@ export default function AiMentorDesk({
             prices={prices}
             alerts={alerts}
           />
+        )}
+
+        {activeTab === 'PLAYBOOK' && (
+          <div className="p-4">
+            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
+          </div>
         )}
       </div>
     </div>

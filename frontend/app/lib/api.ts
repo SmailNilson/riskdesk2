@@ -707,4 +707,86 @@ export const api = {
     Object.entries(params).forEach(([k, v]) => { if (v !== undefined) p.set(k, String(v)); });
     return get<BacktestResult>(`/api/backtest/wt?${p.toString()}`);
   },
+
+  // ── Playbook ──────────────────────────────────────────────────────
+  getPlaybook: (instrument: string, timeframe: string) =>
+    get<PlaybookEvaluation>(`/api/playbook/${instrument}/${timeframe}`),
+
+  getFullPlaybook: (instrument: string, timeframe: string) =>
+    get<FinalVerdict>(`/api/playbook/${instrument}/${timeframe}/full`),
 };
+
+// ── Playbook Types ────────────────────────────────────────────────────
+
+export interface PlaybookEvaluation {
+  filters: FilterResult;
+  setups: SetupCandidate[];
+  bestSetup: SetupCandidate | null;
+  plan: PlaybookPlan | null;
+  checklist: ChecklistItem[];
+  checklistScore: number;
+  verdict: string;
+  evaluatedAt: string;
+}
+
+export interface FilterResult {
+  biasAligned: boolean;
+  swingBias: string;
+  tradeDirection: 'LONG' | 'SHORT';
+  structureClean: boolean;
+  validBreaks: number;
+  fakeBreaks: number;
+  totalBreaks: number;
+  sizeMultiplier: number;
+  vaPositionOk: boolean;
+  vaPosition: 'ABOVE_VA' | 'BELOW_VA' | 'INSIDE_VA';
+  allFiltersPass: boolean;
+}
+
+export interface SetupCandidate {
+  type: 'ZONE_RETEST' | 'LIQUIDITY_SWEEP' | 'BREAK_RETEST';
+  zoneName: string;
+  zoneHigh: number;
+  zoneLow: number;
+  zoneMid: number;
+  distanceFromPrice: number;
+  priceInZone: boolean;
+  reactionVisible: boolean;
+  orderFlowConfirms: boolean;
+  rrRatio: number;
+  checklistScore: number;
+}
+
+export interface PlaybookPlan {
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  rrRatio: number;
+  riskPercent: number;
+  slRationale: string;
+  tp1Rationale: string;
+}
+
+export interface ChecklistItem {
+  step: number;
+  label: string;
+  status: 'PASS' | 'FAIL' | 'WAITING';
+  detail: string;
+}
+
+export interface AgentVerdictView {
+  agentName: string;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  bias: 'LONG' | 'SHORT' | null;
+  reasoning: string;
+}
+
+export interface FinalVerdict {
+  verdict: string;
+  adjustedPlan: PlaybookPlan | null;
+  sizePercent: number;
+  agentVerdicts: AgentVerdictView[];
+  warnings: string[];
+  eligibility: string;
+}
