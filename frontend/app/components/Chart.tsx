@@ -8,6 +8,7 @@ import {
   createSeriesMarkers,
   SeriesMarker,
   CandlestickSeries,
+  CandlestickData,
   LineSeries,
   HistogramSeries,
   ColorType,
@@ -18,6 +19,7 @@ import {
 import { IndicatorSnapshot, api } from '@/app/lib/api';
 import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
+import { useScrollBack } from '@/app/hooks/useScrollBack';
 import { makeChartTickFormatter, makeChartTimeFormatter } from '@/app/lib/datetime';
 
 interface Props {
@@ -128,6 +130,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersApiRef  = useRef<any>(null);                        // createSeriesMarkers handle
   const livePriceRef = useRef<PriceUpdate | undefined>(livePrice);
+  const allBarsRef = useRef<CandlestickData<Time>[]>([]);
 
   // ── Indicator visibility toggles ────────────────────────────────────────────
   const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
@@ -227,6 +230,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         .filter((item, idx, arr) => idx === arr.length - 1 || item.time !== arr[idx + 1].time);
 
       candleSeries.setData(candleData);
+      allBarsRef.current = candleData;
       lastCandleRef.current = candleData[candleData.length - 1];
       setLastBarTime(candleData[candleData.length - 1].time);
 
@@ -270,6 +274,15 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       // backend unavailable
     }
   }, [instrument, timeframe]);
+
+  // ── Scroll-back: on-demand older candle loading ────────────────────────────
+  const scrollBack = useScrollBack({
+    chart: chartRef.current,
+    candleSeries: candleRef.current,
+    instrument,
+    timeframe,
+    allBarsRef,
+  });
 
   const toggle = (key: keyof typeof vis) => {
     setVis(prev => {
@@ -762,6 +775,13 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         <div ref={priceContainerRef} className="w-full" />
         {/* SMC zone boxes (OB + FVG) — overlay canvas above the chart canvas */}
         <canvas ref={smcCanvasRef} className="absolute inset-0 pointer-events-none" style={{ zIndex: 20 }} />
+
+        {/* Scroll-back loading indicator */}
+        {scrollBack.loading && (
+          <div className="absolute top-2 right-3 text-xs text-zinc-400 bg-zinc-900/80 px-2 py-1 rounded z-30 pointer-events-none">
+            Loading...
+          </div>
+        )}
 
         {/* Overlay legend tags — click to toggle indicator */}
         {snapshot && (
