@@ -7,6 +7,10 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
+import com.riskdesk.domain.engine.playbook.PlaybookEvaluator;
+import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
+import com.riskdesk.domain.engine.playbook.model.PlaybookInput;
+import com.riskdesk.domain.engine.playbook.model.ChecklistItem;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
@@ -82,6 +86,7 @@ public class MentorSignalReviewService {
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
+    private final PlaybookEvaluator playbookEvaluator = new PlaybookEvaluator();
 
     /** Dedicated executor for Gemini analysis — avoids ForkJoinPool.commonPool() starvation. */
     private final ExecutorService mentorExecutor = Executors.newFixedThreadPool(4,
@@ -948,6 +953,52 @@ public class MentorSignalReviewService {
                 "wave_trend_points", indicatorSeries.waveTrend().size()
             )
         ));
+
+        // ── Playbook pre-analysis (mechanical setup detection + checklist) ──
+        try {
+            BigDecimal playbookAtr = atr != null ? atr : BigDecimal.ONE;
+            PlaybookInput pbInput = PlaybookService.toPlaybookInput(focusSnapshot, playbookAtr);
+            PlaybookEvaluation pbEval = playbookEvaluator.evaluate(pbInput);
+            var pbMap = new java.util.LinkedHashMap<String, Object>();
+            pbMap.put("verdict", pbEval.verdict());
+            pbMap.put("checklist_score", pbEval.checklistScore() + "/7");
+            var filtersMap = linkedMap(
+                "bias_aligned", pbEval.filters().biasAligned(),
+                "structure_clean", pbEval.filters().structureClean(),
+                "valid_breaks", pbEval.filters().validBreaks(),
+                "fake_breaks", pbEval.filters().fakeBreaks(),
+                "va_position", pbEval.filters().vaPosition().name(),
+                "size_multiplier", pbEval.filters().sizeMultiplier()
+            );
+            pbMap.put("filters", filtersMap);
+            if (pbEval.bestSetup() != null) {
+                pbMap.put("best_setup", linkedMap(
+                    "type", pbEval.bestSetup().type().name(),
+                    "zone", pbEval.bestSetup().zoneName(),
+                    "price_in_zone", pbEval.bestSetup().priceInZone(),
+                    "distance", pbEval.bestSetup().distanceFromPrice(),
+                    "rr_ratio", pbEval.bestSetup().rrRatio()
+                ));
+            }
+            if (pbEval.plan() != null) {
+                pbMap.put("mechanical_plan", linkedMap(
+                    "entry", pbEval.plan().entryPrice(),
+                    "sl", pbEval.plan().stopLoss(),
+                    "tp1", pbEval.plan().takeProfit1(),
+                    "rr", pbEval.plan().rrRatio(),
+                    "sl_rationale", pbEval.plan().slRationale()
+                ));
+            }
+            if (pbEval.checklist() != null) {
+                pbMap.put("checklist", pbEval.checklist().stream()
+                    .map(c -> linkedMap("step", c.step(), "label", c.label(), "status", c.status().name(), "detail", c.detail()))
+                    .toList());
+            }
+            payload.put("playbook_pre_analysis", pbMap);
+        } catch (Exception e) {
+            log.debug("Playbook pre-analysis skipped: {}", e.getMessage());
+        }
+
         return objectMapper.valueToTree(payload);
     }
 
