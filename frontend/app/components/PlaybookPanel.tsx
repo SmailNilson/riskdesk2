@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, PlaybookEvaluation, FinalVerdict, ChecklistItem, SetupCandidate } from '../lib/api';
 
 interface PlaybookPanelProps {
@@ -8,12 +8,22 @@ interface PlaybookPanelProps {
   timeframe: string;
 }
 
+// Auto-run agents when the setup crosses this checklist score.
+// Below this, the setup is weak enough that spending Gemini budget is wasteful.
+const AUTO_TRIGGER_MIN_SCORE = 5;
+// Delay after a setup becomes "good" before auto-triggering, so that a setup that
+// flickers in and out doesn't burn calls every tick.
+const AUTO_TRIGGER_DEBOUNCE_MS = 2_000;
+
 export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelProps) {
   const [playbook, setPlaybook] = useState<PlaybookEvaluation | null>(null);
   const [fullVerdict, setFullVerdict] = useState<FinalVerdict | null>(null);
   const [loading, setLoading] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Remembers the last (zoneName|score|direction) that was auto-run so we don't
+  // re-trigger Gemini on every 30s poll while nothing material has changed.
+  const lastAutoKeyRef = useRef<string | null>(null);
 
   const fetchPlaybook = useCallback(async () => {
     setLoading(true);
@@ -35,7 +45,12 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
     return () => clearInterval(interval);
   }, [fetchPlaybook]);
 
-  const runAgents = async () => {
+  // Reset auto-trigger memory whenever the user switches instrument/timeframe
+  useEffect(() => {
+    lastAutoKeyRef.current = null;
+  }, [instrument, timeframe]);
+
+  const runAgents = useCallback(async () => {
     setAgentsLoading(true);
     try {
       const result = await api.getFullPlaybook(instrument, timeframe);
@@ -45,7 +60,34 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
     } finally {
       setAgentsLoading(false);
     }
-  };
+  }, [instrument, timeframe]);
+
+  // ── Auto-trigger the 4-agent gate when a qualified setup appears ──────
+  // Fires once per (instrument, timeframe, zoneName, score, direction) combination
+  // so we don't burn Gemini budget on the 30s polling cadence. Rate-limited by a
+  // 2s debounce: a flickering setup won't spam requests.
+  useEffect(() => {
+    if (!playbook || !playbook.bestSetup) return;
+    if (playbook.checklistScore < AUTO_TRIGGER_MIN_SCORE) return;
+    if (agentsLoading) return;
+
+    const direction = playbook.filters?.tradeDirection ?? 'UNKNOWN';
+    const key = [
+      instrument,
+      timeframe,
+      playbook.bestSetup.zoneName,
+      playbook.checklistScore,
+      direction,
+    ].join('|');
+    if (lastAutoKeyRef.current === key) return;
+
+    const timer = setTimeout(() => {
+      lastAutoKeyRef.current = key;
+      runAgents();
+    }, AUTO_TRIGGER_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [playbook, instrument, timeframe, agentsLoading, runAgents]);
 
   if (loading && !playbook) {
     return <div className="text-zinc-500 text-sm p-4">Loading playbook...</div>;
