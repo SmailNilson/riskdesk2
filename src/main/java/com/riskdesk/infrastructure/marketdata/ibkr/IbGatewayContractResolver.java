@@ -3,12 +3,11 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
+import com.riskdesk.domain.contract.ContractMonthUtils;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
-import java.time.YearMonth;
-import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -55,7 +54,7 @@ public class IbGatewayContractResolver {
             List<ContractDetails> details = nativeClient.requestContractDetails(query);
             if (details.isEmpty()) continue;
             Optional<ContractDetails> match = details.stream()
-                .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
+                .filter(d -> targetMonth.equals(ContractMonthUtils.normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
                 .findFirst();
             if (match.isPresent()) {
                 ContractDetails d = match.get();
@@ -167,19 +166,6 @@ public class IbGatewayContractResolver {
         };
     }
 
-    private Optional<IbGatewayResolvedContract> preconfigured(Instrument instrument) {
-        Contract contract = switch (instrument) {
-            case MCL -> buildContract(661016514, "MCL", "NYMEX", "USD", "100", "MCL", "202605");
-            case MGC -> buildContract(706903676, "MGC", "COMEX", "USD", "10", "MGC", "202604");
-            case MNQ -> buildContract(770561201, "MNQ", "CME", "USD", "2", "MNQ", "202606");
-            case E6 -> buildContract(496647057, "EUR", "CME", "USD", "125000", "6E", "202606");
-            case DXY -> null;
-        };
-        return contract == null
-            ? Optional.empty()
-            : Optional.of(new IbGatewayResolvedContract(instrument, contract, null));
-    }
-
     private Contract buildQuery(String symbol,
                                 String exchange,
                                 String currency,
@@ -200,47 +186,12 @@ public class IbGatewayContractResolver {
         return contract;
     }
 
-    private Contract buildContract(int conid,
-                                   String symbol,
-                                   String exchange,
-                                   String currency,
-                                   String multiplier,
-                                   String tradingClass,
-                                   String contractMonth) {
-        Contract contract = new Contract();
-        contract.conid(conid);
-        contract.secType(SecType.FUT);
-        contract.symbol(symbol);
-        contract.exchange(exchange);
-        contract.currency(currency);
-        contract.multiplier(multiplier);
-        contract.tradingClass(tradingClass);
-        contract.lastTradeDateOrContractMonth(contractMonth);
-        contract.includeExpired(false);
-        return contract;
-    }
-
     private LocalDate expiryKey(ContractDetails details) {
-        String raw = details.contract().lastTradeDateOrContractMonth();
-        if (raw == null || raw.isBlank()) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        if (digits.length() >= 8) {
-            return LocalDate.parse(digits.substring(0, 8), DateTimeFormatter.BASIC_ISO_DATE);
-        }
-        if (digits.length() == 6) {
-            return YearMonth.parse(digits, DateTimeFormatter.ofPattern("yyyyMM")).atDay(1);
-        }
-        return null;
+        return ContractMonthUtils.parseExpiryDate(details.contract().lastTradeDateOrContractMonth());
     }
 
     private static String safe(String value) {
         return value == null ? "" : value.trim().toUpperCase();
-    }
-
-    private static String normalizeMonth(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 
 }

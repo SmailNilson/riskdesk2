@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.ContractMonthUtils;
 import com.riskdesk.domain.contract.RolloverStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -14,7 +15,6 @@ import org.springframework.stereotype.Service;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -115,22 +115,7 @@ public class RolloverDetectionService {
     }
 
     private LocalDate parseExpiry(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        try {
-            if (digits.length() >= 8) {
-                return LocalDate.parse(digits.substring(0, 8), DateTimeFormatter.BASIC_ISO_DATE);
-            }
-            if (digits.length() == 6) {
-                // YYYYMM → last day of month as conservative estimate
-                return LocalDate.of(
-                    Integer.parseInt(digits.substring(0, 4)),
-                    Integer.parseInt(digits.substring(4, 6)),
-                    1
-                ).withDayOfMonth(1).plusMonths(1).minusDays(1);
-            }
-        } catch (Exception ignored) {}
-        return null;
+        return ContractMonthUtils.parseExpiryDateEndOfMonth(raw);
     }
 
     private RolloverStatus statusFor(long daysToExpiry) {

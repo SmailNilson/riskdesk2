@@ -74,7 +74,8 @@ public class MentorAnalysisService {
                 .supplyAsync(() -> mentorMemoryService.findSimilar(payload))
                 .completeOnTimeout(List.of(), SIMILAR_AUDITS_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .join();
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.trace("Similar audits lookup failed — {}", e.getMessage());
             return List.of();
         }
     }

@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.ContractMonthUtils;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
@@ -36,16 +37,16 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     private final IbkrProperties            ibkrProperties;
     private final OpenInterestProvider      openInterestProvider;
 
-    @Value("${riskdesk.active-contracts.MCL:202505}")
+    @Value("${riskdesk.active-contracts.MCL:202606}")
     private String fallbackMcl;
 
-    @Value("${riskdesk.active-contracts.MGC:202506}")
+    @Value("${riskdesk.active-contracts.MGC:202606}")
     private String fallbackMgc;
 
-    @Value("${riskdesk.active-contracts.MNQ:202506}")
+    @Value("${riskdesk.active-contracts.MNQ:202606}")
     private String fallbackMnq;
 
-    @Value("${riskdesk.active-contracts.E6:202506}")
+    @Value("${riskdesk.active-contracts.E6:202606}")
     private String fallbackE6;
 
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
@@ -94,8 +95,8 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
             IbGatewayResolvedContract selected;
             if (topTwo.size() >= 2) {
-                String frontMonth = normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
-                String nextMonth  = normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
+                String frontMonth = ContractMonthUtils.normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
+                String nextMonth  = ContractMonthUtils.normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
 
                 OptionalLong frontOI = frontMonth != null
                     ? openInterestProvider.fetchOpenInterest(instrument, frontMonth)
@@ -118,16 +119,10 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             // Seed resolver cache so downstream resolve() uses the OI-selected contract
             resolver.setResolved(instrument, selected);
 
-            return normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
+            return ContractMonthUtils.normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
-    }
-
-    private static String normalizeMonth(String raw) {
-        if (raw == null) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        return digits.length() >= 6 ? digits.substring(0, 6) : null;
     }
 }

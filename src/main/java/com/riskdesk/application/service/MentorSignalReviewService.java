@@ -507,8 +507,8 @@ public class MentorSignalReviewService {
     private void publish(MentorSignalReviewRecord review) {
         try {
             messagingTemplate.convertAndSend("/topic/mentor-alerts", toDto(review));
-        } catch (Exception ignored) {
-            // best effort only
+        } catch (Exception e) {
+            log.trace("WebSocket publish failed for review {} — {}", review.getId(), e.getMessage());
         }
     }
 
@@ -517,8 +517,8 @@ public class MentorSignalReviewService {
         if (review.getAnalysisJson() != null && !review.getAnalysisJson().isBlank()) {
             try {
                 analysis = objectMapper.readValue(review.getAnalysisJson(), MentorAnalyzeResponse.class);
-            } catch (Exception ignored) {
-                // best effort only
+            } catch (Exception e) {
+                log.trace("Failed to deserialize analysis JSON for review {} — {}", review.getId(), e.getMessage());
             }
         }
 
@@ -1274,7 +1274,8 @@ public class MentorSignalReviewService {
                 decimalValue(analysis.analysis().proposedTradePlan().stopLoss()),
                 decimalValue(analysis.analysis().proposedTradePlan().takeProfit())
             );
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.trace("Failed to extract trade plan values — {}", e.getMessage());
             return null;
         }
     }
@@ -1283,6 +1284,7 @@ public class MentorSignalReviewService {
         try {
             return objectMapper.writeValueAsString(value);
         } catch (Exception e) {
+            log.trace("JSON serialization failed — {}", e.getMessage());
             return null;
         }
     }

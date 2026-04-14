@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.ContractMonthUtils;
 import com.riskdesk.domain.contract.OpenInterestRolloverRule;
 import com.riskdesk.domain.contract.OpenInterestRolloverRule.OpenInterestSnapshot;
 import com.riskdesk.domain.contract.RolloverRecommendation;
@@ -115,8 +116,8 @@ public class OpenInterestRolloverService {
             return null;
         }
 
-        String frontMonth = normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
-        String nextMonth  = normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
+        String frontMonth = ContractMonthUtils.normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
+        String nextMonth  = ContractMonthUtils.normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
 
         if (frontMonth == null || nextMonth == null) {
             log.debug("OI check: could not parse contract months for {}", instrument);
@@ -178,9 +179,4 @@ public class OpenInterestRolloverService {
         );
     }
 
-    private static String normalizeMonth(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        String digits = raw.replaceAll("[^0-9]", "");
-        return digits.length() >= 6 ? digits.substring(0, 6) : null;
-    }
 }
