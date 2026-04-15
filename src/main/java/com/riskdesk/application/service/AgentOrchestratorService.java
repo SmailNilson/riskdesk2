@@ -150,22 +150,21 @@ public class AgentOrchestratorService {
         int lowCount = 0;
 
         for (AgentVerdict v : verdicts) {
+            var adj = v.adjustments();
+
             // Agent-proposed size cap (agents can only REDUCE, never raise)
-            if (v.adjustments().containsKey("size_pct")) {
-                double agentSize = ((Number) v.adjustments().get("size_pct")).doubleValue();
-                sizePct = Math.min(sizePct, agentSize);
+            if (adj.sizePctCap().isPresent()) {
+                sizePct = Math.min(sizePct, adj.sizePctCap().get());
             }
 
             // Hard block (maintenance window, market closed, etc.)
-            if (v.adjustments().containsKey("blocked")
-                    && Boolean.TRUE.equals(v.adjustments().get("blocked"))) {
+            if (adj.blocked()) {
                 blocked = true;
                 warnings.add(v.agentName() + ": " + v.reasoning());
             }
 
             // Low-confidence warning (unless already flagged blocked)
-            if (v.confidence() == Confidence.LOW
-                    && !v.adjustments().containsKey("blocked")) {
+            if (v.confidence() == Confidence.LOW && !adj.blocked()) {
                 warnings.add(v.agentName() + ": " + v.reasoning());
                 lowCount++;
             }

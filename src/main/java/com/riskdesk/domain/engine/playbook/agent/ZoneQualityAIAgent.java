@@ -171,7 +171,8 @@ public class ZoneQualityAIAgent implements TradingAgent {
         }
 
         Confidence conf = parseConfidence(ai.confidence());
-        return new AgentVerdict(name(), conf, direction, ai.reasoning(), ai.flags());
+        return new AgentVerdict(name(), conf, direction, ai.reasoning(),
+            AgentAdjustments.fromGeminiFlags(ai.flags()));
     }
 
     // ── Local helpers ────────────────────────────────────────────────────
@@ -197,7 +198,7 @@ public class ZoneQualityAIAgent implements TradingAgent {
             reasoning = "AI unavailable — fallback: zone acceptable";
         }
         return new AgentVerdict(name(), conf, direction, reasoning,
-            Map.of("fallback", true, "obstacles", obstacles));
+            AgentAdjustments.flags(Map.of("fallback", true, "obstacles", obstacles)));
     }
 
     private int countObstacles(PlaybookInput input, Direction direction,

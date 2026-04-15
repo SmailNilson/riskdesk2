@@ -109,11 +109,12 @@ public class MtfConfluenceAIAgent implements TradingAgent {
                             : Confidence.LOW;
             return new AgentVerdict(name(), conf, direction,
                 "AI unavailable — rule fallback: " + align + "/3 HTF aligned",
-                Map.of("mtf_alignment", align, "fallback", true));
+                AgentAdjustments.flags(Map.of("mtf_alignment", align, "fallback", true)));
         }
 
         Confidence conf = parseConfidence(ai.confidence());
-        return new AgentVerdict(name(), conf, direction, ai.reasoning(), ai.flags());
+        return new AgentVerdict(name(), conf, direction, ai.reasoning(),
+            AgentAdjustments.fromGeminiFlags(ai.flags()));
     }
 
     private static Confidence parseConfidence(String s) {

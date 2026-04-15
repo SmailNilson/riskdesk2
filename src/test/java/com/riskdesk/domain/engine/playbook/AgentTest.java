@@ -63,7 +63,7 @@ class AgentTest {
 
         AgentVerdict v = agent.evaluate(playbook, context);
 
-        assertTrue((boolean) v.adjustments().get("blocked"));
+        assertTrue(v.adjustments().blocked());
     }
 
     @Test
@@ -75,7 +75,7 @@ class AgentTest {
 
         AgentVerdict v = agent.evaluate(playbook, context);
 
-        assertTrue((boolean) v.adjustments().get("blocked"));
+        assertTrue(v.adjustments().blocked());
         assertTrue(v.reasoning().contains("MAINTENANCE"));
     }
 
@@ -111,7 +111,7 @@ class AgentTest {
 
         assertEquals(Confidence.HIGH, v.confidence());
         assertTrue(v.reasoning().contains("AI unavailable"));
-        assertEquals(2, ((Number) v.adjustments().get("mtf_alignment")).intValue());
+        assertEquals(2, ((Number) v.adjustments().extraFlags().get("mtf_alignment")).intValue());
     }
 
     @Test
@@ -162,7 +162,7 @@ class AgentTest {
         AgentVerdict v = agent.evaluate(mockPlaybook(Direction.LONG, 6), ctx);
 
         assertEquals(Confidence.HIGH, v.confidence());
-        assertEquals(Boolean.TRUE, v.adjustments().get("flow_supports"));
+        assertEquals(Boolean.TRUE, v.adjustments().extraFlags().get("flow_supports"));
     }
 
     @Test

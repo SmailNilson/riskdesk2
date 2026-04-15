@@ -158,7 +158,8 @@ public class OrderFlowAIAgent implements TradingAgent {
         }
 
         Confidence conf = parseConfidence(ai.confidence());
-        return new AgentVerdict(name(), conf, direction, ai.reasoning(), ai.flags());
+        return new AgentVerdict(name(), conf, direction, ai.reasoning(),
+            AgentAdjustments.fromGeminiFlags(ai.flags()));
     }
 
     private AgentVerdict fallbackVerdict(Direction direction,
@@ -183,8 +184,8 @@ public class OrderFlowAIAgent implements TradingAgent {
             reasoning = "AI unavailable — fallback: flow not aligned";
         }
         return new AgentVerdict(name(), conf, direction, reasoning,
-            Map.of("fallback", true, "data_quality",
-                flow != null ? flow.source().toLowerCase() : "none"));
+            AgentAdjustments.flags(Map.of("fallback", true, "data_quality",
+                flow != null ? flow.source().toLowerCase() : "none")));
     }
 
     private static Confidence parseConfidence(String s) {
