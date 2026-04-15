@@ -44,8 +44,13 @@ public class PlaybookEvaluator {
             return noSetupResult(filters);
         }
 
-        // Step 3: Calculate plans and enrich R:R on each candidate
-        List<SetupCandidate> enriched = new ArrayList<>();
+        // Step 3: Calculate plan + checklist ONCE per candidate and keep them
+        // paired so the best-setup path doesn't re-run the calculator/checklist.
+        // EvalEntry is a local record — it never leaves this method.
+        record EvalEntry(SetupCandidate candidate, PlaybookPlan plan,
+                         List<ChecklistItem> checklist, int score) {}
+
+        List<EvalEntry> evaluated = new ArrayList<>();
         for (SetupCandidate setup : allSetups) {
             PlaybookPlan plan = planCalculator.calculate(setup, input, direction, filters.sizeMultiplier());
             if (plan == null) continue;
@@ -53,32 +58,36 @@ public class PlaybookEvaluator {
             List<ChecklistItem> cl = buildChecklist(filters, setup, input);
             int score = (int) cl.stream().filter(c -> c.status() == ChecklistStatus.PASS).count();
 
-            enriched.add(new SetupCandidate(
+            SetupCandidate withRrAndScore = new SetupCandidate(
                 setup.type(), setup.zoneName(), setup.zoneHigh(), setup.zoneLow(), setup.zoneMid(),
                 setup.distanceFromPrice(), setup.priceInZone(), setup.reactionVisible(),
                 setup.orderFlowConfirms(), plan.rrRatio(), score
-            ));
+            );
+            evaluated.add(new EvalEntry(withRrAndScore, plan, cl, score));
         }
 
-        if (enriched.isEmpty()) {
+        if (evaluated.isEmpty()) {
             return noSetupResult(filters);
         }
 
-        // Step 4: Sort by priority
-        enriched.sort(Comparator
-            .comparing((SetupCandidate c) -> c.priceInZone() ? 0 : 1)
-            .thenComparing(c -> -c.checklistScore())
-            .thenComparing(c -> -c.rrRatio())
-            .thenComparing(SetupCandidate::distanceFromPrice));
+        // Step 4: Sort by priority (priceInZone > score > R:R > distance)
+        evaluated.sort(Comparator
+            .comparing((EvalEntry e) -> e.candidate().priceInZone() ? 0 : 1)
+            .thenComparing(e -> -e.candidate().checklistScore())
+            .thenComparing(e -> -e.candidate().rrRatio())
+            .thenComparing(e -> e.candidate().distanceFromPrice()));
 
-        SetupCandidate best = enriched.get(0);
-
-        // Step 5: Build final plan and checklist for best setup
-        PlaybookPlan plan = planCalculator.calculate(best, input, direction, filters.sizeMultiplier());
-        List<ChecklistItem> checklist = buildChecklist(filters, best, input);
-        int checklistScore = (int) checklist.stream().filter(c -> c.status() == ChecklistStatus.PASS).count();
+        // Step 5: Reuse the already-computed plan + checklist for the best entry
+        EvalEntry bestEntry = evaluated.get(0);
+        SetupCandidate best = bestEntry.candidate();
+        PlaybookPlan plan = bestEntry.plan();
+        List<ChecklistItem> checklist = bestEntry.checklist();
+        int checklistScore = bestEntry.score();
 
         String verdict = buildVerdict(direction, best, checklistScore, filters);
+
+        List<SetupCandidate> enriched = evaluated.stream()
+            .map(EvalEntry::candidate).toList();
 
         return new PlaybookEvaluation(
             filters, enriched, best, plan, checklist, checklistScore, verdict, Instant.now()
