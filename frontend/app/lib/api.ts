@@ -644,6 +644,21 @@ export interface FootprintBar {
   totalDelta: number;
 }
 
+/**
+ * Narrow a /api/order-flow/footprint response to a real bar.
+ * FootprintController can return {available:false} or {error:...} with HTTP 200.
+ */
+export function isFootprintBar(v: unknown): v is FootprintBar {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.levels === 'object' &&
+    o.levels !== null &&
+    typeof o.instrument === 'string' &&
+    typeof o.timeframe === 'string'
+  );
+}
+
 // ── Trailing Stop Stats (GET /api/mentor/simulation/trailing-stats) ────────────
 export interface TrailingTrackStats {
   trades: number;
@@ -682,24 +697,32 @@ export interface OrderFlowDepthSnapshot {
 }
 
 // ── ONIMS Correlation (GET /api/correlation/oil-nasdaq/*) ──────────────────────
+// Matches CrossInstrumentAlertService.toPayload() exactly.
 export interface CorrelationSignal {
-  timestamp: string;
-  oilSide: 'LONG' | 'SHORT' | string;
-  nasdaqSide: 'LONG' | 'SHORT' | string;
-  oilPrice?: number | null;
-  nasdaqPrice?: number | null;
-  vixPrice?: number | null;
-  notes?: string | null;
+  type?: string;
+  category?: string;
+  severity?: string;
+  leaderInstrument: string;
+  followerInstrument: string;
+  leaderBreakout: number;
+  leaderResistance: number;
+  followerVwap: number;
+  followerClose: number;
+  lagSeconds: number;
+  confirmedAt: string;   // ISO-8601
+  message?: string;
 }
 
+// Matches CorrelationController.status() exactly. The engine-state key is
+// `engineState` (not `state`) — see CorrelationController.java.
 export interface CorrelationStatus {
-  state: string;
+  strategy?: string;
+  engineState: string;
   blackoutStart: string | null;
   vixThreshold: number;
   cachedVixPrice: number | null;
   blackoutActive: boolean;
   blackoutDurationMins: number;
-  enabled?: boolean;
 }
 
 export const api = {
@@ -748,8 +771,12 @@ export const api = {
     get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
   toggleAutoAnalysis: () =>
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
+  // Backend may return {available: false} or {error: "..."} with HTTP 200 —
+  // callers must narrow with isFootprintBar() before use.
   getFootprint: (instrument: string, timeframe = '5m') =>
-    get<FootprintBar>(`/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`),
+    get<FootprintBar | { available?: boolean; error?: string }>(
+      `/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`,
+    ),
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
   getTrailingStats: (days = 7) =>

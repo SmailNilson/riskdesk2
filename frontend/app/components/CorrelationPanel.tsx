@@ -15,8 +15,22 @@ function formatTime(timestamp: string): string {
   }
 }
 
-function sideColor(side: string): string {
-  return side === 'LONG' ? 'text-emerald-400' : side === 'SHORT' ? 'text-red-400' : 'text-zinc-400';
+/**
+ * Infer the leader's implied side from the payload.
+ * ONIMS fires when the leader breaks above resistance (LONG) or below (SHORT).
+ * The follower is inversely correlated by definition.
+ */
+function inferLeaderSide(sig: CorrelationSignal): 'LONG' | 'SHORT' | null {
+  if (sig.leaderBreakout == null || sig.leaderResistance == null) return null;
+  if (sig.leaderBreakout > sig.leaderResistance) return 'LONG';
+  if (sig.leaderBreakout < sig.leaderResistance) return 'SHORT';
+  return null;
+}
+function inverse(side: 'LONG' | 'SHORT' | null): 'LONG' | 'SHORT' | null {
+  return side === 'LONG' ? 'SHORT' : side === 'SHORT' ? 'LONG' : null;
+}
+function sideColor(side: string | null): string {
+  return side === 'LONG' ? 'text-emerald-400' : side === 'SHORT' ? 'text-red-400' : 'text-zinc-500';
 }
 
 export default function CorrelationPanel() {
@@ -66,7 +80,7 @@ export default function CorrelationPanel() {
             }`}>
               {status.blackoutActive ? 'BLACKOUT' : 'ACTIVE'}
             </span>
-            <span className="text-[10px] text-zinc-500 font-mono">{status.state}</span>
+            <span className="text-[10px] text-zinc-500 font-mono">{status.engineState}</span>
           </div>
         )}
       </div>
@@ -100,19 +114,27 @@ export default function CorrelationPanel() {
           <div className="text-xs text-zinc-600 py-1">No confirmed signals</div>
         ) : (
           <div className="space-y-0.5 max-h-40 overflow-y-auto">
-            {history.slice(0, 20).map((sig, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs font-mono py-0.5 border-b border-zinc-800/40">
-                <span className="text-zinc-600 text-[10px]">{formatTime(sig.timestamp)}</span>
-                <span className="text-zinc-500">MCL</span>
-                <span className={sideColor(sig.oilSide)}>{sig.oilSide}</span>
-                <span className="text-zinc-600">/</span>
-                <span className="text-zinc-500">MNQ</span>
-                <span className={sideColor(sig.nasdaqSide)}>{sig.nasdaqSide}</span>
-                {sig.vixPrice != null && (
-                  <span className="text-zinc-500 ml-auto">VIX {sig.vixPrice.toFixed(2)}</span>
-                )}
-              </div>
-            ))}
+            {history.slice(0, 20).map((sig, i) => {
+              const leaderSide = inferLeaderSide(sig);
+              const followerSide = inverse(leaderSide);
+              return (
+                <div
+                  key={`${sig.confirmedAt}-${i}`}
+                  className="flex items-center gap-2 text-xs font-mono py-0.5 border-b border-zinc-800/40"
+                  title={sig.message}
+                >
+                  <span className="text-zinc-600 text-[10px]">{formatTime(sig.confirmedAt)}</span>
+                  <span className="text-zinc-500">{sig.leaderInstrument}</span>
+                  <span className={sideColor(leaderSide)}>{leaderSide ?? '—'}</span>
+                  <span className="text-zinc-600">/</span>
+                  <span className="text-zinc-500">{sig.followerInstrument}</span>
+                  <span className={sideColor(followerSide)}>{followerSide ?? '—'}</span>
+                  <span className="text-zinc-600 text-[10px] ml-auto">
+                    lag {sig.lagSeconds}s
+                  </span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
