@@ -5,7 +5,6 @@ import com.riskdesk.domain.contract.OpenInterestRolloverRule;
 import com.riskdesk.domain.contract.OpenInterestRolloverRule.OpenInterestSnapshot;
 import com.riskdesk.domain.contract.RolloverRecommendation;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
-import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayResolvedContract;
@@ -44,8 +43,6 @@ public class OpenInterestRolloverService {
     private final RolloverDetectionService  rolloverDetectionService;
     private final SimpMessagingTemplate     messagingTemplate;
     private final boolean                   autoConfirm;
-    private final double                    autoConfirmOiRatio;
-    private final long                      autoConfirmMinCurrentOi;
 
     public OpenInterestRolloverService(ActiveContractRegistry contractRegistry,
                                        IbGatewayContractResolver contractResolver,
@@ -53,9 +50,7 @@ public class OpenInterestRolloverService {
                                        IbkrProperties ibkrProperties,
                                        RolloverDetectionService rolloverDetectionService,
                                        SimpMessagingTemplate messagingTemplate,
-                                       @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm,
-                                       @Value("${riskdesk.rollover.auto-confirm-oi-ratio:2.0}") double autoConfirmOiRatio,
-                                       @Value("${riskdesk.rollover.auto-confirm-min-current-oi:100}") long autoConfirmMinCurrentOi) {
+                                       @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
         this.contractRegistry       = contractRegistry;
         this.contractResolver       = contractResolver;
         this.openInterestProvider   = openInterestProvider;
@@ -63,8 +58,6 @@ public class OpenInterestRolloverService {
         this.rolloverDetectionService = rolloverDetectionService;
         this.messagingTemplate      = messagingTemplate;
         this.autoConfirm            = autoConfirm;
-        this.autoConfirmOiRatio     = autoConfirmOiRatio;
-        this.autoConfirmMinCurrentOi = autoConfirmMinCurrentOi;
     }
 
     /** Scheduled check every 6 hours (with 2-minute initial delay). */
@@ -218,89 +211,17 @@ public class OpenInterestRolloverService {
                 instrument, currentMonth, currentOI.getAsLong(), nextMonth, nextOI.getAsLong(), recommendation.action());
 
         if (recommendation.action() == RolloverRecommendation.Action.RECOMMEND_ROLL) {
-            boolean actuallyAutoConfirmed = false;
-            if (autoConfirm && shouldAutoConfirm(instrument, currentOI.getAsLong(), nextOI.getAsLong(),
-                                                 currentMonth, nextMonth)) {
+            if (autoConfirm) {
                 rolloverDetectionService.confirmRollover(instrument, nextMonth);
-                actuallyAutoConfirmed = true;
-                log.info("OI auto-rollover: {} rolled from {} to {} (currentOI={}, nextOI={}, ratio={})",
-                    instrument, currentMonth, nextMonth,
-                    currentOI.getAsLong(), nextOI.getAsLong(),
-                    ratioStr(nextOI.getAsLong(), currentOI.getAsLong()));
+                log.info("OI auto-rollover: {} rolled from {} to {}", instrument, currentMonth, nextMonth);
             }
-            pushOiRolloverAlert(recommendation, actuallyAutoConfirmed);
+            pushOiRolloverAlert(recommendation);
         }
 
         return recommendation;
     }
 
-    /**
-     * Gates auto-confirmation behind three safeguards, learned from the 2026-04-10
-     * MCL incident where a premature OI-based rollover caused intraday candle
-     * persistence to stall on a less liquid contract month:
-     *
-     *   1. ENERGY veto. For MCL (and any future ENERGY product) the relation
-     *      between IBKR's {@code lastTradeDateOrContractMonth} and the active
-     *      delivery month is offset by one month (see
-     *      {@link com.riskdesk.infrastructure.marketdata.ibkr.ActiveContractRegistryInitializer#selectByOi}).
-     *      An in-flight {@code nextOI > currentOI} shift therefore doesn't mean
-     *      "time to roll"; it's normal as delivery approaches. We still emit the
-     *      WebSocket alert so operators can decide via {@code POST /api/rollover/confirm}.
-     *
-     *   2. Minimum current OI. Sub-threshold values usually indicate a stale or
-     *      missing snapshot rather than genuine liquidity migration.
-     *
-     *   3. Clear dominance ratio. Only auto-confirm when next OI is at least
-     *      {@code autoConfirmOiRatio}× current OI. Small oscillations around
-     *      parity (~1.1×) happened historically for MNQ and produced subscription
-     *      churn without a real liquidity move.
-     */
-    private boolean shouldAutoConfirm(Instrument instrument,
-                                      long currentOi,
-                                      long nextOi,
-                                      String currentMonth,
-                                      String nextMonth) {
-        if (instrument.assetClass() == AssetClass.ENERGY) {
-            log.info("OI auto-rollover suppressed for {} ({} → {}): ENERGY asset class — "
-                + "IBKR expiry-month semantics make OI-shift unreliable for auto-roll; "
-                + "operator must confirm manually.",
-                instrument, currentMonth, nextMonth);
-            return false;
-        }
-        if (currentOi < autoConfirmMinCurrentOi) {
-            log.info("OI auto-rollover suppressed for {} ({} → {}): current OI {} below minimum {} — "
-                + "likely stale data, not a true liquidity shift.",
-                instrument, currentMonth, nextMonth, currentOi, autoConfirmMinCurrentOi);
-            return false;
-        }
-        double ratio = (double) nextOi / Math.max(currentOi, 1L);
-        if (ratio < autoConfirmOiRatio) {
-            log.info("OI auto-rollover suppressed for {} ({} → {}): OI ratio {} below threshold {} "
-                + "(currentOI={}, nextOI={}).",
-                instrument, currentMonth, nextMonth,
-                ratioStr(nextOi, currentOi), autoConfirmOiRatio, currentOi, nextOi);
-            return false;
-        }
-        return true;
-    }
-
-    private static String ratioStr(long numerator, long denominator) {
-        if (denominator <= 0) return "∞";
-        return String.format("%.2fx", (double) numerator / denominator);
-    }
-
-    /**
-     * Publishes the OI rollover event to the frontend.
-     *
-     * <p>{@code autoConfirmed} reflects the <em>actual</em> outcome of this check —
-     * true only when {@code confirmRollover()} was called. It must not track the
-     * {@code riskdesk.rollover.auto-confirm} config flag, since the suppression
-     * paths (ENERGY veto, below ratio / min-OI) skip the confirmation while
-     * auto-confirm is enabled. Reporting the config flag would mislead the UI
-     * into hiding the manual-confirm prompt for events that still need operator
-     * action.</p>
-     */
-    private void pushOiRolloverAlert(RolloverRecommendation rec, boolean autoConfirmed) {
+    private void pushOiRolloverAlert(RolloverRecommendation rec) {
         try {
             messagingTemplate.convertAndSend("/topic/rollover", Map.of(
                 "type",          "OI_ROLLOVER",
@@ -310,7 +231,7 @@ public class OpenInterestRolloverService {
                 "currentOI",     rec.currentOI(),
                 "nextOI",        rec.nextOI(),
                 "action",        rec.action().name(),
-                "autoConfirmed", autoConfirmed
+                "autoConfirmed", autoConfirm
             ));
         } catch (Exception e) {
             log.debug("OI rollover WebSocket push failed — {}", e.getMessage());
