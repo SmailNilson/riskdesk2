@@ -20,7 +20,7 @@ import java.util.Map;
  *
  * <p>Falls back to a neutral MEDIUM verdict if the Gemini port is unavailable.
  */
-public class MtfConfluenceAIAgent implements TradingAgent {
+public class MtfConfluenceAIAgent implements Scorer {
 
     public static final String AGENT_NAME = "MTF-Confluence-AI";
     public static final String PROMPT_KEY = "mtf-confluence";

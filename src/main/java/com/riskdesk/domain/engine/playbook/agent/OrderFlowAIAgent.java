@@ -22,7 +22,7 @@ import java.util.Map;
  *
  * <p>Falls back to a neutral MEDIUM verdict if Gemini is unavailable.
  */
-public class OrderFlowAIAgent implements TradingAgent {
+public class OrderFlowAIAgent implements Scorer {
 
     public static final String AGENT_NAME = "Order-Flow-AI";
     public static final String PROMPT_KEY = "order-flow";

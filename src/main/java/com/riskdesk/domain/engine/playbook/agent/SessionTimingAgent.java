@@ -12,7 +12,7 @@ import java.util.Map;
  * A 7/7 setup during Asian session with no volume is a trap.
  * A 5/7 setup during NY AM kill zone with high volume is tradeable.
  */
-public class SessionTimingAgent implements TradingAgent {
+public class SessionTimingAgent implements Gate {
 
     @Override
     public String name() { return "Session-Timing"; }

@@ -24,7 +24,7 @@ import java.util.Map;
  *
  * <p>Falls back to a neutral MEDIUM verdict if Gemini is unavailable.
  */
-public class ZoneQualityAIAgent implements TradingAgent {
+public class ZoneQualityAIAgent implements Scorer {
 
     public static final String AGENT_NAME = "Zone-Quality-AI";
     public static final String PROMPT_KEY = "zone-quality";

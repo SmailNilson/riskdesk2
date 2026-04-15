@@ -4,6 +4,7 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.engine.playbook.agent.*;
+import com.riskdesk.domain.engine.playbook.event.AgentDecisionEvent;
 import com.riskdesk.domain.engine.playbook.model.Confidence;
 import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
@@ -20,6 +21,7 @@ import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -57,7 +59,8 @@ public class AgentOrchestratorService {
     private static final Duration AGENT_TIMEOUT = Duration.ofSeconds(20);
     private static final Duration MTF_TIMEOUT = Duration.ofSeconds(5);
 
-    private final List<TradingAgent> agents;
+    private final List<TradingAgent> gates;
+    private final List<TradingAgent> scorers;
     private final RiskManagementService riskManagementService;
     private final PositionService positionService;
     private final MentorIntermarketService intermarketService;
@@ -66,6 +69,7 @@ public class AgentOrchestratorService {
     private final MarketDepthPort marketDepthPort;
     private final AbsorptionCache absorptionCache;
     private final ExecutorService agentExecutor;
+    private final ApplicationEventPublisher eventPublisher;
 
     public AgentOrchestratorService(
             List<TradingAgent> agents,
@@ -76,11 +80,25 @@ public class AgentOrchestratorService {
             TickDataPort tickDataPort,
             MarketDepthPort marketDepthPort,
             AbsorptionCache absorptionCache,
-            @Qualifier("agentExecutor") ExecutorService agentExecutor) {
+            @Qualifier("agentExecutor") ExecutorService agentExecutor,
+            ApplicationEventPublisher eventPublisher) {
         // Spring collects every TradingAgent bean (see TradingAgentConfig) and hands
-        // them to us as an ordered list. Adding a new agent is just a new @Bean — no
-        // changes here.
-        this.agents = List.copyOf(agents);
+        // them to us as an ordered list. We partition once at construction so the
+        // orchestrate() path does not re-filter on every call.
+        //
+        //   Gates  → deterministic, fast, may BLOCK     → run sequentially, short-circuit
+        //   Others → AI / slow / non-blocking           → run in parallel afterwards
+        //
+        // Anything not tagged {@code Gate} is treated as a scorer; missing a Scorer
+        // tag is a degrade-gracefully case rather than a hard failure.
+        List<TradingAgent> gateList = new ArrayList<>();
+        List<TradingAgent> scorerList = new ArrayList<>();
+        for (TradingAgent a : agents) {
+            if (a instanceof Gate) gateList.add(a);
+            else scorerList.add(a);
+        }
+        this.gates = List.copyOf(gateList);
+        this.scorers = List.copyOf(scorerList);
         this.riskManagementService = riskManagementService;
         this.positionService = positionService;
         this.intermarketService = intermarketService;
@@ -89,18 +107,23 @@ public class AgentOrchestratorService {
         this.marketDepthPort = marketDepthPort;
         this.absorptionCache = absorptionCache;
         this.agentExecutor = agentExecutor;
+        this.eventPublisher = eventPublisher;
 
-        log.info("AgentOrchestratorService initialized with {} agents: {}",
-            this.agents.size(),
-            this.agents.stream().map(TradingAgent::name).toList());
+        log.info("AgentOrchestratorService initialized with {} gate(s) {} and {} scorer(s) {}",
+            this.gates.size(),
+            this.gates.stream().map(TradingAgent::name).toList(),
+            this.scorers.size(),
+            this.scorers.stream().map(TradingAgent::name).toList());
     }
 
     public FinalVerdict orchestrate(PlaybookEvaluation playbook, AgentContext context) {
         if (playbook.bestSetup() == null || playbook.plan() == null) {
-            return new FinalVerdict(
+            FinalVerdict fv = new FinalVerdict(
                 playbook.verdict(), null, 0, List.of(),
                 List.of("No setup detected"), "INELIGIBLE"
             );
+            publishDecisionEvent(context, playbook, fv);
+            return fv;
         }
 
         // ── 1. Deterministic risk gate — runs first, may short-circuit AI calls ─
@@ -108,51 +131,103 @@ public class AgentOrchestratorService {
             riskManagementService.evaluate(playbook, context);
         if (risk.blocked()) {
             log.info("Orchestrator: risk gate BLOCKED — {}", risk.blockReason());
-            return new FinalVerdict(
+            FinalVerdict fv = new FinalVerdict(
                 "BLOCKED — " + risk.blockReason(),
-                null,
-                0,
-                List.of(),
-                risk.warnings(),
-                "BLOCKED"
+                null, 0, List.of(),
+                risk.warnings(), "BLOCKED"
             );
+            publishDecisionEvent(context, playbook, fv);
+            return fv;
         }
 
-        // ── 2. Run all agents in parallel on the dedicated executor ─────────
-        List<CompletableFuture<AgentVerdict>> futures = agents.stream()
+        // ── 2. Run GATES sequentially — short-circuit on any hard block ─────
+        // Gates are microsecond-fast and deterministic; running them first means a
+        // SessionTimingAgent rejection no longer costs 3 Gemini calls + 20s of
+        // wall-clock time.
+        List<AgentVerdict> gateVerdicts = new ArrayList<>(gates.size());
+        for (TradingAgent gate : gates) {
+            AgentVerdict v = safeEvaluate(gate, playbook, context);
+            gateVerdicts.add(v);
+            if (v.adjustments().blocked()) {
+                log.info("Orchestrator: gate {} BLOCKED — skipping {} scorer(s)",
+                    gate.name(), scorers.size());
+                FinalVerdict fv = resolveVerdicts(playbook, gateVerdicts, risk);
+                publishDecisionEvent(context, playbook, fv);
+                return fv;
+            }
+        }
+
+        // ── 3. Run SCORERS in parallel on the dedicated executor ────────────
+        List<CompletableFuture<AgentVerdict>> futures = scorers.stream()
             .map(agent -> CompletableFuture.supplyAsync(
                 () -> safeEvaluate(agent, playbook, context), agentExecutor))
             .toList();
 
-        // Global timeout: we wait for all agents collectively, not per-agent in a loop.
-        // A slow first agent no longer pushes the wall-clock deadline of later agents.
+        // Global timeout: we wait for all scorers collectively, not per-agent in a loop.
+        // A slow first scorer no longer pushes the wall-clock deadline of later scorers.
         CompletableFuture<Void> all = CompletableFuture.allOf(
             futures.toArray(CompletableFuture[]::new));
         try {
             all.get(AGENT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            log.warn("Agent orchestration timed out after {}ms — collecting completed verdicts",
+            log.warn("Scorer orchestration timed out after {}ms — collecting completed verdicts",
                 AGENT_TIMEOUT.toMillis());
         } catch (Exception e) {
-            log.warn("Agent orchestration failed: {}", e.getMessage());
+            log.warn("Scorer orchestration failed: {}", e.getMessage());
         }
 
         // Collect whichever verdicts completed; stragglers become timeout verdicts.
-        List<AgentVerdict> verdicts = new ArrayList<>(futures.size());
+        List<AgentVerdict> verdicts = new ArrayList<>(gates.size() + futures.size());
+        verdicts.addAll(gateVerdicts);
         for (int i = 0; i < futures.size(); i++) {
             CompletableFuture<AgentVerdict> f = futures.get(i);
-            String agentName = agents.get(i).name();
+            String agentName = scorers.get(i).name();
             if (f.isDone() && !f.isCompletedExceptionally() && !f.isCancelled()) {
                 verdicts.add(f.getNow(AgentVerdict.timeout(agentName)));
             } else {
                 f.cancel(true);
-                log.warn("Agent {} did not complete within {}ms", agentName, AGENT_TIMEOUT.toMillis());
+                log.warn("Scorer {} did not complete within {}ms", agentName, AGENT_TIMEOUT.toMillis());
                 verdicts.add(AgentVerdict.timeout(agentName));
             }
         }
 
-        // ── 3. Resolve conflicts and build final verdict ─────────────────────
-        return resolveVerdicts(playbook, verdicts, risk);
+        // ── 4. Resolve conflicts, publish decision event, return ────────────
+        FinalVerdict fv = resolveVerdicts(playbook, verdicts, risk);
+        publishDecisionEvent(context, playbook, fv);
+        return fv;
+    }
+
+    /**
+     * Publishes a best-effort {@link AgentDecisionEvent} on every decision. Emission
+     * failures are swallowed — the orchestration result is authoritative, the event is
+     * an audit-trail side effect.
+     */
+    private void publishDecisionEvent(AgentContext context, PlaybookEvaluation playbook,
+                                       FinalVerdict fv) {
+        try {
+            String setupType = playbook.bestSetup() != null
+                ? playbook.bestSetup().type().name()
+                : "NONE";
+            List<AgentDecisionEvent.AgentSummary> summaries = fv.agentVerdicts().stream()
+                .map(v -> new AgentDecisionEvent.AgentSummary(
+                    v.agentName(), v.confidence(), v.reasoning(),
+                    v.adjustments() != null && v.adjustments().blocked()))
+                .toList();
+            AgentDecisionEvent event = new AgentDecisionEvent(
+                context.instrument(),
+                context.timeframe(),
+                setupType,
+                fv.eligibility(),
+                fv.sizePercent(),
+                summaries,
+                fv.warnings() != null ? fv.warnings().size() : 0,
+                fv.verdict(),
+                Instant.now()
+            );
+            eventPublisher.publishEvent(event);
+        } catch (Exception e) {
+            log.debug("Failed to publish AgentDecisionEvent: {}", e.getMessage());
+        }
     }
 
     /** Runs an agent's {@code evaluate} guarded against exceptions. */
