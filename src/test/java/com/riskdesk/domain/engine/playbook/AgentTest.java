@@ -84,7 +84,7 @@ class AgentTest {
     @Test
     void mtfAiAgent_geminiHigh_returnsHigh() {
         var port = cannedPort(AgentAiResponse.HIGH, "Triple HTF confluence", Map.of("mtf_alignment", 3));
-        var agent = new MtfConfluenceAIAgent(port);
+        var agent = new MtfConfluenceAIAgent(port, "test-prompt");
         var mtf = new AgentContext.MtfSnapshot(
             "BULLISH", "BULLISH", "BULLISH", "BULLISH",
             "BOS", "BOS", 80.0, true, 75.0, true);
@@ -100,7 +100,7 @@ class AgentTest {
     void mtfAiAgent_geminiUnavailable_fallsBackToAlignmentScore() {
         // Port returns fallback → agent must run its own rule-based rule on alignmentScore
         var port = fallbackPort();
-        var agent = new MtfConfluenceAIAgent(port);
+        var agent = new MtfConfluenceAIAgent(port, "test-prompt");
         // 2/3 HTF aligned with LONG (H1 + H4 BULLISH, Daily BEARISH)
         var mtf = new AgentContext.MtfSnapshot(
             "BULLISH", "BULLISH", "BULLISH", "BEARISH",
@@ -116,7 +116,7 @@ class AgentTest {
 
     @Test
     void mtfAiAgent_skipWhenNoSetup() {
-        var agent = new MtfConfluenceAIAgent(cannedPort(AgentAiResponse.HIGH, "", Map.of()));
+        var agent = new MtfConfluenceAIAgent(cannedPort(AgentAiResponse.HIGH, "", Map.of()), "test-prompt");
 
         AgentVerdict v = agent.evaluate(noSetupPlaybook(), contextWithMtf(null));
 
@@ -125,7 +125,7 @@ class AgentTest {
 
     @Test
     void mtfAiAgent_skipWhenNoMtfData() {
-        var agent = new MtfConfluenceAIAgent(cannedPort(AgentAiResponse.HIGH, "", Map.of()));
+        var agent = new MtfConfluenceAIAgent(cannedPort(AgentAiResponse.HIGH, "", Map.of()), "test-prompt");
         var ctx = new AgentContext(
             Instrument.MCL, "10m", minimalInput(),
             AgentContext.PortfolioState.empty(),
@@ -152,7 +152,7 @@ class AgentTest {
     void orderFlowAiAgent_geminiHigh_passesThrough() {
         var port = cannedPort(AgentAiResponse.HIGH,
             "REAL_TICKS + bullish absorption", Map.of("data_quality", "real_ticks", "flow_supports", true));
-        var agent = new OrderFlowAIAgent(port);
+        var agent = new OrderFlowAIAgent(port, "test-prompt");
         var flow = new AgentContext.OrderFlowSnapshot(
             "REAL_TICKS", 700, 300, 400, 3_500, 70.0, "RISING", false, null);
         var absorption = new AgentContext.AbsorptionSnapshot(
@@ -168,7 +168,7 @@ class AgentTest {
     @Test
     void orderFlowAiAgent_geminiUnavailable_flowAlignedWithAbsorption_fallbackHigh() {
         var port = fallbackPort();
-        var agent = new OrderFlowAIAgent(port);
+        var agent = new OrderFlowAIAgent(port, "test-prompt");
         var flow = new AgentContext.OrderFlowSnapshot(
             "REAL_TICKS", 700, 300, 400, 3_500, 70.0, "RISING", false, null);
         var absorption = new AgentContext.AbsorptionSnapshot(
@@ -184,7 +184,7 @@ class AgentTest {
     @Test
     void orderFlowAiAgent_geminiUnavailable_flowMisaligned_fallbackLow() {
         var port = fallbackPort();
-        var agent = new OrderFlowAIAgent(port);
+        var agent = new OrderFlowAIAgent(port, "test-prompt");
         // Bearish flow + bearish absorption against a LONG
         var flow = new AgentContext.OrderFlowSnapshot(
             "REAL_TICKS", 200, 800, -600, -4_000, 20.0, "FALLING", true, "BEARISH_DIVERGENCE");
@@ -203,7 +203,7 @@ class AgentTest {
     void zoneAiAgent_geminiHigh_returnsHigh() {
         var port = cannedPort(AgentAiResponse.HIGH,
             "OB defended, live score 85, 0 obstacles", Map.of("weak_zone", false));
-        var agent = new ZoneQualityAIAgent(port);
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
         var zq = new AgentContext.ZoneQualitySnapshot(
             85.0, 85.0, Boolean.TRUE, 2.5, 80.0, 75.0, Boolean.TRUE, 70.0);
         var ctx = contextWithZoneQuality(zq);
@@ -216,7 +216,7 @@ class AgentTest {
     @Test
     void zoneAiAgent_geminiUnavailable_weakZone_fallbackLow() {
         var port = fallbackPort();
-        var agent = new ZoneQualityAIAgent(port);
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
         var zq = new AgentContext.ZoneQualitySnapshot(
             20.0, 20.0, Boolean.FALSE, 0.3, null, null, null, null);
         var ctx = contextWithZoneQuality(zq);
@@ -230,7 +230,7 @@ class AgentTest {
     @Test
     void zoneAiAgent_geminiUnavailable_highQuality_fallbackHigh() {
         var port = fallbackPort();
-        var agent = new ZoneQualityAIAgent(port);
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
         // High quality OB + no obstacles (empty lists in input) → HIGH
         var zq = new AgentContext.ZoneQualitySnapshot(
             85.0, 85.0, Boolean.TRUE, 2.5, null, null, null, null);

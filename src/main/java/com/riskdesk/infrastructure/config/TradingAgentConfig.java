@@ -5,6 +5,7 @@ import com.riskdesk.domain.engine.playbook.agent.OrderFlowAIAgent;
 import com.riskdesk.domain.engine.playbook.agent.SessionTimingAgent;
 import com.riskdesk.domain.engine.playbook.agent.ZoneQualityAIAgent;
 import com.riskdesk.domain.engine.playbook.agent.port.GeminiAgentPort;
+import com.riskdesk.infrastructure.prompt.AgentPromptRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -29,18 +30,24 @@ public class TradingAgentConfig {
     }
 
     @Bean
-    public MtfConfluenceAIAgent mtfConfluenceAIAgent(GeminiAgentPort geminiAgentPort) {
-        return new MtfConfluenceAIAgent(geminiAgentPort);
+    public MtfConfluenceAIAgent mtfConfluenceAIAgent(GeminiAgentPort geminiAgentPort,
+                                                      AgentPromptRegistry prompts) {
+        return new MtfConfluenceAIAgent(geminiAgentPort,
+            prompts.prompt(MtfConfluenceAIAgent.PROMPT_KEY));
     }
 
     @Bean
-    public OrderFlowAIAgent orderFlowAIAgent(GeminiAgentPort geminiAgentPort) {
-        return new OrderFlowAIAgent(geminiAgentPort);
+    public OrderFlowAIAgent orderFlowAIAgent(GeminiAgentPort geminiAgentPort,
+                                              AgentPromptRegistry prompts) {
+        return new OrderFlowAIAgent(geminiAgentPort,
+            prompts.prompt(OrderFlowAIAgent.PROMPT_KEY));
     }
 
     @Bean
-    public ZoneQualityAIAgent zoneQualityAIAgent(GeminiAgentPort geminiAgentPort) {
-        return new ZoneQualityAIAgent(geminiAgentPort);
+    public ZoneQualityAIAgent zoneQualityAIAgent(GeminiAgentPort geminiAgentPort,
+                                                  AgentPromptRegistry prompts) {
+        return new ZoneQualityAIAgent(geminiAgentPort,
+            prompts.prompt(ZoneQualityAIAgent.PROMPT_KEY));
     }
 
     /**

@@ -6,6 +6,7 @@ import com.riskdesk.domain.engine.playbook.agent.SessionTimingAgent;
 import com.riskdesk.domain.engine.playbook.agent.TradingAgent;
 import com.riskdesk.domain.engine.playbook.agent.ZoneQualityAIAgent;
 import com.riskdesk.domain.engine.playbook.agent.port.GeminiAgentPort;
+import com.riskdesk.infrastructure.prompt.AgentPromptRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.ExecutorService;
@@ -25,6 +26,7 @@ class TradingAgentConfigTest {
 
     private final TradingAgentConfig config = new TradingAgentConfig();
     private final GeminiAgentPort port = mock(GeminiAgentPort.class);
+    private final AgentPromptRegistry prompts = new AgentPromptRegistry();
 
     @Test
     void sessionTimingAgent_isInstantiated() {
@@ -35,21 +37,21 @@ class TradingAgentConfigTest {
 
     @Test
     void mtfConfluenceAIAgent_isInstantiated_withGeminiPort() {
-        MtfConfluenceAIAgent agent = config.mtfConfluenceAIAgent(port);
+        MtfConfluenceAIAgent agent = config.mtfConfluenceAIAgent(port, prompts);
         assertNotNull(agent);
         assertEquals(MtfConfluenceAIAgent.AGENT_NAME, agent.name());
     }
 
     @Test
     void orderFlowAIAgent_isInstantiated_withGeminiPort() {
-        OrderFlowAIAgent agent = config.orderFlowAIAgent(port);
+        OrderFlowAIAgent agent = config.orderFlowAIAgent(port, prompts);
         assertNotNull(agent);
         assertEquals(OrderFlowAIAgent.AGENT_NAME, agent.name());
     }
 
     @Test
     void zoneQualityAIAgent_isInstantiated_withGeminiPort() {
-        ZoneQualityAIAgent agent = config.zoneQualityAIAgent(port);
+        ZoneQualityAIAgent agent = config.zoneQualityAIAgent(port, prompts);
         assertNotNull(agent);
         assertEquals(ZoneQualityAIAgent.AGENT_NAME, agent.name());
     }
@@ -57,9 +59,9 @@ class TradingAgentConfigTest {
     @Test
     void allAgents_implementTradingAgent() {
         assertTrue(config.sessionTimingAgent() instanceof TradingAgent);
-        assertTrue(config.mtfConfluenceAIAgent(port) instanceof TradingAgent);
-        assertTrue(config.orderFlowAIAgent(port) instanceof TradingAgent);
-        assertTrue(config.zoneQualityAIAgent(port) instanceof TradingAgent);
+        assertTrue(config.mtfConfluenceAIAgent(port, prompts) instanceof TradingAgent);
+        assertTrue(config.orderFlowAIAgent(port, prompts) instanceof TradingAgent);
+        assertTrue(config.zoneQualityAIAgent(port, prompts) instanceof TradingAgent);
     }
 
     @Test
