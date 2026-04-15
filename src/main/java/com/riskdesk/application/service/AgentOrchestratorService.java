@@ -4,7 +4,6 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.engine.playbook.agent.*;
-import com.riskdesk.domain.engine.playbook.agent.port.GeminiAgentPort;
 import com.riskdesk.domain.engine.playbook.model.Confidence;
 import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
@@ -64,7 +63,7 @@ public class AgentOrchestratorService {
     private final AbsorptionCache absorptionCache;
 
     public AgentOrchestratorService(
-            GeminiAgentPort geminiAgentPort,
+            List<TradingAgent> agents,
             RiskManagementService riskManagementService,
             PositionService positionService,
             MentorIntermarketService intermarketService,
@@ -72,6 +71,10 @@ public class AgentOrchestratorService {
             TickDataPort tickDataPort,
             MarketDepthPort marketDepthPort,
             AbsorptionCache absorptionCache) {
+        // Spring collects every TradingAgent bean (see TradingAgentConfig) and hands
+        // them to us as an ordered list. Adding a new agent is just a new @Bean — no
+        // changes here.
+        this.agents = List.copyOf(agents);
         this.riskManagementService = riskManagementService;
         this.positionService = positionService;
         this.intermarketService = intermarketService;
@@ -80,13 +83,9 @@ public class AgentOrchestratorService {
         this.marketDepthPort = marketDepthPort;
         this.absorptionCache = absorptionCache;
 
-        // 1 rule-based + 3 AI agents — all domain-layer, Gemini injected via port
-        this.agents = List.of(
-            new SessionTimingAgent(),
-            new MtfConfluenceAIAgent(geminiAgentPort),
-            new OrderFlowAIAgent(geminiAgentPort),
-            new ZoneQualityAIAgent(geminiAgentPort)
-        );
+        log.info("AgentOrchestratorService initialized with {} agents: {}",
+            this.agents.size(),
+            this.agents.stream().map(TradingAgent::name).toList());
     }
 
     public FinalVerdict orchestrate(PlaybookEvaluation playbook, AgentContext context) {
