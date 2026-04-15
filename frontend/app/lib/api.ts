@@ -195,6 +195,11 @@ export interface IndicatorSnapshot {
   wtDiff: number | null;
   wtCrossover: string | null;
   wtSignal: string | null;
+  // Stochastic Oscillator
+  stochK: number | null;
+  stochD: number | null;
+  stochSignal: string | null;
+  stochCrossover: string | null;
   // SMC: Internal structure
   internalBias: string | null;
   internalHigh: number | null;
@@ -639,6 +644,64 @@ export interface FootprintBar {
   totalDelta: number;
 }
 
+// ── Trailing Stop Stats (GET /api/mentor/simulation/trailing-stats) ────────────
+export interface TrailingTrackStats {
+  trades: number;
+  wins: number;
+  winRate: number;
+  netPnl: number;
+}
+
+export interface TrailingImprovement {
+  winRateDelta: number;
+  pnlDelta: number;
+}
+
+export interface TrailingStopStats {
+  period: string;
+  fixedSLTP: TrailingTrackStats;
+  trailingStop: TrailingTrackStats;
+  improvement: TrailingImprovement;
+}
+
+// ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
+export interface OrderFlowDepthSnapshot {
+  instrument: string;
+  available: boolean;
+  totalBidSize?: number;
+  totalAskSize?: number;
+  depthImbalance?: number;
+  bestBid?: number;
+  bestAsk?: number;
+  spread?: number;
+  spreadTicks?: number;
+  bidWall?: { price: number; size: number } | null;
+  askWall?: { price: number; size: number } | null;
+  timestamp?: string | null;
+  error?: string;
+}
+
+// ── ONIMS Correlation (GET /api/correlation/oil-nasdaq/*) ──────────────────────
+export interface CorrelationSignal {
+  timestamp: string;
+  oilSide: 'LONG' | 'SHORT' | string;
+  nasdaqSide: 'LONG' | 'SHORT' | string;
+  oilPrice?: number | null;
+  nasdaqPrice?: number | null;
+  vixPrice?: number | null;
+  notes?: string | null;
+}
+
+export interface CorrelationStatus {
+  state: string;
+  blackoutStart: string | null;
+  vixThreshold: number;
+  cachedVixPrice: number | null;
+  blackoutActive: boolean;
+  blackoutDurationMins: number;
+  enabled?: boolean;
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
@@ -687,6 +750,14 @@ export const api = {
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
   getFootprint: (instrument: string, timeframe = '5m') =>
     get<FootprintBar>(`/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`),
+  getOrderFlowDepth: (instrument: string) =>
+    get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
+  getTrailingStats: (days = 7) =>
+    get<TrailingStopStats>(`/api/mentor/simulation/trailing-stats?days=${days}`),
+  getCorrelationStatus: () =>
+    get<CorrelationStatus>('/api/correlation/oil-nasdaq/status'),
+  getCorrelationHistory: () =>
+    get<CorrelationSignal[]>('/api/correlation/oil-nasdaq/history'),
   refreshDb: () => post<{ status: string; message: string }>('/api/backtest/refresh-db', {}),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
