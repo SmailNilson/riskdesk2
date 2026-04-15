@@ -40,6 +40,31 @@ function signalColor(signal: string | null): 'green' | 'red' | 'amber' | 'gray' 
   return 'gray';
 }
 
+/** Client-side mirror of MarketRegimeDetector.detect — EMA alignment + BB expansion. */
+function detectMarketRegime(
+  ema9: number | null,
+  ema50: number | null,
+  ema200: number | null,
+  bbExpanding: boolean,
+): 'TRENDING_UP' | 'TRENDING_DOWN' | 'RANGING' | 'CHOPPY' | null {
+  if (ema9 == null || ema50 == null || ema200 == null) return null;
+  const bullish = ema9 > ema50 && ema50 > ema200;
+  const bearish = ema9 < ema50 && ema50 < ema200;
+  const close = ema50 !== 0 && Math.abs(ema9 - ema50) / Math.abs(ema50) < 0.002;
+  if (bullish && bbExpanding) return 'TRENDING_UP';
+  if (bearish && bbExpanding) return 'TRENDING_DOWN';
+  if (close && !bbExpanding) return 'RANGING';
+  return 'CHOPPY';
+}
+
+/** Convert a BULLISH/BEARISH/NEUTRAL bias string to a color badge. */
+function biasColor(bias: string | null): 'green' | 'red' | 'gray' {
+  if (!bias) return 'gray';
+  if (bias === 'BULLISH') return 'green';
+  if (bias === 'BEARISH') return 'red';
+  return 'gray';
+}
+
 export default function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
   if (!s) return (
     <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 text-zinc-500 text-sm">
@@ -86,11 +111,33 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
 
   return (
     <div className="grid grid-cols-2 gap-3">
-      {/* UC-OF-013: Session Phase Badge */}
-      {s.sessionPhase && (
-        <div className="col-span-2 flex items-center gap-2">
-          <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Session</span>
-          <Badge label={sessionPhaseLabel(s.sessionPhase)} color={sessionPhaseColor(s.sessionPhase)} />
+      {/* UC-OF-013: Session Phase Badge + Market Regime Badge */}
+      {(s.sessionPhase || s.ema9 != null) && (
+        <div className="col-span-2 flex items-center flex-wrap gap-3">
+          {s.sessionPhase && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Session</span>
+              <Badge label={sessionPhaseLabel(s.sessionPhase)} color={sessionPhaseColor(s.sessionPhase)} />
+            </div>
+          )}
+          {(() => {
+            const regime = detectMarketRegime(s.ema9, s.ema50, s.ema200, s.bbTrendExpanding);
+            if (!regime) return null;
+            const regimeColor = regime === 'TRENDING_UP' ? 'green'
+              : regime === 'TRENDING_DOWN' ? 'red'
+              : regime === 'RANGING' ? 'blue'
+              : 'amber';
+            const regimeLabel = regime.replace('TRENDING_', 'TREND ').replace('_', ' ');
+            return (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Regime</span>
+                <Badge label={regimeLabel} color={regimeColor} />
+                {s.bbWidth != null && (
+                  <span className="text-[10px] text-zinc-500 font-mono">BBw {s.bbWidth.toFixed(2)}</span>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -208,6 +255,88 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
           </div>
         )}
       </Section>
+
+      {/* Stochastic Oscillator (14, 3, 3) */}
+      <Section title="Stochastic (14/3/3)">
+        <Row label="%K" value={n(s.stochK, 1)} />
+        <Row label="%D" value={n(s.stochD, 1)} />
+        <div className="flex justify-between items-center py-0.5">
+          <span className="text-zinc-500 text-xs">Signal</span>
+          <Badge
+            label={s.stochSignal ?? '—'}
+            color={s.stochSignal === 'OVERBOUGHT' ? 'red' : s.stochSignal === 'OVERSOLD' ? 'green' : 'gray'}
+          />
+        </div>
+        {s.stochCrossover && (
+          <div className="flex justify-end mt-0.5">
+            <Badge label={s.stochCrossover} color={signalColor(s.stochCrossover)} />
+          </div>
+        )}
+        {s.stochK != null && (
+          <div className="mt-1.5 w-full bg-zinc-800 rounded-full h-1.5 relative">
+            <div
+              className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-emerald-500 via-zinc-500 to-red-500"
+              style={{ width: `${Math.min(Math.max(s.stochK, 0), 100)}%` }}
+            />
+            {/* 20 / 80 guides */}
+            <div className="absolute inset-y-0 left-[20%] w-px bg-emerald-700/60" />
+            <div className="absolute inset-y-0 left-[80%] w-px bg-red-700/60" />
+          </div>
+        )}
+      </Section>
+
+      {/* Multi-Resolution Bias — 5 lookback scales */}
+      {s.multiResolutionBias && (
+        <Section title="Multi-Resolution Bias">
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Swing 50</span>
+            <Badge label={s.multiResolutionBias.swing50 ?? '—'} color={biasColor(s.multiResolutionBias.swing50)} />
+          </div>
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Swing 25</span>
+            <Badge label={s.multiResolutionBias.swing25 ?? '—'} color={biasColor(s.multiResolutionBias.swing25)} />
+          </div>
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Swing 9</span>
+            <Badge label={s.multiResolutionBias.swing9 ?? '—'} color={biasColor(s.multiResolutionBias.swing9)} />
+          </div>
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Internal 5</span>
+            <Badge label={s.multiResolutionBias.internal5 ?? '—'} color={biasColor(s.multiResolutionBias.internal5)} />
+          </div>
+          <div className="flex justify-between items-center py-0.5">
+            <span className="text-zinc-500 text-xs">Micro 1</span>
+            <Badge label={s.multiResolutionBias.micro1 ?? '—'} color={biasColor(s.multiResolutionBias.micro1)} />
+          </div>
+          {(() => {
+            const biases = [
+              s.multiResolutionBias.swing50,
+              s.multiResolutionBias.swing25,
+              s.multiResolutionBias.swing9,
+              s.multiResolutionBias.internal5,
+              s.multiResolutionBias.micro1,
+            ].filter(Boolean) as string[];
+            if (biases.length < 2) return null;
+            const bulls = biases.filter(b => b === 'BULLISH').length;
+            const bears = biases.filter(b => b === 'BEARISH').length;
+            const convergence = bulls === biases.length ? 'FULL BULL'
+              : bears === biases.length ? 'FULL BEAR'
+              : bulls >= 4 ? 'BULL 4/5'
+              : bears >= 4 ? 'BEAR 4/5'
+              : 'MIXED';
+            const convColor: 'green' | 'red' | 'amber' =
+              convergence.startsWith('FULL BULL') || convergence.startsWith('BULL') ? 'green'
+              : convergence.startsWith('FULL BEAR') || convergence.startsWith('BEAR') ? 'red'
+              : 'amber';
+            return (
+              <div className="flex justify-between items-center py-0.5 border-t border-zinc-800/60 mt-1 pt-1">
+                <span className="text-zinc-500 text-xs">Convergence</span>
+                <Badge label={convergence} color={convColor} />
+              </div>
+            );
+          })()}
+        </Section>
+      )}
 
       {/* SMC Internal */}
       <Section title="SMC Internal">

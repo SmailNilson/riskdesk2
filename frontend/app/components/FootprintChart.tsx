@@ -1,6 +1,8 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useOrderFlow, FootprintBar, FootprintLevel } from '@/app/hooks/useOrderFlow';
+import { api, isFootprintBar } from '@/app/lib/api';
 
 interface FootprintChartProps {
   selectedInstrument?: string;
@@ -91,8 +93,25 @@ function FootprintBarView({ bar }: { bar: FootprintBar }) {
 
 export default function FootprintChart({ selectedInstrument }: FootprintChartProps) {
   const { footprintData } = useOrderFlow();
+  const [restBar, setRestBar] = useState<FootprintBar | null>(null);
 
-  const bar = selectedInstrument ? footprintData.get(selectedInstrument) : undefined;
+  // REST fallback: fetch initial footprint on instrument switch so the panel
+  // has data before the first WebSocket tick arrives. The backend may return
+  // {available: false} or {error: ...} with HTTP 200 when ticks aren't flowing —
+  // narrow with isFootprintBar() before storing so later reads don't crash.
+  useEffect(() => {
+    if (!selectedInstrument) { setRestBar(null); return; }
+    let cancelled = false;
+    api.getFootprint(selectedInstrument).then(result => {
+      if (cancelled) return;
+      setRestBar(isFootprintBar(result) ? (result as unknown as FootprintBar) : null);
+    }).catch(() => { if (!cancelled) setRestBar(null); });
+    return () => { cancelled = true; };
+  }, [selectedInstrument]);
+
+  // WebSocket data takes precedence; fall back to REST snapshot.
+  const liveBar = selectedInstrument ? footprintData.get(selectedInstrument) : undefined;
+  const bar = liveBar ?? restBar ?? undefined;
 
   const totalDelta = bar?.totalDelta ?? 0;
   const totalBuy = bar?.totalBuyVolume ?? 0;
