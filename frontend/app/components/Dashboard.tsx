@@ -15,6 +15,8 @@ import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
+import TrailingStopStatsPanel from './TrailingStopStatsPanel';
+import CorrelationPanel from './CorrelationPanel';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -169,6 +171,12 @@ export default function Dashboard() {
 
         {/* Flash Crash Detection */}
         <FlashCrashPanel />
+
+        {/* Trailing Stop simulation stats (7d / 14d / 30d) */}
+        <TrailingStopStatsPanel />
+
+        {/* ONIMS Oil-Nasdaq correlation — hides itself when engine disabled */}
+        <CorrelationPanel />
 
         <DxyPanel />
 

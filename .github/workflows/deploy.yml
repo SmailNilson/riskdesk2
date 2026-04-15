@@ -190,16 +190,13 @@ jobs:
           gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" &
           wait
 
-      - name: Deploy on VM
+      # Deploy + health-check share one SSH session to stay within the ephemeral
+      # OS Login SSH key's ~5 min TTL. Splitting them caused the second ssh to
+      # fail with "Permission denied (publickey)" once `docker compose pull +
+      # up --force-recreate` outlasted the first key's lifetime (v1.10.48–50).
+      - name: Deploy on VM and wait for healthy backend
         run: |
           gcloud compute ssh "${INSTANCE_NAME}" \
             --zone "${ZONE}" \
             --tunnel-through-iap \
-            --command "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh'"
-
-      - name: Health check
-        run: |
-          gcloud compute ssh "${INSTANCE_NAME}" \
-            --zone "${ZONE}" \
-            --tunnel-through-iap \
-            --command "timeout 480 bash -c 'until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done' && echo Deploy OK"
+            --command "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'"

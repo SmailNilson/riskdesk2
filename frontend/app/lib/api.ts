@@ -195,6 +195,11 @@ export interface IndicatorSnapshot {
   wtDiff: number | null;
   wtCrossover: string | null;
   wtSignal: string | null;
+  // Stochastic Oscillator
+  stochK: number | null;
+  stochD: number | null;
+  stochSignal: string | null;
+  stochCrossover: string | null;
   // SMC: Internal structure
   internalBias: string | null;
   internalHigh: number | null;
@@ -639,6 +644,87 @@ export interface FootprintBar {
   totalDelta: number;
 }
 
+/**
+ * Narrow a /api/order-flow/footprint response to a real bar.
+ * FootprintController can return {available:false} or {error:...} with HTTP 200.
+ */
+export function isFootprintBar(v: unknown): v is FootprintBar {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.levels === 'object' &&
+    o.levels !== null &&
+    typeof o.instrument === 'string' &&
+    typeof o.timeframe === 'string'
+  );
+}
+
+// ── Trailing Stop Stats (GET /api/mentor/simulation/trailing-stats) ────────────
+export interface TrailingTrackStats {
+  trades: number;
+  wins: number;
+  winRate: number;
+  netPnl: number;
+}
+
+export interface TrailingImprovement {
+  winRateDelta: number;
+  pnlDelta: number;
+}
+
+export interface TrailingStopStats {
+  period: string;
+  fixedSLTP: TrailingTrackStats;
+  trailingStop: TrailingTrackStats;
+  improvement: TrailingImprovement;
+}
+
+// ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
+export interface OrderFlowDepthSnapshot {
+  instrument: string;
+  available: boolean;
+  totalBidSize?: number;
+  totalAskSize?: number;
+  depthImbalance?: number;
+  bestBid?: number;
+  bestAsk?: number;
+  spread?: number;
+  spreadTicks?: number;
+  bidWall?: { price: number; size: number } | null;
+  askWall?: { price: number; size: number } | null;
+  timestamp?: string | null;
+  error?: string;
+}
+
+// ── ONIMS Correlation (GET /api/correlation/oil-nasdaq/*) ──────────────────────
+// Matches CrossInstrumentAlertService.toPayload() exactly.
+export interface CorrelationSignal {
+  type?: string;
+  category?: string;
+  severity?: string;
+  leaderInstrument: string;
+  followerInstrument: string;
+  leaderBreakout: number;
+  leaderResistance: number;
+  followerVwap: number;
+  followerClose: number;
+  lagSeconds: number;
+  confirmedAt: string;   // ISO-8601
+  message?: string;
+}
+
+// Matches CorrelationController.status() exactly. The engine-state key is
+// `engineState` (not `state`) — see CorrelationController.java.
+export interface CorrelationStatus {
+  strategy?: string;
+  engineState: string;
+  blackoutStart: string | null;
+  vixThreshold: number;
+  cachedVixPrice: number | null;
+  blackoutActive: boolean;
+  blackoutDurationMins: number;
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
@@ -685,8 +771,20 @@ export const api = {
     get<{ enabled: boolean }>('/api/mentor/auto-analysis/status'),
   toggleAutoAnalysis: () =>
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
+  // Backend may return {available: false} or {error: "..."} with HTTP 200 —
+  // callers must narrow with isFootprintBar() before use.
   getFootprint: (instrument: string, timeframe = '5m') =>
-    get<FootprintBar>(`/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`),
+    get<FootprintBar | { available?: boolean; error?: string }>(
+      `/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`,
+    ),
+  getOrderFlowDepth: (instrument: string) =>
+    get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
+  getTrailingStats: (days = 7) =>
+    get<TrailingStopStats>(`/api/mentor/simulation/trailing-stats?days=${days}`),
+  getCorrelationStatus: () =>
+    get<CorrelationStatus>('/api/correlation/oil-nasdaq/status'),
+  getCorrelationHistory: () =>
+    get<CorrelationSignal[]>('/api/correlation/oil-nasdaq/history'),
   refreshDb: () => post<{ status: string; message: string }>('/api/backtest/refresh-db', {}),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;

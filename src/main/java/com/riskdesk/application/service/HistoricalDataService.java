@@ -141,17 +141,35 @@ public class HistoricalDataService implements ApplicationRunner {
     /**
      * On contract rollover, preserve all existing candles. New contract data
      * accumulates naturally via on-demand loading.
-     * A minimal warm-up gap-fill is triggered for the rolled instrument.
+     *
+     * <p>Warm-up gap-fill covers ALL intraday timeframes so charts and indicators
+     * have continuous history on the new contract immediately. Previously only
+     * 10m was warmed, which left 5m / 1h / 4h charts starved until the next
+     * mentor refresh or manual poll — the exact failure mode observed on MCL
+     * after 2026-04-10.</p>
      */
     @EventListener
     public void onContractRollover(ContractRolloverEvent event) {
-        log.info("Rollover for {} -> {}. Historical candles preserved.",
-                event.instrument(), event.newContractMonth());
-        CompletableFuture.runAsync(() -> gapFillTimeframe(event.instrument(), "10m", "rollover-warmup"))
-            .exceptionally(ex -> {
-                log.warn("Rollover warm-up failed: {}", ex.getMessage());
-                return null;
-            });
+        Instrument instrument = event.instrument();
+        log.info("Rollover for {} -> {}. Historical candles preserved; warming all intraday timeframes.",
+                instrument, event.newContractMonth());
+        CompletableFuture.runAsync(() -> {
+            for (String timeframe : TIMEFRAMES) {
+                if (!historicalProvider.supports(instrument, timeframe)) continue;
+                try {
+                    int saved = gapFillTimeframe(instrument, timeframe, "rollover-warmup");
+                    if (saved > 0) {
+                        log.info("Rollover warm-up: {} {} gap-filled {} new candles.",
+                            instrument, timeframe, saved);
+                    }
+                } catch (Exception e) {
+                    log.warn("Rollover warm-up failed for {} {}: {}", instrument, timeframe, e.getMessage());
+                }
+            }
+        }).exceptionally(ex -> {
+            log.warn("Rollover warm-up failed: {}", ex.getMessage());
+            return null;
+        });
     }
 
     /** Trigger a manual full refresh asynchronously. Returns immediately. */
