@@ -10,6 +10,7 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -63,8 +64,10 @@ class OpenInterestRolloverServiceTest {
 
         // auto-confirm is false, so confirmRollover should NOT be called
         verify(rolloverDetectionService, never()).confirmRollover(any(), any());
-        // but WebSocket alert should be sent
-        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), any(Map.class));
+        // WebSocket alert should fire with autoConfirmed=false reflecting the actual outcome
+        Map<String, Object> alert = captureAlertPayload();
+        assertEquals(Boolean.FALSE, alert.get("autoConfirmed"));
+        assertEquals("RECOMMEND_ROLL", alert.get("action"));
     }
 
     @Test
@@ -94,6 +97,9 @@ class OpenInterestRolloverServiceTest {
         autoService.checkAllNow();
 
         verify(rolloverDetectionService).confirmRollover(Instrument.MNQ, "202609");
+        // Only on this path should the payload report autoConfirmed=true.
+        Map<String, Object> alert = captureAlertPayload();
+        assertEquals(Boolean.TRUE, alert.get("autoConfirmed"));
     }
 
     @Test
@@ -109,8 +115,10 @@ class OpenInterestRolloverServiceTest {
         autoService.checkAllNow();
 
         verify(rolloverDetectionService, never()).confirmRollover(any(), any());
-        // But the alert is still pushed so operators can confirm manually.
-        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), any(Map.class));
+        // Alert must report autoConfirmed=false so the UI keeps the manual-confirm
+        // prompt open — reporting the config flag (true) would hide it.
+        Map<String, Object> alert = captureAlertPayload();
+        assertEquals(Boolean.FALSE, alert.get("autoConfirmed"));
     }
 
     @Test
@@ -125,7 +133,8 @@ class OpenInterestRolloverServiceTest {
         autoService.checkAllNow();
 
         verify(rolloverDetectionService, never()).confirmRollover(any(), any());
-        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), any(Map.class));
+        Map<String, Object> alert = captureAlertPayload();
+        assertEquals(Boolean.FALSE, alert.get("autoConfirmed"));
     }
 
     @Test
@@ -140,6 +149,8 @@ class OpenInterestRolloverServiceTest {
         autoService.checkAllNow();
 
         verify(rolloverDetectionService, never()).confirmRollover(any(), any());
+        Map<String, Object> alert = captureAlertPayload();
+        assertEquals(Boolean.FALSE, alert.get("autoConfirmed"));
     }
 
     @Test
@@ -181,6 +192,13 @@ class OpenInterestRolloverServiceTest {
             ibkrProperties, rolloverDetectionService, messagingTemplate,
             true, ratio, minOi
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> captureAlertPayload() {
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), captor.capture());
+        return captor.getValue();
     }
 
     private void setupInstrumentContracts(Instrument target, String frontMonth, String nextMonth) {

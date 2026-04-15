@@ -218,15 +218,17 @@ public class OpenInterestRolloverService {
                 instrument, currentMonth, currentOI.getAsLong(), nextMonth, nextOI.getAsLong(), recommendation.action());
 
         if (recommendation.action() == RolloverRecommendation.Action.RECOMMEND_ROLL) {
+            boolean actuallyAutoConfirmed = false;
             if (autoConfirm && shouldAutoConfirm(instrument, currentOI.getAsLong(), nextOI.getAsLong(),
                                                  currentMonth, nextMonth)) {
                 rolloverDetectionService.confirmRollover(instrument, nextMonth);
+                actuallyAutoConfirmed = true;
                 log.info("OI auto-rollover: {} rolled from {} to {} (currentOI={}, nextOI={}, ratio={})",
                     instrument, currentMonth, nextMonth,
                     currentOI.getAsLong(), nextOI.getAsLong(),
                     ratioStr(nextOI.getAsLong(), currentOI.getAsLong()));
             }
-            pushOiRolloverAlert(recommendation);
+            pushOiRolloverAlert(recommendation, actuallyAutoConfirmed);
         }
 
         return recommendation;
@@ -287,7 +289,18 @@ public class OpenInterestRolloverService {
         return String.format("%.2fx", (double) numerator / denominator);
     }
 
-    private void pushOiRolloverAlert(RolloverRecommendation rec) {
+    /**
+     * Publishes the OI rollover event to the frontend.
+     *
+     * <p>{@code autoConfirmed} reflects the <em>actual</em> outcome of this check —
+     * true only when {@code confirmRollover()} was called. It must not track the
+     * {@code riskdesk.rollover.auto-confirm} config flag, since the suppression
+     * paths (ENERGY veto, below ratio / min-OI) skip the confirmation while
+     * auto-confirm is enabled. Reporting the config flag would mislead the UI
+     * into hiding the manual-confirm prompt for events that still need operator
+     * action.</p>
+     */
+    private void pushOiRolloverAlert(RolloverRecommendation rec, boolean autoConfirmed) {
         try {
             messagingTemplate.convertAndSend("/topic/rollover", Map.of(
                 "type",          "OI_ROLLOVER",
@@ -297,7 +310,7 @@ public class OpenInterestRolloverService {
                 "currentOI",     rec.currentOI(),
                 "nextOI",        rec.nextOI(),
                 "action",        rec.action().name(),
-                "autoConfirmed", autoConfirm
+                "autoConfirmed", autoConfirmed
             ));
         } catch (Exception e) {
             log.debug("OI rollover WebSocket push failed — {}", e.getMessage());
