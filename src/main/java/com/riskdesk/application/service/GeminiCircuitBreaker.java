@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,6 +46,8 @@ public class GeminiCircuitBreaker {
     private final AtomicInteger consecutiveFailures = new AtomicInteger(0);
     private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
     private final AtomicReference<Instant> openedAt = new AtomicReference<>();
+    /** Guards the HALF_OPEN trial: only one concurrent call proceeds as probe. */
+    private final AtomicBoolean trialInFlight = new AtomicBoolean(false);
 
     public GeminiCircuitBreaker(int failureThreshold, Duration openDuration) {
         if (failureThreshold < 1) throw new IllegalArgumentException("failureThreshold must be >= 1");
@@ -56,12 +59,22 @@ public class GeminiCircuitBreaker {
     }
 
     /**
-     * Returns {@code true} if a call may proceed. If the breaker is OPEN but the
-     * cool-down has elapsed, transitions to HALF_OPEN and lets one trial call through.
+     * Returns {@code true} if a call may proceed.
+     * <ul>
+     *   <li>{@code CLOSED} — always allowed.</li>
+     *   <li>{@code HALF_OPEN} — exactly <em>one</em> trial call is allowed; concurrent
+     *       callers that lose the {@link #trialInFlight} CAS are rejected.</li>
+     *   <li>{@code OPEN} — rejected unless the cool-down elapsed, in which case we
+     *       transition to {@code HALF_OPEN} and let the winning thread through.</li>
+     * </ul>
      */
     public boolean allowRequest() {
         State s = state.get();
-        if (s == State.CLOSED || s == State.HALF_OPEN) return true;
+        if (s == State.CLOSED) return true;
+        if (s == State.HALF_OPEN) {
+            // Only the first caller proceeds as the trial; others get fallback.
+            return trialInFlight.compareAndSet(false, true);
+        }
         // OPEN — check whether cool-down has elapsed
         Instant opened = openedAt.get();
         if (opened != null && Instant.now().isAfter(opened.plus(openDuration))) {
@@ -70,7 +83,8 @@ public class GeminiCircuitBreaker {
                 log.info("Circuit breaker: OPEN → HALF_OPEN (probing after {}s)",
                     openDuration.toSeconds());
             }
-            return true;
+            // After the OPEN → HALF_OPEN transition, gate the trial call.
+            return trialInFlight.compareAndSet(false, true);
         }
         return false;
     }
@@ -78,6 +92,7 @@ public class GeminiCircuitBreaker {
     /** Records a successful call. Closes the breaker and resets counters. */
     public void recordSuccess() {
         consecutiveFailures.set(0);
+        trialInFlight.set(false);
         State prev = state.getAndSet(State.CLOSED);
         if (prev != State.CLOSED) {
             log.info("Circuit breaker: {} → CLOSED (call succeeded)", prev);
@@ -91,6 +106,7 @@ public class GeminiCircuitBreaker {
     public void recordFailure() {
         State s = state.get();
         if (s == State.HALF_OPEN) {
+            trialInFlight.set(false);
             open();
             return;
         }

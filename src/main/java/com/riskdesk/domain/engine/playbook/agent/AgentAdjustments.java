@@ -24,7 +24,7 @@ public record AgentAdjustments(
 
     public AgentAdjustments {
         if (sizePctCap == null) sizePctCap = Optional.empty();
-        if (extraFlags == null) extraFlags = Map.of();
+        extraFlags = extraFlags == null ? Map.of() : Map.copyOf(extraFlags);
     }
 
     public static AgentAdjustments none() {

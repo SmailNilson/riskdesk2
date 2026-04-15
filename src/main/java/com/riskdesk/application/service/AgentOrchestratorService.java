@@ -237,7 +237,7 @@ public class AgentOrchestratorService {
             return agent.evaluate(playbook, context);
         } catch (Exception e) {
             log.warn("Agent {} failed: {}", agent.name(), e.getMessage());
-            return AgentVerdict.timeout(agent.name());
+            return AgentVerdict.error(agent.name(), e.getMessage());
         }
     }
 
@@ -248,8 +248,6 @@ public class AgentOrchestratorService {
         // Start from the risk-gate cap so the gate always wins
         double sizePct = Math.min(playbook.plan().riskPercent(), risk.sizePct());
         boolean blocked = false;
-
-        int lowCount = 0;
 
         for (AgentVerdict v : verdicts) {
             var adj = v.adjustments();
@@ -268,12 +266,11 @@ public class AgentOrchestratorService {
             // Low-confidence warning (unless already flagged blocked)
             if (v.confidence() == Confidence.LOW && !adj.blocked()) {
                 warnings.add(v.agentName() + ": " + v.reasoning());
-                lowCount++;
             }
         }
 
         // ── 4. Majority-LOW rule: 2+ of 3 AI agents LOW → treat as ineligible ─
-        // SessionTiming isn't counted here — its LOW is surfaced via 'blocked' or size_pct.
+        // Gates are excluded: their LOW is surfaced via 'blocked' or size_pct.
         long aiLow = verdicts.stream()
             .filter(v -> !"Session-Timing".equals(v.agentName()))
             .filter(v -> v.confidence() == Confidence.LOW)
@@ -303,9 +300,9 @@ public class AgentOrchestratorService {
             verdict = playbook.verdict() + " — " + warnings.size() + " warning(s)";
         }
 
-        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} LOW], warnings: {})",
+        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} AI LOW], warnings: {})",
             verdict, String.format("%.4f", sizePct * 100),
-            verdicts.size(), lowCount, warnings.size());
+            verdicts.size(), aiLow, warnings.size());
 
         return new FinalVerdict(verdict, adjustedPlan, sizePct, verdicts, warnings, eligibility);
     }

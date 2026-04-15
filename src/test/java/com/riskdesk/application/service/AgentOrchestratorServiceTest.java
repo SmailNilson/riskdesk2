@@ -4,14 +4,15 @@ import com.riskdesk.domain.engine.playbook.agent.*;
 import com.riskdesk.domain.engine.playbook.event.AgentDecisionEvent;
 import com.riskdesk.domain.engine.playbook.model.*;
 import com.riskdesk.domain.model.Instrument;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,6 +51,11 @@ class AgentOrchestratorServiceTest {
         risk = mock(RiskManagementService.class);
         when(risk.evaluate(any(), any()))
             .thenReturn(RiskManagementService.RiskGateVerdict.eligible(0.01, List.of()));
+    }
+
+    @AfterEach
+    void tearDown() {
+        exec.shutdownNow();
     }
 
     @Test
@@ -204,7 +210,7 @@ class AgentOrchestratorServiceTest {
 
     /** Minimal {@link ApplicationEventPublisher} that captures everything published. */
     private static final class RecordingPublisher implements ApplicationEventPublisher {
-        final List<AgentDecisionEvent> events = new ArrayList<>();
+        final List<AgentDecisionEvent> events = new CopyOnWriteArrayList<>();
         @Override public void publishEvent(Object event) {
             if (event instanceof AgentDecisionEvent ade) events.add(ade);
         }

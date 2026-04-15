@@ -22,4 +22,9 @@ public record AgentVerdict(
     public static AgentVerdict timeout(String agentName) {
         return new AgentVerdict(agentName, Confidence.LOW, null, "Agent timeout", AgentAdjustments.none());
     }
+
+    public static AgentVerdict error(String agentName, String cause) {
+        return new AgentVerdict(agentName, Confidence.LOW, null,
+            "Agent error: " + (cause != null ? cause : "unknown"), AgentAdjustments.none());
+    }
 }
