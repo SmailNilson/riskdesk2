@@ -44,8 +44,15 @@ public class PlaybookController {
             @PathVariable String timeframe) {
         PlaybookEvaluation playbook = playbookService.evaluate(instrument, timeframe);
         IndicatorSnapshot snapshot = indicatorService.computeSnapshot(instrument, timeframe);
+        // Compute the real ATR (NOT BigDecimal.ONE) — required for correct size
+        // multipliers, trap-zone detection and zone_size_atr in ZoneQualityAIAgent.
+        BigDecimal atr = playbookService.computeAtr(instrument, timeframe);
+        // Use the playbook-aware buildContext overload so ZoneQualityAIAgent targets
+        // the OB/FVG referenced by the best setup, not just the first active zone.
         AgentContext context = orchestratorService.buildContext(
-            instrument, timeframe, snapshot, BigDecimal.ONE);
+            instrument, timeframe, snapshot,
+            atr != null ? atr : BigDecimal.ONE,
+            playbook);
         FinalVerdict verdict = orchestratorService.orchestrate(playbook, context);
         return ResponseEntity.ok(verdict);
     }
