@@ -25,6 +25,9 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class OpenInterestRolloverServiceTest {
 
+    private static final double DEFAULT_RATIO = 2.0;
+    private static final long   DEFAULT_MIN_OI = 100L;
+
     @Mock private ActiveContractRegistry contractRegistry;
     @Mock private IbGatewayContractResolver contractResolver;
     @Mock private OpenInterestProvider openInterestProvider;
@@ -39,13 +42,14 @@ class OpenInterestRolloverServiceTest {
         lenient().when(ibkrProperties.isEnabled()).thenReturn(true);
         service = new OpenInterestRolloverService(
             contractRegistry, contractResolver, openInterestProvider,
-            ibkrProperties, rolloverDetectionService, messagingTemplate, false
+            ibkrProperties, rolloverDetectionService, messagingTemplate,
+            false, DEFAULT_RATIO, DEFAULT_MIN_OI
         );
     }
 
     @Test
     void recommendsRoll_whenNextOiExceedsCurrent() {
-        setupMclContracts("202505", "202506");
+        setupInstrumentContracts(Instrument.MCL, "202505", "202506");
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202505")).thenReturn(OptionalLong.of(50_000));
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202506")).thenReturn(OptionalLong.of(80_000));
 
@@ -65,7 +69,7 @@ class OpenInterestRolloverServiceTest {
 
     @Test
     void holds_whenCurrentOiExceedsNext() {
-        setupMclContracts("202505", "202506");
+        setupInstrumentContracts(Instrument.MCL, "202505", "202506");
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202505")).thenReturn(OptionalLong.of(80_000));
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202506")).thenReturn(OptionalLong.of(50_000));
 
@@ -80,26 +84,68 @@ class OpenInterestRolloverServiceTest {
     }
 
     @Test
-    void autoConfirm_callsConfirmRollover() {
-        // Create service with auto-confirm enabled
-        OpenInterestRolloverService autoService = new OpenInterestRolloverService(
-            contractRegistry, contractResolver, openInterestProvider,
-            ibkrProperties, rolloverDetectionService, messagingTemplate, true
-        );
-
-        setupMclContracts("202505", "202506");
-        when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202505")).thenReturn(OptionalLong.of(50_000));
-        when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202506")).thenReturn(OptionalLong.of(80_000));
+    void autoConfirm_triggersForNonEnergyAboveRatio() {
+        // MNQ (EQUITY_INDEX), nextOI / currentOI = 3x — well above the 2x threshold.
+        OpenInterestRolloverService autoService = autoConfirmServiceWith(DEFAULT_RATIO, DEFAULT_MIN_OI);
+        setupInstrumentContracts(Instrument.MNQ, "202606", "202609");
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202606")).thenReturn(OptionalLong.of(40_000));
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202609")).thenReturn(OptionalLong.of(120_000));
 
         autoService.checkAllNow();
 
-        verify(rolloverDetectionService).confirmRollover(Instrument.MCL, "202506");
+        verify(rolloverDetectionService).confirmRollover(Instrument.MNQ, "202609");
+    }
+
+    @Test
+    void autoConfirm_suppressedForEnergyEvenWithClearDominance() {
+        // Regression test for 2026-04-10 MCL incident: even with overwhelming OI
+        // dominance on the next month, ENERGY should never auto-roll via OI shift
+        // because IBKR's expiry-month semantics are offset from delivery month.
+        OpenInterestRolloverService autoService = autoConfirmServiceWith(DEFAULT_RATIO, DEFAULT_MIN_OI);
+        setupInstrumentContracts(Instrument.MCL, "202604", "202605");
+        when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202604")).thenReturn(OptionalLong.of(20_000));
+        when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202605")).thenReturn(OptionalLong.of(200_000));
+
+        autoService.checkAllNow();
+
+        verify(rolloverDetectionService, never()).confirmRollover(any(), any());
+        // But the alert is still pushed so operators can confirm manually.
+        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), any(Map.class));
+    }
+
+    @Test
+    void autoConfirm_suppressedBelowRatioThreshold() {
+        // 1.6x < 2.0x threshold — a thin OI lead that historically produced
+        // spurious rollovers on quarterly products like MNQ.
+        OpenInterestRolloverService autoService = autoConfirmServiceWith(DEFAULT_RATIO, DEFAULT_MIN_OI);
+        setupInstrumentContracts(Instrument.MNQ, "202606", "202609");
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202606")).thenReturn(OptionalLong.of(50_000));
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202609")).thenReturn(OptionalLong.of(80_000));
+
+        autoService.checkAllNow();
+
+        verify(rolloverDetectionService, never()).confirmRollover(any(), any());
+        verify(messagingTemplate).convertAndSend(eq("/topic/rollover"), any(Map.class));
+    }
+
+    @Test
+    void autoConfirm_suppressedWhenCurrentOiBelowMinimum() {
+        // Stale-data guard: currentOI (50) below the 100 floor — treated as
+        // unreliable snapshot, not a real liquidity migration.
+        OpenInterestRolloverService autoService = autoConfirmServiceWith(DEFAULT_RATIO, DEFAULT_MIN_OI);
+        setupInstrumentContracts(Instrument.MNQ, "202606", "202609");
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202606")).thenReturn(OptionalLong.of(50));
+        when(openInterestProvider.fetchOpenInterest(Instrument.MNQ, "202609")).thenReturn(OptionalLong.of(10_000));
+
+        autoService.checkAllNow();
+
+        verify(rolloverDetectionService, never()).confirmRollover(any(), any());
     }
 
     @Test
     void unavailableOi_returnsUnavailable() {
         when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(java.util.Optional.of("202505"));
-        setupMclContracts("202505", "202506");
+        setupInstrumentContracts(Instrument.MCL, "202505", "202506");
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202505")).thenReturn(OptionalLong.empty());
         when(openInterestProvider.fetchOpenInterest(Instrument.MCL, "202506")).thenReturn(OptionalLong.empty());
 
@@ -129,23 +175,31 @@ class OpenInterestRolloverServiceTest {
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    private void setupMclContracts(String frontMonth, String nextMonth) {
-        when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(java.util.Optional.of(frontMonth));
+    private OpenInterestRolloverService autoConfirmServiceWith(double ratio, long minOi) {
+        return new OpenInterestRolloverService(
+            contractRegistry, contractResolver, openInterestProvider,
+            ibkrProperties, rolloverDetectionService, messagingTemplate,
+            true, ratio, minOi
+        );
+    }
+
+    private void setupInstrumentContracts(Instrument target, String frontMonth, String nextMonth) {
+        when(contractRegistry.getContractMonth(target)).thenReturn(java.util.Optional.of(frontMonth));
 
         Contract c1 = new Contract();
         c1.lastTradeDateOrContractMonth(frontMonth);
         Contract c2 = new Contract();
         c2.lastTradeDateOrContractMonth(nextMonth);
 
-        when(contractResolver.resolveNextContracts(Instrument.MCL))
+        when(contractResolver.resolveNextContracts(target))
             .thenReturn(List.of(
-                new IbGatewayResolvedContract(Instrument.MCL, c1, null),
-                new IbGatewayResolvedContract(Instrument.MCL, c2, null)
+                new IbGatewayResolvedContract(target, c1, null),
+                new IbGatewayResolvedContract(target, c2, null)
             ));
 
         // Stub other instruments as having no contract
         for (Instrument inst : Instrument.exchangeTradedFutures()) {
-            if (inst != Instrument.MCL) {
+            if (inst != target) {
                 lenient().when(contractRegistry.getContractMonth(inst)).thenReturn(java.util.Optional.empty());
             }
         }
