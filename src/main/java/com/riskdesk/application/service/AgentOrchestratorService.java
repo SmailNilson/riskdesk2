@@ -19,6 +19,7 @@ import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -28,7 +29,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Runs the trading agents that gate a setup before it becomes a Mentor review.
@@ -52,6 +55,7 @@ public class AgentOrchestratorService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestratorService.class);
     private static final Duration AGENT_TIMEOUT = Duration.ofSeconds(20);
+    private static final Duration MTF_TIMEOUT = Duration.ofSeconds(5);
 
     private final List<TradingAgent> agents;
     private final RiskManagementService riskManagementService;
@@ -61,6 +65,7 @@ public class AgentOrchestratorService {
     private final TickDataPort tickDataPort;
     private final MarketDepthPort marketDepthPort;
     private final AbsorptionCache absorptionCache;
+    private final ExecutorService agentExecutor;
 
     public AgentOrchestratorService(
             List<TradingAgent> agents,
@@ -70,7 +75,8 @@ public class AgentOrchestratorService {
             IndicatorService indicatorService,
             TickDataPort tickDataPort,
             MarketDepthPort marketDepthPort,
-            AbsorptionCache absorptionCache) {
+            AbsorptionCache absorptionCache,
+            @Qualifier("agentExecutor") ExecutorService agentExecutor) {
         // Spring collects every TradingAgent bean (see TradingAgentConfig) and hands
         // them to us as an ordered list. Adding a new agent is just a new @Bean — no
         // changes here.
@@ -82,6 +88,7 @@ public class AgentOrchestratorService {
         this.tickDataPort = tickDataPort;
         this.marketDepthPort = marketDepthPort;
         this.absorptionCache = absorptionCache;
+        this.agentExecutor = agentExecutor;
 
         log.info("AgentOrchestratorService initialized with {} agents: {}",
             this.agents.size(),
@@ -111,31 +118,52 @@ public class AgentOrchestratorService {
             );
         }
 
-        // ── 2. Run all agents in parallel ───────────────────────────────────
+        // ── 2. Run all agents in parallel on the dedicated executor ─────────
         List<CompletableFuture<AgentVerdict>> futures = agents.stream()
-            .map(agent -> CompletableFuture.supplyAsync(() -> {
-                try {
-                    return agent.evaluate(playbook, context);
-                } catch (Exception e) {
-                    log.warn("Agent {} failed: {}", agent.name(), e.getMessage());
-                    return AgentVerdict.timeout(agent.name());
-                }
-            }))
+            .map(agent -> CompletableFuture.supplyAsync(
+                () -> safeEvaluate(agent, playbook, context), agentExecutor))
             .toList();
 
-        List<AgentVerdict> verdicts = new ArrayList<>();
+        // Global timeout: we wait for all agents collectively, not per-agent in a loop.
+        // A slow first agent no longer pushes the wall-clock deadline of later agents.
+        CompletableFuture<Void> all = CompletableFuture.allOf(
+            futures.toArray(CompletableFuture[]::new));
+        try {
+            all.get(AGENT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            log.warn("Agent orchestration timed out after {}ms — collecting completed verdicts",
+                AGENT_TIMEOUT.toMillis());
+        } catch (Exception e) {
+            log.warn("Agent orchestration failed: {}", e.getMessage());
+        }
+
+        // Collect whichever verdicts completed; stragglers become timeout verdicts.
+        List<AgentVerdict> verdicts = new ArrayList<>(futures.size());
         for (int i = 0; i < futures.size(); i++) {
+            CompletableFuture<AgentVerdict> f = futures.get(i);
             String agentName = agents.get(i).name();
-            try {
-                verdicts.add(futures.get(i).get(AGENT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
-            } catch (Exception e) {
-                log.warn("Agent {} timed out after {}ms", agentName, AGENT_TIMEOUT.toMillis());
+            if (f.isDone() && !f.isCompletedExceptionally() && !f.isCancelled()) {
+                verdicts.add(f.getNow(AgentVerdict.timeout(agentName)));
+            } else {
+                f.cancel(true);
+                log.warn("Agent {} did not complete within {}ms", agentName, AGENT_TIMEOUT.toMillis());
                 verdicts.add(AgentVerdict.timeout(agentName));
             }
         }
 
         // ── 3. Resolve conflicts and build final verdict ─────────────────────
         return resolveVerdicts(playbook, verdicts, risk);
+    }
+
+    /** Runs an agent's {@code evaluate} guarded against exceptions. */
+    private AgentVerdict safeEvaluate(TradingAgent agent, PlaybookEvaluation playbook,
+                                       AgentContext context) {
+        try {
+            return agent.evaluate(playbook, context);
+        } catch (Exception e) {
+            log.warn("Agent {} failed: {}", agent.name(), e.getMessage());
+            return AgentVerdict.timeout(agent.name());
+        }
     }
 
     private FinalVerdict resolveVerdicts(PlaybookEvaluation playbook,
@@ -331,53 +359,53 @@ public class AgentOrchestratorService {
 
     private AgentContext.MtfSnapshot buildMtfSnapshot(Instrument instrument) {
         try {
+            // Fire all three timeframe snapshots in parallel — no inter-dependency
+            // between H1 / H4 / Daily. Wall-clock ~= max(tfLatency) instead of sum.
+            CompletableFuture<IndicatorSnapshot> h1F = snapshotFuture(instrument, "1h");
+            CompletableFuture<IndicatorSnapshot> h4F = snapshotFuture(instrument, "4h");
+            CompletableFuture<IndicatorSnapshot> dF  = snapshotFuture(instrument, "1d");
+
+            try {
+                CompletableFuture.allOf(h1F, h4F, dF)
+                    .get(MTF_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.debug("MTF snapshot load timed out after {}ms for {} — using whatever is ready",
+                    MTF_TIMEOUT.toMillis(), instrument);
+            } catch (Exception ignored) {
+                // Individual futures handle their own errors and return null
+            }
+
+            IndicatorSnapshot h1 = h1F.getNow(null);
+            IndicatorSnapshot h4 = h4F.getNow(null);
+            IndicatorSnapshot daily = dF.getNow(null);
+
             String h1Swing = null, h1Internal = null, h1Break = null;
             String h4Swing = null, h4Break = null;
             String dailySwing = null;
             Double h1BreakConfidence = null, h4BreakConfidence = null;
             Boolean h1BreakConfirmed = null, h4BreakConfirmed = null;
 
-            // H1 snapshot (+ most recent break enrichment)
-            try {
-                IndicatorSnapshot h1 = indicatorService.computeSnapshot(instrument, "1h");
-                if (h1 != null) {
-                    h1Swing = h1.swingBias();
-                    h1Internal = h1.internalBias();
-                    h1Break = h1.lastBreakType();
-                    var latestH1Break = latestStructureBreak(h1);
-                    if (latestH1Break != null) {
-                        h1BreakConfidence = latestH1Break.breakConfidenceScore();
-                        h1BreakConfirmed = latestH1Break.confirmed();
-                    }
+            if (h1 != null) {
+                h1Swing = h1.swingBias();
+                h1Internal = h1.internalBias();
+                h1Break = h1.lastBreakType();
+                var latestH1Break = latestStructureBreak(h1);
+                if (latestH1Break != null) {
+                    h1BreakConfidence = latestH1Break.breakConfidenceScore();
+                    h1BreakConfirmed = latestH1Break.confirmed();
                 }
-            } catch (Exception e) {
-                log.trace("No H1 snapshot for {}: {}", instrument, e.getMessage());
             }
-
-            // H4 snapshot (+ most recent break enrichment)
-            try {
-                IndicatorSnapshot h4 = indicatorService.computeSnapshot(instrument, "4h");
-                if (h4 != null) {
-                    h4Swing = h4.swingBias();
-                    h4Break = h4.lastBreakType();
-                    var latestH4Break = latestStructureBreak(h4);
-                    if (latestH4Break != null) {
-                        h4BreakConfidence = latestH4Break.breakConfidenceScore();
-                        h4BreakConfirmed = latestH4Break.confirmed();
-                    }
+            if (h4 != null) {
+                h4Swing = h4.swingBias();
+                h4Break = h4.lastBreakType();
+                var latestH4Break = latestStructureBreak(h4);
+                if (latestH4Break != null) {
+                    h4BreakConfidence = latestH4Break.breakConfidenceScore();
+                    h4BreakConfirmed = latestH4Break.confirmed();
                 }
-            } catch (Exception e) {
-                log.trace("No H4 snapshot for {}: {}", instrument, e.getMessage());
             }
-
-            // Daily snapshot
-            try {
-                IndicatorSnapshot daily = indicatorService.computeSnapshot(instrument, "1d");
-                if (daily != null) {
-                    dailySwing = daily.swingBias();
-                }
-            } catch (Exception e) {
-                log.trace("No Daily snapshot for {}: {}", instrument, e.getMessage());
+            if (daily != null) {
+                dailySwing = daily.swingBias();
             }
 
             return new AgentContext.MtfSnapshot(
@@ -390,6 +418,18 @@ public class AgentOrchestratorService {
             log.debug("Failed to build MTF snapshot: {}", e.getMessage());
             return AgentContext.MtfSnapshot.empty();
         }
+    }
+
+    /** Async snapshot load that returns {@code null} on any failure — never throws. */
+    private CompletableFuture<IndicatorSnapshot> snapshotFuture(Instrument instrument, String tf) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return indicatorService.computeSnapshot(instrument, tf);
+            } catch (Exception e) {
+                log.trace("No {} snapshot for {}: {}", tf, instrument, e.getMessage());
+                return null;
+            }
+        }, agentExecutor);
     }
 
     private AgentContext.MomentumSnapshot buildMomentumSnapshot(IndicatorSnapshot snap) {

@@ -8,7 +8,10 @@ import com.riskdesk.domain.engine.playbook.agent.ZoneQualityAIAgent;
 import com.riskdesk.domain.engine.playbook.agent.port.GeminiAgentPort;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.ExecutorService;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -57,5 +60,20 @@ class TradingAgentConfigTest {
         assertTrue(config.mtfConfluenceAIAgent(port) instanceof TradingAgent);
         assertTrue(config.orderFlowAIAgent(port) instanceof TradingAgent);
         assertTrue(config.zoneQualityAIAgent(port) instanceof TradingAgent);
+    }
+
+    @Test
+    void agentExecutor_isDedicatedDaemonPool() throws Exception {
+        ExecutorService exec = config.agentExecutor();
+        try {
+            assertNotNull(exec);
+            assertFalse(exec.isShutdown());
+            // Smoke test: task runs on a daemon "agent-exec-*" thread
+            String threadName = exec.submit(() -> Thread.currentThread().getName()).get();
+            assertTrue(threadName.startsWith("agent-exec-"),
+                "Expected thread prefix 'agent-exec-' but got: " + threadName);
+        } finally {
+            exec.shutdown();
+        }
     }
 }
