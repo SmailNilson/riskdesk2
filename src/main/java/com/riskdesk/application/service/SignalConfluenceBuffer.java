@@ -3,11 +3,17 @@ package com.riskdesk.application.service;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.SignalWeight;
+import com.riskdesk.domain.engine.playbook.agent.AgentContext;
+import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
+import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
+import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -49,8 +55,43 @@ public class SignalConfluenceBuffer {
     private final ConcurrentHashMap<String, BufferEntry> buffers = new ConcurrentHashMap<>();
     private final MentorSignalReviewService mentorSignalReviewService;
 
+    /**
+     * Optional pre-Mentor agent gate. When wired, a flush that would normally trigger
+     * a Gemini review is first evaluated by the 4-agent orchestrator
+     * (SessionTiming + MtfConfluence + OrderFlow + ZoneQuality) and the deterministic
+     * risk gate. If the orchestrator returns BLOCKED or INELIGIBLE, we skip the
+     * expensive Gemini review — saving ~$0.04 per rejected signal.
+     *
+     * <p>All nullable so the buffer keeps working if the agent wiring is down.
+     */
+    private AgentOrchestratorService agentOrchestrator;
+    private PlaybookService playbookService;
+
+    /**
+     * Optional {@link TradeDecisionService} — when wired, each flush that passes the agent
+     * gate also persists a {@code TradeDecision} (additive to the Mentor review). This is
+     * the PR 1 step of the Mentor → TradeDecision migration: both paths run in parallel;
+     * the Mentor path is removed in a later PR once the frontend cutover is done.
+     */
+    private TradeDecisionService tradeDecisionService;
+
     public SignalConfluenceBuffer(MentorSignalReviewService mentorSignalReviewService) {
         this.mentorSignalReviewService = mentorSignalReviewService;
+    }
+
+    @Autowired(required = false)
+    public void setAgentOrchestrator(AgentOrchestratorService agentOrchestrator) {
+        this.agentOrchestrator = agentOrchestrator;
+    }
+
+    @Autowired(required = false)
+    public void setPlaybookService(PlaybookService playbookService) {
+        this.playbookService = playbookService;
+    }
+
+    @Autowired(required = false)
+    public void setTradeDecisionService(TradeDecisionService tradeDecisionService) {
+        this.tradeDecisionService = tradeDecisionService;
     }
 
     /**
@@ -113,6 +154,23 @@ public class SignalConfluenceBuffer {
             log.info("CONFLUENCE FLUSH [{}] weight={} signals={} primary={} opposing={}",
                     key, weight, entry.signals.size(), primary.category(), opposingWeight);
 
+            // ── Pre-Mentor agent gate (session + MTF + OrderFlow + ZoneQuality + Risk) ─
+            // Saves ~$0.04 per rejected signal by skipping the Gemini mentor review
+            // when the orchestrator says the setup is blocked or clearly ineligible.
+            AgentGateResult gate = evaluateAgentGate(key, entry);
+            if (gate.blocked()) {
+                log.info("AGENT GATE BLOCKED [{}] {} — Mentor review skipped ({})",
+                        key, gate.reason(), gate.eligibility());
+                return;
+            }
+            if (gate.evaluated()) {
+                log.info("AGENT GATE PASSED [{}] eligibility={} sizePct={}",
+                        key, gate.eligibility(), String.format("%.4f", gate.sizePct()));
+                // Additive (PR 1): also persist as a TradeDecision. Mentor review still
+                // fires below until PR 2 (frontend cutover) and PR 3 (Mentor removal).
+                recordTradeDecision(key, gate);
+            }
+
             mentorSignalReviewService.captureConsolidatedReview(
                     entry.signals, entry.latestSnapshot, weight, primary, opposingWeight);
         } else {
@@ -134,6 +192,89 @@ public class SignalConfluenceBuffer {
         if (key.endsWith(":LONG"))  return key.substring(0, key.length() - 4) + "SHORT";
         if (key.endsWith(":SHORT")) return key.substring(0, key.length() - 5) + "LONG";
         return key;
+    }
+
+    /**
+     * Runs the 4-agent orchestrator + risk gate on the buffer's latest snapshot.
+     * Returns an {@link AgentGateResult#notEvaluated()} when any prerequisite is
+     * missing (orchestrator not wired, snapshot null, no playbook setup, etc.) so
+     * the flow falls through to Mentor review as before.
+     */
+    private AgentGateResult evaluateAgentGate(String key, BufferEntry entry) {
+        if (agentOrchestrator == null || playbookService == null) {
+            return AgentGateResult.notEvaluated();
+        }
+        if (entry.latestSnapshot == null) {
+            return AgentGateResult.notEvaluated();
+        }
+
+        // Parse "INSTRUMENT:timeframe:direction" key
+        String[] parts = key.split(":", 3);
+        if (parts.length != 3) return AgentGateResult.notEvaluated();
+
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(parts[0].toUpperCase());
+        } catch (IllegalArgumentException e) {
+            log.debug("Agent gate: unknown instrument {}", parts[0]);
+            return AgentGateResult.notEvaluated();
+        }
+        String timeframe = parts[1];
+
+        try {
+            BigDecimal atr = BigDecimal.ONE; // PlaybookService will use snapshot-based heuristic
+            PlaybookEvaluation playbook = playbookService.evaluateFromSnapshot(entry.latestSnapshot, atr);
+            if (playbook.bestSetup() == null || playbook.plan() == null) {
+                return AgentGateResult.notEvaluated();
+            }
+            AgentContext context = agentOrchestrator.buildContext(
+                instrument, timeframe, entry.latestSnapshot, atr, playbook);
+
+            FinalVerdict verdict = agentOrchestrator.orchestrate(playbook, context);
+            boolean blocked = "BLOCKED".equals(verdict.eligibility())
+                           || "INELIGIBLE".equals(verdict.eligibility());
+            String reason = verdict.warnings() != null && !verdict.warnings().isEmpty()
+                ? verdict.warnings().get(0) : verdict.verdict();
+            return new AgentGateResult(true, blocked, verdict.eligibility(), reason,
+                verdict.sizePercent(), verdict, playbook, instrument.name(), timeframe);
+        } catch (Exception e) {
+            log.warn("Agent gate evaluation failed for {}: {}", key, e.getMessage());
+            return AgentGateResult.notEvaluated();
+        }
+    }
+
+    /** Persists the agent verdict as a {@link com.riskdesk.domain.decision.model.TradeDecision}. */
+    private void recordTradeDecision(String key, AgentGateResult gate) {
+        if (tradeDecisionService == null || gate.verdict() == null || gate.playbook() == null) {
+            return;
+        }
+        try {
+            tradeDecisionService.record(gate.verdict(), gate.playbook(),
+                gate.instrument(), gate.timeframe());
+        } catch (Exception e) {
+            // Never block the Mentor flow on a TradeDecision failure.
+            log.warn("TradeDecision record failed for {}: {}", key, e.getMessage());
+        }
+    }
+
+    /**
+     * Outcome of the pre-Mentor agent gate.
+     * {@code evaluated=false} means the gate was skipped (missing deps); let the flow
+     * through to Mentor review. {@code blocked=true} means the orchestrator returned
+     * BLOCKED or INELIGIBLE — skip the review to save Gemini cost.
+     *
+     * <p>Carries the full {@link FinalVerdict} and {@link PlaybookEvaluation} so the flush
+     * path can record a {@link com.riskdesk.domain.decision.model.TradeDecision} without
+     * re-running the orchestrator.
+     */
+    record AgentGateResult(boolean evaluated, boolean blocked, String eligibility,
+                           String reason, double sizePct,
+                           FinalVerdict verdict, PlaybookEvaluation playbook,
+                           String instrument, String timeframe) {
+        static AgentGateResult notEvaluated() {
+            return new AgentGateResult(false, false, "NOT_EVALUATED", null, 0.0,
+                null, null, null, null);
+        }
     }
 
     // ── BufferEntry ────────────────────────────────────────────────────────────
