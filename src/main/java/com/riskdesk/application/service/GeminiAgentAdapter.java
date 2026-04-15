@@ -13,6 +13,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.util.*;
 
 /**
@@ -37,11 +38,16 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
     private final MentorProperties properties;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
+    private final GeminiCircuitBreaker breaker;
 
     public GeminiAgentAdapter(MentorProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.restTemplate = buildRestTemplate(properties);
+        // 3 consecutive failures → open for 30 s. Calibrated for Gemini's typical
+        // transient-error duration; short enough that a recovered backend isn't
+        // starved, long enough that we stop hammering during a real outage.
+        this.breaker = new GeminiCircuitBreaker(3, Duration.ofSeconds(30));
     }
 
     @Override
@@ -51,6 +57,11 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
         }
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
             return AgentAiResponse.fallback("GEMINI_API_KEY missing");
+        }
+        if (!breaker.allowRequest()) {
+            // Fail-fast: don't pay the HTTP timeout for every agent call
+            // while we know Gemini is down.
+            return AgentAiResponse.fallback("Gemini circuit breaker OPEN");
         }
 
         try {
@@ -90,6 +101,7 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
             long latencyMs = System.currentTimeMillis() - start;
 
             if (root == null) {
+                breaker.recordFailure();
                 return AgentAiResponse.fallback("Empty Gemini body");
             }
 
@@ -97,15 +109,30 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
 
             String text = extractText(root);
             if (text == null || text.isBlank()) {
+                breaker.recordFailure();
                 return AgentAiResponse.fallback("Empty text in Gemini response");
             }
 
-            return parseAgentResponse(text);
+            AgentAiResponse parsed = parseAgentResponse(text);
+            if (parsed.aiAvailable()) {
+                breaker.recordSuccess();
+            } else {
+                // Parse errors also count — a Gemini response we can't use is
+                // functionally the same as a 500 for the agent.
+                breaker.recordFailure();
+            }
+            return parsed;
 
         } catch (Exception e) {
+            breaker.recordFailure();
             log.warn("Agent '{}' Gemini call failed: {}", request.agentName(), e.getMessage());
             return AgentAiResponse.fallback("Gemini error: " + e.getClass().getSimpleName());
         }
+    }
+
+    /** Exposed for debugging / actuator-style introspection. */
+    public GeminiCircuitBreaker.State circuitState() {
+        return breaker.currentState();
     }
 
     // ── Response schema (kept small to enforce deterministic output) ────
