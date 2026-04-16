@@ -25,7 +25,10 @@ import java.util.OptionalLong;
  *   2. Compare OI across all contracts — pick the one with highest OI.
  *   3. If OI unavailable, compare volume — pick highest volume.
  *   4. If neither available, default to front-month (no calendar-roll).
- *   5. If IBKR is unavailable or disabled, fall back to application properties as-is.
+ *   5. If IBKR is unavailable or disabled, fall back to the last contract
+ *      persisted in the database (hydrated into the registry at construction).
+ *   6. If the DB is also empty (truly cold start), fall back to the
+ *      application properties as a last resort.
  */
 @Component
 @Order(1)
@@ -81,14 +84,28 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 registry.initialize(instrument, resolved);
                 log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
             } else {
-                String fallback = fallbacks.get(instrument);
-                // Never calendar-roll the fallback — it's operator-configured and represents
-                // the known active contract. Rolling it forward when IBKR is unavailable
-                // caused Frankenstein charts (mixing contract price series).
-                registry.initialize(instrument, fallback);
-                log.warn("ActiveContractRegistry: {} → {} (fallback — IBKR {} or unavailable)",
-                    instrument, fallback,
-                    ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                // Second-tier fallback: the registry constructor has already hydrated
+                // itself from the persistence port, so any previously-confirmed contract
+                // is already in the in-memory map. Prefer that over the static property
+                // default — it represents the last known good value and is self-healing.
+                String fromDb = registry.getContractMonth(instrument).orElse(null);
+                if (fromDb != null) {
+                    log.warn("ActiveContractRegistry: {} → {} (DB last-known — IBKR {} or unavailable)",
+                        instrument, fromDb,
+                        ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                    // Upsert for clarity — ensures the persistence row timestamp is refreshed
+                    // and keeps this path symmetrical with the IBKR/property branches.
+                    registry.initialize(instrument, fromDb);
+                } else {
+                    String fallback = fallbacks.get(instrument);
+                    // Never calendar-roll the fallback — it's operator-configured and represents
+                    // the known active contract. Rolling it forward when IBKR is unavailable
+                    // caused Frankenstein charts (mixing contract price series).
+                    registry.initialize(instrument, fallback);
+                    log.warn("ActiveContractRegistry: {} → {} (fallback property — IBKR {} or unavailable, DB empty)",
+                        instrument, fallback,
+                        ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                }
             }
         }
 

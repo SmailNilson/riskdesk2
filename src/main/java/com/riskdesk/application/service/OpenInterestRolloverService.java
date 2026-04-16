@@ -130,42 +130,17 @@ public class OpenInterestRolloverService {
         }
 
         String activeMonth = contractRegistry.getContractMonth(instrument).orElse(null);
-
-        // ── Step 2: Cold Start — registry empty, self-initialize ──
         if (activeMonth == null) {
-            return handleColdStart(instrument, upcoming, months);
-        }
-
-        // ── Step 3: Dynamic Matching — find active month in IBKR list ──
-        return handleDynamicMatch(instrument, upcoming, months, activeMonth);
-    }
-
-    /**
-     * Cold Start: no active contract in registry. Compare OI of the first two IBKR
-     * contracts and initialize the registry with the one that has the highest OI
-     * (= where liquidity currently sits).
-     */
-    private RolloverRecommendation handleColdStart(Instrument instrument,
-                                                    List<IbGatewayResolvedContract> upcoming,
-                                                    List<String> months) {
-        String month0 = months.get(0);
-        String month1 = months.get(1);
-
-        OptionalLong oi0 = openInterestProvider.fetchOpenInterest(instrument, month0);
-        OptionalLong oi1 = openInterestProvider.fetchOpenInterest(instrument, month1);
-
-        if (oi0.isEmpty() || oi1.isEmpty()) {
-            log.warn("OI cold start: {} — OI unavailable for {} and/or {}, defaulting to front month {}",
-                    instrument, month0, month1, month0);
-            contractRegistry.initialize(instrument, month0);
+            // Defensive: ActiveContractRegistryInitializer runs at @Order(1) and always sets
+            // a value (IBKR / DB / properties cascade). Hitting this branch means that
+            // bootstrap silently failed for this instrument — log and skip instead of guessing.
+            log.warn("OI check: {} has no active contract in registry — skipping (bootstrap likely failed)",
+                instrument);
             return null;
         }
 
-        String selected = oi1.getAsLong() > oi0.getAsLong() ? month1 : month0;
-        contractRegistry.initialize(instrument, selected);
-        log.info("OI cold start: {} — initialized to {} ({}={}, {}={})",
-                instrument, selected, month0, oi0.getAsLong(), month1, oi1.getAsLong());
-        return null;
+        // ── Step 2: Dynamic Matching — find active month in IBKR list ──
+        return handleDynamicMatch(instrument, upcoming, months, activeMonth);
     }
 
     /**
