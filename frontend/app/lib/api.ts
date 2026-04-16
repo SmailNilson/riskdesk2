@@ -549,6 +549,12 @@ export interface MentorSignalReview {
   activationTime: string | null;
   resolutionTime: string | null;
   maxDrawdownPoints: number | null;
+  // Trailing-stop dual-track (runs in parallel with fixed SL/TP).
+  // See CLAUDE.md § "Trailing Stop (Dual-Track)" for the full spec.
+  trailingStopResult: 'TRAILING_WIN' | 'TRAILING_BE' | 'TRAILING_LOSS' | null;
+  trailingExitPrice: number | null;
+  // Maximum Favorable Excursion — best price reached before the trailing exit.
+  bestFavorablePrice: number | null;
   analysis: MentorAnalyzeResponse | null;
   errorMessage: string | null;
   triggerPrice: number | null;
