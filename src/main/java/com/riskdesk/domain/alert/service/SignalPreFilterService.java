@@ -94,25 +94,35 @@ public class SignalPreFilterService {
 
     // ── Filter logic ──────────────────────────────────────────────────────────
 
-    /** Signal families suppressed in CHOPPY regimes — pure noise without trend backing. */
+    /**
+     * Signal families suppressed in CHOPPY regimes — pure noise without trend backing.
+     *
+     * <p>PR-11: "Flow" (CHAIKIN + DELTA_FLOW) is in this list. These are volume-derived
+     * imbalance readings that flip sign rapidly when price is chopping — the exact
+     * regime in which they mislead most. Deliberately NOT here: "OrderFlow" (ABSORPTION
+     * + DELTA_OSCILLATOR), which is real tick-level institutional flow and often
+     * precedes a breakout precisely *when* the surface looks choppy.
+     */
     private static final Set<String> NOISE_FAMILIES_IN_CHOP = Set.of(
             "Momentum",          // EMA crosses, MACD histogram whispers
             "Oscillateur",       // WaveTrend threshold bouncing
             "Oscillateur_RSI",   // RSI oscillation at 33/60
             "Oscillateur_Stoch", // Stochastic whipsaw
             "Tendance",          // Supertrend flip-flops in tight range
-            "Niveaux"            // VWAP crosses in consolidation
+            "Niveaux",           // VWAP crosses in consolidation
+            "Flow"               // CMF zero-line flip-flops, DELTA_FLOW bias reversals
     );
 
     private FilterResult applyFilters(Alert alert, String timeframe, String h1Trend,
                                       boolean isLtf, String regime) {
         String direction = extractDirection(alert);
 
-        // Rule 5: Regime-Aware Noise Suppression — block oscillator/momentum signals
+        // Rule 5: Regime-Aware Noise Suppression — block oscillator/momentum/flow signals
         // in CHOPPY regimes where they produce only whipsaw noise.
         // RANGING is allowed: most valid trades happen in BB CONTRACTING / RANGING markets.
         // Only applied on LTF (5m/10m). H1 signals are rare + high-value and always pass.
-        // Structural signals (SMC, OrderBlock, EqualLevel, FVG, Flow) always pass.
+        // Structural signals (SMC, OrderBlock, EqualLevel, FVG) and real order-flow
+        // signals (ABSORPTION, DELTA_OSCILLATOR — family "OrderFlow") always pass.
         if (isLtf && !"1h".equals(timeframe)
                 && "CHOPPY".equals(regime)) {
             SignalWeight sw = SignalWeight.fromAlert(alert);
