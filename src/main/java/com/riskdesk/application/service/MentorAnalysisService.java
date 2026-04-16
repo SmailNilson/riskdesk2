@@ -329,13 +329,23 @@ public class MentorAnalysisService {
     }
 
     private String buildSemanticText(JsonNode payload, MentorStructuredResponse structured) {
+        // Mentor IA v2 rename moved `market_structure_the_king` → `market_structure_smc`
+        // and `momentum_and_flow_the_trigger` → `momentum_oscillators`.
+        // Read the current keys first; fall back to the legacy keys so older audit
+        // rows (pre-rename) still produce a non-empty embedding when re-indexed.
         return String.join(" | ",
             valueOrEmpty(payload.path("metadata").path("asset").asText(null)),
             valueOrEmpty(payload.path("trade_intention").path("action").asText(null)),
             valueOrEmpty(payload.path("trade_intention").path("analysis_mode").asText(null)),
             valueOrEmpty(payload.path("metadata").path("market_session").asText(null)),
-            valueOrEmpty(payload.path("market_structure_the_king").path("last_event").asText(null)),
-            valueOrEmpty(payload.path("momentum_and_flow_the_trigger").path("money_flow_state").asText(null)),
+            firstNonEmpty(
+                payload.path("market_structure_smc").path("last_event").asText(null),
+                payload.path("market_structure_the_king").path("last_event").asText(null)
+            ),
+            firstNonEmpty(
+                payload.path("momentum_oscillators").path("money_flow_state").asText(null),
+                payload.path("momentum_and_flow_the_trigger").path("money_flow_state").asText(null)
+            ),
             valueOrEmpty(payload.path("risk_and_emotional_check").path("reward_to_risk_ratio").asText(null)),
             valueOrEmpty(structured == null ? null : structured.technicalQuickAnalysis()),
             valueOrEmpty(structured == null ? null : structured.verdict()),
@@ -345,6 +355,17 @@ public class MentorAnalysisService {
 
     private String valueOrEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    /**
+     * Returns the first non-null, non-blank value — or empty string if both are missing.
+     * Used to bridge the v1 → v2 payload-key rename so semantic embeddings remain
+     * populated regardless of which schema version stored the audit.
+     */
+    private String firstNonEmpty(String primary, String legacy) {
+        if (primary != null && !primary.isBlank()) return primary;
+        if (legacy != null && !legacy.isBlank()) return legacy;
+        return "";
     }
 
     private String extractSelectedTimezone(JsonNode payload) {
