@@ -184,6 +184,40 @@ class OpenInterestRolloverServiceTest {
         assertEquals("UNAVAILABLE", mcl.get("status"));
     }
 
+    @Test
+    void registryEmpty_skipsWithoutInitializing() {
+        // Cold-start handling has been removed: the Registry is Single Source of Truth
+        // and ActiveContractRegistryInitializer always populates it at @Order(1).
+        // If for some reason bootstrap silently fails for one instrument, the scheduled
+        // OI check must log + skip — NOT silently initialize() behind the Registry's back.
+        Contract c1 = new Contract();
+        c1.lastTradeDateOrContractMonth("202505");
+        Contract c2 = new Contract();
+        c2.lastTradeDateOrContractMonth("202506");
+        when(contractResolver.resolveNextContracts(Instrument.MCL))
+            .thenReturn(List.of(
+                new IbGatewayResolvedContract(Instrument.MCL, c1, null),
+                new IbGatewayResolvedContract(Instrument.MCL, c2, null)
+            ));
+        when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(java.util.Optional.empty());
+        for (Instrument inst : Instrument.exchangeTradedFutures()) {
+            if (inst != Instrument.MCL) {
+                lenient().when(contractRegistry.getContractMonth(inst)).thenReturn(java.util.Optional.empty());
+            }
+        }
+
+        Map<String, Object> result = service.checkAllNow();
+
+        // The cold-start path no longer initializes the registry — it warns and skips.
+        verify(contractRegistry, never()).initialize(any(), any());
+        verify(openInterestProvider, never()).fetchOpenInterest(eq(Instrument.MCL), any());
+        verify(rolloverDetectionService, never()).confirmRollover(any(), any());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> mcl = (Map<String, Object>) result.get("MCL");
+        assertEquals("UNAVAILABLE", mcl.get("status"));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
 
     private OpenInterestRolloverService autoConfirmServiceWith(double ratio, long minOi) {

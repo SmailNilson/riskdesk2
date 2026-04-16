@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,10 +23,12 @@ public class IbGatewayContractResolver {
 
     private static final Logger log = LoggerFactory.getLogger(IbGatewayContractResolver.class);
     private final IbGatewayNativeClient nativeClient;
+    private final ActiveContractRegistry registry;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
 
-    public IbGatewayContractResolver(IbGatewayNativeClient nativeClient) {
+    public IbGatewayContractResolver(IbGatewayNativeClient nativeClient, ActiveContractRegistry registry) {
         this.nativeClient = nativeClient;
+        this.registry = registry;
     }
 
     public Optional<IbGatewayResolvedContract> resolve(Instrument instrument) {
@@ -36,6 +39,19 @@ public class IbGatewayContractResolver {
         if (cached != null) {
             return Optional.of(cached);
         }
+        // Prefer the registry's month — the registry is the Single Source of Truth.
+        // Without this step, refresh() picks min(expiry), which for ENERGY contracts
+        // (CME convention: expiry = 1 month before delivery) selects the contract
+        // about to expire instead of the active delivery month.
+        String registryMonth = registry.getContractMonth(instrument).orElse(null);
+        if (registryMonth != null) {
+            refreshToMonth(instrument, registryMonth);
+            IbGatewayResolvedContract hydrated = cache.get(instrument);
+            if (hydrated != null) {
+                return Optional.of(hydrated);
+            }
+        }
+        // No registry value — fall back to legacy min-expiry behavior (should be rare in prod).
         return refresh(instrument);
     }
 
@@ -95,6 +111,13 @@ public class IbGatewayContractResolver {
         }
     }
 
+    /**
+     * Legacy last-resort path: picks the contract with min(expiry) from IBKR.
+     * For ENERGY products this selects the contract about to expire (wrong).
+     * {@link #resolve(Instrument)} now prefers {@link ActiveContractRegistry}
+     * and only falls through to this method when the registry has no value
+     * (rare in prod — ActiveContractRegistryInitializer runs at @Order(1)).
+     */
     public Optional<IbGatewayResolvedContract> refresh(Instrument instrument) {
         if (!instrument.isExchangeTradedFuture()) {
             return Optional.empty();
