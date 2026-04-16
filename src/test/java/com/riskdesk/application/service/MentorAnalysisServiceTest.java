@@ -121,4 +121,85 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().technicalQuickAnalysis()).isEqualTo("plain text answer");
         assertThat(response.analysis().errors()).contains("La réponse du modèle n'était pas un JSON strictement exploitable.");
     }
+
+    @Test
+    void analyze_recoversFromTruncatedJson() throws Exception {
+        // Reproduces the prod bug: Gemini response truncated mid-string in the first field
+        // (maxOutputTokens exhausted). The strict parser fails; the recovery path should
+        // salvage whatever fields are present and mark the response as partial.
+        mentorProperties.setPersistAudits(false);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient,
+            mentorMemoryService,
+            mentorAuditRepository,
+            mentorProperties,
+            objectMapper
+        );
+
+        // Truncated mid-technicalQuickAnalysis — no closing quote, no closing brace.
+        String truncated = "{\"technicalQuickAnalysis\": \"Trend is bullish near VWAP with absorption on demand OB";
+
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", truncated));
+
+        MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        assertThat(response.analysis().technicalQuickAnalysis())
+            .isEqualTo("Trend is bullish near VWAP with absorption on demand OB");
+        // Recovered responses stay INELIGIBLE — promotion to ELIGIBLE is the playbook fallback's job.
+        assertThat(response.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(response.analysis().errors())
+            .anySatisfy(e -> assertThat(e).contains("tronquée"));
+        assertThat(response.analysis().verdict()).contains("Analyse Partielle");
+    }
+
+    @Test
+    void analyze_recoversPartialJsonWithTradePlanFields() throws Exception {
+        // Truncated later in the response — we got strengths + part of the trade plan.
+        mentorProperties.setPersistAudits(false);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient,
+            mentorMemoryService,
+            mentorAuditRepository,
+            mentorProperties,
+            objectMapper
+        );
+
+        String truncated = """
+            {
+              "technicalQuickAnalysis": "Bullish setup with BOS confirmed.",
+              "strengths": ["Respect de la structure", "Flow acheteur"],
+              "verdict": "Trade Validé - Discipline Respectée",
+              "executionEligibilityStatus": "ELIGIBLE",
+              "executionEligibilityReason": "Plan conforme.",
+              "proposedTradePlan": {
+                "entryPrice": 3012.5,
+                "stopLoss": 3005.0,
+                "takeProfit": 3035.0,
+                "rationale": "Entree sur pullback EMA
+            """;
+
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", truncated));
+
+        MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        assertThat(response.analysis().strengths()).containsExactly("Respect de la structure", "Flow acheteur");
+        assertThat(response.analysis().proposedTradePlan()).isNotNull();
+        assertThat(response.analysis().proposedTradePlan().entryPrice()).isEqualTo(3012.5);
+        assertThat(response.analysis().proposedTradePlan().stopLoss()).isEqualTo(3005.0);
+        assertThat(response.analysis().proposedTradePlan().takeProfit()).isEqualTo(3035.0);
+        // Still INELIGIBLE — the strict-schema promise was broken, downstream must decide.
+        assertThat(response.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(response.analysis().errors())
+            .anySatisfy(e -> assertThat(e).contains("tronquée"));
+    }
 }

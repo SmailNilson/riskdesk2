@@ -84,12 +84,18 @@ public class GeminiMentorClient implements MentorModelClient {
         Si volatility_regime est présent dans risk_management_gatekeeper :
         - LOW (atr_percentile_rank < 20) : marché comprimé. Les breakouts sont violents — privilégier les entrées sur OB avec SL serré.
         - NORMAL : comportement standard. Appliquer les règles ATR normales.
-        - EXTREME (atr_percentile_rank > 80) : volatilité anormale.
-          - EXIGER confluence >= 3 signaux pour valider un trade.
+        - ELEVATED (atr_percentile_rank entre 80 et 90) : volatilité au-dessus de la moyenne mais exploitable.
+          - Adapter les stops : SL minimum 2× current_atr_focus.
+          - Pas de rejet automatique. Si la confluence est claire (≥2 signaux alignés OU 1 signal fort + order flow confirmant), le trade reste ELIGIBLE.
+          - Un "order flow confirmant" = CMF > 0.3 aligné avec la direction, OU buy_ratio > 65%% pour LONG / < 35%% pour SHORT, OU absorption détectée dans l'OB (defended=true ou absorptionScore > 2).
+        - EXTREME (atr_percentile_rank > 90) : volatilité anormale (crise, news, liquidation).
           - Recommander 50%% de la taille standard dans improvementTip.
-          - SL doit être à minimum 2× current_atr_focus (pas 1.5×).
-          - Les TP doivent être à minimum 2× ATR du prix (pas 1×).
-          - Si le setup ne passe pas ces filtres renforcés → executionEligibilityStatus = INELIGIBLE.
+          - SL minimum 2.5× current_atr_focus ; TP minimum 2× ATR du prix.
+          - Exiger l'UNE de ces conditions (pas toutes) :
+            (a) confluence >= 3 signaux, OU
+            (b) 2 signaux alignés + order flow confirmant (CMF > 0.3 aligné, OU buy_ratio > 70%% / < 30%%, OU absorption defended=true), OU
+            (c) setup "Catch-up" ou "Kill Zone" (patterns historiques à edge confirmé).
+          - Rejeter UNIQUEMENT si aucune de (a)(b)(c) n'est satisfaite. Ne rejette PAS un setup simplement parce que atr_percentile_rank > 90 si le flow et la structure sont cohérents.
 
         ## CONTEXTE MARCHÉ
         Modes d'analyse :
@@ -425,7 +431,10 @@ public class GeminiMentorClient implements MentorModelClient {
                 ),
                 "generationConfig", Map.of(
                     "temperature", 0.1,
-                    "maxOutputTokens", 1500,
+                    // Bumped from 1500 → 3000 after prod audit: ~37% of rejections
+                    // were Gemini responses truncated mid-first-field (≈160 chars).
+                    // Schema is large; 1500 wasn't enough budget to finish the JSON.
+                    "maxOutputTokens", 3000,
                     "responseMimeType", "application/json",
                     "responseSchema", buildResponseSchema()
                 )
@@ -494,11 +503,28 @@ public class GeminiMentorClient implements MentorModelClient {
         if (!candidates.isArray() || candidates.isEmpty()) {
             return null;
         }
-        JsonNode parts = candidates.get(0).path("content").path("parts");
+        JsonNode first = candidates.get(0);
+        // finishReason != STOP means the model was truncated (MAX_TOKENS, SAFETY,
+        // RECITATION, etc.). We surface this so downstream can attempt partial recovery.
+        String finishReason = first.path("finishReason").asText(null);
+        if (finishReason != null && !"STOP".equalsIgnoreCase(finishReason)) {
+            log.warn("Gemini response terminated with finishReason={} — downstream parser will attempt partial recovery.", finishReason);
+        }
+        JsonNode parts = first.path("content").path("parts");
         if (!parts.isArray() || parts.isEmpty()) {
             return null;
         }
-        return parts.get(0).path("text").asText(null);
+        // Concatenate every text part — Gemini may emit the JSON across multiple parts
+        // especially with responseMimeType=application/json.
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode part : parts) {
+            String t = part.path("text").asText(null);
+            if (t != null && !t.isEmpty()) {
+                sb.append(t);
+            }
+        }
+        String text = sb.toString();
+        return text.isEmpty() ? null : text;
     }
 
     private boolean isTransientTimeout(Throwable throwable) {

@@ -779,4 +779,149 @@ class MentorSignalReviewServiceTest {
             100L
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Fix #3 — Playbook → trade fallback circuit
+    // ──────────────────────────────────────────────────────────────────────────
+
+    private MentorSignalReviewService newServiceForFallbackTests() {
+        return new MentorSignalReviewService(
+            mentorAnalysisService,
+            indicatorService,
+            mentorIntermarketService,
+            marketDataServiceProvider,
+            candleRepositoryPort,
+            contractRegistry,
+            reviewRepository,
+            messagingTemplate,
+            objectMapper,
+            tickDataPortProvider,
+            eventPublisher,
+            true
+        );
+    }
+
+    private static MentorAnalyzeResponse ineligibleResponse(String reason) {
+        MentorStructuredResponse structured = new MentorStructuredResponse(
+            "Truncated analysis.",
+            List.of(),
+            new java.util.ArrayList<>(List.of("Réponse du mentor tronquée — reconstruction partielle appliquée.")),
+            "Trade Non-Conforme - Analyse Partielle",
+            ExecutionEligibilityStatus.INELIGIBLE,
+            reason,
+            "Improve mentor robustness.",
+            null
+        );
+        return new MentorAnalyzeResponse(null, "gemini-test", null, structured, "{truncated}", List.of());
+    }
+
+    @Test
+    void applyPlaybookFallback_promotesToEligibleWhenScoreHighAndMechanicalPlanPresent() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini truncated, no decision.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "metadata": {"asset": "MGC1!"},
+              "playbook_pre_analysis": {
+                "verdict": "TRADE_VALID",
+                "checklist_score": "6/7",
+                "mechanical_plan": {
+                  "entry": 3012.5,
+                  "sl": 3005.0,
+                  "tp1": 3035.0,
+                  "rr": 3.0,
+                  "sl_rationale": "Below demand OB with 1.5x ATR buffer."
+                }
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+
+        assertThat(effective).isNotSameAs(ineligible);
+        assertThat(effective.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.ELIGIBLE);
+        assertThat(effective.analysis().verdict()).contains("Playbook Fallback");
+        assertThat(effective.analysis().executionEligibilityReason()).contains("6/7");
+        MentorProposedTradePlan plan = effective.analysis().proposedTradePlan();
+        assertThat(plan).isNotNull();
+        assertThat(plan.entryPrice()).isEqualTo(3012.5);
+        assertThat(plan.stopLoss()).isEqualTo(3005.0);
+        assertThat(plan.takeProfit()).isEqualTo(3035.0);
+        assertThat(plan.rewardToRiskRatio()).isEqualTo(3.0);
+        assertThat(plan.tpSource()).isEqualTo("PLAYBOOK_MECHANICAL");
+    }
+
+    @Test
+    void applyPlaybookFallback_leavesResponseUnchangedWhenScoreTooLow() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini rejected.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "4/7",
+                "mechanical_plan": {"entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0}
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+
+        assertThat(effective).isSameAs(ineligible);
+    }
+
+    @Test
+    void applyPlaybookFallback_leavesResponseUnchangedWhenMechanicalPlanMissing() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini rejected.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "verdict": "TRADE_VALID"
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+
+        assertThat(effective).isSameAs(ineligible);
+    }
+
+    @Test
+    void applyPlaybookFallback_neverDowngradesEligibleResponses() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorProposedTradePlan plan = new MentorProposedTradePlan(
+            3020.0, 3010.0, 3040.0, 2.0, "Gemini plan", null, "FORMULA_1.5");
+        MentorStructuredResponse eligible = new MentorStructuredResponse(
+            "Bullish.",
+            List.of("Flow aligned"),
+            List.of(),
+            "Trade Validé - Discipline Respectée",
+            ExecutionEligibilityStatus.ELIGIBLE,
+            "Plan complet.",
+            "OK.",
+            plan
+        );
+        MentorAnalyzeResponse geminiEligible = new MentorAnalyzeResponse(
+            7L, "gemini-test", null, eligible, "{ok}", List.of()
+        );
+
+        // Playbook would also want to promote — but Gemini already said ELIGIBLE.
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "mechanical_plan": {"entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0}
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(geminiEligible, payload);
+
+        // Same instance — no override needed when Gemini already validated.
+        assertThat(effective).isSameAs(geminiEligible);
+        assertThat(effective.analysis().proposedTradePlan().entryPrice()).isEqualTo(3020.0);
+        assertThat(effective.analysis().proposedTradePlan().tpSource()).isEqualTo("FORMULA_1.5");
+    }
 }

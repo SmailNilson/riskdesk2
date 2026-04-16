@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
 import com.riskdesk.domain.engine.playbook.PlaybookEvaluator;
@@ -608,29 +610,139 @@ public class MentorSignalReviewService {
 
         try {
             MentorAnalyzeResponse analysis = mentorAnalysisService.analyze(payload, MentorAnalysisService.ALERT_SOURCE_PREFIX + reviewId);
+            MentorAnalyzeResponse effective = applyPlaybookFallback(analysis, payload);
             reviewRepository.findById(reviewId).ifPresent(review -> {
                 review.setStatus(STATUS_DONE);
                 review.setCompletedAt(Instant.now());
-                review.setAnalysisJson(writeJson(analysis));
-                review.setVerdict(truncate(analysis.analysis() == null ? null : analysis.analysis().verdict(), 512));
+                review.setAnalysisJson(writeJson(effective));
+                review.setVerdict(truncate(effective.analysis() == null ? null : effective.analysis().verdict(), 512));
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
                     review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
                 } else {
-                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(analysis));
-                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(analysis));
-                    initializeSimulationState(review, analysis);
+                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(effective));
+                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(effective));
+                    initializeSimulationState(review, effective);
                 }
                 review.setErrorMessage(null);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
                 publish(updated);
-                publishTradeValidatedIfEligible(updated, analysis);
+                publishTradeValidatedIfEligible(updated, effective);
             });
         } catch (Exception e) {
             log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
         }
+    }
+
+    /**
+     * Playbook → trade fallback circuit.
+     *
+     * <p>The Opus prod audit showed a sizeable fraction of qualified alerts were rejected
+     * with INELIGIBLE simply because Gemini's response was truncated or returned an error
+     * envelope — even though the deterministic playbook checklist had produced a high-score
+     * setup with a full mechanical plan (entry/SL/TP). We treat the playbook as a safety
+     * net: when Gemini is unusable AND the playbook produced a score ≥ 6/7 with a complete
+     * mechanical plan, we override eligibility to ELIGIBLE and wire the mechanical plan as
+     * the proposedTradePlan.</p>
+     *
+     * <p>Guards:
+     * <ul>
+     *   <li>Never overrides a Gemini ELIGIBLE verdict — only promotes INELIGIBLE → ELIGIBLE.</li>
+     *   <li>Behaviour alerts are not touched (handled downstream).</li>
+     *   <li>If the payload has no playbook_pre_analysis, no mechanical_plan, or score < 6 → no-op.</li>
+     * </ul>
+     */
+    MentorAnalyzeResponse applyPlaybookFallback(MentorAnalyzeResponse analysis, JsonNode payload) {
+        if (analysis == null || analysis.analysis() == null || payload == null) {
+            return analysis;
+        }
+        MentorStructuredResponse structured = analysis.analysis();
+        if (structured.executionEligibilityStatus() == ExecutionEligibilityStatus.ELIGIBLE) {
+            return analysis;
+        }
+        JsonNode pb = payload.get("playbook_pre_analysis");
+        if (pb == null || !pb.isObject()) {
+            return analysis;
+        }
+        int score = parsePlaybookScore(pb.path("checklist_score").asText(null));
+        if (score < 6) {
+            return analysis;
+        }
+        JsonNode mech = pb.get("mechanical_plan");
+        if (mech == null || !mech.isObject()) {
+            return analysis;
+        }
+        Double entry = readDouble(mech, "entry");
+        Double sl = readDouble(mech, "sl");
+        Double tp = readDouble(mech, "tp1");
+        Double rr = readDouble(mech, "rr");
+        if (entry == null || sl == null || tp == null) {
+            return analysis;
+        }
+        String slRationale = mech.path("sl_rationale").asText(null);
+        String pbVerdict = pb.path("verdict").asText(null);
+        String reason = "Playbook fallback — Gemini unusable, checklist=" + score + "/7"
+            + (pbVerdict != null && !pbVerdict.isBlank() ? " (" + pbVerdict + ")" : "")
+            + ". Mechanical plan applied.";
+
+        MentorProposedTradePlan mechanicalPlan = new MentorProposedTradePlan(
+            entry, sl, tp, rr,
+            slRationale != null ? slRationale : "Playbook mechanical plan (structural SL + TP1).",
+            null,
+            "PLAYBOOK_MECHANICAL"
+        );
+
+        List<String> errors = new ArrayList<>(structured.errors() != null ? structured.errors() : List.of());
+        errors.add("Gemini rejection overridden by playbook fallback circuit.");
+
+        MentorStructuredResponse promoted = new MentorStructuredResponse(
+            structured.technicalQuickAnalysis(),
+            structured.strengths() != null ? structured.strengths() : List.of(),
+            errors,
+            "Trade Validé - Playbook Fallback",
+            ExecutionEligibilityStatus.ELIGIBLE,
+            reason,
+            structured.improvementTip() != null ? structured.improvementTip()
+                : "Surveille le comportement du mentor IA — la décision a été automatisée par le playbook.",
+            mechanicalPlan
+        );
+        log.warn("Playbook fallback promoted review to ELIGIBLE (score={}/7, entry={}, sl={}, tp={})", score, entry, sl, tp);
+        return new MentorAnalyzeResponse(
+            analysis.auditId(),
+            analysis.model(),
+            analysis.payload(),
+            promoted,
+            analysis.rawResponse(),
+            analysis.similarAudits()
+        );
+    }
+
+    private static int parsePlaybookScore(String raw) {
+        if (raw == null || raw.isBlank()) return -1;
+        // Format: "6/7" — take the numerator.
+        int slash = raw.indexOf('/');
+        String numerator = slash >= 0 ? raw.substring(0, slash) : raw;
+        try {
+            return Integer.parseInt(numerator.trim());
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    private static Double readDouble(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull()) return null;
+        if (child.isNumber()) return child.doubleValue();
+        if (child.isTextual()) {
+            try {
+                return Double.parseDouble(child.asText().trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private void publishTradeValidatedIfEligible(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
