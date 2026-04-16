@@ -15,20 +15,42 @@ import java.util.List;
 /**
  * Setup A: Detects price approaching or sitting inside a support/resistance zone
  * aligned with the swing bias (Order Blocks, Breakers, or aligned FVGs).
+ *
+ * <p><b>PR-10 · Proximity is scaled by ATR, not by the zone's own width.</b>
+ * The old formula divided distance by zone size, which produced the wrong
+ * behaviour at both extremes: a 1-pt FVG was declared "far" the moment price
+ * drifted 1.5 pts away (noise-level on a $MNQ tick), while a 50-pt Order Block
+ * was declared "near" even when price was 75 pts away. ATR is the instrument's
+ * natural reach; scaling proximity by ATR keeps the gate consistent across
+ * zone sizes and across volatility regimes.
+ *
+ * <p>Distance semantics: the reported {@code distanceFromPrice} is now the
+ * <em>boundary</em> distance — zero when price is inside the zone, otherwise
+ * the gap to the nearest edge. That matches trader intuition ("how far am I
+ * from this zone?") and stops the earlier mid-distance metric from
+ * mis-ranking narrow zones that price has already reached.
  */
 public class ZoneRetestDetector {
 
-    private static final double PROXIMITY_THRESHOLD = 1.5;
+    /**
+     * A zone counts as "in proximity" when price sits within
+     * {@code PROXIMITY_ATR_MULTIPLIER × ATR} of its nearest boundary. 1.5 ATR
+     * is wide enough to catch a fresh retest setup forming, tight enough to
+     * exclude zones that are still a full swing away.
+     */
+    private static final double PROXIMITY_ATR_MULTIPLIER = 1.5;
 
     public List<SetupCandidate> detect(PlaybookInput input, Direction direction) {
         List<SetupCandidate> candidates = new ArrayList<>();
         BigDecimal price = input.lastPrice();
-        if (price == null) return candidates;
+        BigDecimal atr = input.atr();
+        // Fail-open: without price or a positive ATR we cannot scale proximity.
+        if (price == null || atr == null || atr.signum() <= 0) return candidates;
 
         // 1. Active Order Blocks aligned with bias
         for (SmcOrderBlock ob : input.activeOrderBlocks()) {
             if (!isAligned(ob.type(), direction)) continue;
-            addIfProximate(candidates, price, ob.high(), ob.low(), ob.mid(),
+            addIfProximate(candidates, price, atr, ob.high(), ob.low(), ob.mid(),
                 "OB " + ob.type() + " " + ob.low() + "-" + ob.high(),
                 input);
         }
@@ -37,7 +59,7 @@ public class ZoneRetestDetector {
         for (SmcOrderBlock brk : input.breakerOrderBlocks()) {
             String breakerBias = breakerAlignedBias(brk);
             if (!breakerBias.equalsIgnoreCase(direction.name())) continue;
-            addIfProximate(candidates, price, brk.high(), brk.low(), brk.mid(),
+            addIfProximate(candidates, price, atr, brk.high(), brk.low(), brk.mid(),
                 "Breaker " + brk.low() + "-" + brk.high(),
                 input);
         }
@@ -48,7 +70,7 @@ public class ZoneRetestDetector {
                            || (direction == Direction.SHORT && "BEARISH".equalsIgnoreCase(fvg.bias()));
             if (!aligned) continue;
             BigDecimal mid = fvg.top().add(fvg.bottom()).divide(BigDecimal.TWO, 6, RoundingMode.HALF_UP);
-            addIfProximate(candidates, price, fvg.top(), fvg.bottom(), mid,
+            addIfProximate(candidates, price, atr, fvg.top(), fvg.bottom(), mid,
                 "FVG " + fvg.bias() + " " + fvg.bottom() + "-" + fvg.top(),
                 input);
         }
@@ -56,25 +78,32 @@ public class ZoneRetestDetector {
         return candidates;
     }
 
-    private void addIfProximate(List<SetupCandidate> list, BigDecimal price,
+    private void addIfProximate(List<SetupCandidate> list, BigDecimal price, BigDecimal atr,
                                 BigDecimal high, BigDecimal low, BigDecimal mid,
                                 String zoneName, PlaybookInput input) {
         if (high == null || low == null || mid == null) return;
-        BigDecimal zoneSize = high.subtract(low);
-        if (zoneSize.compareTo(BigDecimal.ZERO) <= 0) return;
+        // Guard against degenerate zones (zero or inverted width).
+        if (high.compareTo(low) <= 0) return;
 
-        BigDecimal distance = price.subtract(mid).abs();
-        double proximity = distance.doubleValue() / zoneSize.doubleValue();
-
-        if (proximity <= PROXIMITY_THRESHOLD) {
-            boolean inZone = price.compareTo(low) >= 0 && price.compareTo(high) <= 0;
-            boolean ofConfirms = isOrderFlowConfirming(input);
-
-            list.add(new SetupCandidate(
-                SetupType.ZONE_RETEST, zoneName, high, low, mid,
-                distance.doubleValue(), inZone, false, ofConfirms, 0.0, 0
-            ));
+        // Boundary distance: 0 when inside, otherwise distance to the nearest edge.
+        boolean inZone = price.compareTo(low) >= 0 && price.compareTo(high) <= 0;
+        BigDecimal boundaryDistance;
+        if (inZone) {
+            boundaryDistance = BigDecimal.ZERO;
+        } else if (price.compareTo(high) > 0) {
+            boundaryDistance = price.subtract(high);
+        } else {
+            boundaryDistance = low.subtract(price);
         }
+
+        BigDecimal threshold = atr.multiply(BigDecimal.valueOf(PROXIMITY_ATR_MULTIPLIER));
+        if (boundaryDistance.compareTo(threshold) > 0) return;
+
+        boolean ofConfirms = isOrderFlowConfirming(input);
+        list.add(new SetupCandidate(
+            SetupType.ZONE_RETEST, zoneName, high, low, mid,
+            boundaryDistance.doubleValue(), inZone, false, ofConfirms, 0.0, 0
+        ));
     }
 
     private boolean isAligned(String obType, Direction direction) {
