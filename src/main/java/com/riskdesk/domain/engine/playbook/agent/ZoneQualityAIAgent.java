@@ -126,9 +126,37 @@ public class ZoneQualityAIAgent implements Scorer {
         }
 
         Confidence conf = parseConfidence(ai.confidence());
-        return new AgentVerdict(name(), conf, direction, ai.reasoning(),
-            AgentAdjustments.fromGeminiFlags(ai.flags()));
+        AgentAdjustments adjustments = AgentAdjustments.fromGeminiFlags(ai.flags());
+        adjustments = enforceWeakZoneBlock(adjustments, context);
+        return new AgentVerdict(name(), conf, direction, ai.reasoning(), adjustments);
     }
+
+    /**
+     * Defensive gate: when the FVG quality score or OB live score is below the
+     * institutional-grade threshold ({@value #WEAK_ZONE_THRESHOLD}), force a
+     * hard block even if Gemini returned only a size-cap. This protects against
+     * prompt drift where the model flags {@code weak_zone=true} but forgets to
+     * set {@code blocked=true}, leading to a tradeable plan on a structurally
+     * unreliable zone.
+     */
+    private AgentAdjustments enforceWeakZoneBlock(AgentAdjustments adjustments, AgentContext context) {
+        if (adjustments.blocked()) return adjustments;
+        var zq = context.zoneQuality();
+        if (zq == null) return adjustments;
+
+        boolean weakFvg = zq.fvgQualityScore() != null && zq.fvgQualityScore() < WEAK_ZONE_THRESHOLD;
+        boolean weakOb = zq.isWeakOb();
+        if (!weakFvg && !weakOb) return adjustments;
+
+        java.util.Map<String, Object> extras = new java.util.LinkedHashMap<>(adjustments.extraFlags());
+        extras.put("weak_zone_enforced", true);
+        if (weakFvg) extras.put("fvg_quality_score", zq.fvgQualityScore());
+        if (weakOb) extras.put("ob_live_score", zq.obLiveScore());
+        return AgentAdjustments.blockWith(extras);
+    }
+
+    /** Threshold below which a zone is considered too weak to trade. */
+    static final double WEAK_ZONE_THRESHOLD = 30.0;
 
     // ── Local helpers ────────────────────────────────────────────────────
 

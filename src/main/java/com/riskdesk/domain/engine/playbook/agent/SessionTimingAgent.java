@@ -2,6 +2,7 @@ package com.riskdesk.domain.engine.playbook.agent;
 
 import com.riskdesk.domain.engine.playbook.model.Confidence;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
+import com.riskdesk.domain.model.Instrument;
 
 import java.util.Map;
 
@@ -54,11 +55,21 @@ public class SessionTimingAgent implements Gate {
             reasoning = String.format("%s session — good liquidity for execution", session.phase());
             adjustments = AgentAdjustments.none();
         } else if (session.isLowLiquidity()) {
-            // Low liquidity — risky
+            // Low liquidity — risky. MCL (Micro WTI Crude) has materially thinner
+            // books outside London/NY than the equity-index micros, and the
+            // resulting spread widening + stop-hunt risk is not mitigated by a
+            // size-cap alone. Block it outright instead.
             confidence = Confidence.LOW;
-            reasoning = String.format("%s session — LOW LIQUIDITY, spreads wider, sweep risk higher",
-                session.phase());
-            adjustments = AgentAdjustments.sizeCap(0.005);
+            if (context.instrument() == Instrument.MCL) {
+                reasoning = String.format(
+                    "%s session on MCL — crude illiquid outside LONDON/NY, trade blocked",
+                    session.phase());
+                adjustments = AgentAdjustments.block();
+            } else {
+                reasoning = String.format("%s session — LOW LIQUIDITY, spreads wider, sweep risk higher",
+                    session.phase());
+                adjustments = AgentAdjustments.sizeCap(0.005);
+            }
         } else {
             // Normal session
             confidence = Confidence.MEDIUM;

@@ -57,7 +57,19 @@ public class PlaybookEvaluator {
             PlaybookPlan plan = planCalculator.calculate(setup, input, direction, filters.sizeMultiplier());
             if (plan == null) continue;
 
-            List<ChecklistItem> cl = buildChecklist(filters, setup, input);
+            // Inject the real plan R:R into a snapshot BEFORE the checklist is
+            // built so item 7 ("R:R >= 2:1") reads the plan-derived ratio
+            // instead of the raw setup default (which is 0.0 for detectors that
+            // don't compute R:R themselves, e.g. ZoneRetestDetector). Without
+            // this, the UI used to display "R:R 0.0:1" on the checklist while
+            // the mechanical plan correctly reported the real ratio.
+            SetupCandidate setupForChecklist = new SetupCandidate(
+                setup.type(), setup.zoneName(), setup.zoneHigh(), setup.zoneLow(), setup.zoneMid(),
+                setup.distanceFromPrice(), setup.priceInZone(), setup.reactionVisible(),
+                setup.orderFlowConfirms(), plan.rrRatio(), 0
+            );
+
+            List<ChecklistItem> cl = buildChecklist(filters, setupForChecklist, input);
             int score = (int) cl.stream().filter(c -> c.status() == ChecklistStatus.PASS).count();
 
             SetupCandidate withRrAndScore = new SetupCandidate(
@@ -178,6 +190,11 @@ public class PlaybookEvaluator {
             setup.reactionVisible() ? "Rejection detected" : "Waiting for confirmation"));
 
         // 6. Order flow confirms
+        // The checklist previously displayed "Delta: SELLING" as PASS on a LONG
+        // setup without explaining *why* selling pressure could confirm a long
+        // (absorption/capitulation at a demand zone). We now annotate the label
+        // with the trade direction so reviewers can tell aligned flow from
+        // capitulation/absorption at a glance.
         String ofDetail;
         ChecklistStatus ofStatus;
         if (input.deltaFlowBias() == null || input.deltaFlowBias().isBlank()) {
@@ -185,10 +202,18 @@ public class PlaybookEvaluator {
             ofDetail = "No order flow data";
         } else if (setup.orderFlowConfirms()) {
             ofStatus = ChecklistStatus.PASS;
-            ofDetail = "Delta: " + input.deltaFlowBias();
+            String dirName = filters.tradeDirection().name();
+            String bias = input.deltaFlowBias();
+            boolean directional =
+                ("LONG".equals(dirName) && "BUYING".equalsIgnoreCase(bias))
+             || ("SHORT".equals(dirName) && "SELLING".equalsIgnoreCase(bias));
+            ofDetail = "Delta: " + bias
+                + (directional
+                    ? " (supports " + dirName + ")"
+                    : " (absorption/capitulation for " + dirName + ")");
         } else {
             ofStatus = ChecklistStatus.FAIL;
-            ofDetail = "Delta neutral";
+            ofDetail = "Delta does not confirm";
         }
         items.add(new ChecklistItem(6, "Order flow confirms", ofStatus, ofDetail));
 

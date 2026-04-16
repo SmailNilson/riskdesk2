@@ -209,6 +209,87 @@ class PlaybookEvaluatorTest {
         assertTrue(result.checklistScore() > 0);
     }
 
+    @Test
+    void checklist_rrItem_reflectsPlanRrRatio_notStaleSetupDefault() {
+        // Regression: before the fix, ChecklistItem 7 ("R:R >= 2:1") read
+        // setup.rrRatio() which was still 0.0 at the time buildChecklist() ran,
+        // so the UI showed "R:R 0.0:1" while the mechanical plan displayed the
+        // real ratio. The checklist must now surface the plan-derived ratio.
+        SmcOrderBlock ob = new SmcOrderBlock("BULLISH", "ACTIVE",
+            bd("94.71"), bd("91.03"), bd("92.87"), null);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("93.00"),
+            List.of(), List.of(ob), List.of(), List.of(), List.of(), List.of(),
+            111.2, 100.0, 117.0, "BUYING", bd("0.65"), "DISCOUNT", null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        assertNotNull(result.plan(), "Plan must be computed for this setup");
+        double planRr = result.plan().rrRatio();
+        assertTrue(planRr > 0, "Sanity check: plan R:R should be > 0");
+
+        ChecklistItem rrItem = result.checklist().stream()
+            .filter(c -> c.step() == 7)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Checklist item 7 (R:R) missing"));
+
+        String expected = String.format("R:R %.1f:1", planRr);
+        assertEquals(expected, rrItem.detail(),
+            "Checklist item 7 must reflect the plan R:R, not the stale setup default");
+        assertNotEquals("R:R 0.0:1", rrItem.detail(),
+            "Regression guard: must never display the stale 0.0 default");
+    }
+
+    @Test
+    void checklist_orderFlow_longWithSellingDelta_labelsAsCapitulation() {
+        // When a LONG setup is confirmed by SELLING delta (demand absorption
+        // at a support zone), the checklist must label the flow as
+        // "absorption/capitulation for LONG" so reviewers don't misread it as
+        // a contradiction.
+        SmcOrderBlock ob = new SmcOrderBlock("BULLISH", "ACTIVE",
+            bd("94.71"), bd("91.03"), bd("92.87"), null);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("93.00"),
+            List.of(), List.of(ob), List.of(), List.of(), List.of(), List.of(),
+            111.2, 100.0, 117.0, "SELLING", bd("0.65"), "DISCOUNT", null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        ChecklistItem ofItem = result.checklist().stream()
+            .filter(c -> c.step() == 6)
+            .findFirst().orElseThrow();
+
+        assertTrue(ofItem.detail().contains("SELLING"),
+            "Delta bias should be surfaced in the label: " + ofItem.detail());
+        assertTrue(ofItem.detail().contains("absorption/capitulation for LONG"),
+            "SELLING delta on a LONG setup should be tagged as capitulation: " + ofItem.detail());
+    }
+
+    @Test
+    void checklist_orderFlow_longWithBuyingDelta_labelsAsSupports() {
+        SmcOrderBlock ob = new SmcOrderBlock("BULLISH", "ACTIVE",
+            bd("94.71"), bd("91.03"), bd("92.87"), null);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("93.00"),
+            List.of(), List.of(ob), List.of(), List.of(), List.of(), List.of(),
+            111.2, 100.0, 117.0, "BUYING", bd("0.65"), "DISCOUNT", null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        ChecklistItem ofItem = result.checklist().stream()
+            .filter(c -> c.step() == 6)
+            .findFirst().orElseThrow();
+
+        assertTrue(ofItem.detail().contains("supports LONG"),
+            "BUYING delta on a LONG setup should be tagged as supports: " + ofItem.detail());
+    }
+
     // ── PR-8 · Late-entry detection ─────────────────────────────────────
 
     @Test

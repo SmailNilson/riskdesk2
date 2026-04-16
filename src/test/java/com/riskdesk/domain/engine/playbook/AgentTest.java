@@ -42,16 +42,40 @@ class AgentTest {
     }
 
     @Test
-    void sessionAgent_asianSession_lowLiquidity() {
+    void sessionAgent_asianSession_mcl_blocked() {
+        // MCL is especially illiquid outside London/NY — a size-cap isn't enough,
+        // it must be blocked outright.
         var agent = new SessionTimingAgent();
         var playbook = mockPlaybook(Direction.LONG, 6);
         var session = new AgentContext.SessionInfo("ASIAN", false, true, false);
-        var context = contextWithSession(session);
+        var context = contextWithSessionAndInstrument(session, Instrument.MCL);
 
         AgentVerdict v = agent.evaluate(playbook, context);
 
         assertEquals(Confidence.LOW, v.confidence());
+        assertTrue(v.adjustments().blocked(),
+            "MCL in ASIAN session must be blocked, not just size-capped");
+        assertTrue(v.reasoning().contains("MCL"),
+            "Reasoning should mention MCL specifically: " + v.reasoning());
+    }
+
+    @Test
+    void sessionAgent_asianSession_nonMcl_sizeCapped() {
+        // The equity-index micros (MNQ) and FX (E6) have enough ASIAN depth to
+        // trade with a reduced size — the block must remain MCL-specific.
+        var agent = new SessionTimingAgent();
+        var playbook = mockPlaybook(Direction.LONG, 6);
+        var session = new AgentContext.SessionInfo("ASIAN", false, true, false);
+        var context = contextWithSessionAndInstrument(session, Instrument.MNQ);
+
+        AgentVerdict v = agent.evaluate(playbook, context);
+
+        assertEquals(Confidence.LOW, v.confidence());
+        assertFalse(v.adjustments().blocked(),
+            "Non-MCL instruments must keep the size-cap path, not be blocked");
         assertTrue(v.reasoning().contains("LOW LIQUIDITY"));
+        assertTrue(v.adjustments().sizePctCap().isPresent(),
+            "Non-MCL ASIAN should still apply a size cap");
     }
 
     @Test
@@ -270,6 +294,67 @@ class AgentTest {
         assertEquals(Confidence.HIGH, v.confidence());
     }
 
+    @Test
+    void zoneAiAgent_weakFvgScore_enforcesHardBlock() {
+        // Gemini returns LOW confidence with a weak_zone flag but forgets to
+        // set blocked=true. The defensive gate must translate that into a hard
+        // block so downstream doesn't accept the trade plan anyway.
+        var port = cannedPort(AgentAiResponse.LOW,
+            "FVG quality score is 18.69 (<30) indicating a weak zone",
+            Map.of("weak_zone", true));
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
+        var zq = new AgentContext.ZoneQualitySnapshot(
+            null, null, null, null,
+            18.69,           // fvgQualityScore < threshold
+            null, null, null);
+        var ctx = contextWithZoneQuality(zq);
+
+        AgentVerdict v = agent.evaluate(mockPlaybook(Direction.LONG, 6), ctx);
+
+        assertEquals(Confidence.LOW, v.confidence());
+        assertTrue(v.adjustments().blocked(),
+            "FVG quality below threshold must be enforced as a hard block");
+        assertEquals(Boolean.TRUE, v.adjustments().extraFlags().get("weak_zone_enforced"),
+            "Enforcement flag should be surfaced so audits can tell Gemini-blocked from defensively-blocked");
+    }
+
+    @Test
+    void zoneAiAgent_weakObLiveScore_enforcesHardBlock() {
+        // Same defensive path but triggered by the OB live score instead of FVG.
+        var port = cannedPort(AgentAiResponse.LOW,
+            "OB live score 25 — weak defended zone",
+            Map.of());
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
+        var zq = new AgentContext.ZoneQualitySnapshot(
+            null, 25.0, Boolean.FALSE, null,  // obLiveScore < 40 → isWeakOb()
+            null, null, null, null);
+        var ctx = contextWithZoneQuality(zq);
+
+        AgentVerdict v = agent.evaluate(mockPlaybook(Direction.LONG, 6), ctx);
+
+        assertTrue(v.adjustments().blocked(),
+            "Weak OB live score must be enforced as a hard block");
+    }
+
+    @Test
+    void zoneAiAgent_acceptableZone_doesNotForceBlock() {
+        // Quality scores above threshold and Gemini returns MEDIUM without
+        // blocked → defensive gate must stay out of the way.
+        var port = cannedPort(AgentAiResponse.MEDIUM,
+            "FVG quality 55 — acceptable", Map.of());
+        var agent = new ZoneQualityAIAgent(port, "test-prompt");
+        var zq = new AgentContext.ZoneQualitySnapshot(
+            70.0, 70.0, Boolean.TRUE, 1.5,
+            55.0,            // fvgQualityScore above threshold
+            60.0, Boolean.TRUE, 50.0);
+        var ctx = contextWithZoneQuality(zq);
+
+        AgentVerdict v = agent.evaluate(mockPlaybook(Direction.LONG, 6), ctx);
+
+        assertFalse(v.adjustments().blocked(),
+            "Healthy zone quality must not trip the defensive gate");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private static BigDecimal bd(String val) { return new BigDecimal(val); }
@@ -326,8 +411,13 @@ class AgentTest {
     }
 
     private static AgentContext contextWithSession(AgentContext.SessionInfo session) {
+        return contextWithSessionAndInstrument(session, Instrument.MCL);
+    }
+
+    private static AgentContext contextWithSessionAndInstrument(AgentContext.SessionInfo session,
+                                                                Instrument instrument) {
         return new AgentContext(
-            Instrument.MCL, "10m", minimalInput(),
+            instrument, "10m", minimalInput(),
             AgentContext.PortfolioState.empty(),
             AgentContext.MacroSnapshot.empty(),
             AgentContext.MtfSnapshot.empty(),
