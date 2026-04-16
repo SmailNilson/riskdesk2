@@ -197,6 +197,35 @@ class AgentTest {
         assertEquals(Confidence.LOW, v.confidence());
     }
 
+    /**
+     * PR-5 — Audit finding S2. When Gemini is unavailable, the fallback must honour
+     * {@link AgentContext.MomentumSnapshot#momentumContradicts(String)}: even if flow
+     * and absorption align with a LONG, an OVERBOUGHT RSI/WT has to veto the verdict
+     * down to LOW (Gemini-online would have caught it via the momentum payload block).
+     */
+    @Test
+    void orderFlowAiAgent_geminiUnavailable_momentumContradicts_vetoesToLow() {
+        var port = fallbackPort();
+        var agent = new OrderFlowAIAgent(port, "test-prompt");
+        // Flow aligned BULLISH for a LONG trade…
+        var flow = new AgentContext.OrderFlowSnapshot(
+            "REAL_TICKS", 700, 300, 400, 3_500, 70.0, "RISING", false, null);
+        var absorption = new AgentContext.AbsorptionSnapshot(
+            true, "BULLISH_ABSORPTION", 2.4, 1.0, 12_000);
+        // …but RSI + WaveTrend are OVERBOUGHT, which contradicts a LONG.
+        var momentum = new AgentContext.MomentumSnapshot(
+            bd("82"), "OVERBOUGHT", bd("0.2"), "BULLISH",
+            bd("65"), bd("60"), "OVERBOUGHT",
+            bd("0.95"), false, null, true, null, null);
+        var ctx = contextWithOrderFlowAndMomentum(flow, absorption, momentum);
+
+        AgentVerdict v = agent.evaluate(mockPlaybook(Direction.LONG, 6), ctx);
+
+        assertEquals(Confidence.LOW, v.confidence());
+        assertTrue(v.reasoning().contains("momentum contradicts"));
+        assertEquals(Boolean.TRUE, v.adjustments().extraFlags().get("momentum_veto"));
+    }
+
     // ── Zone Quality AI ──────────────────────────────────────────────────
 
     @Test
@@ -338,6 +367,26 @@ class AgentTest {
             AgentContext.MacroSnapshot.empty(),
             AgentContext.MtfSnapshot.empty(),
             AgentContext.MomentumSnapshot.empty(),
+            AgentContext.SessionInfo.empty(),
+            bd("1.50"),
+            flow,
+            AgentContext.DepthSnapshot.empty(),
+            absorption,
+            AgentContext.VolumeProfileSnapshot.empty(),
+            AgentContext.ZoneQualitySnapshot.empty()
+        );
+    }
+
+    private static AgentContext contextWithOrderFlowAndMomentum(
+            AgentContext.OrderFlowSnapshot flow,
+            AgentContext.AbsorptionSnapshot absorption,
+            AgentContext.MomentumSnapshot momentum) {
+        return new AgentContext(
+            Instrument.MCL, "10m", minimalInput(),
+            AgentContext.PortfolioState.empty(),
+            AgentContext.MacroSnapshot.empty(),
+            AgentContext.MtfSnapshot.empty(),
+            momentum,
             AgentContext.SessionInfo.empty(),
             bd("1.50"),
             flow,

@@ -118,8 +118,12 @@ public class OrderFlowAIAgent implements Scorer {
             AGENT_NAME, systemPrompt, payload, 1500));
 
         if (!ai.aiAvailable()) {
-            // Deterministic fallback: flow-based heuristic
-            return fallbackVerdict(direction, flow, absorption);
+            // Deterministic fallback: flow-based heuristic with momentum veto.
+            // PR-5: if momentum contradicts the trade direction (RSI/WT overbought
+            // on a LONG, or oversold on a SHORT), the fallback must NOT let the
+            // setup slip through on flow-alone alignment — Gemini would have caught
+            // it. Pass `momentum` to the fallback so it can apply the veto.
+            return fallbackVerdict(direction, flow, absorption, momentum);
         }
 
         Confidence conf = parseConfidence(ai.confidence());
@@ -129,16 +133,27 @@ public class OrderFlowAIAgent implements Scorer {
 
     private AgentVerdict fallbackVerdict(Direction direction,
                                           AgentContext.OrderFlowSnapshot flow,
-                                          AgentContext.AbsorptionSnapshot absorption) {
+                                          AgentContext.AbsorptionSnapshot absorption,
+                                          AgentContext.MomentumSnapshot momentum) {
         boolean isLong = direction == Direction.LONG;
         boolean flowAligned = flow != null
             && ((isLong && flow.isBullishPressure()) || (!isLong && flow.isBearishPressure()));
         boolean absorbedWithUs = absorption != null && absorption.detected()
             && ((isLong && absorption.isBullish()) || (!isLong && absorption.isBearish()));
 
+        // PR-5: momentum veto. If RSI/WT is OVERBOUGHT on a LONG (or OVERSOLD on a SHORT),
+        // the signal contradicts and the fallback must downgrade to LOW, even if flow aligns.
+        // This closes audit finding S2: Gemini-online catches this via the momentum block in
+        // the payload, but the fallback previously ignored it.
+        boolean momentumContradicts = momentum != null
+            && momentum.momentumContradicts(direction.name());
+
         Confidence conf;
         String reasoning;
-        if (flowAligned && absorbedWithUs) {
+        if (momentumContradicts) {
+            conf = Confidence.LOW;
+            reasoning = "AI unavailable — fallback: momentum contradicts direction (RSI/WT extreme)";
+        } else if (flowAligned && absorbedWithUs) {
             conf = Confidence.HIGH;
             reasoning = "AI unavailable — fallback: flow + absorption align";
         } else if (flowAligned || absorbedWithUs) {
@@ -149,8 +164,10 @@ public class OrderFlowAIAgent implements Scorer {
             reasoning = "AI unavailable — fallback: flow not aligned";
         }
         return new AgentVerdict(name(), conf, direction, reasoning,
-            AgentAdjustments.flags(Map.of("fallback", true, "data_quality",
-                flow != null ? flow.source().toLowerCase() : "none")));
+            AgentAdjustments.flags(Map.of(
+                "fallback", true,
+                "momentum_veto", momentumContradicts,
+                "data_quality", flow != null ? flow.source().toLowerCase() : "none")));
     }
 
     private static Confidence parseConfidence(String s) {
