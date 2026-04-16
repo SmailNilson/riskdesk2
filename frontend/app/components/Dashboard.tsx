@@ -34,6 +34,32 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
+  const [purging, setPurging] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
+
+  const handlePurge = useCallback(async () => {
+    if (purging) return;
+    if (!window.confirm(
+      `Purge all ${instrument} candles (all timeframes) and trigger IBKR re-backfill?\n\nThis is destructive — existing DB history for ${instrument} will be wiped.`
+    )) return;
+    setPurging(true);
+    setPurgeMsg(null);
+    try {
+      const purgeRes = await api.purgeInstrument(instrument);
+      if (purgeRes.error) {
+        setPurgeMsg(`Error: ${purgeRes.error}`);
+        return;
+      }
+      await api.refreshDb();
+      setPurgeMsg(`Purged ${purgeRes.purged ?? 0} • Refill started`);
+    } catch (e) {
+      console.error(`Purge ${instrument} failed:`, e);
+      setPurgeMsg('Error');
+    } finally {
+      setPurging(false);
+      setTimeout(() => setPurgeMsg(null), 6000);
+    }
+  }, [instrument, purging]);
 
   const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
 
@@ -116,6 +142,22 @@ export default function Dashboard() {
               ))}
             </select>
           </div>
+
+          {/* Purge + refill current instrument */}
+          <button
+            onClick={handlePurge}
+            disabled={purging}
+            title={`Wipe all ${instrument} candles (all timeframes) and re-backfill from IBKR`}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs transition-colors select-none ${
+              purging
+                ? 'border-zinc-800 text-zinc-500 cursor-wait'
+                : purgeMsg
+                ? 'border-emerald-700 text-emerald-300'
+                : 'border-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-700'
+            }`}
+          >
+            {purging ? '⟳ Purging…' : purgeMsg ?? `🗑 Purge ${instrument}`}
+          </button>
 
           {/* Theme toggle */}
           <button
