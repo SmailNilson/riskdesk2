@@ -99,7 +99,15 @@ public class PlaybookService {
         );
     }
 
-    private BigDecimal computeAtr(Instrument instrument, String timeframe) {
+    /**
+     * Computes the ATR for the given instrument/timeframe. Exposed (vs. private) so
+     * the presentation layer can reuse the exact same ATR source when enriching an
+     * {@link com.riskdesk.domain.engine.playbook.agent.AgentContext}. Returns
+     * {@code null} when there aren't enough candles or the repository fails — callers
+     * must handle the null case (never silently substitute {@code BigDecimal.ONE},
+     * which would corrupt all ATR-relative sizing / trap-detection calculations).
+     */
+    public BigDecimal computeAtr(Instrument instrument, String timeframe) {
         try {
             List<Candle> candles = candleRepository.findRecentCandles(instrument, timeframe, ATR_CANDLE_LIMIT);
             if (candles == null || candles.size() <= ATR_PERIOD) return null;

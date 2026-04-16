@@ -4,7 +4,7 @@ import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.PortfolioSummary;
 import com.riskdesk.domain.engine.playbook.agent.*;
-import com.riskdesk.domain.engine.playbook.agent.port.GeminiAgentPort;
+import com.riskdesk.domain.engine.playbook.event.AgentDecisionEvent;
 import com.riskdesk.domain.engine.playbook.model.Confidence;
 import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
@@ -20,6 +20,8 @@ import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -29,7 +31,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Runs the trading agents that gate a setup before it becomes a Mentor review.
@@ -53,8 +57,10 @@ public class AgentOrchestratorService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestratorService.class);
     private static final Duration AGENT_TIMEOUT = Duration.ofSeconds(20);
+    private static final Duration MTF_TIMEOUT = Duration.ofSeconds(5);
 
-    private final List<TradingAgent> agents;
+    private final List<TradingAgent> gates;
+    private final List<TradingAgent> scorers;
     private final RiskManagementService riskManagementService;
     private final PositionService positionService;
     private final MentorIntermarketService intermarketService;
@@ -62,16 +68,37 @@ public class AgentOrchestratorService {
     private final TickDataPort tickDataPort;
     private final MarketDepthPort marketDepthPort;
     private final AbsorptionCache absorptionCache;
+    private final ExecutorService agentExecutor;
+    private final ApplicationEventPublisher eventPublisher;
 
     public AgentOrchestratorService(
-            GeminiAgentPort geminiAgentPort,
+            List<TradingAgent> agents,
             RiskManagementService riskManagementService,
             PositionService positionService,
             MentorIntermarketService intermarketService,
             IndicatorService indicatorService,
             TickDataPort tickDataPort,
             MarketDepthPort marketDepthPort,
-            AbsorptionCache absorptionCache) {
+            AbsorptionCache absorptionCache,
+            @Qualifier("agentExecutor") ExecutorService agentExecutor,
+            ApplicationEventPublisher eventPublisher) {
+        // Spring collects every TradingAgent bean (see TradingAgentConfig) and hands
+        // them to us as an ordered list. We partition once at construction so the
+        // orchestrate() path does not re-filter on every call.
+        //
+        //   Gates  → deterministic, fast, may BLOCK     → run sequentially, short-circuit
+        //   Others → AI / slow / non-blocking           → run in parallel afterwards
+        //
+        // Anything not tagged {@code Gate} is treated as a scorer; missing a Scorer
+        // tag is a degrade-gracefully case rather than a hard failure.
+        List<TradingAgent> gateList = new ArrayList<>();
+        List<TradingAgent> scorerList = new ArrayList<>();
+        for (TradingAgent a : agents) {
+            if (a instanceof Gate) gateList.add(a);
+            else scorerList.add(a);
+        }
+        this.gates = List.copyOf(gateList);
+        this.scorers = List.copyOf(scorerList);
         this.riskManagementService = riskManagementService;
         this.positionService = positionService;
         this.intermarketService = intermarketService;
@@ -79,22 +106,24 @@ public class AgentOrchestratorService {
         this.tickDataPort = tickDataPort;
         this.marketDepthPort = marketDepthPort;
         this.absorptionCache = absorptionCache;
+        this.agentExecutor = agentExecutor;
+        this.eventPublisher = eventPublisher;
 
-        // 1 rule-based + 3 AI agents — all domain-layer, Gemini injected via port
-        this.agents = List.of(
-            new SessionTimingAgent(),
-            new MtfConfluenceAIAgent(geminiAgentPort),
-            new OrderFlowAIAgent(geminiAgentPort),
-            new ZoneQualityAIAgent(geminiAgentPort)
-        );
+        log.info("AgentOrchestratorService initialized with {} gate(s) {} and {} scorer(s) {}",
+            this.gates.size(),
+            this.gates.stream().map(TradingAgent::name).toList(),
+            this.scorers.size(),
+            this.scorers.stream().map(TradingAgent::name).toList());
     }
 
     public FinalVerdict orchestrate(PlaybookEvaluation playbook, AgentContext context) {
         if (playbook.bestSetup() == null || playbook.plan() == null) {
-            return new FinalVerdict(
+            FinalVerdict fv = new FinalVerdict(
                 playbook.verdict(), null, 0, List.of(),
                 List.of("No setup detected"), "INELIGIBLE"
             );
+            publishDecisionEvent(context, playbook, fv);
+            return fv;
         }
 
         // ── 1. Deterministic risk gate — runs first, may short-circuit AI calls ─
@@ -102,41 +131,114 @@ public class AgentOrchestratorService {
             riskManagementService.evaluate(playbook, context);
         if (risk.blocked()) {
             log.info("Orchestrator: risk gate BLOCKED — {}", risk.blockReason());
-            return new FinalVerdict(
+            FinalVerdict fv = new FinalVerdict(
                 "BLOCKED — " + risk.blockReason(),
-                null,
-                0,
-                List.of(),
-                risk.warnings(),
-                "BLOCKED"
+                null, 0, List.of(),
+                risk.warnings(), "BLOCKED"
             );
+            publishDecisionEvent(context, playbook, fv);
+            return fv;
         }
 
-        // ── 2. Run all agents in parallel ───────────────────────────────────
-        List<CompletableFuture<AgentVerdict>> futures = agents.stream()
-            .map(agent -> CompletableFuture.supplyAsync(() -> {
-                try {
-                    return agent.evaluate(playbook, context);
-                } catch (Exception e) {
-                    log.warn("Agent {} failed: {}", agent.name(), e.getMessage());
-                    return AgentVerdict.timeout(agent.name());
-                }
-            }))
+        // ── 2. Run GATES sequentially — short-circuit on any hard block ─────
+        // Gates are microsecond-fast and deterministic; running them first means a
+        // SessionTimingAgent rejection no longer costs 3 Gemini calls + 20s of
+        // wall-clock time.
+        List<AgentVerdict> gateVerdicts = new ArrayList<>(gates.size());
+        for (TradingAgent gate : gates) {
+            AgentVerdict v = safeEvaluate(gate, playbook, context);
+            gateVerdicts.add(v);
+            if (v.adjustments().blocked()) {
+                log.info("Orchestrator: gate {} BLOCKED — skipping {} scorer(s)",
+                    gate.name(), scorers.size());
+                FinalVerdict fv = resolveVerdicts(playbook, gateVerdicts, risk);
+                publishDecisionEvent(context, playbook, fv);
+                return fv;
+            }
+        }
+
+        // ── 3. Run SCORERS in parallel on the dedicated executor ────────────
+        List<CompletableFuture<AgentVerdict>> futures = scorers.stream()
+            .map(agent -> CompletableFuture.supplyAsync(
+                () -> safeEvaluate(agent, playbook, context), agentExecutor))
             .toList();
 
-        List<AgentVerdict> verdicts = new ArrayList<>();
+        // Global timeout: we wait for all scorers collectively, not per-agent in a loop.
+        // A slow first scorer no longer pushes the wall-clock deadline of later scorers.
+        CompletableFuture<Void> all = CompletableFuture.allOf(
+            futures.toArray(CompletableFuture[]::new));
+        try {
+            all.get(AGENT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            log.warn("Scorer orchestration timed out after {}ms — collecting completed verdicts",
+                AGENT_TIMEOUT.toMillis());
+        } catch (Exception e) {
+            log.warn("Scorer orchestration failed: {}", e.getMessage());
+        }
+
+        // Collect whichever verdicts completed; stragglers become timeout verdicts.
+        List<AgentVerdict> verdicts = new ArrayList<>(gates.size() + futures.size());
+        verdicts.addAll(gateVerdicts);
         for (int i = 0; i < futures.size(); i++) {
-            String agentName = agents.get(i).name();
-            try {
-                verdicts.add(futures.get(i).get(AGENT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
-            } catch (Exception e) {
-                log.warn("Agent {} timed out after {}ms", agentName, AGENT_TIMEOUT.toMillis());
+            CompletableFuture<AgentVerdict> f = futures.get(i);
+            String agentName = scorers.get(i).name();
+            if (f.isDone() && !f.isCompletedExceptionally() && !f.isCancelled()) {
+                verdicts.add(f.getNow(AgentVerdict.timeout(agentName)));
+            } else {
+                f.cancel(true);
+                log.warn("Scorer {} did not complete within {}ms", agentName, AGENT_TIMEOUT.toMillis());
                 verdicts.add(AgentVerdict.timeout(agentName));
             }
         }
 
-        // ── 3. Resolve conflicts and build final verdict ─────────────────────
-        return resolveVerdicts(playbook, verdicts, risk);
+        // ── 4. Resolve conflicts, publish decision event, return ────────────
+        FinalVerdict fv = resolveVerdicts(playbook, verdicts, risk);
+        publishDecisionEvent(context, playbook, fv);
+        return fv;
+    }
+
+    /**
+     * Publishes a best-effort {@link AgentDecisionEvent} on every decision. Emission
+     * failures are swallowed — the orchestration result is authoritative, the event is
+     * an audit-trail side effect.
+     */
+    private void publishDecisionEvent(AgentContext context, PlaybookEvaluation playbook,
+                                       FinalVerdict fv) {
+        try {
+            String setupType = playbook.bestSetup() != null
+                ? playbook.bestSetup().type().name()
+                : "NONE";
+            List<AgentDecisionEvent.AgentSummary> summaries = fv.agentVerdicts().stream()
+                .map(v -> new AgentDecisionEvent.AgentSummary(
+                    v.agentName(), v.confidence(), v.reasoning(),
+                    v.adjustments() != null && v.adjustments().blocked()))
+                .toList();
+            AgentDecisionEvent event = new AgentDecisionEvent(
+                context.instrument(),
+                context.timeframe(),
+                setupType,
+                fv.eligibility(),
+                fv.sizePercent(),
+                summaries,
+                fv.warnings() != null ? fv.warnings().size() : 0,
+                fv.verdict(),
+                Instant.now()
+            );
+            eventPublisher.publishEvent(event);
+        } catch (Exception e) {
+            log.debug("Failed to publish AgentDecisionEvent: {}", e.getMessage());
+        }
+    }
+
+    /** Runs an agent's {@code evaluate} guarded against exceptions. */
+    private AgentVerdict safeEvaluate(TradingAgent agent, PlaybookEvaluation playbook,
+                                       AgentContext context) {
+        try {
+            return agent.evaluate(playbook, context);
+        } catch (Exception e) {
+            log.warn("Agent {} failed: {}", agent.name(), e.getMessage());
+            return AgentVerdict.error(agent.name(), e.getMessage());
+        }
     }
 
     private FinalVerdict resolveVerdicts(PlaybookEvaluation playbook,
@@ -147,32 +249,28 @@ public class AgentOrchestratorService {
         double sizePct = Math.min(playbook.plan().riskPercent(), risk.sizePct());
         boolean blocked = false;
 
-        int lowCount = 0;
-
         for (AgentVerdict v : verdicts) {
+            var adj = v.adjustments();
+
             // Agent-proposed size cap (agents can only REDUCE, never raise)
-            if (v.adjustments().containsKey("size_pct")) {
-                double agentSize = ((Number) v.adjustments().get("size_pct")).doubleValue();
-                sizePct = Math.min(sizePct, agentSize);
+            if (adj.sizePctCap().isPresent()) {
+                sizePct = Math.min(sizePct, adj.sizePctCap().get());
             }
 
             // Hard block (maintenance window, market closed, etc.)
-            if (v.adjustments().containsKey("blocked")
-                    && Boolean.TRUE.equals(v.adjustments().get("blocked"))) {
+            if (adj.blocked()) {
                 blocked = true;
                 warnings.add(v.agentName() + ": " + v.reasoning());
             }
 
             // Low-confidence warning (unless already flagged blocked)
-            if (v.confidence() == Confidence.LOW
-                    && !v.adjustments().containsKey("blocked")) {
+            if (v.confidence() == Confidence.LOW && !adj.blocked()) {
                 warnings.add(v.agentName() + ": " + v.reasoning());
-                lowCount++;
             }
         }
 
         // ── 4. Majority-LOW rule: 2+ of 3 AI agents LOW → treat as ineligible ─
-        // SessionTiming isn't counted here — its LOW is surfaced via 'blocked' or size_pct.
+        // Gates are excluded: their LOW is surfaced via 'blocked' or size_pct.
         long aiLow = verdicts.stream()
             .filter(v -> !"Session-Timing".equals(v.agentName()))
             .filter(v -> v.confidence() == Confidence.LOW)
@@ -202,9 +300,9 @@ public class AgentOrchestratorService {
             verdict = playbook.verdict() + " — " + warnings.size() + " warning(s)";
         }
 
-        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} LOW], warnings: {})",
+        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} AI LOW], warnings: {})",
             verdict, String.format("%.4f", sizePct * 100),
-            verdicts.size(), lowCount, warnings.size());
+            verdicts.size(), aiLow, warnings.size());
 
         return new FinalVerdict(verdict, adjustedPlan, sizePct, verdicts, warnings, eligibility);
     }
@@ -333,53 +431,53 @@ public class AgentOrchestratorService {
 
     private AgentContext.MtfSnapshot buildMtfSnapshot(Instrument instrument) {
         try {
+            // Fire all three timeframe snapshots in parallel — no inter-dependency
+            // between H1 / H4 / Daily. Wall-clock ~= max(tfLatency) instead of sum.
+            CompletableFuture<IndicatorSnapshot> h1F = snapshotFuture(instrument, "1h");
+            CompletableFuture<IndicatorSnapshot> h4F = snapshotFuture(instrument, "4h");
+            CompletableFuture<IndicatorSnapshot> dF  = snapshotFuture(instrument, "1d");
+
+            try {
+                CompletableFuture.allOf(h1F, h4F, dF)
+                    .get(MTF_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.debug("MTF snapshot load timed out after {}ms for {} — using whatever is ready",
+                    MTF_TIMEOUT.toMillis(), instrument);
+            } catch (Exception ignored) {
+                // Individual futures handle their own errors and return null
+            }
+
+            IndicatorSnapshot h1 = h1F.getNow(null);
+            IndicatorSnapshot h4 = h4F.getNow(null);
+            IndicatorSnapshot daily = dF.getNow(null);
+
             String h1Swing = null, h1Internal = null, h1Break = null;
             String h4Swing = null, h4Break = null;
             String dailySwing = null;
             Double h1BreakConfidence = null, h4BreakConfidence = null;
             Boolean h1BreakConfirmed = null, h4BreakConfirmed = null;
 
-            // H1 snapshot (+ most recent break enrichment)
-            try {
-                IndicatorSnapshot h1 = indicatorService.computeSnapshot(instrument, "1h");
-                if (h1 != null) {
-                    h1Swing = h1.swingBias();
-                    h1Internal = h1.internalBias();
-                    h1Break = h1.lastBreakType();
-                    var latestH1Break = latestStructureBreak(h1);
-                    if (latestH1Break != null) {
-                        h1BreakConfidence = latestH1Break.breakConfidenceScore();
-                        h1BreakConfirmed = latestH1Break.confirmed();
-                    }
+            if (h1 != null) {
+                h1Swing = h1.swingBias();
+                h1Internal = h1.internalBias();
+                h1Break = h1.lastBreakType();
+                var latestH1Break = latestStructureBreak(h1);
+                if (latestH1Break != null) {
+                    h1BreakConfidence = latestH1Break.breakConfidenceScore();
+                    h1BreakConfirmed = latestH1Break.confirmed();
                 }
-            } catch (Exception e) {
-                log.trace("No H1 snapshot for {}: {}", instrument, e.getMessage());
             }
-
-            // H4 snapshot (+ most recent break enrichment)
-            try {
-                IndicatorSnapshot h4 = indicatorService.computeSnapshot(instrument, "4h");
-                if (h4 != null) {
-                    h4Swing = h4.swingBias();
-                    h4Break = h4.lastBreakType();
-                    var latestH4Break = latestStructureBreak(h4);
-                    if (latestH4Break != null) {
-                        h4BreakConfidence = latestH4Break.breakConfidenceScore();
-                        h4BreakConfirmed = latestH4Break.confirmed();
-                    }
+            if (h4 != null) {
+                h4Swing = h4.swingBias();
+                h4Break = h4.lastBreakType();
+                var latestH4Break = latestStructureBreak(h4);
+                if (latestH4Break != null) {
+                    h4BreakConfidence = latestH4Break.breakConfidenceScore();
+                    h4BreakConfirmed = latestH4Break.confirmed();
                 }
-            } catch (Exception e) {
-                log.trace("No H4 snapshot for {}: {}", instrument, e.getMessage());
             }
-
-            // Daily snapshot
-            try {
-                IndicatorSnapshot daily = indicatorService.computeSnapshot(instrument, "1d");
-                if (daily != null) {
-                    dailySwing = daily.swingBias();
-                }
-            } catch (Exception e) {
-                log.trace("No Daily snapshot for {}: {}", instrument, e.getMessage());
+            if (daily != null) {
+                dailySwing = daily.swingBias();
             }
 
             return new AgentContext.MtfSnapshot(
@@ -392,6 +490,18 @@ public class AgentOrchestratorService {
             log.debug("Failed to build MTF snapshot: {}", e.getMessage());
             return AgentContext.MtfSnapshot.empty();
         }
+    }
+
+    /** Async snapshot load that returns {@code null} on any failure — never throws. */
+    private CompletableFuture<IndicatorSnapshot> snapshotFuture(Instrument instrument, String tf) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return indicatorService.computeSnapshot(instrument, tf);
+            } catch (Exception e) {
+                log.trace("No {} snapshot for {}: {}", tf, instrument, e.getMessage());
+                return null;
+            }
+        }, agentExecutor);
     }
 
     private AgentContext.MomentumSnapshot buildMomentumSnapshot(IndicatorSnapshot snap) {

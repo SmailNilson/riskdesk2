@@ -22,52 +22,17 @@ import java.util.Map;
  *
  * <p>Falls back to a neutral MEDIUM verdict if Gemini is unavailable.
  */
-public class OrderFlowAIAgent implements TradingAgent {
+public class OrderFlowAIAgent implements Scorer {
 
     public static final String AGENT_NAME = "Order-Flow-AI";
-
-    private static final String SYSTEM_PROMPT = """
-        Rôle : Tu es un Analyste Order Flow Institutionnel spécialisé en scalping futures.
-        Tu évalues la qualité du flow en temps réel (ticks classifiés Lee-Ready + L2 depth
-        + absorption detector) par rapport à la direction du setup proposé.
-
-        ## Hiérarchie de confiance par source
-        - source="REAL_TICKS" : absorption, delta divergence, depth imbalance = signaux DÉCISIONNELS.
-        - source="CLV_ESTIMATED" : flow = INDICATIF seulement. Ne jamais valider HIGH confidence
-          uniquement sur CLV — max MEDIUM. Mentionner "CLV fallback" dans reasoning.
-
-        ## Règles
-        1. REAL_TICKS + absorption.side alignée avec direction + absorption.score>=2.0
-           + buy_ratio_pct dans le bon sens (>55 pour LONG, <45 pour SHORT) → HIGH.
-        2. REAL_TICKS + delta_divergence_detected opposée à la direction
-           (ex: price rising + BEARISH_DIVERGENCE sur un LONG) → LOW, flags.size_pct=0.003.
-        3. REAL_TICKS + absorption.side opposite à direction → LOW
-           (les institutionnels absorbent contre notre trade).
-        4. REAL_TICKS + depth.depthImbalance contre la direction (LONG avec imbalance<-0.3,
-           ou SHORT avec imbalance>0.3) → reduce to LOW/MEDIUM.
-        5. REAL_TICKS + wall présent du côté TP (bidWall pour LONG, askWall pour SHORT) →
-           flags.wall_blocking_tp=true (TP peut rebondir).
-        6. CLV_ESTIMATED + momentum confirme seulement → MEDIUM, flags.data_quality="degraded".
-        7. momentum (rsi/macd/wt) qui contredit clairement (OVERBOUGHT sur LONG, OVERSOLD
-           sur SHORT) → abaisse d'un cran la confidence déterminée par le flow.
-
-        ## Sortie JSON OBLIGATOIRE
-        {
-          "confidence": "HIGH" | "MEDIUM" | "LOW",
-          "reasoning": "max 250 caractères, cite source, absorption/delta/depth",
-          "flags": {
-            "data_quality": "real_ticks" | "degraded",
-            "flow_supports": boolean,
-            "size_pct": number (optionnel, 0..0.01),
-            "wall_blocking_tp": boolean (optionnel)
-          }
-        }
-        """;
+    public static final String PROMPT_KEY = "order-flow";
 
     private final GeminiAgentPort port;
+    private final String systemPrompt;
 
-    public OrderFlowAIAgent(GeminiAgentPort port) {
+    public OrderFlowAIAgent(GeminiAgentPort port, String systemPrompt) {
         this.port = port;
+        this.systemPrompt = systemPrompt;
     }
 
     @Override
@@ -150,7 +115,7 @@ public class OrderFlowAIAgent implements TradingAgent {
         }
 
         AgentAiResponse ai = port.analyze(new AgentAiRequest(
-            AGENT_NAME, SYSTEM_PROMPT, payload, 500));
+            AGENT_NAME, systemPrompt, payload, 500));
 
         if (!ai.aiAvailable()) {
             // Deterministic fallback: flow-based heuristic
@@ -158,7 +123,8 @@ public class OrderFlowAIAgent implements TradingAgent {
         }
 
         Confidence conf = parseConfidence(ai.confidence());
-        return new AgentVerdict(name(), conf, direction, ai.reasoning(), ai.flags());
+        return new AgentVerdict(name(), conf, direction, ai.reasoning(),
+            AgentAdjustments.fromGeminiFlags(ai.flags()));
     }
 
     private AgentVerdict fallbackVerdict(Direction direction,
@@ -183,8 +149,8 @@ public class OrderFlowAIAgent implements TradingAgent {
             reasoning = "AI unavailable — fallback: flow not aligned";
         }
         return new AgentVerdict(name(), conf, direction, reasoning,
-            Map.of("fallback", true, "data_quality",
-                flow != null ? flow.source().toLowerCase() : "none"));
+            AgentAdjustments.flags(Map.of("fallback", true, "data_quality",
+                flow != null ? flow.source().toLowerCase() : "none")));
     }
 
     private static Confidence parseConfidence(String s) {

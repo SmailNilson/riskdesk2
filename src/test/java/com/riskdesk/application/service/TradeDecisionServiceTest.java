@@ -6,6 +6,7 @@ import com.riskdesk.domain.decision.port.DecisionNarratorPort;
 import com.riskdesk.domain.decision.port.NarratorRequest;
 import com.riskdesk.domain.decision.port.NarratorResponse;
 import com.riskdesk.domain.decision.port.TradeDecisionRepositoryPort;
+import com.riskdesk.domain.engine.playbook.agent.AgentAdjustments;
 import com.riskdesk.domain.engine.playbook.agent.AgentVerdict;
 import com.riskdesk.domain.engine.playbook.model.*;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,7 +40,7 @@ class TradeDecisionServiceTest {
     @Test
     void record_persistsDecision_withNarrationAndDoneStatus() {
         FinalVerdict verdict = verdict("ELIGIBLE", 0.01,
-            List.of(new AgentVerdict("MTF", Confidence.HIGH, Direction.LONG, "h1+h4 bullish", Map.of())));
+            List.of(new AgentVerdict("MTF", Confidence.HIGH, Direction.LONG, "h1+h4 bullish", AgentAdjustments.none())));
         narrator.nextResponse = new NarratorResponse("Narratif OK", "gemini-3.1-pro-preview", 320L, true);
 
         Optional<TradeDecision> saved = service.record(verdict, playbook(Direction.LONG, 6), "MCL", "10m");
@@ -79,8 +80,8 @@ class TradeDecisionServiceTest {
     @Test
     void record_capturesAgentVerdictsAsJson() {
         FinalVerdict verdict = verdict("ELIGIBLE", 0.005, List.of(
-            new AgentVerdict("MTF", Confidence.HIGH, Direction.LONG, "triple confluence", Map.of("align", 3)),
-            new AgentVerdict("OrderFlow", Confidence.MEDIUM, Direction.LONG, "CVD rising", Map.of())
+            new AgentVerdict("MTF", Confidence.HIGH, Direction.LONG, "triple confluence", AgentAdjustments.flags(Map.of("align", 3))),
+            new AgentVerdict("OrderFlow", Confidence.MEDIUM, Direction.LONG, "CVD rising", AgentAdjustments.none())
         ));
         narrator.nextResponse = new NarratorResponse("ok", "model", 10L, true);
 
@@ -166,7 +167,7 @@ class TradeDecisionServiceTest {
     @Test
     void narrator_receivesAgentLinesInRequest() {
         AgentVerdict mtf = new AgentVerdict("MTF Confluence", Confidence.HIGH,
-            Direction.LONG, "h1 bullish + BOS confirmed", Map.of());
+            Direction.LONG, "h1 bullish + BOS confirmed", AgentAdjustments.none());
         FinalVerdict verdict = verdict("ELIGIBLE", 0.01, List.of(mtf));
         narrator.nextResponse = new NarratorResponse("ok", "m", 10L, true);
 
