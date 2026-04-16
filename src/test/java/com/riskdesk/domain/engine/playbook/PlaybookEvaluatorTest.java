@@ -189,6 +189,63 @@ class PlaybookEvaluatorTest {
         assertTrue(result.checklistScore() > 0);
     }
 
+    // ── PR-8 · Late-entry detection ─────────────────────────────────────
+
+    @Test
+    void evaluate_flagsLateEntry_whenPriceAdvancedBeyondEntry() {
+        // Setup: bullish OB at 91.03–94.71 (zoneMid = 92.87 = planned entry).
+        // lastPrice = 94.00 → price has advanced 1.13 past entry on a 1.50 ATR.
+        // Tolerance = 0.5 × 1.50 = 0.75. 1.13 > 0.75 → LATE.
+        SmcOrderBlock ob = new SmcOrderBlock("BULLISH", "ACTIVE",
+            bd("94.71"), bd("91.03"), bd("92.87"), null);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("94.00"),
+            List.of(), List.of(ob), List.of(), List.of(), List.of(), List.of(),
+            111.2, 100.0, 117.0, "BUYING", bd("0.65"), "DISCOUNT", null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        assertNotNull(result.bestSetup());
+        assertTrue(result.lateEntry(),
+            "Price has advanced past entry by more than 0.5×ATR — should flag late");
+        assertTrue(result.verdict().startsWith("LATE ENTRY — "),
+            "Verdict must surface the late-entry warning as a prefix: " + result.verdict());
+    }
+
+    @Test
+    void evaluate_doesNotFlagLateEntry_whenPriceInZone() {
+        // lastPrice = 93.00 is already inside the zone, near entry (92.87).
+        // Advance = 0.13 << 0.75 tolerance → NOT late.
+        SmcOrderBlock ob = new SmcOrderBlock("BULLISH", "ACTIVE",
+            bd("94.71"), bd("91.03"), bd("92.87"), null);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("93.00"),
+            List.of(), List.of(ob), List.of(), List.of(), List.of(), List.of(),
+            111.2, 100.0, 117.0, "BUYING", bd("0.65"), "DISCOUNT", null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        assertNotNull(result.bestSetup());
+        assertFalse(result.lateEntry(),
+            "Price is at entry — fresh setup, not late");
+        assertFalse(result.verdict().startsWith("LATE ENTRY"),
+            "Verdict should not carry the late-entry prefix: " + result.verdict());
+    }
+
+    @Test
+    void evaluate_noSetup_isNotFlaggedLate() {
+        PlaybookInput input = minimalInput(null, bd("97.00"), null, null);
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        assertNull(result.bestSetup());
+        assertFalse(result.lateEntry(),
+            "No setup → no late-entry flag (nothing to be late on)");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private static BigDecimal bd(String val) {
