@@ -282,6 +282,12 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}${await readErrorSuffix(res)}`);
+  return res.json();
+}
+
 async function readErrorSuffix(res: Response) {
   try {
     const data = await res.clone().json();
@@ -786,6 +792,10 @@ export const api = {
   getCorrelationHistory: () =>
     get<CorrelationSignal[]>('/api/correlation/oil-nasdaq/history'),
   refreshDb: () => post<{ status: string; message: string }>('/api/backtest/refresh-db', {}),
+  purgeInstrument: (instrument: string) =>
+    del<{ instrument?: string; purged?: number; error?: string }>(
+      `/api/backtest/purge/${encodeURIComponent(instrument)}`
+    ),
   runBacktest: (params: {
     instrument?: string; timeframe?: string; pyramiding?: number; continuous?: boolean;
     n1?: number; n2?: number; nsc?: number; nsv?: number; qty?: number; capital?: number; pointValue?: number;
