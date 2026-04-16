@@ -397,4 +397,197 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().errors())
             .anySatisfy(e -> assertThat(e).contains("tronquée"));
     }
+
+    // ── Truncated-but-validated: the "missed trade" diagnostic ──────────────
+
+    @Test
+    void analyze_recoveredResponseWithEligibleVerdict_countsAsMissedTrade() throws Exception {
+        // Reproduces Opus audit #3460 — E6 1h SHORT where Gemini had written
+        // "executionEligibilityStatus": "ELIGIBLE" in the raw text but the
+        // response was truncated before the plan fields were serialized. The
+        // system still lands on MENTOR_UNAVAILABLE (safe) but the diagnostics
+        // counter must record it as a missed trade.
+        mentorProperties.setPersistAudits(false);
+        MentorParseMetrics metrics = new MentorParseMetrics();
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository,
+            mentorProperties, objectMapper, metrics);
+
+        String truncatedWithEligible = "{"
+            + "\"technicalQuickAnalysis\": \"Confluence macro baissière forte alignée avec CHoCH baissier.\","
+            + "\"verdict\": \"Trade Validé - Discipline Respectée\","
+            + "\"executionEligibilityStatus\": \"ELIGIBLE\","
+            + "\"executionEligibilityReason\": \"";  // truncated mid-string
+
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", truncatedWithEligible));
+
+        service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "6E1!"}, "trade_intention": {"action": "SHORT"}}
+            """));
+
+        MentorParseMetrics.Snapshot snap = metrics.snapshot();
+        assertThat(snap.recovered()).isEqualTo(1);
+        assertThat(snap.missedTrades())
+            .as("truncated response carried an ELIGIBLE verdict — must be counted")
+            .isEqualTo(1);
+    }
+
+    @Test
+    void analyze_recoveredResponseWithoutEligibleVerdict_doesNotCountAsMissedTrade() throws Exception {
+        // A truncated response that was never going to validate the trade
+        // must NOT bump the missed-trade counter.
+        mentorProperties.setPersistAudits(false);
+        MentorParseMetrics metrics = new MentorParseMetrics();
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository,
+            mentorProperties, objectMapper, metrics);
+
+        String truncatedIneligible = "{"
+            + "\"technicalQuickAnalysis\": \"Setup invalidé — RSI overbought.\","
+            + "\"verdict\": \"Trade Non-Conforme - Erreur de Processus\","
+            + "\"executionEligibilityStatus\": \"INELIGIBLE\","
+            + "\"executionEligibilityReason\": \"";  // truncated mid-string
+
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", truncatedIneligible));
+
+        service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MNQ1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        MentorParseMetrics.Snapshot snap = metrics.snapshot();
+        assertThat(snap.recovered()).isEqualTo(1);
+        assertThat(snap.missedTrades())
+            .as("INELIGIBLE in raw text — no tradeable setup was dropped")
+            .isZero();
+    }
+
+    @Test
+    void wasValidatedBeforeTruncation_ignoresIneligibleSubstring() {
+        // Guard against the trivial "INELIGIBLE" containing "ELIGIBLE".
+        String raw = "{\"executionEligibilityStatus\": \"INELIGIBLE\", \"verdict\": \"Trade Non";
+        assertThat(MentorAnalysisService.wasValidatedBeforeTruncation(raw)).isFalse();
+    }
+
+    @Test
+    void wasValidatedBeforeTruncation_detectsTradeValideLiteral() {
+        // The French literal verdict string is a second signal, useful when
+        // the status field comes AFTER the verdict and is lost to truncation.
+        String raw = "{\"verdict\": \"Trade Validé - Discipline Respectée\", \"executionEligibility";
+        assertThat(MentorAnalysisService.wasValidatedBeforeTruncation(raw)).isTrue();
+    }
+
+    // ── Inverse bias hint (Opus audit #3496) ────────────────────────────────
+
+    @Test
+    void analyze_rejectedLongWithBearishErrors_populatesInverseShortHint() throws Exception {
+        mentorProperties.setPersistAudits(false);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository,
+            mentorProperties, objectMapper, new MentorParseMetrics());
+
+        // Mirrors prod E6 1h WT LONG rejection — four bearish contradictions
+        // that should surface a SHORT hint.
+        String rawJson = """
+            {
+              "technicalQuickAnalysis": "Tendance H1 haussière mais prix en zone PREMIUM suite à CHoCH baissier.",
+              "strengths": ["Tendance H1 globale haussière."],
+              "errors": [
+                "Divergence baissière détectée sur l'Order Flow réel (BEARISH_DIVERGENCE).",
+                "Dernier événement structurel est un CHoCH baissier.",
+                "Buy ratio faible (43.2%) indiquant un manque de pression acheteuse agressive.",
+                "DXY haussier (0.137%) tiré par la faiblesse de l'EUR, ce qui est baissier pour 6E."
+              ],
+              "verdict": "Trade Non-Conforme - Erreur de Processus",
+              "executionEligibilityStatus": "INELIGIBLE",
+              "executionEligibilityReason": "Divergence baissière de l'Order Flow réel.",
+              "improvementTip": "Attendre un retour sur le FVG haussier."
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+
+        MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "6E1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        assertThat(response.analysis().inverseBiasHint())
+            .as("Four bearish contradictions must surface a SHORT hint")
+            .isNotNull();
+        assertThat(response.analysis().inverseBiasHint().direction()).isEqualTo("SHORT");
+        assertThat(response.analysis().inverseBiasHint().supportingErrors()).hasSize(4);
+        assertThat(response.analysis().inverseBiasHint().confidenceScore()).isGreaterThanOrEqualTo(1.0);
+    }
+
+    @Test
+    void analyze_eligibleTrade_doesNotProduceInverseHint() throws Exception {
+        // Don't annotate validated trades — the inverse is implicitly not on
+        // the table when Gemini agreed with the requested direction.
+        mentorProperties.setPersistAudits(false);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository,
+            mentorProperties, objectMapper, new MentorParseMetrics());
+
+        String rawJson = """
+            {
+              "technicalQuickAnalysis": "Setup propre, flow acheteur confirmé.",
+              "strengths": ["Flow acheteur", "Structure OK"],
+              "errors": ["bearish divergence mineure", "CHoCH baissier ancien", "distribution"],
+              "verdict": "Trade Validé - Discipline Respectée",
+              "executionEligibilityStatus": "ELIGIBLE",
+              "executionEligibilityReason": "Plan complet.",
+              "proposedTradePlan": {
+                "entryPrice": 3012.5, "stopLoss": 3005.0, "takeProfit": 3035.0,
+                "rewardToRiskRatio": 3.0, "rationale": "Entry on pullback."
+              }
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+
+        MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        assertThat(response.analysis().executionEligibilityStatus()).isEqualTo(ExecutionEligibilityStatus.ELIGIBLE);
+        assertThat(response.analysis().inverseBiasHint())
+            .as("ELIGIBLE verdict — inverse hint suppressed")
+            .isNull();
+    }
+
+    @Test
+    void analyze_rejectedWithInsufficientContradictions_noInverseHint() throws Exception {
+        mentorProperties.setPersistAudits(false);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository,
+            mentorProperties, objectMapper, new MentorParseMetrics());
+
+        String rawJson = """
+            {
+              "technicalQuickAnalysis": "RSI overbought — attendre pullback.",
+              "strengths": ["Trend OK"],
+              "errors": ["RSI overbought"],
+              "verdict": "Trade Non-Conforme - Erreur de Processus",
+              "executionEligibilityStatus": "INELIGIBLE",
+              "executionEligibilityReason": "Attendre repli structurel.",
+              "improvementTip": "Patience."
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+
+        MentorAnalyzeResponse response = service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MNQ1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        assertThat(response.analysis().inverseBiasHint())
+            .as("Only 1 contradiction — below threshold, no hint")
+            .isNull();
+    }
 }

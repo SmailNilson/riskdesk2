@@ -27,6 +27,13 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>{@link #recordSuccess()} — strict JSON parse succeeded.</li>
  *   <li>{@link #recordRecovered()} — partial JSON repair salvaged some fields.</li>
  *   <li>{@link #recordFailure()} — could not consume the reply at all.</li>
+ *   <li>{@link #recordTruncatedButValidated()} — recovered response whose raw text
+ *       carried an {@code ELIGIBLE} / {@code Trade Validé} verdict that we then
+ *       had to force to {@code MENTOR_UNAVAILABLE} because the trade plan was
+ *       lost in the truncation. This is the "missed trade" counter: it lets
+ *       operators see how many tradeable setups the system is throwing away
+ *       because of response-size pressure, independently of the overall parse-
+ *       failure ratio.</li>
  * </ul>
  */
 @Component
@@ -42,6 +49,10 @@ public class MentorParseMetrics {
     private final AtomicLong success = new AtomicLong();
     private final AtomicLong recovered = new AtomicLong();
     private final AtomicLong failure = new AtomicLong();
+    // "Missed trade" counter: recovered responses where Gemini had explicitly
+    // validated the trade (ELIGIBLE / Trade Validé) but the plan was lost in
+    // the truncation, forcing us to mark them MENTOR_UNAVAILABLE anyway.
+    private final AtomicLong truncatedButValidated = new AtomicLong();
     // Flips true on the first call that crosses the warn threshold, reset to
     // false once the ratio drops back below it. Ensures we log one line per
     // breach transition instead of one line per call while the ratio sits
@@ -62,13 +73,26 @@ public class MentorParseMetrics {
         checkFailureRatio();
     }
 
+    /**
+     * Records a recovered response that carried an explicit positive verdict
+     * ({@code ELIGIBLE} / {@code Trade Validé}) in its raw text but had to be
+     * forced to {@code MENTOR_UNAVAILABLE} because the trade plan couldn't
+     * be reconstructed. Surfaces as {@code missedTrades} in the snapshot.
+     * Always paired with {@link #recordRecovered()} — callers must not call
+     * this instead of it.
+     */
+    public void recordTruncatedButValidated() {
+        truncatedButValidated.incrementAndGet();
+    }
+
     public Snapshot snapshot() {
         long s = success.get();
         long r = recovered.get();
         long f = failure.get();
+        long missed = truncatedButValidated.get();
         long total = s + r + f;
         double techFailureRatio = total == 0 ? 0.0 : (double) (r + f) / (double) total;
-        return new Snapshot(s, r, f, total, techFailureRatio);
+        return new Snapshot(s, r, f, total, techFailureRatio, missed);
     }
 
     private void checkFailureRatio() {
@@ -94,5 +118,12 @@ public class MentorParseMetrics {
         }
     }
 
-    public record Snapshot(long success, long recovered, long failure, long total, double techFailureRatio) {}
+    public record Snapshot(
+        long success,
+        long recovered,
+        long failure,
+        long total,
+        double techFailureRatio,
+        long missedTrades
+    ) {}
 }
