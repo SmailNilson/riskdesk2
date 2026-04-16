@@ -68,9 +68,13 @@ public class GeminiNarrator implements DecisionNarratorPort {
                     Map.of("role", "user",
                            "parts", List.of(Map.of("text", userPrompt)))
                 ),
+                // thinkingBudget pinned: Gemini 3.x thinking models otherwise
+                // consume output tokens for their reasoning trace, truncating
+                // the narrative JSON (same root cause as mentor client).
                 "generationConfig", Map.of(
                     "temperature", 0.1,
                     "maxOutputTokens", MAX_OUTPUT_TOKENS,
+                    "thinkingConfig", Map.of("thinkingBudget", properties.getThinkingBudget()),
                     "responseMimeType", "application/json",
                     "responseSchema", buildResponseSchema()
                 )
