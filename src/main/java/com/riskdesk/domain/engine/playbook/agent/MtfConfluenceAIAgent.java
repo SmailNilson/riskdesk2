@@ -71,7 +71,7 @@ public class MtfConfluenceAIAgent implements Scorer {
         payload.put("mtf", mtfMap);
 
         AgentAiResponse ai = port.analyze(new AgentAiRequest(
-            AGENT_NAME, systemPrompt, payload, 500));
+            AGENT_NAME, systemPrompt, payload, 1500));
 
         if (!ai.aiAvailable()) {
             // Deterministic fallback: use alignment score only
