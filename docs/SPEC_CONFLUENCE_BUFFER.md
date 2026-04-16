@@ -1,8 +1,8 @@
 # SPEC — Confluence Engine (Signal Buffer) pour Mentor Reviews
 
 **Auteur**: PO + BA + Architecte + Dev
-**Date**: 2026-04-06
-**Status**: VALIDÉ — prêt pour implémentation
+**Date**: 2026-04-06 (weights revised 2026-04-16 after standalone-signal tuning)
+**Status**: VALIDÉ — implémenté; section 2.3 mise à jour pour refléter le code actuel
 
 ---
 
@@ -50,16 +50,21 @@ Remplacer `captureGroupReview()` synchrone par un buffer par clé `(instrument, 
 - **Signaux opposés** (LONG + SHORT) → buffers séparés, les deux peuvent flusher si >= 3.0 chacun
 - **Pas de flush forcé à la clôture de bougie** — les signaux décalés ne doivent pas être ratés
 
-### 2.3 Système de poids
+### 2.3 Système de poids (révisé 2026-04-16)
 
 **Seuil de déclenchement : poids cumulé >= 3.0**
 
-| Signal | Poids | Famille | Règle de non-cumul |
-|--------|-------|---------|-------------------|
-| ORDER_BLOCK (mitigation/invalidation) | **3.0** | Structure | — |
-| CHoCH | **2.0** | SMC | — |
-| WAVETREND (cross/extrêmes) | **2.0** | Oscillateur | — |
-| BOS | **1.5** | SMC | — |
+Les poids ont été rehaussés après tuning backtest pour que les signaux
+structurels majeurs (ORDER_BLOCK, CHoCH, BOS) déclenchent un flush
+**immédiat** (standalone trigger) et que WAVETREND soit quasi-standalone
+(il lui faut +0.5 de secondaire pour atteindre 3.0).
+
+| Signal | Poids | Famille | Notes |
+|--------|-------|---------|-------|
+| ORDER_BLOCK (mitigation/invalidation) | **3.0** | Structure | Standalone trigger |
+| CHoCH | **3.0** | SMC | Standalone trigger (relevé de 2.0 → 3.0) |
+| BOS | **3.0** | SMC | Standalone trigger — 100% win rate en backtest (relevé de 1.5 → 3.0) |
+| WAVETREND (cross/extrêmes) | **2.5** | Oscillateur | Near-standalone — exige +0.5 de secondaire |
 | EQH/EQL Sweep | 1.0 | Liquidité | — |
 | FVG | 1.0 | Structure | — |
 | Supertrend flip | 1.0 | Tendance | — |
@@ -68,9 +73,15 @@ Remplacer `captureGroupReview()` synchrone par un buffer par clé `(instrument, 
 | MACD cross | 1.0 | **Momentum** | **Max 1 avec EMA** |
 | Chaikin Osc cross | 1.0 | **Flow** | **Max 1 avec Delta Flow** |
 | Delta Flow shift | 1.0 | **Flow** | **Max 1 avec Chaikin** |
-| RSI (extrêmes) | 0.5 | Oscillateur | — |
+| RSI (extrêmes) | **1.0** | Oscillateur_RSI | Relevé de 0.5 → 1.0 |
 
 **Règle de non-cumul** : au sein d'une même famille (Momentum, Flow), un seul signal compte dans le poids total. EMA cross + MACD cross = 1.0, pas 2.0.
+
+**Structural-anchor gate** (non dans la spec v1) : un buffer qui atteint 3.0
+uniquement via des signaux oscillateur/momentum **sans** ancre structurelle
+(ORDER_BLOCK / CHoCH / BOS / WAVETREND) est rejeté à l'emission avec un log
+`info` — protection contre les flush chop-based. Source de vérité : voir
+`SignalConfluenceBuffer#hasStructuralAnchor`.
 
 ### 2.4 Signal Primary
 
