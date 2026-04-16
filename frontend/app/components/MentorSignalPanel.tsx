@@ -713,6 +713,11 @@ export default function MentorSignalPanel({
                             executionEligibilityStatus={review.executionEligibilityStatus}
                           />
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
+                          <TrailingChip
+                            result={review.trailingStopResult}
+                            exitPrice={review.trailingExitPrice}
+                            bestFavorable={review.bestFavorablePrice}
+                          />
                           <ExecutionChip execution={executionsByReviewId[review.id]} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {formatTime(review.createdAt, timezone.tz)}
@@ -1039,6 +1044,47 @@ function SimulationChip({
   return (
     <span className={`rounded px-2 py-1 text-[10px] ${cls}`}>
       {label}{showDrawdown ? ` −${maxDrawdown.toFixed(1)}pts` : ''}
+    </span>
+  );
+}
+
+/**
+ * Dual-track trailing-stop outcome — runs in parallel with the fixed SL/TP
+ * simulation. See CLAUDE.md § "Trailing Stop (Dual-Track)" for the spec.
+ *
+ * - TRAILING_WIN  — trailing stop exited above break-even (better than fixed TP sometimes)
+ * - TRAILING_BE   — trailing stop exited at / near entry
+ * - TRAILING_LOSS — trailing never activated (price never reached +0.5R) or hit initial SL
+ *
+ * Hides when the trailing track has not yet resolved. MFE (Maximum Favorable
+ * Excursion = best price reached) is shown as a tooltip for quick context.
+ */
+function TrailingChip({
+  result,
+  exitPrice,
+  bestFavorable,
+}: {
+  result: MentorSignalReview['trailingStopResult'];
+  exitPrice: number | null;
+  bestFavorable: number | null;
+}) {
+  if (!result) return null;
+
+  const configs: Record<NonNullable<MentorSignalReview['trailingStopResult']>, { label: string; cls: string }> = {
+    TRAILING_WIN:  { label: 'Trail WIN',  cls: 'bg-emerald-950/40 text-emerald-300/80 border border-emerald-800/40' },
+    TRAILING_BE:   { label: 'Trail BE',   cls: 'bg-zinc-900/60 text-zinc-300 border border-zinc-700/40' },
+    TRAILING_LOSS: { label: 'Trail LOSS', cls: 'bg-red-950/40 text-red-300/80 border border-red-800/40' },
+  };
+  const { label, cls } = configs[result];
+
+  const tooltipParts: string[] = [];
+  if (bestFavorable != null) tooltipParts.push(`MFE ${bestFavorable.toFixed(2)}`);
+  if (exitPrice != null) tooltipParts.push(`exit ${exitPrice.toFixed(2)}`);
+  const tooltip = tooltipParts.join(' · ');
+
+  return (
+    <span className={`rounded px-2 py-1 text-[10px] ${cls}`} title={tooltip || undefined}>
+      {label}
     </span>
   );
 }
