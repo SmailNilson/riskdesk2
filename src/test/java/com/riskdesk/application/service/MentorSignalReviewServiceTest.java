@@ -480,61 +480,6 @@ class MentorSignalReviewServiceTest {
         assertThat(reviewCaptor.getValue().getSelectedTimezone()).isEqualTo("UTC");
     }
 
-    @Test
-    void captureGroupReview_preservesPrimaryAlertKeyForGroupedAlerts() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
-        service.setAutoAnalysisEnabled(true);
-
-        Instant primaryTimestamp = Instant.now();
-        Alert primary = new Alert(
-            "ob:mitigated:MCL:10m",
-            AlertSeverity.INFO,
-            "MCL [10m] Bearish order block mitigated",
-            AlertCategory.ORDER_BLOCK,
-            "MCL",
-            primaryTimestamp
-        );
-        Alert confirmation = new Alert(
-            "wt:bearish:MCL:10m",
-            AlertSeverity.INFO,
-            "MCL [10m] WaveTrend Bearish Cross",
-            AlertCategory.WAVETREND,
-            "MCL",
-            primaryTimestamp.plusSeconds(10)
-        );
-
-        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
-        when(reviewRepository.save(any())).thenAnswer(invocation -> {
-            MentorSignalReviewRecord record = invocation.getArgument(0);
-            if (record.getId() == null) {
-                record.setId(88L);
-            }
-            return record;
-        });
-
-        service.captureGroupReview(List.of(primary, confirmation), null);
-
-        ArgumentCaptor<MentorSignalReviewRecord> reviewCaptor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
-        verify(reviewRepository).save(reviewCaptor.capture());
-        assertThat(reviewCaptor.getValue().getAlertKey())
-            .isEqualTo(primaryTimestamp + ":MCL:ORDER_BLOCK:MCL [10m] Bearish order block mitigated");
-        assertThat(reviewCaptor.getValue().getMessage()).isEqualTo(primary.message());
-        assertThat(reviewCaptor.getValue().getAlertTimestamp()).isEqualTo(primaryTimestamp);
-        assertThat(reviewCaptor.getValue().getCategory()).isEqualTo("ORDER_BLOCK");
-    }
 
     // -- captureBehaviourReview tests --
 

@@ -153,33 +153,6 @@ public class MentorSignalReviewService {
     }
 
     /**
-     * Batch-capture: groups alerts by direction and creates ONE combined review
-     * per direction instead of one per indicator.
-     * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
-     * so the semantic dedup prevents re-review after restart.
-     */
-    @Deprecated
-    public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
-        // Group by direction (LONG/SHORT)
-        Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
-        for (Alert alert : alerts) {
-            String action = inferAction(alert.message());
-            if (action == null) continue;
-            byDirection.computeIfAbsent(action, k -> new ArrayList<>()).add(alert);
-        }
-
-        for (Map.Entry<String, List<Alert>> entry : byDirection.entrySet()) {
-            List<Alert> group = entry.getValue();
-            Alert primary = group.get(0);
-            // Persist the review against the exact primary alert shown in the live feed.
-            // The UI correlates reviews back to alert groups through the original
-            // timestamp/category/message triple, so rewriting any of those fields
-            // breaks review attachment and makes fresh groups appear as "No Review".
-            captureInitialReview(primary, focusSnapshot);
-        }
-    }
-
-    /**
      * Confluence Engine entry point — receives a consolidated batch of signals
      * from {@link SignalConfluenceBuffer} after the weight threshold is reached.
      * Standalone signals (weight 3.0) flush immediately; secondary signals

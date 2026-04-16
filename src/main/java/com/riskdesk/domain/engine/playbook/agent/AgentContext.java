@@ -83,13 +83,6 @@ public record AgentContext(
             return new MtfSnapshot(null, null, null, null, null, null, null, null, null, null);
         }
 
-        /** Legacy 6-arg constructor for backward-compat with existing rule-based code. */
-        public MtfSnapshot(String h1SwingBias, String h1InternalBias, String h4SwingBias,
-                           String dailySwingBias, String h1LastBreakType, String h4LastBreakType) {
-            this(h1SwingBias, h1InternalBias, h4SwingBias, dailySwingBias,
-                 h1LastBreakType, h4LastBreakType, null, null, null, null);
-        }
-
         /** Count of HTF biases agreeing with the given direction. */
         public int alignmentScore(String direction) {
             int score = 0;
@@ -130,17 +123,6 @@ public record AgentContext(
             );
         }
 
-        /** RSI divergence heuristic: price trending one way, RSI says the opposite. */
-        public boolean hasRsiBearishDivergence(String swingBias) {
-            return "BULLISH".equalsIgnoreCase(swingBias)
-                && rsi != null && rsi.doubleValue() < 55;
-        }
-
-        public boolean hasRsiBullishDivergence(String swingBias) {
-            return "BEARISH".equalsIgnoreCase(swingBias)
-                && rsi != null && rsi.doubleValue() > 45;
-        }
-
         /** Momentum contradicts the trade direction. */
         public boolean momentumContradicts(String direction) {
             if ("LONG".equalsIgnoreCase(direction)) {
@@ -154,23 +136,6 @@ public record AgentContext(
                     || (macdHistogram != null && macdHistogram.doubleValue() > 0
                         && "BULLISH".equalsIgnoreCase(macdCrossover));
             }
-        }
-
-        /** Momentum confirms the trade direction. */
-        public boolean momentumConfirms(String direction) {
-            int confirms = 0;
-            if ("LONG".equalsIgnoreCase(direction)) {
-                if (macdHistogram != null && macdHistogram.doubleValue() > 0) confirms++;
-                if ("BULLISH".equalsIgnoreCase(macdCrossover)) confirms++;
-                if (rsi != null && rsi.doubleValue() > 40 && rsi.doubleValue() < 70) confirms++;
-                if (supertrendBullish) confirms++;
-            } else {
-                if (macdHistogram != null && macdHistogram.doubleValue() < 0) confirms++;
-                if ("BEARISH".equalsIgnoreCase(macdCrossover)) confirms++;
-                if (rsi != null && rsi.doubleValue() < 60 && rsi.doubleValue() > 30) confirms++;
-                if (!supertrendBullish) confirms++;
-            }
-            return confirms >= 2;
         }
     }
 
