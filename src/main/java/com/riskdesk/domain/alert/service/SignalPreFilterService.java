@@ -3,6 +3,8 @@ package com.riskdesk.domain.alert.service;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.SignalWeight;
+import com.riskdesk.domain.calendar.NewsBlackoutCalendar;
+import com.riskdesk.domain.calendar.NewsEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,6 +13,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -26,6 +29,14 @@ import java.util.regex.Pattern;
  *   If both LONG and SHORT signals appear for the same instrument within 60 seconds,
  *   the market is in range. Both signals are cancelled with a "Market Chop detected" log.
  *
+ * Rule 5 — Regime-Aware Noise Suppression:
+ *   In CHOPPY regimes, block oscillator/momentum families on LTF; structural signals always pass.
+ *
+ * Rule 6 — News Blackout (FOMC/NFP/CPI/ECB):
+ *   All signals are suppressed inside a configured pre/post-event window around scheduled
+ *   high-impact macro events. Applied across every timeframe including H1, because news prints
+ *   crush structural setups just as hard as oscillator noise.
+ *
  * Rule 4 (Candle Close) is enforced inside IndicatorAlertEvaluator via candle timestamp tracking.
  * Rule 2 (Dynamic Cooldown) is enforced inside AlertDeduplicator via timeframe-aware shouldFire().
  */
@@ -36,6 +47,18 @@ public class SignalPreFilterService {
 
     /** Tracks recent signal directions per instrument+timeframe key for anti-chop detection. */
     private final Map<DirectionKey, Deque<DirectionEntry>> recentDirections = new ConcurrentHashMap<>();
+
+    private final NewsBlackoutCalendar newsBlackoutCalendar;
+
+    public SignalPreFilterService() {
+        this(NewsBlackoutCalendar.disabled());
+    }
+
+    public SignalPreFilterService(NewsBlackoutCalendar newsBlackoutCalendar) {
+        this.newsBlackoutCalendar = newsBlackoutCalendar == null
+            ? NewsBlackoutCalendar.disabled()
+            : newsBlackoutCalendar;
+    }
 
     public record FilterResult(boolean allowed, String reason) {}
 
@@ -107,6 +130,20 @@ public class SignalPreFilterService {
     private FilterResult applyFilters(Alert alert, String timeframe, String h1Trend,
                                       boolean isLtf, String regime) {
         String direction = extractDirection(alert);
+
+        // Rule 6: News Blackout — evaluated first so we never waste HTF/anti-chop/regime
+        // reasoning on signals that are about to be wiped out by a scheduled news print.
+        // Applies to every timeframe (H1 included) because FOMC/NFP crushes structural
+        // setups just as hard as oscillator noise.
+        Optional<NewsEvent> blackout = newsBlackoutCalendar.activeBlackout(Instant.now());
+        if (blackout.isPresent()) {
+            NewsEvent event = blackout.get();
+            log.debug("NEWS-BLACKOUT [{}] blocked '{}' — active event '{}' @ {} ({})",
+                    timeframe, alert.message(), event.name(), event.timestamp(), event.impact());
+            return new FilterResult(false,
+                    "News blackout: " + event.name() + " @ " + event.timestamp()
+                            + " (" + event.impact() + ")");
+        }
 
         // Rule 5: Regime-Aware Noise Suppression — block oscillator/momentum signals
         // in CHOPPY regimes where they produce only whipsaw noise.
