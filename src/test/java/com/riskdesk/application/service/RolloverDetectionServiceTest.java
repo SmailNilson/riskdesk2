@@ -2,7 +2,6 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.event.ContractRolloverEvent;
-import com.riskdesk.domain.contract.port.ActiveContractSnapshotStore;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -29,7 +28,6 @@ class RolloverDetectionServiceTest {
     @Mock private SimpMessagingTemplate messagingTemplate;
     @Mock private ApplicationEventPublisher eventPublisher;
     @Mock private HistoricalDataService historicalDataService;
-    @Mock private ActiveContractSnapshotStore snapshotStore;
 
     private RolloverDetectionService service;
 
@@ -38,7 +36,7 @@ class RolloverDetectionServiceTest {
         service = new RolloverDetectionService(
                 contractRegistry, resolver, openInterestProvider,
                 ibkrProperties, messagingTemplate, eventPublisher,
-                historicalDataService, snapshotStore, 32, false);
+                historicalDataService, 32, false);
     }
 
     @Test
@@ -50,8 +48,6 @@ class RolloverDetectionServiceTest {
 
         verify(contractRegistry).confirmRollover(Instrument.MCL, "202609");
         verify(resolver).refreshToMonth(Instrument.MCL, "202609");
-        verify(snapshotStore).save(eq(Instrument.MCL), eq("202609"),
-                eq(ActiveContractSnapshotStore.Source.ROLLOVER_CONFIRM), any());
 
         ArgumentCaptor<ContractRolloverEvent> captor = ArgumentCaptor.forClass(ContractRolloverEvent.class);
         verify(eventPublisher).publishEvent(captor.capture());
