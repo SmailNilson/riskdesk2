@@ -16,6 +16,7 @@ import com.riskdesk.application.service.MentorAnalysisService;
 import com.riskdesk.application.service.MentorIntermarketService;
 import com.riskdesk.application.service.MentorMemoryService;
 import com.riskdesk.application.service.MentorManualReviewService;
+import com.riskdesk.application.service.MentorParseMetrics;
 import com.riskdesk.application.service.MentorSignalReviewService;
 import com.riskdesk.application.service.SubmitEntryOrderCommand;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
@@ -56,6 +57,7 @@ public class MentorController {
     private final MentorSignalReviewService mentorSignalReviewService;
     private final ExecutionManagerService executionManagerService;
     private final TradeSimulationService tradeSimulationService;
+    private final MentorParseMetrics parseMetrics;
 
     public MentorController(MentorAnalysisService mentorAnalysisService,
                             MentorIntermarketService mentorIntermarketService,
@@ -65,7 +67,8 @@ public class MentorController {
                             MentorManualReviewService mentorManualReviewService,
                             MentorSignalReviewService mentorSignalReviewService,
                             ExecutionManagerService executionManagerService,
-                            TradeSimulationService tradeSimulationService) {
+                            TradeSimulationService tradeSimulationService,
+                            MentorParseMetrics parseMetrics) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.mentorIntermarketService = mentorIntermarketService;
         this.historicalDataService = historicalDataService;
@@ -75,6 +78,7 @@ public class MentorController {
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.executionManagerService = executionManagerService;
         this.tradeSimulationService = tradeSimulationService;
+        this.parseMetrics = parseMetrics;
     }
 
     @PostMapping("/analyze")
@@ -267,6 +271,17 @@ public class MentorController {
     @GetMapping("/simulation/trailing-stats")
     public TrailingStopStatsResponse getTrailingStats(@RequestParam(defaultValue = "7") int days) {
         return tradeSimulationService.computeTrailingStats(days);
+    }
+
+    /**
+     * Snapshot of Gemini response parse-success/failure counters.
+     * Use this to detect silent mentor degradations: when the tech-failure
+     * ratio climbs, the UI will be masking technical failures as rejections.
+     * Healthy steady state is &lt;5%; alert threshold is 10%.
+     */
+    @GetMapping("/diagnostics/parse-stats")
+    public MentorParseMetrics.Snapshot getParseStats() {
+        return parseMetrics.snapshot();
     }
 
     private Alert buildAlert(MentorAlertReviewRequest request) {
