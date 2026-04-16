@@ -12,6 +12,10 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,19 +30,56 @@ import java.util.Optional;
 @Service
 public class ExecutionManagerService {
 
+    private static final Logger log = LoggerFactory.getLogger(ExecutionManagerService.class);
+
+    /** Default entry-limit buffer: no shift — exact mentor level. */
+    static final int DEFAULT_ENTRY_LIMIT_BUFFER_TICKS = 0;
+
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final IbkrOrderService ibkrOrderService;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Signed number of ticks by which the entry LIMIT is shifted before being
+     * submitted to IBKR. Convention: positive value shifts the limit in the
+     * direction of the trade (LONG → higher, SHORT → lower), which improves
+     * fill probability at the cost of a slightly worse entry. Negative value
+     * shifts it against the trade (more patient, better entry, less likely to
+     * fill). Zero (default) submits the mentor's proposed level exactly as-is
+     * — this is backward-compatible with pre-PR-14 behaviour.
+     */
+    private final int entryLimitBufferTicks;
+
+    @Autowired
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
                                    IbkrOrderService ibkrOrderService,
-                                   ObjectMapper objectMapper) {
+                                   ObjectMapper objectMapper,
+                                   @Value("${riskdesk.execution.entry-limit-buffer-ticks:0}")
+                                   int entryLimitBufferTicks) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.ibkrOrderService = ibkrOrderService;
         this.objectMapper = objectMapper;
+        this.entryLimitBufferTicks = entryLimitBufferTicks;
+        if (entryLimitBufferTicks != 0) {
+            log.info("Execution entry-limit buffer active: {} ticks ({} fill)",
+                entryLimitBufferTicks,
+                entryLimitBufferTicks > 0 ? "more aggressive" : "more patient");
+        }
+    }
+
+    /**
+     * Test-only constructor preserving the pre-PR-14 contract — buffer defaults
+     * to {@link #DEFAULT_ENTRY_LIMIT_BUFFER_TICKS} (no shift).
+     */
+    public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
+                                   TradeExecutionRepositoryPort tradeExecutionRepository,
+                                   IbkrOrderService ibkrOrderService,
+                                   ObjectMapper objectMapper) {
+        this(reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper,
+            DEFAULT_ENTRY_LIMIT_BUFFER_TICKS);
     }
 
     public TradeExecutionRecord ensureExecutionCreated(CreateExecutionCommand command) {
@@ -83,7 +124,9 @@ public class ExecutionManagerService {
         candidate.setRequestedBy(blankToNull(command.requestedBy()));
         candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         candidate.setStatusReason("Execution foundation created. IBKR placement not started.");
-        candidate.setNormalizedEntryPrice(normalizeToTick(BigDecimal.valueOf(tradePlan.entryPrice()), instrument));
+        BigDecimal bufferedEntry = applyEntryLimitBuffer(
+            BigDecimal.valueOf(tradePlan.entryPrice()), instrument, review.getAction());
+        candidate.setNormalizedEntryPrice(normalizeToTick(bufferedEntry, instrument));
         candidate.setVirtualStopLoss(normalizeToTick(BigDecimal.valueOf(tradePlan.stopLoss()), instrument));
         candidate.setVirtualTakeProfit(normalizeToTick(BigDecimal.valueOf(tradePlan.takeProfit()), instrument));
         candidate.setDisasterStopPrice(null);
@@ -231,6 +274,38 @@ public class ExecutionManagerService {
         return price.divide(tickSize, 0, RoundingMode.HALF_UP)
             .multiply(tickSize)
             .setScale(tickSize.scale(), RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Shifts the mentor-proposed entry by {@link #entryLimitBufferTicks} in the
+     * signed direction of the trade before the price is tick-normalized.
+     *
+     * <p>Sign convention: positive buffer shifts <b>with</b> the trade direction
+     * (LONG → higher limit, SHORT → lower limit), trading a slightly worse
+     * entry for a higher chance of being filled. Negative buffer shifts against
+     * the trade for a better entry but lower fill probability. Zero leaves the
+     * mentor's level untouched.
+     *
+     * <p>For an unknown action label the buffer is ignored — no silent directional
+     * assumption when the data is garbled. A WARN is emitted so the operator
+     * notices: the order will still be submitted at the raw level rather than
+     * failing, so this preserves the pre-PR-14 behaviour for malformed reviews.
+     */
+    BigDecimal applyEntryLimitBuffer(BigDecimal entry, Instrument instrument, String action) {
+        if (entry == null || entryLimitBufferTicks == 0 || instrument == null) {
+            return entry;
+        }
+        BigDecimal shift = instrument.getTickSize()
+            .multiply(BigDecimal.valueOf(entryLimitBufferTicks));
+        if ("LONG".equalsIgnoreCase(action) || "BUY".equalsIgnoreCase(action)) {
+            return entry.add(shift);
+        }
+        if ("SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action)) {
+            return entry.subtract(shift);
+        }
+        log.warn("Entry-limit buffer skipped: unknown action '{}' — submitting raw mentor level {}",
+            action, entry);
+        return entry;
     }
 
     private String blankToNull(String value) {

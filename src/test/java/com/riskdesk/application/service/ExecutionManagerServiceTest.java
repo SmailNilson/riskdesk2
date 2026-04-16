@@ -10,6 +10,7 @@ import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
+import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -263,6 +265,134 @@ class ExecutionManagerServiceTest {
         assertThat(submitted.getEntryOrderId()).isEqualTo(44001L);
         assertThat(submitted.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
         assertThat(submitted.getEntrySubmittedAt()).isEqualTo(Instant.parse("2026-03-28T16:03:00Z"));
+    }
+
+    // ── PR-14 · Entry-limit buffer configurable ────────────────────────────
+
+    @Test
+    void entryLimitBuffer_defaultZero_unchangedFromPrePr14() {
+        // Default constructor keeps the pre-PR-14 behaviour: buffer = 0.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper);
+
+        BigDecimal raw = new BigDecimal("18123.38");
+        BigDecimal shifted = service.applyEntryLimitBuffer(raw, Instrument.MNQ, "LONG");
+
+        assertThat(shifted).isEqualByComparingTo(raw);
+    }
+
+    @Test
+    void entryLimitBuffer_positiveShiftsLongHigher() {
+        // Positive buffer = trade-direction shift.
+        // MNQ tick size is 0.25 → +2 ticks on LONG = +0.50 above mentor level.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 2);
+
+        BigDecimal shifted = service.applyEntryLimitBuffer(
+            new BigDecimal("18123.38"), Instrument.MNQ, "LONG");
+
+        assertThat(shifted).isEqualByComparingTo(new BigDecimal("18123.88"));
+    }
+
+    @Test
+    void entryLimitBuffer_positiveShiftsShortLower() {
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 2);
+
+        BigDecimal shifted = service.applyEntryLimitBuffer(
+            new BigDecimal("18123.38"), Instrument.MNQ, "SHORT");
+
+        assertThat(shifted).isEqualByComparingTo(new BigDecimal("18122.88"));
+    }
+
+    @Test
+    void entryLimitBuffer_negativeShiftsLongLower_moreConservativeFill() {
+        // Negative buffer = against-direction shift for better entry, less likely fill.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, -2);
+
+        BigDecimal shifted = service.applyEntryLimitBuffer(
+            new BigDecimal("18123.38"), Instrument.MNQ, "LONG");
+
+        assertThat(shifted).isEqualByComparingTo(new BigDecimal("18122.88"));
+    }
+
+    @Test
+    void entryLimitBuffer_acceptsBuyAndSellSynonyms() {
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 1);
+
+        BigDecimal buy = service.applyEntryLimitBuffer(
+            new BigDecimal("100.00"), Instrument.MCL, "BUY");
+        BigDecimal sell = service.applyEntryLimitBuffer(
+            new BigDecimal("100.00"), Instrument.MCL, "SELL");
+
+        // MCL tick size is 0.01 → +1 tick
+        assertThat(buy).isEqualByComparingTo(new BigDecimal("100.01"));
+        assertThat(sell).isEqualByComparingTo(new BigDecimal("99.99"));
+    }
+
+    @Test
+    void entryLimitBuffer_unknownAction_returnsRawEntry_noSilentGuess() {
+        // Guarantee: we never invent a direction when the label is garbled.
+        // Returning the raw entry is safe — pre-PR-14 behaviour for that field.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 5);
+
+        BigDecimal raw = new BigDecimal("18123.38");
+        BigDecimal result = service.applyEntryLimitBuffer(raw, Instrument.MNQ, "???");
+
+        assertThat(result).isEqualByComparingTo(raw);
+    }
+
+    @Test
+    void entryLimitBuffer_nullEntry_returnsNull_noNpe() {
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 2);
+
+        assertThat(service.applyEntryLimitBuffer(null, Instrument.MNQ, "LONG")).isNull();
+    }
+
+    @Test
+    void entryLimitBuffer_nullInstrument_returnsRawEntry_noNpe() {
+        // If instrument is unresolved upstream, we can't derive tick size; fall
+        // back to the raw entry rather than throwing. Callers will still invoke
+        // tick normalization using whatever instrument they have.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 2);
+
+        BigDecimal raw = new BigDecimal("18123.38");
+        assertThat(service.applyEntryLimitBuffer(raw, null, "LONG")).isEqualByComparingTo(raw);
+    }
+
+    @Test
+    void ensureExecutionCreated_appliesConfiguredBufferToPersistedEntry() throws Exception {
+        // End-to-end: a buffer of +2 ticks on MNQ LONG shifts the mentor's
+        // 18123.38 → 18123.88 → tick-normalized to 18123.88 (already aligned to 0.25).
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository, tradeExecutionRepository, ibkrOrderService, objectMapper, 2);
+
+        MentorSignalReviewRecord review = eligibleReview(77L, 1, "2026-03-28T16:00:00Z");
+        when(reviewRepository.findById(77L)).thenReturn(Optional.of(review));
+        when(tradeExecutionRepository.createIfAbsent(any())).thenAnswer(i -> {
+            TradeExecutionRecord r = i.getArgument(0);
+            r.setId(999L);
+            return r;
+        });
+
+        service.ensureExecutionCreated(new CreateExecutionCommand(
+            77L, "DU1234567", 1, ExecutionTriggerSource.MANUAL_ARMING,
+            Instant.parse("2026-03-28T16:01:00Z"), "mentor-panel"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(tradeExecutionRepository).createIfAbsent(captor.capture());
+        // Raw mentor entry 18123.38 + 0.50 (2 × 0.25) = 18123.88 → tick-aligned to 18123.75 (HALF_UP)
+        // Note: normalizeToTick rounds to nearest tick; 18123.88 rounds to 18123.75 then +0.25 → let's verify
+        // 18123.88 / 0.25 = 72495.52 → HALF_UP → 72496 × 0.25 = 18124.00
+        assertThat(captor.getValue().getNormalizedEntryPrice()).isEqualByComparingTo("18124.00");
+        // SL and TP are unchanged by the buffer — only entry is shifted.
+        assertThat(captor.getValue().getVirtualStopLoss()).isEqualByComparingTo("18099.75");
+        assertThat(captor.getValue().getVirtualTakeProfit()).isEqualByComparingTo("18160.25");
     }
 
     private MentorSignalReviewRecord eligibleReview(Long id, int revision, String createdAt) throws Exception {
