@@ -169,6 +169,26 @@ class PlaybookEvaluatorTest {
         assertEquals(SetupType.BREAK_RETEST, result.bestSetup().type());
     }
 
+    @Test
+    void evaluate_breakRetest_chochNearPrice() {
+        // PR-9: CHoCH retests must be accepted by the evaluator too — this is
+        // often the cleanest R:R entry into a freshly flipped trend.
+        SmcBreak choch = new SmcBreak("CHOCH", "BULLISH", bd("98.34"), "SWING", 0.85);
+
+        PlaybookInput input = new PlaybookInput(
+            "BULLISH", "BULLISH", bd("99.49"), bd("95.26"), bd("98.40"),
+            List.of(choch), List.of(), List.of(), List.of(), List.of(), List.of(),
+            null, null, null, "BUYING", bd("0.60"), null, null, bd("1.50")
+        );
+
+        PlaybookEvaluation result = evaluator.evaluate(input);
+
+        assertNotNull(result.bestSetup());
+        assertEquals(SetupType.BREAK_RETEST, result.bestSetup().type());
+        assertTrue(result.bestSetup().zoneName().contains("CHoCH"),
+            "Zone name should surface the CHoCH flavour for audit: " + result.bestSetup().zoneName());
+    }
+
     // ── Checklist Tests ─────────────────────────────────────────────────
 
     @Test
