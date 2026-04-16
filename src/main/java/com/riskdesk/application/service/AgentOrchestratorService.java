@@ -10,6 +10,7 @@ import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
 import com.riskdesk.domain.engine.playbook.model.PlaybookInput;
 import com.riskdesk.domain.engine.playbook.model.PlaybookPlan;
+import com.riskdesk.domain.engine.playbook.model.RiskFraction;
 import com.riskdesk.domain.engine.playbook.model.SetupCandidate;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
@@ -287,6 +288,11 @@ public class AgentOrchestratorService {
             eligibility = "INELIGIBLE";
         }
 
+        // Clamp to the RiskFraction contract before handing off — reductions in the loop
+        // above can only shrink sizePct, but a fuzzed / misconfigured agent cap could
+        // still push it negative or NaN. Fail closed at zero rather than throwing.
+        sizePct = RiskFraction.clamp(sizePct);
+
         PlaybookPlan adjustedPlan = blocked ? null : playbook.plan().withAdjustedSize(sizePct);
 
         String verdict;
@@ -301,7 +307,7 @@ public class AgentOrchestratorService {
         }
 
         log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} AI LOW], warnings: {})",
-            verdict, String.format("%.4f", sizePct * 100),
+            verdict, String.format("%.4f", RiskFraction.toPercent(sizePct)),
             verdicts.size(), aiLow, warnings.size());
 
         return new FinalVerdict(verdict, adjustedPlan, sizePct, verdicts, warnings, eligibility);

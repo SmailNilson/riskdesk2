@@ -3,6 +3,7 @@ package com.riskdesk.application.service;
 import com.riskdesk.domain.engine.playbook.agent.AgentContext;
 import com.riskdesk.domain.engine.playbook.model.Direction;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
+import com.riskdesk.domain.engine.playbook.model.RiskFraction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -105,9 +106,15 @@ public class RiskManagementService {
             return RiskGateVerdict.blocked(blockReason, warnings);
         }
 
-        log.debug("Risk gate passed {} {}: size {} (base {}), {} warnings",
+        // Clamp the cumulative reductions back into RiskFraction's contract so downstream
+        // consumers can rely on the value being a valid risk fraction, not e.g. a
+        // floating-point drift that bleeds into PlaybookPlan.withAdjustedSize().
+        sizePct = RiskFraction.clamp(sizePct);
+
+        log.debug("Risk gate passed {} {}: size {}% (base {}%), {} warnings",
             instrument, direction,
-            String.format("%.4f", sizePct), String.format("%.4f", baseRisk),
+            String.format("%.4f", RiskFraction.toPercent(sizePct)),
+            String.format("%.4f", RiskFraction.toPercent(baseRisk)),
             warnings.size());
         return RiskGateVerdict.eligible(sizePct, warnings);
     }

@@ -3,6 +3,7 @@ package com.riskdesk.domain.engine.playbook.calculator;
 import com.riskdesk.domain.engine.playbook.model.Direction;
 import com.riskdesk.domain.engine.playbook.model.PlaybookInput;
 import com.riskdesk.domain.engine.playbook.model.PlaybookPlan;
+import com.riskdesk.domain.engine.playbook.model.RiskFraction;
 import com.riskdesk.domain.engine.playbook.model.SetupCandidate;
 import com.riskdesk.domain.engine.playbook.model.SmcFvg;
 import com.riskdesk.domain.engine.playbook.model.SmcOrderBlock;
@@ -73,7 +74,10 @@ public class MechanicalPlanCalculator {
         BigDecimal reward1 = tp1.subtract(entry).abs();
         double rr = reward1.doubleValue() / risk.doubleValue();
 
-        double finalSize = sizeMultiplier * (rr >= 2.0 ? 0.01 : 0.005);
+        // Risk fraction (see RiskFraction). FULL (1%) when R:R ≥ 2, HALF (0.5%) otherwise,
+        // then down-scaled by the structure-clean size multiplier (1.0 or 0.5) computed upstream.
+        double finalSize = RiskFraction.clamp(
+            sizeMultiplier * (rr >= 2.0 ? RiskFraction.FULL : RiskFraction.HALF));
 
         return new PlaybookPlan(entry, sl, tp1, tp2, rr, finalSize, slRationale, tp1Rationale);
     }

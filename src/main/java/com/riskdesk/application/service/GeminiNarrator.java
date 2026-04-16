@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.decision.port.DecisionNarratorPort;
 import com.riskdesk.domain.decision.port.NarratorRequest;
 import com.riskdesk.domain.decision.port.NarratorResponse;
+import com.riskdesk.domain.engine.playbook.model.RiskFraction;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -169,7 +170,7 @@ public class GeminiNarrator implements DecisionNarratorPort {
         }
         sb.append('\n');
         sb.append(String.format(Locale.ROOT, "Eligibility: %s (size %.2f%%)%n",
-            r.eligibility(), r.sizePercent() * 100.0));
+            r.eligibility(), RiskFraction.toPercent(r.sizePercent())));
 
         sb.append("\nAgent verdicts:\n");
         if (r.agentVerdicts() != null) {
@@ -199,7 +200,7 @@ public class GeminiNarrator implements DecisionNarratorPort {
         return String.format(Locale.ROOT,
             "[narrator fallback — %s] %s %s %s — %s (size %.2f%%). Zone: %s.",
             reason, r.instrument(), dir, r.timeframe(),
-            elig, r.sizePercent() * 100.0, nullSafe(r.zoneName()));
+            elig, RiskFraction.toPercent(r.sizePercent()), nullSafe(r.zoneName()));
     }
 
     // ── Gemini response handling ──────────────────────────────────────────
