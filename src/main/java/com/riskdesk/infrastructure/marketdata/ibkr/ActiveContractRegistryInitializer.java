@@ -1,31 +1,43 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.port.ActiveContractSnapshotStore;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.time.YearMonth;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 /**
  * Initializes the ActiveContractRegistry at startup (Order 1 — before HistoricalDataService).
  *
  * Resolution strategy (in order):
- *   1. Ask IBKR for available contracts via IbGatewayContractResolver.
- *   2. Compare OI across all contracts — pick the one with highest OI.
- *   3. If OI unavailable, compare volume — pick highest volume.
- *   4. If neither available, default to front-month (no calendar-roll).
- *   5. If IBKR is unavailable or disabled, fall back to application properties as-is.
+ *   1. Ask IBKR for available contracts via IbGatewayContractResolver, then:
+ *      a. Compare OI across all contracts — pick the one with highest OI.
+ *      b. If OI unavailable, compare volume — pick highest volume.
+ *      c. If neither available, default to front-month (no calendar-roll).
+ *      Each successful resolution persists the month to {@link ActiveContractSnapshotStore}
+ *      so future cold boots without IBKR can restore the last-known-good state.
+ *   2. If IBKR is unavailable or disabled, restore from the snapshot store.
+ *   3. If no snapshot exists (first boot), fall back to application properties.
+ *   4. Any fallback (snapshot or property) must not be older than the current month —
+ *      a stale value is refused and the instrument is left uninitialized. Downstream
+ *      services then fail loud rather than silently trading on an expired contract.
  */
 @Component
 @Order(1)
@@ -33,12 +45,17 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(ActiveContractRegistryInitializer.class);
 
-    private final ActiveContractRegistry    registry;
-    private final IbGatewayContractResolver resolver;
-    private final IbkrProperties            ibkrProperties;
-    private final OpenInterestProvider      openInterestProvider;
+    /** Business calendar — matches TradingSessionResolver projection. */
+    private static final ZoneId NY_ZONE = ZoneId.of("America/New_York");
 
-    @Value("${riskdesk.active-contracts.MCL:202605}")
+    private final ActiveContractRegistry       registry;
+    private final IbGatewayContractResolver    resolver;
+    private final IbkrProperties               ibkrProperties;
+    private final OpenInterestProvider         openInterestProvider;
+    private final ActiveContractSnapshotStore  snapshotStore;
+    private final Clock                        clock;
+
+    @Value("${riskdesk.active-contracts.MCL:202606}")
     private String fallbackMcl;
 
     @Value("${riskdesk.active-contracts.MGC:202606}")
@@ -53,14 +70,28 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     // calendarDaysThreshold removed — caused Frankenstein charts by rolling the
     // fallback contract forward when IBKR was unavailable at startup.
 
+    @Autowired
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
                                              IbkrProperties ibkrProperties,
-                                             OpenInterestProvider openInterestProvider) {
+                                             OpenInterestProvider openInterestProvider,
+                                             ActiveContractSnapshotStore snapshotStore) {
+        this(registry, resolver, ibkrProperties, openInterestProvider, snapshotStore, Clock.system(NY_ZONE));
+    }
+
+    // Visible for tests — lets us inject a fixed Clock to exercise the staleness guard.
+    ActiveContractRegistryInitializer(ActiveContractRegistry registry,
+                                      IbGatewayContractResolver resolver,
+                                      IbkrProperties ibkrProperties,
+                                      OpenInterestProvider openInterestProvider,
+                                      ActiveContractSnapshotStore snapshotStore,
+                                      Clock clock) {
         this.registry             = registry;
         this.resolver             = resolver;
         this.ibkrProperties       = ibkrProperties;
         this.openInterestProvider = openInterestProvider;
+        this.snapshotStore        = snapshotStore;
+        this.clock                = clock;
     }
 
     @Override
@@ -72,6 +103,8 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             Instrument.E6,  fallbackE6
         );
 
+        YearMonth currentMonth = YearMonth.now(clock);
+
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             String resolved = ibkrProperties.isEnabled()
                 ? resolveFromIbkr(instrument)
@@ -80,19 +113,86 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             if (resolved != null) {
                 registry.initialize(instrument, resolved);
                 log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
-            } else {
-                String fallback = fallbacks.get(instrument);
-                // Never calendar-roll the fallback — it's operator-configured and represents
-                // the known active contract. Rolling it forward when IBKR is unavailable
-                // caused Frankenstein charts (mixing contract price series).
-                registry.initialize(instrument, fallback);
-                log.warn("ActiveContractRegistry: {} → {} (fallback — IBKR {} or unavailable)",
-                    instrument, fallback,
-                    ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                continue;
             }
+
+            // IBKR unavailable: prefer the persisted last-known-good over the hardcoded property.
+            // The snapshot reflects either a previous successful IBKR resolution or a confirmed
+            // rollover — both strictly better signals than an operator-maintained property file.
+            Optional<ActiveContractSnapshotStore.Snapshot> snapshot = loadSnapshot(instrument);
+            if (snapshot.isPresent() && !isStale(snapshot.get().contractMonth(), currentMonth)) {
+                String month = snapshot.get().contractMonth();
+                registry.initialize(instrument, month);
+                log.warn("ActiveContractRegistry: {} → {} (snapshot from {} @ {}, IBKR {})",
+                    instrument, month, snapshot.get().source(), snapshot.get().resolvedAt(),
+                    ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                continue;
+            }
+
+            // No usable snapshot: fall back to the property value, but refuse anything expired.
+            // Silently trading on an expired contract is worse than leaving the slot empty —
+            // downstream services will see Optional.empty() and fail loud instead of writing
+            // candles against a dead contract month.
+            String fallback = fallbacks.get(instrument);
+            if (isStale(fallback, currentMonth)) {
+                log.error("ActiveContractRegistry: {} NOT initialized — fallback property '{}' is expired "
+                    + "(current YearMonth={}). IBKR is unreachable and no usable snapshot is persisted. "
+                    + "Update riskdesk.active-contracts.{} in application.properties or bring IBKR up. "
+                    + "Downstream services depending on this instrument will fail until resolved.",
+                    instrument, fallback, currentMonth, instrument.name());
+                continue;
+            }
+            registry.initialize(instrument, fallback);
+            log.warn("ActiveContractRegistry: {} → {} (property fallback — IBKR {}, no snapshot)",
+                instrument, fallback,
+                ibkrProperties.isEnabled() ? "returned empty" : "disabled");
         }
 
         log.info("ActiveContractRegistry ready: {}", registry.snapshot());
+    }
+
+    private Optional<ActiveContractSnapshotStore.Snapshot> loadSnapshot(Instrument instrument) {
+        try {
+            return snapshotStore.load(instrument);
+        } catch (Exception e) {
+            // Snapshot backing store is optional — do not block startup on a DB hiccup.
+            log.warn("ActiveContractRegistryInitializer: snapshot load failed for {} — {}",
+                instrument, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * A contract month is considered stale when its {@link YearMonth} is strictly before
+     * the current month. Equal months (we are in the final weeks of the front contract)
+     * are still accepted — the proper rollover path will pick up the next contract.
+     */
+    private static boolean isStale(String contractMonth, YearMonth now) {
+        YearMonth ym = parseYearMonth(contractMonth);
+        return ym == null || ym.isBefore(now);
+    }
+
+    private static YearMonth parseYearMonth(String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return null;
+        try {
+            int year  = Integer.parseInt(contractMonth.substring(0, 4));
+            int month = Integer.parseInt(contractMonth.substring(4, 6));
+            return YearMonth.of(year, month);
+        } catch (NumberFormatException | java.time.DateTimeException e) {
+            return null;
+        }
+    }
+
+    private void persistSnapshot(Instrument instrument, String contractMonth,
+                                 ActiveContractSnapshotStore.Source source) {
+        try {
+            snapshotStore.save(instrument, contractMonth, source, Instant.now(clock));
+        } catch (Exception e) {
+            // A failed snapshot write must not block startup — the in-memory registry
+            // is the source of truth at runtime; persistence is a recovery aid.
+            log.warn("ActiveContractRegistryInitializer: snapshot save failed for {} {} — {}",
+                instrument, contractMonth, e.getMessage());
+        }
     }
 
     private String resolveFromIbkr(Instrument instrument) {
@@ -101,21 +201,27 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             if (contracts.isEmpty()) return null;
             if (contracts.size() == 1) {
                 resolver.setResolved(instrument, contracts.get(0));
-                return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+                String month = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+                if (month != null) persistSnapshot(instrument, month, ActiveContractSnapshotStore.Source.IBKR_FRONT);
+                return month;
             }
 
             // Strategy 1: OI comparison — scan ALL available contracts (not just first 2)
             IbGatewayResolvedContract oiWinner = selectByOi(instrument, contracts);
             if (oiWinner != null) {
                 resolver.setResolved(instrument, oiWinner);
-                return normalizeMonth(oiWinner.contract().lastTradeDateOrContractMonth());
+                String month = normalizeMonth(oiWinner.contract().lastTradeDateOrContractMonth());
+                if (month != null) persistSnapshot(instrument, month, ActiveContractSnapshotStore.Source.IBKR_OI);
+                return month;
             }
 
             // Strategy 2: Volume comparison — scan ALL available contracts
             IbGatewayResolvedContract volWinner = selectByVolume(instrument, contracts);
             if (volWinner != null) {
                 resolver.setResolved(instrument, volWinner);
-                return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
+                String month = normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
+                if (month != null) persistSnapshot(instrument, month, ActiveContractSnapshotStore.Source.IBKR_VOLUME);
+                return month;
             }
 
             // Default: use front-month when OI+volume are both unavailable.
@@ -123,6 +229,7 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
             String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
             log.info("ActiveContractRegistry: {} defaulting to front-month {} (OI+volume unavailable)", instrument, frontMonth);
             resolver.setResolved(instrument, contracts.get(0));
+            if (frontMonth != null) persistSnapshot(instrument, frontMonth, ActiveContractSnapshotStore.Source.IBKR_FRONT);
             return frontMonth;
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());

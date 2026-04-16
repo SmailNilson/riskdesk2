@@ -3,6 +3,7 @@ package com.riskdesk.application.service;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.RolloverStatus;
 import com.riskdesk.domain.contract.event.ContractRolloverEvent;
+import com.riskdesk.domain.contract.port.ActiveContractSnapshotStore;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -45,15 +46,16 @@ public class RolloverDetectionService {
     private static final int WARNING_DAYS  = 7;
     private static final int CRITICAL_DAYS = 3;
 
-    private final ActiveContractRegistry    contractRegistry;
-    private final IbGatewayContractResolver resolver;
-    private final OpenInterestProvider      openInterestProvider;
-    private final IbkrProperties            ibkrProperties;
-    private final SimpMessagingTemplate     messagingTemplate;
-    private final ApplicationEventPublisher eventPublisher;
-    private final HistoricalDataService     historicalDataService;
-    private final int                       calendarDaysThreshold;
-    private final boolean                   autoConfirm;
+    private final ActiveContractRegistry      contractRegistry;
+    private final IbGatewayContractResolver   resolver;
+    private final OpenInterestProvider        openInterestProvider;
+    private final IbkrProperties              ibkrProperties;
+    private final SimpMessagingTemplate       messagingTemplate;
+    private final ApplicationEventPublisher   eventPublisher;
+    private final HistoricalDataService       historicalDataService;
+    private final ActiveContractSnapshotStore snapshotStore;
+    private final int                         calendarDaysThreshold;
+    private final boolean                     autoConfirm;
 
     public RolloverDetectionService(ActiveContractRegistry contractRegistry,
                                     IbGatewayContractResolver resolver,
@@ -62,6 +64,7 @@ public class RolloverDetectionService {
                                     SimpMessagingTemplate messagingTemplate,
                                     ApplicationEventPublisher eventPublisher,
                                     HistoricalDataService historicalDataService,
+                                    ActiveContractSnapshotStore snapshotStore,
                                     @Value("${riskdesk.rollover.calendar-days-threshold:32}") int calendarDaysThreshold,
                                     @Value("${riskdesk.rollover.auto-confirm:false}") boolean autoConfirm) {
         this.contractRegistry       = contractRegistry;
@@ -71,6 +74,7 @@ public class RolloverDetectionService {
         this.messagingTemplate      = messagingTemplate;
         this.eventPublisher         = eventPublisher;
         this.historicalDataService   = historicalDataService;
+        this.snapshotStore          = snapshotStore;
         this.calendarDaysThreshold  = calendarDaysThreshold;
         this.autoConfirm            = autoConfirm;
     }
@@ -91,6 +95,16 @@ public class RolloverDetectionService {
         String oldMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         contractRegistry.confirmRollover(instrument, contractMonth);
         resolver.refreshToMonth(instrument, contractMonth);
+
+        // Persist the confirmed month so a subsequent cold boot without IBKR restores
+        // the trader's explicit decision instead of falling back to application properties.
+        try {
+            snapshotStore.save(instrument, contractMonth,
+                ActiveContractSnapshotStore.Source.ROLLOVER_CONFIRM, Instant.now());
+        } catch (Exception e) {
+            log.warn("RolloverDetectionService: snapshot save failed for {} {} — {}",
+                instrument, contractMonth, e.getMessage());
+        }
 
         // Rollover acknowledged — historical candles preserved, gap-fill handles new contract
 
