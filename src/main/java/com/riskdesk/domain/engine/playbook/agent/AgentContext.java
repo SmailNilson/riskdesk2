@@ -1,5 +1,6 @@
 package com.riskdesk.domain.engine.playbook.agent;
 
+import com.riskdesk.domain.engine.indicators.MomentumThresholds;
 import com.riskdesk.domain.engine.playbook.model.PlaybookInput;
 import com.riskdesk.domain.model.Instrument;
 
@@ -133,12 +134,12 @@ public record AgentContext(
         /** RSI divergence heuristic: price trending one way, RSI says the opposite. */
         public boolean hasRsiBearishDivergence(String swingBias) {
             return "BULLISH".equalsIgnoreCase(swingBias)
-                && rsi != null && rsi.doubleValue() < 55;
+                && rsi != null && rsi.doubleValue() < MomentumThresholds.RSI_BEARISH_DIVERGENCE_MAX;
         }
 
         public boolean hasRsiBullishDivergence(String swingBias) {
             return "BEARISH".equalsIgnoreCase(swingBias)
-                && rsi != null && rsi.doubleValue() > 45;
+                && rsi != null && rsi.doubleValue() > MomentumThresholds.RSI_BULLISH_DIVERGENCE_MIN;
         }
 
         /** Momentum contradicts the trade direction. */
@@ -162,12 +163,16 @@ public record AgentContext(
             if ("LONG".equalsIgnoreCase(direction)) {
                 if (macdHistogram != null && macdHistogram.doubleValue() > 0) confirms++;
                 if ("BULLISH".equalsIgnoreCase(macdCrossover)) confirms++;
-                if (rsi != null && rsi.doubleValue() > 40 && rsi.doubleValue() < 70) confirms++;
+                if (rsi != null
+                    && rsi.doubleValue() > MomentumThresholds.RSI_CONFIRM_LONG_MIN
+                    && rsi.doubleValue() < MomentumThresholds.RSI_CONFIRM_LONG_MAX) confirms++;
                 if (supertrendBullish) confirms++;
             } else {
                 if (macdHistogram != null && macdHistogram.doubleValue() < 0) confirms++;
                 if ("BEARISH".equalsIgnoreCase(macdCrossover)) confirms++;
-                if (rsi != null && rsi.doubleValue() < 60 && rsi.doubleValue() > 30) confirms++;
+                if (rsi != null
+                    && rsi.doubleValue() < MomentumThresholds.RSI_CONFIRM_SHORT_MAX
+                    && rsi.doubleValue() > MomentumThresholds.RSI_CONFIRM_SHORT_MIN) confirms++;
                 if (!supertrendBullish) confirms++;
             }
             return confirms >= 2;
