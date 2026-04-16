@@ -48,7 +48,14 @@ public class GeminiMentorClient implements MentorModelClient {
         ### Order Flow (order_flow_and_volume)
         - Delta cumulatif (cumulative_delta_trend), buy_ratio_pct
         - Divergences delta (delta_divergence_detected)
-        - Note : si "source" = "CLV_ESTIMATED", fiabilité réduite
+        - Champ "source" : "REAL_TICKS" = ticks IBKR classifiés Lee-Ready (haute fiabilité) ;
+          "CLV_ESTIMATED" = estimation depuis Close-Location-Value des bougies (fiabilité réduite).
+        - **RÈGLE DE PONDÉRATION** : quand source="CLV_ESTIMATED", le poids de l'order flow
+          dans la décision est DIVISÉ PAR DEUX. Ne rejette JAMAIS un setup uniquement sur
+          un signal CLV_ESTIMATED ; exige au minimum une confirmation structurelle (BOS/CHoCH
+          aligné, OB defended) ou un momentum aligné (WT + RSI) avant de t'appuyer dessus.
+        - Quand source="CLV_ESTIMATED", mentionne explicitement "[order flow estimé]" dans
+          technicalQuickAnalysis pour signaler la dégradation de fiabilité.
 
         ### Momentum (momentum_oscillators + dynamic_levels)
         - WaveTrend (signal, niveaux), RSI, Stochastic (%K/%D, OB/OS), Chaikin Money Flow
@@ -56,6 +63,16 @@ public class GeminiMentorClient implements MentorModelClient {
 
         ### Macro (macro_correlations_dynamic)
         - DXY trend + pct_change, VIX, US10Y, secteur leader
+        - **RÈGLE ANTI-TAUTOLOGIE FOREX** : sur les paires EUR/USD (6E), GBP/USD, USD/JPY, etc.
+          le DXY est MATHÉMATIQUEMENT dérivé de la paire elle-même (EUR pèse 57,6% du DXY).
+          Ne présente JAMAIS "DXY haussier tiré par la faiblesse de l'EUR" comme une
+          "divergence macro" : c'est la corrélation structurelle de la paire, pas un signal
+          indépendant. Sur FOREX, cherche les vraies divergences ailleurs :
+            - US10Y (rendement obligataire) vs direction de la paire
+            - Cross-rates (EURGBP, EURJPY) qui isolent la force spécifique de la devise
+            - Sector leaders par asset class (ex. Silver pour METALS, VIX pour EQUITY_INDEX)
+          Si AUCUNE divergence macro indépendante n'est disponible (tous champs null sauf DXY),
+          NE CITE PAS la macro comme raison de rejet — évalue sur la structure + momentum + flow.
 
         ### Confluence (confluence_signals)
         - Le champ confluence_weight indique la force du setup (seuil = 3.0)
@@ -460,12 +477,21 @@ public class GeminiMentorClient implements MentorModelClient {
                         "parts", List.of(Map.of("text", prompt))
                     )
                 ),
+                // Gemini 3.x "thinking" models silently consume output tokens
+                // for their reasoning trace when thinkingBudget is unset. Prod
+                // audit showed ~96% of SIGNAL reviews fell back to
+                // "Structured mentor response unavailable" because replies
+                // were truncated at ~400 chars with the full 3000 token
+                // budget — thinking was eating the output room. Pinning
+                // thinkingBudget guarantees the JSON schema fits in what
+                // remains of maxOutputTokens.
                 "generationConfig", Map.of(
                     "temperature", 0.1,
                     // Bumped from 1500 → 3000 after prod audit: ~37% of rejections
                     // were Gemini responses truncated mid-first-field (≈160 chars).
                     // Schema is large; 1500 wasn't enough budget to finish the JSON.
                     "maxOutputTokens", 3000,
+                    "thinkingConfig", Map.of("thinkingBudget", properties.getThinkingBudget()),
                     "responseMimeType", "application/json",
                     "responseSchema", buildResponseSchema()
                 )

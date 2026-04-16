@@ -45,7 +45,8 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            new MentorParseMetrics()
         );
 
         String rawJson = """
@@ -108,7 +109,8 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            new MentorParseMetrics()
         );
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
@@ -134,7 +136,8 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            new MentorParseMetrics()
         );
 
         // Truncated mid-technicalQuickAnalysis — no closing quote, no closing brace.
@@ -150,9 +153,11 @@ class MentorAnalysisServiceTest {
 
         assertThat(response.analysis().technicalQuickAnalysis())
             .isEqualTo("Trend is bullish near VWAP with absorption on demand OB");
-        // Recovered responses stay INELIGIBLE — promotion to ELIGIBLE is the playbook fallback's job.
+        // Recovered responses are surfaced as MENTOR_UNAVAILABLE (distinct from a
+        // real INELIGIBLE rejection). A truncated Gemini reply was never a full
+        // verdict — promotion to ELIGIBLE happens downstream via the playbook.
         assertThat(response.analysis().executionEligibilityStatus())
-            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+            .isEqualTo(ExecutionEligibilityStatus.MENTOR_UNAVAILABLE);
         assertThat(response.analysis().errors())
             .anySatisfy(e -> assertThat(e).contains("tronquée"));
         assertThat(response.analysis().verdict()).contains("Analyse Partielle");
@@ -168,7 +173,7 @@ class MentorAnalysisServiceTest {
     void analyze_eligibleWithFullPlan_marksAuditPendingEntry() throws Exception {
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
 
         String rawJson = """
             {
@@ -206,7 +211,7 @@ class MentorAnalysisServiceTest {
     void analyze_ineligibleVerdict_doesNotMarkPendingEntry() throws Exception {
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
 
         String rawJson = """
             {
@@ -244,7 +249,7 @@ class MentorAnalysisServiceTest {
         // and stay in PENDING_ENTRY forever.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
 
         String rawJson = """
             {
@@ -283,7 +288,7 @@ class MentorAnalysisServiceTest {
         // built from asset|action|"" |"" |"". The new builder reads v2 keys first.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
         when(mentorModelClient.analyze(any(), any()))
@@ -318,7 +323,7 @@ class MentorAnalysisServiceTest {
         // embedding when re-indexed. The builder reads v2 first, v1 second.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
         when(mentorModelClient.analyze(any(), any()))
@@ -354,7 +359,8 @@ class MentorAnalysisServiceTest {
             mentorMemoryService,
             mentorAuditRepository,
             mentorProperties,
-            objectMapper
+            objectMapper,
+            new MentorParseMetrics()
         );
 
         String truncated = """
@@ -384,9 +390,10 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().proposedTradePlan().entryPrice()).isEqualTo(3012.5);
         assertThat(response.analysis().proposedTradePlan().stopLoss()).isEqualTo(3005.0);
         assertThat(response.analysis().proposedTradePlan().takeProfit()).isEqualTo(3035.0);
-        // Still INELIGIBLE — the strict-schema promise was broken, downstream must decide.
+        // MENTOR_UNAVAILABLE — the strict-schema promise was broken. Downstream
+        // decides whether to promote to ELIGIBLE via the playbook fallback.
         assertThat(response.analysis().executionEligibilityStatus())
-            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+            .isEqualTo(ExecutionEligibilityStatus.MENTOR_UNAVAILABLE);
         assertThat(response.analysis().errors())
             .anySatisfy(e -> assertThat(e).contains("tronquée"));
     }

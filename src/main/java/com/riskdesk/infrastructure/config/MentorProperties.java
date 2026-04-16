@@ -19,6 +19,14 @@ public class MentorProperties {
     private boolean embeddingsEnabled = true;
     private String embeddingsModel = "gemini-embedding-001";
     private int embeddingDimensions = 768;
+    // Gemini 2.5+/3.x are "thinking" models. Without an explicit thinkingBudget,
+    // the API defaults to dynamic thinking, which can consume most of the
+    // maxOutputTokens budget and truncate the JSON reply mid-field (observed in
+    // prod: ~96% of SIGNAL reviews fell back to "Structured mentor response
+    // unavailable" because the JSON closing braces never arrived).
+    // 0 disables thinking entirely; 512 leaves room for concise reasoning while
+    // guaranteeing the schema fits in the remaining output budget.
+    private int thinkingBudget = 512;
 
     public boolean isEnabled() {
         return enabled;
@@ -114,5 +122,13 @@ public class MentorProperties {
 
     public void setEmbeddingDimensions(int embeddingDimensions) {
         this.embeddingDimensions = embeddingDimensions;
+    }
+
+    public int getThinkingBudget() {
+        return thinkingBudget;
+    }
+
+    public void setThinkingBudget(int thinkingBudget) {
+        this.thinkingBudget = thinkingBudget;
     }
 }

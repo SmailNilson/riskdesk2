@@ -76,9 +76,13 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
                            "parts", List.of(Map.of("text",
                                "Analyse ce payload JSON et retourne la réponse au format imposé.\n\n" + payloadJson)))
                 ),
+                // thinkingBudget pinned: see GeminiMentorClient note — without
+                // this, Gemini 3.x models silently consume output tokens
+                // for reasoning and truncate the agent JSON reply.
                 "generationConfig", Map.of(
                     "temperature", 0.1,
                     "maxOutputTokens", request.maxOutputTokens(),
+                    "thinkingConfig", Map.of("thinkingBudget", properties.getThinkingBudget()),
                     "responseMimeType", "application/json",
                     "responseSchema", buildAgentResponseSchema()
                 )
