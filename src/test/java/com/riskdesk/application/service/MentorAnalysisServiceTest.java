@@ -6,6 +6,7 @@ import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.MentorAudit;
+import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -155,6 +156,123 @@ class MentorAnalysisServiceTest {
         assertThat(response.analysis().errors())
             .anySatisfy(e -> assertThat(e).contains("tronquée"));
         assertThat(response.analysis().verdict()).contains("Analyse Partielle");
+    }
+
+    // ── PENDING_ENTRY simulation-queue gate ───────────────────────────────
+    // Before this, every successful audit (including INELIGIBLE verdicts and
+    // manual Ask-Mentor calls with no trade plan) was marked PENDING_ENTRY
+    // and then clogged TradeSimulationService's poller forever — the poller
+    // cannot resolve a row with no Entry/SL/TP.
+
+    @Test
+    void analyze_eligibleWithFullPlan_marksAuditPendingEntry() throws Exception {
+        mentorProperties.setPersistAudits(true);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+
+        String rawJson = """
+            {
+              "verdict": "Trade Validé - Discipline Respectée",
+              "executionEligibilityStatus": "ELIGIBLE",
+              "executionEligibilityReason": "Plan complet.",
+              "proposedTradePlan": {
+                "entryPrice": 3012.5,
+                "stopLoss": 3005.0,
+                "takeProfit": 3035.0,
+                "rewardToRiskRatio": 3.0,
+                "rationale": "Entry on pullback."
+              }
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+        when(mentorAuditRepository.save(any())).thenAnswer(inv -> {
+            MentorAudit a = inv.getArgument(0);
+            a.setId(1L);
+            return a;
+        });
+
+        service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        ArgumentCaptor<MentorAudit> c = ArgumentCaptor.forClass(MentorAudit.class);
+        verify(mentorAuditRepository).save(c.capture());
+        assertThat(c.getValue().getSimulationStatus()).isEqualTo(TradeSimulationStatus.PENDING_ENTRY);
+    }
+
+    @Test
+    void analyze_ineligibleVerdict_doesNotMarkPendingEntry() throws Exception {
+        mentorProperties.setPersistAudits(true);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+
+        String rawJson = """
+            {
+              "verdict": "Trade Rejeté - Structure Cassée",
+              "executionEligibilityStatus": "INELIGIBLE",
+              "executionEligibilityReason": "Structure non validée.",
+              "proposedTradePlan": {
+                "entryPrice": 3012.5, "stopLoss": 3005.0, "takeProfit": 3035.0,
+                "rationale": "Plan proposé mais INELIGIBLE."
+              }
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+        when(mentorAuditRepository.save(any())).thenAnswer(inv -> {
+            MentorAudit a = inv.getArgument(0);
+            a.setId(2L);
+            return a;
+        });
+
+        service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "SHORT"}}
+            """));
+
+        ArgumentCaptor<MentorAudit> c = ArgumentCaptor.forClass(MentorAudit.class);
+        verify(mentorAuditRepository).save(c.capture());
+        assertThat(c.getValue().getSimulationStatus()).isNull();
+    }
+
+    @Test
+    void analyze_eligibleButMissingSlOrTp_doesNotMarkPendingEntry() throws Exception {
+        // Manual "Ask Mentor" style response — verdict is ELIGIBLE but no SL/TP.
+        // Without the gate this row would be picked up by TradeSimulationService
+        // and stay in PENDING_ENTRY forever.
+        mentorProperties.setPersistAudits(true);
+        MentorAnalysisService service = new MentorAnalysisService(
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper);
+
+        String rawJson = """
+            {
+              "verdict": "Trade Validé - Discipline Respectée",
+              "executionEligibilityStatus": "ELIGIBLE",
+              "executionEligibilityReason": "Validé en principe.",
+              "proposedTradePlan": {
+                "entryPrice": 3012.5,
+                "rationale": "Plan partiel sans SL/TP."
+              }
+            }
+            """;
+        when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
+        when(mentorModelClient.analyze(any(), any()))
+            .thenReturn(new MentorModelClient.MentorModelResult("gemini-test", rawJson));
+        when(mentorAuditRepository.save(any())).thenAnswer(inv -> {
+            MentorAudit a = inv.getArgument(0);
+            a.setId(3L);
+            return a;
+        });
+
+        service.analyze(objectMapper.readTree("""
+            {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
+            """));
+
+        ArgumentCaptor<MentorAudit> c = ArgumentCaptor.forClass(MentorAudit.class);
+        verify(mentorAuditRepository).save(c.capture());
+        assertThat(c.getValue().getSimulationStatus()).isNull();
     }
 
     @Test

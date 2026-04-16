@@ -275,6 +275,29 @@ public class MentorAnalysisService {
         return null;
     }
 
+    /**
+     * Returns {@code true} only when the structured response has a complete,
+     * tradable plan (non-null entry, SL, TP) AND Gemini flagged the setup
+     * ELIGIBLE for execution.
+     *
+     * <p>This is the gate for initial {@code simulationStatus = PENDING_ENTRY}
+     * on {@link MentorAudit}: previously every successful audit (including
+     * manual Ask-Mentor calls with no trade plan and explicitly INELIGIBLE
+     * verdicts) was enqueued into {@code TradeSimulationService}, producing
+     * "stuck" rows the simulation poller could never resolve. Gating here
+     * keeps the queue clean without widening the Simulation Decoupling Rule
+     * surface (no new fields on MentorAudit).
+     */
+    private boolean isSimulationCandidate(MentorStructuredResponse structured) {
+        if (structured == null) return false;
+        if (structured.executionEligibilityStatus() != ExecutionEligibilityStatus.ELIGIBLE) return false;
+        MentorProposedTradePlan plan = structured.proposedTradePlan();
+        return plan != null
+            && plan.entryPrice() != null
+            && plan.stopLoss() != null
+            && plan.takeProfit() != null;
+    }
+
     private Long persistSuccess(JsonNode payload,
                                 MentorModelClient.MentorModelResult raw,
                                 MentorStructuredResponse structured,
@@ -293,7 +316,13 @@ public class MentorAnalysisService {
             audit.setVerdict(structured.verdict());
             audit.setSuccess(true);
             audit.setSemanticText(buildSemanticText(payload, structured));
-            audit.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
+            // Only enqueue audits that are actually executable. Previously
+            // every manual "Ask Mentor" audit and every INELIGIBLE verdict
+            // was marked PENDING_ENTRY and then clogged TradeSimulationService
+            // because the poller cannot resolve an audit with no trade plan.
+            if (isSimulationCandidate(structured)) {
+                audit.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
+            }
             MentorAudit saved = mentorAuditRepository.save(audit);
             CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved))
                 .exceptionally(ex -> {

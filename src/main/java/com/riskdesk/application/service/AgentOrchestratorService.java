@@ -61,6 +61,15 @@ public class AgentOrchestratorService {
 
     private final List<TradingAgent> gates;
     private final List<TradingAgent> scorers;
+    /**
+     * Names of every agent that implements {@link Gate}. Used by
+     * {@link #resolveVerdicts} to enforce the {@link Scorer} contract:
+     * only Gate verdicts are allowed to hard-block a setup. A Scorer that
+     * returns {@code adj.blocked()=true} (e.g. a rogue Gemini response
+     * emitting {@code "blocked":true}) is logged at WARN and downgraded
+     * to a LOW-confidence warning — the setup is NOT short-circuited.
+     */
+    private final java.util.Set<String> gateNames;
     private final RiskManagementService riskManagementService;
     private final PositionService positionService;
     private final MentorIntermarketService intermarketService;
@@ -99,6 +108,9 @@ public class AgentOrchestratorService {
         }
         this.gates = List.copyOf(gateList);
         this.scorers = List.copyOf(scorerList);
+        this.gateNames = this.gates.stream()
+            .map(TradingAgent::name)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
         this.riskManagementService = riskManagementService;
         this.positionService = positionService;
         this.intermarketService = intermarketService;
@@ -257,14 +269,25 @@ public class AgentOrchestratorService {
                 sizePct = Math.min(sizePct, adj.sizePctCap().get());
             }
 
-            // Hard block (maintenance window, market closed, etc.)
-            if (adj.blocked()) {
+            // Hard block — Scorer contract says only Gates are allowed to
+            // hard-block (see Scorer.java javadoc). A Scorer that emits
+            // adj.blocked()=true (e.g. a Gemini response that set
+            // "blocked":true in its flags object) is logged and downgraded
+            // to a LOW-confidence warning rather than vetoing the setup.
+            // This keeps the cost model predictable: once Gates pass, we
+            // don't retroactively un-allow a setup after paying Gemini.
+            boolean isGateBlock = adj.blocked() && gateNames.contains(v.agentName());
+            if (adj.blocked() && !isGateBlock) {
+                log.warn("Scorer '{}' emitted blocked=true — ignored per Scorer contract ({})",
+                    v.agentName(), v.reasoning());
+            }
+            if (isGateBlock) {
                 blocked = true;
                 warnings.add(v.agentName() + ": " + v.reasoning());
             }
 
-            // Low-confidence warning (unless already flagged blocked)
-            if (v.confidence() == Confidence.LOW && !adj.blocked()) {
+            // Low-confidence warning (unless this is an authoritative Gate block).
+            if (v.confidence() == Confidence.LOW && !isGateBlock) {
                 warnings.add(v.agentName() + ": " + v.reasoning());
             }
         }
