@@ -292,17 +292,24 @@ public class AgentOrchestratorService {
             }
         }
 
-        // ── 4. Majority-LOW rule: 2+ of 3 AI agents LOW → treat as ineligible ─
-        // Gates are excluded: their LOW is surfaced via 'blocked' or size_pct.
-        long aiLow = verdicts.stream()
-            .filter(v -> !"Session-Timing".equals(v.agentName()))
+        // ── 4. Majority-LOW rule: 2+ agents LOW → treat as ineligible ────────
+        // Every agent's LOW confidence counts — gates included. The earlier
+        // carve-out for Session-Timing assumed its LOW would always surface via
+        // `blocked` or `size_pct`, but the low-liquidity branch in
+        // SessionTimingAgent emits LOW + a 0.5% size cap without blocking.
+        // Excluding that LOW meant a dead-zone setup with one AI scorer LOW was
+        // still ELIGIBLE at 0.5% — the tally now correctly escalates it to
+        // INELIGIBLE (2-of-N vote).
+        // Blocked verdicts are still included in the tally but the `blocked`
+        // branch below wins eligibility, so their contribution is harmless.
+        long agentLow = verdicts.stream()
             .filter(v -> v.confidence() == Confidence.LOW)
             .count();
 
         String eligibility;
         if (blocked) {
             eligibility = "BLOCKED";
-        } else if (aiLow >= 2) {
+        } else if (agentLow >= 2) {
             eligibility = "INELIGIBLE";
         } else if (sizePct > 0) {
             eligibility = "ELIGIBLE";
@@ -316,16 +323,16 @@ public class AgentOrchestratorService {
         if (blocked) {
             verdict = "BLOCKED — " + (warnings.isEmpty() ? "agent block" : warnings.get(0));
         } else if ("INELIGIBLE".equals(eligibility)) {
-            verdict = playbook.verdict() + " — " + aiLow + " AI agent(s) LOW → stand down";
+            verdict = playbook.verdict() + " — " + agentLow + " agent(s) LOW → stand down";
         } else if (warnings.isEmpty()) {
             verdict = playbook.verdict() + " — ALL AGENTS ALIGNED";
         } else {
             verdict = playbook.verdict() + " — " + warnings.size() + " warning(s)";
         }
 
-        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} AI LOW], warnings: {})",
+        log.info("Orchestrator verdict: {} (size: {}%, agents: {} [{} LOW], warnings: {})",
             verdict, String.format("%.4f", sizePct * 100),
-            verdicts.size(), aiLow, warnings.size());
+            verdicts.size(), agentLow, warnings.size());
 
         return new FinalVerdict(verdict, adjustedPlan, sizePct, verdicts, warnings, eligibility);
     }

@@ -158,6 +158,71 @@ class AgentOrchestratorServiceTest {
         assertEquals("BLOCKED", publisher.events.get(0).eligibility());
     }
 
+    // ── PR-17 · SessionTiming.LOW counted in majority-LOW ─────────────────
+    //
+    // The low-liquidity branch in {@code SessionTimingAgent} emits
+    // Confidence.LOW + AgentAdjustments.sizeCap(0.005) — it does NOT block.
+    // The previous filter excluded Session-Timing's LOW from the tally, so a
+    // dead-zone setup with only one AI scorer LOW was still ELIGIBLE at 0.5%
+    // size. Including that LOW correctly escalates it to INELIGIBLE via the
+    // 2-of-N majority vote.
+
+    @Test
+    void majorityLow_sessionTimingLowCountsToward2OfN_driveSetupIneligible() {
+        // Session-Timing LOW (non-blocking, low-liquidity branch: size cap 0.5%)
+        // + one scorer LOW = 2 LOW → must trip majority and make the setup INELIGIBLE.
+        AgentOrchestratorService svc = newOrchestrator(List.of(
+            new SessionTimingLowNonBlockingStub(),
+            new LowConfidenceScorer("AI-Scorer-A"),
+            new HighConfidenceScorer("AI-Scorer-B")));
+
+        FinalVerdict fv = svc.orchestrate(samplePlaybook(), sampleContext());
+
+        assertEquals("INELIGIBLE", fv.eligibility(),
+            "2 LOW verdicts (Session-Timing + 1 AI scorer) must trigger majority-LOW veto");
+        assertTrue(fv.verdict().contains("2 agent(s) LOW"),
+            "Verdict string should surface the LOW tally — was: " + fv.verdict());
+        assertEquals(1, publisher.events.size());
+        assertEquals("INELIGIBLE", publisher.events.get(0).eligibility());
+    }
+
+    @Test
+    void majorityLow_soloSessionTimingLow_doesNotBlockSetup() {
+        // Session-Timing LOW alone (1 LOW) must still allow the setup through
+        // when every other agent is HIGH — the threshold is 2+ LOW.
+        // Size cap remains enforced (Session-Timing's sizeCap(0.005) wins over
+        // the risk gate's 0.01), so the trade sizes down but is NOT ineligible.
+        AgentOrchestratorService svc = newOrchestrator(List.of(
+            new SessionTimingLowNonBlockingStub(),
+            new HighConfidenceScorer("AI-Scorer-A"),
+            new HighConfidenceScorer("AI-Scorer-B")));
+
+        FinalVerdict fv = svc.orchestrate(samplePlaybook(), sampleContext());
+
+        assertEquals("ELIGIBLE", fv.eligibility(),
+            "1 LOW alone must not trip majority-LOW — size cap suffices as the safety net");
+        assertEquals(0.005, fv.sizePercent(), 1e-9,
+            "Session-Timing's 0.5% size cap must be honoured even though eligibility passes");
+        assertEquals(1, publisher.events.size());
+    }
+
+    @Test
+    void majorityLow_soloAiScorerLow_withSessionTimingHigh_isStillEligible() {
+        // Regression guard: single AI-scorer LOW while Session-Timing is HIGH
+        // must NOT push the setup to INELIGIBLE. This protects the "one
+        // dissenting opinion is a warning, not a veto" invariant.
+        AgentOrchestratorService svc = newOrchestrator(List.of(
+            new PassingGate(),  // Session-Timing stand-in, HIGH confidence
+            new LowConfidenceScorer("AI-Scorer-A"),
+            new HighConfidenceScorer("AI-Scorer-B")));
+
+        FinalVerdict fv = svc.orchestrate(samplePlaybook(), sampleContext());
+
+        assertEquals("ELIGIBLE", fv.eligibility(),
+            "1 AI LOW with Session-Timing HIGH must remain ELIGIBLE (below 2-of-N threshold)");
+        assertEquals(1, publisher.events.size());
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private AgentOrchestratorService newOrchestrator(List<TradingAgent> agents) {
@@ -252,6 +317,42 @@ class AgentOrchestratorServiceTest {
             return new AgentVerdict(name(), Confidence.LOW, Direction.LONG,
                 "Scorer tried to block — should be ignored",
                 AgentAdjustments.block());
+        }
+    }
+
+    /**
+     * Mirrors {@code SessionTimingAgent}'s low-liquidity branch: LOW confidence
+     * with a 0.5% size cap but NO hard block. Used to verify PR-17 — this LOW
+     * must count toward the 2-of-N majority-LOW tally.
+     */
+    private static final class SessionTimingLowNonBlockingStub implements Gate {
+        @Override public String name() { return "Session-Timing"; }
+        @Override public AgentVerdict evaluate(PlaybookEvaluation p, AgentContext c) {
+            return new AgentVerdict(name(), Confidence.LOW, Direction.LONG,
+                "LOW LIQUIDITY session — sweep risk elevated",
+                AgentAdjustments.sizeCap(0.005));
+        }
+    }
+
+    /** Named scorer that emits Confidence.LOW with no adjustments. */
+    private static final class LowConfidenceScorer implements Scorer {
+        private final String name;
+        LowConfidenceScorer(String name) { this.name = name; }
+        @Override public String name() { return name; }
+        @Override public AgentVerdict evaluate(PlaybookEvaluation p, AgentContext c) {
+            return new AgentVerdict(name, Confidence.LOW, Direction.LONG,
+                "scorer dissent", AgentAdjustments.none());
+        }
+    }
+
+    /** Named scorer that emits Confidence.HIGH with no adjustments. */
+    private static final class HighConfidenceScorer implements Scorer {
+        private final String name;
+        HighConfidenceScorer(String name) { this.name = name; }
+        @Override public String name() { return name; }
+        @Override public AgentVerdict evaluate(PlaybookEvaluation p, AgentContext c) {
+            return new AgentVerdict(name, Confidence.HIGH, Direction.LONG,
+                "scorer ok", AgentAdjustments.none());
         }
     }
 
