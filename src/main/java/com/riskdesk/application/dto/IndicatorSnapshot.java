@@ -4,6 +4,25 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * Snapshot of all indicator values for one (instrument, timeframe) pair at
+ * one point in time.
+ *
+ * <h2>Pivot staleness — {@code internalHigh/Low}, {@code swingHigh/Low},
+ * {@code strongHigh/Low}, {@code weakHigh/Low}</h2>
+ *
+ * Every pivot-derived level on this record originates in
+ * {@link com.riskdesk.domain.engine.smc.SmcStructureEngine.Pivot} and therefore
+ * carries an inherent confirmation lag equal to the corresponding lookback:
+ * <ul>
+ *   <li>{@code internal*} — default lookback 5 bars (≈50 min on 10m, ≈5 h on 1h)</li>
+ *   <li>{@code swing*}, {@code strong*}, {@code weak*} — default lookback 50 bars
+ *       (≈8 h 20 min on 10m, ≈2 days on 1h)</li>
+ * </ul>
+ * Consequently the {@code *Time} fields here refer to the candidate bar's close
+ * time, not "when the pivot was detected". Any UI element that labels these as
+ * "latest" / "current" should qualify them as structural anchors.
+ */
 public record IndicatorSnapshot(
     String instrument,
     String timeframe,
