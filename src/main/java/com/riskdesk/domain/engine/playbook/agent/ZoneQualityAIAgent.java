@@ -119,7 +119,7 @@ public class ZoneQualityAIAgent implements Scorer {
         payload.put("volume_profile", vpMap);
 
         AgentAiResponse ai = port.analyze(new AgentAiRequest(
-            AGENT_NAME, systemPrompt, payload, 500));
+            AGENT_NAME, systemPrompt, payload, 1500));
 
         if (!ai.aiAvailable()) {
             return fallbackVerdict(playbook, context, direction);

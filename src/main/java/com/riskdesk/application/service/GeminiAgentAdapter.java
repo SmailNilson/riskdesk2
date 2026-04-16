@@ -138,10 +138,39 @@ public class GeminiAgentAdapter implements GeminiAgentPort {
     // ── Response schema (kept small to enforce deterministic output) ────
 
     private static Map<String, Object> buildAgentResponseSchema() {
+        // Union of flags emitted across the 3 AI agents (see prompts/*.md). None
+        // are required — each agent's prompt tells Gemini which subset is
+        // relevant. We must enumerate them explicitly because Gemini 3.x rejects
+        // OBJECT schemas with empty {@code "properties": {}} (and does not
+        // support {@code additionalProperties}). Previously this field was
+        // declared permissive, which caused every agent call to fail with
+        // HTTP 400 INVALID_ARGUMENT — tripping the circuit breaker into a
+        // permanent "AI unavailable" fallback loop.
+        Map<String, Object> flagsProps = new LinkedHashMap<>();
+        flagsProps.put("size_pct", Map.of("type", "NUMBER",
+            "description", "Optional risk cap, 0..0.01"));
+        flagsProps.put("blocked", Map.of("type", "BOOLEAN"));
+        // MTF-Confluence signals
+        flagsProps.put("counter_trend", Map.of("type", "BOOLEAN"));
+        flagsProps.put("htf_fake_break", Map.of("type", "BOOLEAN"));
+        flagsProps.put("mtf_alignment", Map.of("type", "INTEGER",
+            "description", "0..3 HTF aligned"));
+        flagsProps.put("no_data", Map.of("type", "BOOLEAN"));
+        // Order-Flow signals
+        flagsProps.put("data_quality", Map.of("type", "STRING",
+            "enum", List.of("real_ticks", "degraded")));
+        flagsProps.put("flow_supports", Map.of("type", "BOOLEAN"));
+        flagsProps.put("wall_blocking_tp", Map.of("type", "BOOLEAN"));
+        // Zone-Quality signals
+        flagsProps.put("weak_zone", Map.of("type", "BOOLEAN"));
+        flagsProps.put("fake_break", Map.of("type", "BOOLEAN"));
+        flagsProps.put("trap_risk", Map.of("type", "BOOLEAN"));
+        flagsProps.put("no_of_enrichment", Map.of("type", "BOOLEAN"));
+
         Map<String, Object> flagsSchema = Map.of(
             "type", "OBJECT",
-            "description", "Free-form structured signals (e.g. counter_trend=true, size_pct=0.003)",
-            "properties", Map.of() // permissive
+            "description", "Structured signals — agent fills only the subset relevant to its domain",
+            "properties", flagsProps
         );
 
         Map<String, Object> props = new LinkedHashMap<>();

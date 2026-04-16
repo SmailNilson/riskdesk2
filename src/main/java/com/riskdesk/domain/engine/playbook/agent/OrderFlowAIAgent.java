@@ -115,7 +115,7 @@ public class OrderFlowAIAgent implements Scorer {
         }
 
         AgentAiResponse ai = port.analyze(new AgentAiRequest(
-            AGENT_NAME, systemPrompt, payload, 500));
+            AGENT_NAME, systemPrompt, payload, 1500));
 
         if (!ai.aiAvailable()) {
             // Deterministic fallback: flow-based heuristic
