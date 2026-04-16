@@ -12,6 +12,8 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.trading.service.PositionSizeValidator;
+import com.riskdesk.infrastructure.config.RiskProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,15 +32,20 @@ public class ExecutionManagerService {
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final IbkrOrderService ibkrOrderService;
     private final ObjectMapper objectMapper;
+    private final PositionSizeValidator positionSizeValidator;
 
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
                                    IbkrOrderService ibkrOrderService,
-                                   ObjectMapper objectMapper) {
+                                   ObjectMapper objectMapper,
+                                   RiskProperties riskProperties) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.ibkrOrderService = ibkrOrderService;
         this.objectMapper = objectMapper;
+        this.positionSizeValidator = new PositionSizeValidator(
+            riskProperties.getMaxRiskPerTradeUsd(),
+            riskProperties.getMaxQuantityPerOrder());
     }
 
     public TradeExecutionRecord ensureExecutionCreated(CreateExecutionCommand command) {
@@ -68,6 +75,15 @@ public class ExecutionManagerService {
         MentorProposedTradePlan tradePlan = extractTradePlan(review);
         Instrument instrument = Instrument.valueOf(review.getInstrument());
         Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
+
+        // PR-1 gate: reject oversized orders BEFORE any broker side-effect.
+        // Throws PositionSizeExceededException (runtime) which is translated to
+        // HTTP 422 by the presentation layer.
+        positionSizeValidator.validate(
+            instrument,
+            command.quantity(),
+            normalizeToTick(BigDecimal.valueOf(tradePlan.entryPrice()), instrument),
+            normalizeToTick(BigDecimal.valueOf(tradePlan.stopLoss()), instrument));
 
         TradeExecutionRecord candidate = new TradeExecutionRecord();
         candidate.setExecutionKey("exec:mentor-review:" + review.getId());

@@ -5,6 +5,7 @@ import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.infrastructure.config.RiskProperties;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -42,13 +43,24 @@ class ExecutionManagerServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** Generous risk caps so existing tests (which use small qty/stops) pass unchanged. */
+    private final RiskProperties riskProperties = riskPropertiesWith(100_000.0, 1_000);
+
+    private static RiskProperties riskPropertiesWith(double maxRiskUsd, int maxQty) {
+        RiskProperties p = new RiskProperties();
+        p.setMaxRiskPerTradeUsd(maxRiskUsd);
+        p.setMaxQuantityPerOrder(maxQty);
+        return p;
+    }
+
     @Test
     void ensureExecutionCreated_buildsPendingExecutionFromEligibleReview() throws Exception {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -91,7 +103,8 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -116,7 +129,8 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -157,7 +171,8 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         MentorSignalReviewRecord reviewV1 = eligibleReview(77L, 1, "2026-03-28T16:00:00Z");
@@ -196,7 +211,8 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         TradeExecutionRecord existing = new TradeExecutionRecord();
@@ -230,7 +246,8 @@ class ExecutionManagerServiceTest {
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
-            objectMapper
+            objectMapper,
+            riskProperties
         );
 
         TradeExecutionRecord execution = new TradeExecutionRecord();
