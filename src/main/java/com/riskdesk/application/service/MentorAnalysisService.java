@@ -39,17 +39,20 @@ public class MentorAnalysisService {
     private final MentorAuditRepositoryPort mentorAuditRepository;
     private final MentorProperties mentorProperties;
     private final ObjectMapper objectMapper;
+    private final MentorParseMetrics parseMetrics;
 
     public MentorAnalysisService(MentorModelClient mentorModelClient,
                                  MentorMemoryService mentorMemoryService,
                                  MentorAuditRepositoryPort mentorAuditRepository,
                                  MentorProperties mentorProperties,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 MentorParseMetrics parseMetrics) {
         this.mentorModelClient = mentorModelClient;
         this.mentorMemoryService = mentorMemoryService;
         this.mentorAuditRepository = mentorAuditRepository;
         this.mentorProperties = mentorProperties;
         this.objectMapper = objectMapper;
+        this.parseMetrics = parseMetrics;
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload) {
@@ -85,19 +88,28 @@ public class MentorAnalysisService {
 
     private MentorStructuredResponse parseStructuredResponse(String rawText) {
         try {
-            return objectMapper.readValue(rawText, MentorStructuredResponse.class);
+            MentorStructuredResponse strict = objectMapper.readValue(rawText, MentorStructuredResponse.class);
+            parseMetrics.recordSuccess();
+            return strict;
         } catch (Exception strictFailure) {
             MentorStructuredResponse recovered = tryRecoverPartialResponse(rawText);
             if (recovered != null) {
                 log.warn("Mentor response recovered from partial JSON (original length={} chars)", rawText == null ? 0 : rawText.length());
+                parseMetrics.recordRecovered();
                 return recovered;
             }
+            parseMetrics.recordFailure();
+            // Parse failure: Gemini did not return a consumable JSON. This is a
+            // TECHNICAL failure, not a trade rejection. Use MENTOR_UNAVAILABLE
+            // so the UI can surface it as "retry needed" instead of masking it
+            // as a real rejection. Prod audit showed ~90% of SIGNAL reviews
+            // landed here because of thinking-budget-induced truncation.
             return new MentorStructuredResponse(
                 rawText,
                 List.of(),
                 List.of("La réponse du modèle n'était pas un JSON strictement exploitable."),
-                "Trade Non-Conforme - Erreur de Processus",
-                ExecutionEligibilityStatus.INELIGIBLE,
+                "Mentor Indisponible - Réponse Incomplète",
+                ExecutionEligibilityStatus.MENTOR_UNAVAILABLE,
                 "Structured mentor response unavailable.",
                 "Rends la sortie du mentor plus structurée avant de l'utiliser en décision.",
                 null
@@ -145,10 +157,13 @@ public class MentorAnalysisService {
         if (improvement == null || improvement.isBlank()) {
             improvement = "Augmente la robustesse de la sortie structurée du mentor.";
         }
-        // Recovered responses are kept INELIGIBLE here on purpose. The playbook
-        // fallback circuit (MentorSignalReviewService) may override to ELIGIBLE
-        // when the mechanical plan + checklist score justify it.
-        ExecutionEligibilityStatus eligibility = ExecutionEligibilityStatus.INELIGIBLE;
+        // Recovered responses are kept MENTOR_UNAVAILABLE here on purpose:
+        // we cannot trust a Gemini verdict that was reconstructed from a
+        // truncated JSON (the closing fields may have flipped it). The UI
+        // surfaces this distinctly from a real INELIGIBLE. The downstream
+        // playbook fallback (MentorSignalReviewService) may still override
+        // to ELIGIBLE when the mechanical plan + checklist score justify it.
+        ExecutionEligibilityStatus eligibility = ExecutionEligibilityStatus.MENTOR_UNAVAILABLE;
         return new MentorStructuredResponse(
             technical == null ? "" : technical,
             strengths,

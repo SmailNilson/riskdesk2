@@ -749,7 +749,10 @@ public class MentorSignalReviewService {
             review.setStatus(STATUS_ERROR);
             review.setCompletedAt(Instant.now());
             review.setErrorMessage(message);
-            review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+            // Review failed technically (Gemini down, timeout, I/O error). The
+            // trade was never evaluated on merit — surface it as
+            // MENTOR_UNAVAILABLE so the UI doesn't mask it as a real rejection.
+            review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.MENTOR_UNAVAILABLE);
             review.setExecutionEligibilityReason(message);
             review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
             MentorSignalReviewRecord updated = reviewRepository.save(review);
@@ -831,7 +834,8 @@ public class MentorSignalReviewService {
 
     private ExecutionEligibilityStatus resolveExecutionEligibilityStatus(MentorAnalyzeResponse analysis) {
         if (analysis == null || analysis.analysis() == null || analysis.analysis().executionEligibilityStatus() == null) {
-            return ExecutionEligibilityStatus.INELIGIBLE;
+            // No analysis payload at all — distinct from a real INELIGIBLE verdict.
+            return ExecutionEligibilityStatus.MENTOR_UNAVAILABLE;
         }
         return analysis.analysis().executionEligibilityStatus();
     }

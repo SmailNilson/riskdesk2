@@ -543,7 +543,17 @@ export interface MentorSignalReview {
   timestamp: string;
   createdAt: string;
   selectedTimezone: string | null;
-  executionEligibilityStatus: 'NOT_EVALUATED' | 'ELIGIBLE' | 'INELIGIBLE' | null;
+  // MENTOR_UNAVAILABLE: Gemini reply was truncated / parse-failed / timed out.
+  // Distinct from INELIGIBLE — the trade was never actually evaluated and the
+  // UI surfaces it as "retry needed", not "rejected". Introduced after a prod
+  // audit where ~96% of "Trade Non-Conforme" badges were masked technical
+  // failures, not real rejections.
+  executionEligibilityStatus:
+    | 'NOT_EVALUATED'
+    | 'ELIGIBLE'
+    | 'INELIGIBLE'
+    | 'MENTOR_UNAVAILABLE'
+    | null;
   executionEligibilityReason: string | null;
   simulationStatus: 'PENDING_ENTRY' | 'ACTIVE' | 'WIN' | 'LOSS' | 'MISSED' | 'CANCELLED' | 'REVERSED' | null;
   activationTime: string | null;

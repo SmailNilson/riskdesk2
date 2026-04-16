@@ -853,6 +853,20 @@ function StatusChip({
         </span>
       );
     }
+    // MENTOR_UNAVAILABLE ≠ rejected trade: amber warning, not red, so the
+    // user knows Gemini itself didn't finish (truncated / parse-failed /
+    // circuit-broken). They can re-run the analysis instead of treating it
+    // as a real "non-conforme" verdict.
+    if (executionEligibilityStatus === 'MENTOR_UNAVAILABLE') {
+      return (
+        <span
+          className="rounded bg-amber-950/70 px-2 py-1 text-[10px] font-semibold text-amber-300"
+          title="La réponse Gemini n'a pas été exploitable (tronquée / parse / timeout). Relance l'analyse — ce n'est PAS un rejet du trade."
+        >
+          Mentor Indisponible
+        </span>
+      );
+    }
     return (
       <span className="rounded bg-zinc-800 px-2 py-1 text-[10px] font-semibold text-zinc-300">
         Review Done
