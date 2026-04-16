@@ -78,6 +78,7 @@ class MentorSignalReviewServiceTest {
     private ApplicationEventPublisher eventPublisher;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final DeterministicMentorFallback deterministicMentorFallback = new DeterministicMentorFallback();
 
     @Test
     void reanalyzeAlert_rebuildsLivePayloadAndPreservesOriginalAlertContext() throws Exception {
@@ -93,6 +94,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            deterministicMentorFallback,
             true
         );
 
@@ -254,6 +256,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            deterministicMentorFallback,
             true
         );
 
@@ -423,6 +426,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            deterministicMentorFallback,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -494,6 +498,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            deterministicMentorFallback,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -543,7 +548,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, deterministicMentorFallback, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -594,7 +599,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, deterministicMentorFallback, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -630,7 +635,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, deterministicMentorFallback, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -655,7 +660,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, deterministicMentorFallback, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -797,6 +802,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            deterministicMentorFallback,
             true
         );
     }
@@ -923,5 +929,145 @@ class MentorSignalReviewServiceTest {
         assertThat(effective).isSameAs(geminiEligible);
         assertThat(effective.analysis().proposedTradePlan().entryPrice()).isEqualTo(3020.0);
         assertThat(effective.analysis().proposedTradePlan().tpSource()).isEqualTo("FORMULA_1.5");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // PR-4 — Deterministic Mentor fallback (Gemini unavailable → DONE + INELIGIBLE)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void analyzeAndPersist_whenGeminiThrows_fallsBackToDeterministicIneligibleVerdict() throws Exception {
+        // The key regression from the audit: when Gemini is fully unavailable
+        // (network error, API key revoked, etc.) the review used to be lost as
+        // ERROR. PR-4 persists it as DONE + INELIGIBLE with the mechanical plan
+        // preserved so the operator still sees entry/SL/TP.
+        MentorSignalReviewService service = newServiceForFallbackTests();
+
+        Alert alert = new Alert(
+            "smc:MNQ:2026-04-15T14:00:00Z",
+            AlertSeverity.INFO,
+            "Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH",
+            AlertCategory.SMC,
+            "MNQ",
+            Instant.parse("2026-04-15T14:00:00Z")
+        );
+        String alertKey = "2026-04-15T14:00:00Z:MNQ:SMC:Micro E-mini Nasdaq-100 [10m] — CHoCH detected: CHOCH_BEARISH";
+
+        MentorSignalReviewRecord baseReview = new MentorSignalReviewRecord();
+        baseReview.setId(21L);
+        baseReview.setAlertKey(alertKey);
+        baseReview.setRevision(1);
+        baseReview.setTriggerType("INITIAL");
+        baseReview.setStatus("DONE");
+        baseReview.setSeverity("INFO");
+        baseReview.setCategory("SMC");
+        baseReview.setMessage(alert.message());
+        baseReview.setInstrument("MNQ");
+        baseReview.setTimeframe("10m");
+        baseReview.setAction("SHORT");
+        baseReview.setAlertTimestamp(alert.timestamp());
+        baseReview.setCreatedAt(alert.timestamp());
+        // Snapshot includes a playbook with mechanical plan so the fallback has
+        // something to surface to the operator.
+        baseReview.setSnapshotJson("""
+            {
+              "metadata": {"asset": "MNQ1!", "timeframe_focus": "10m", "current_price": 24411.25},
+              "market_structure_the_king": {"last_event": "CHOCH_BEARISH"},
+              "trade_intention": {"action": "SHORT"},
+              "playbook_pre_analysis": {
+                "checklist_score": "6/7",
+                "verdict": "Setup structurel",
+                "mechanical_plan": {
+                  "entry": 24410.0,
+                  "sl": 24430.0,
+                  "tp1": 24370.0,
+                  "rr": 2.0,
+                  "sl_rationale": "Au-dessus du swing high + marge ATR"
+                }
+              }
+            }
+            """);
+
+        MentorSignalReviewRecord pendingReview = new MentorSignalReviewRecord();
+        pendingReview.setId(22L);
+        pendingReview.setAlertKey(alertKey);
+        pendingReview.setRevision(2);
+        pendingReview.setTriggerType("MANUAL_REANALYSIS");
+        pendingReview.setStatus("ANALYZING");
+        pendingReview.setSeverity("INFO");
+        pendingReview.setCategory("SMC");
+        pendingReview.setMessage(alert.message());
+        pendingReview.setInstrument("MNQ");
+        pendingReview.setTimeframe("10m");
+        pendingReview.setAction("SHORT");
+        pendingReview.setAlertTimestamp(alert.timestamp());
+        pendingReview.setCreatedAt(Instant.parse("2026-04-15T14:05:00Z"));
+        pendingReview.setSnapshotJson(baseReview.getSnapshotJson());
+
+        when(reviewRepository.findByAlertKeyOrderByRevisionAsc(alertKey)).thenReturn(List.of(baseReview));
+        when(reviewRepository.save(any())).thenAnswer(invocation -> {
+            MentorSignalReviewRecord record = invocation.getArgument(0);
+            if (record.getId() == null) {
+                record.setId(22L);
+            }
+            return record;
+        });
+        when(reviewRepository.findById(22L)).thenReturn(Optional.of(pendingReview));
+        when(marketDataServiceProvider.getIfAvailable()).thenReturn(marketDataService);
+        when(marketDataService.currentPrice(Instrument.MNQ)).thenReturn(
+            new MarketDataService.StoredPrice(new BigDecimal("24415.50"), Instant.parse("2026-04-15T14:05:05Z"), "LIVE_PROVIDER")
+        );
+        when(indicatorService.computeSnapshot(Instrument.MNQ, "10m"))
+            .thenReturn(snapshot("10m", new BigDecimal("24422.50"), new BigDecimal("47.20"), "CHOCH_BEARISH"));
+        when(indicatorService.computeSnapshot(Instrument.MNQ, "1h"))
+            .thenReturn(snapshot("1h", new BigDecimal("24405.00"), new BigDecimal("44.10"), "CHOCH_BEARISH"));
+        when(indicatorService.computeSeries(Instrument.MNQ, "10m", 500)).thenReturn(
+            new IndicatorSeriesSnapshot("MNQ", "10m", List.of(), List.of(), List.of(), List.of(), List.of()));
+        when(candleRepositoryPort.findRecentCandles(Instrument.MNQ, "10m", 120)).thenReturn(List.of(
+            candle("2026-04-15T13:50:00Z", "24418.25", "24422.00", "24410.00", "24415.00"),
+            candle("2026-04-15T14:00:00Z", "24415.00", "24428.00", "24412.00", "24424.25")
+        ));
+        when(mentorIntermarketService.current(Instrument.MNQ)).thenReturn(
+            new MentorIntermarketSnapshot(0.35, "BULLISH", null, null, null, null, "DXY_AVAILABLE"));
+        when(mentorIntermarketService.currentForAssetClass(any(), any())).thenReturn(
+            new MacroCorrelationSnapshot(0.35, "BULLISH", null, null, null, null, null, null, "UNAVAILABLE", "DXY_ONLY"));
+
+        // Gemini is offline — analyze throws IllegalStateException (same contract
+        // as MentorAnalysisService when the underlying model client fails).
+        when(mentorAnalysisService.analyze(any(), any()))
+            .thenThrow(new IllegalStateException("Gemini mentor call failed: Connection timed out"));
+
+        service.reanalyzeAlert(alert, "Africa/Casablanca", null, null, null);
+
+        // The service should have persisted:
+        //   1st save → pending ANALYZING record (from the reanalyze entry)
+        //   2nd save → final DONE record built from the deterministic fallback
+        ArgumentCaptor<MentorSignalReviewRecord> captor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
+        verify(reviewRepository, timeout(2000).atLeast(2)).save(captor.capture());
+
+        // The last captured save is the one written by analyzeAndPersist.
+        MentorSignalReviewRecord finalRecord = captor.getAllValues().get(captor.getAllValues().size() - 1);
+
+        // Review must NOT be ERROR — the whole point of PR-4 is that the review
+        // survives Gemini downtime.
+        assertThat(finalRecord.getStatus()).isEqualTo("DONE");
+        // Conservative stand-down: never auto-execute when Mentor is offline.
+        assertThat(finalRecord.getExecutionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(finalRecord.getExecutionEligibilityReason())
+            .contains("Mentor IA offline")
+            .contains("Connection timed out");
+        assertThat(finalRecord.getVerdict()).contains("Fallback Deterministe");
+        assertThat(finalRecord.getErrorMessage()).isNull();
+
+        // The persisted analysis JSON should carry the fallback model marker
+        // and the synthesized French verdict. Mechanical plan preservation is
+        // covered directly by DeterministicMentorFallbackTest — the reanalyze
+        // flow rebuilds the payload from live indicators so the plan fields
+        // depend on runtime data that isn't mocked here.
+        assertThat(finalRecord.getAnalysisJson())
+            .contains(DeterministicMentorFallback.FALLBACK_MODEL)
+            .contains("Fallback Deterministe")
+            .contains("Connection timed out");
     }
 }

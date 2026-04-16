@@ -87,6 +87,7 @@ public class MentorSignalReviewService {
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
+    private final DeterministicMentorFallback deterministicMentorFallback;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
     private final PlaybookEvaluator playbookEvaluator = new PlaybookEvaluator();
 
@@ -114,6 +115,7 @@ public class MentorSignalReviewService {
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
                                      ApplicationEventPublisher eventPublisher,
+                                     DeterministicMentorFallback deterministicMentorFallback,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -126,6 +128,7 @@ public class MentorSignalReviewService {
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
         this.eventPublisher = eventPublisher;
+        this.deterministicMentorFallback = deterministicMentorFallback;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -611,29 +614,49 @@ public class MentorSignalReviewService {
         try {
             MentorAnalyzeResponse analysis = mentorAnalysisService.analyze(payload, MentorAnalysisService.ALERT_SOURCE_PREFIX + reviewId);
             MentorAnalyzeResponse effective = applyPlaybookFallback(analysis, payload);
-            reviewRepository.findById(reviewId).ifPresent(review -> {
-                review.setStatus(STATUS_DONE);
-                review.setCompletedAt(Instant.now());
-                review.setAnalysisJson(writeJson(effective));
-                review.setVerdict(truncate(effective.analysis() == null ? null : effective.analysis().verdict(), 512));
-                if ("BEHAVIOUR".equals(review.getSourceType())) {
-                    review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
-                    review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
-                    review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
-                } else {
-                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(effective));
-                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(effective));
-                    initializeSimulationState(review, effective);
-                }
-                review.setErrorMessage(null);
-                MentorSignalReviewRecord updated = reviewRepository.save(review);
-                publish(updated);
-                publishTradeValidatedIfEligible(updated, effective);
-            });
+            persistAnalysisResult(reviewId, effective);
+        } catch (IllegalStateException mentorDown) {
+            // Gemini itself is unavailable (network error, invalid key, timeout retries exhausted).
+            // Instead of losing the review as ERROR, synthesize a deterministic INELIGIBLE response
+            // from the playbook + agent context already in the payload. The operator can still see
+            // the mechanical plan; auto-execution is blocked by policy until Gemini recovers.
+            log.warn("Mentor IA unavailable for review {} — using deterministic fallback: {}",
+                reviewId, mentorDown.getMessage());
+            MentorAnalyzeResponse fallback = deterministicMentorFallback.build(payload, mentorDown.getMessage());
+            persistAnalysisResult(reviewId, fallback);
         } catch (Exception e) {
             log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
         }
+    }
+
+    /**
+     * Commit a Mentor analysis (real or fallback) to the review record.
+     *
+     * <p>Shared by the normal Gemini path and the {@link DeterministicMentorFallback} path
+     * so both produce a DONE review with the same lifecycle semantics (eligibility,
+     * simulation state, WebSocket publication, trade validated event).
+     */
+    private void persistAnalysisResult(Long reviewId, MentorAnalyzeResponse effective) {
+        reviewRepository.findById(reviewId).ifPresent(review -> {
+            review.setStatus(STATUS_DONE);
+            review.setCompletedAt(Instant.now());
+            review.setAnalysisJson(writeJson(effective));
+            review.setVerdict(truncate(effective.analysis() == null ? null : effective.analysis().verdict(), 512));
+            if ("BEHAVIOUR".equals(review.getSourceType())) {
+                review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+                review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
+                review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+            } else {
+                review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(effective));
+                review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(effective));
+                initializeSimulationState(review, effective);
+            }
+            review.setErrorMessage(null);
+            MentorSignalReviewRecord updated = reviewRepository.save(review);
+            publish(updated);
+            publishTradeValidatedIfEligible(updated, effective);
+        });
     }
 
     /**
