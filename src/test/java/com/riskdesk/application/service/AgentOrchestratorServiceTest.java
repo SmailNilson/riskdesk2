@@ -111,6 +111,39 @@ class AgentOrchestratorServiceTest {
     }
 
     @Test
+    void scorerCannotHardBlock_itsBlockedFlagIsIgnoredAndDowngradedToWarning() {
+        // Scorer contract (Scorer.java javadoc): only Gates are allowed to
+        // hard-block a setup. If a Scorer emits adj.blocked()=true — e.g. a
+        // Gemini response with "blocked":true in its flags — the orchestrator
+        // ignores the block and keeps the setup eligible.
+        AgentOrchestratorService svc = newOrchestrator(List.of(
+            new PassingGate(),
+            new BlockingScorer()));  // emits blocked=true, violates contract
+
+        FinalVerdict fv = svc.orchestrate(samplePlaybook(), sampleContext());
+
+        assertEquals("ELIGIBLE", fv.eligibility(),
+            "A Scorer's blocked=true must NOT hard-block the setup (Scorer contract)");
+        // The block attempt should surface as a warning so an operator can see it.
+        assertTrue(fv.warnings().stream().anyMatch(w -> w.contains("Blocking-Scorer")),
+            "Scorer's attempted block must appear as a warning — was: " + fv.warnings());
+        assertEquals(1, publisher.events.size());
+    }
+
+    @Test
+    void gateBlock_stillShortCircuits_contractIsNotWeakened() {
+        // Guard against PR-C regressing PR-8's short-circuit: Gate blocks
+        // remain authoritative and scorers must still not be invoked.
+        CountingScorer scorer = new CountingScorer();
+        AgentOrchestratorService svc = newOrchestrator(List.of(new BlockingGate(), scorer));
+
+        FinalVerdict fv = svc.orchestrate(samplePlaybook(), sampleContext());
+
+        assertEquals(0, scorer.calls.get(), "Gate block must still short-circuit scorers");
+        assertEquals("BLOCKED", fv.eligibility());
+    }
+
+    @Test
     void riskGateBlocks_noAgentIsInvoked_andEventCarriesBlock() {
         when(risk.evaluate(any(), any())).thenReturn(
             RiskManagementService.RiskGateVerdict.blocked("DAILY DRAWDOWN", List.of("DD breach")));
@@ -205,6 +238,20 @@ class AgentOrchestratorServiceTest {
             calls.incrementAndGet();
             return new AgentVerdict(name(), Confidence.HIGH, Direction.LONG,
                 "ok", AgentAdjustments.none());
+        }
+    }
+
+    /**
+     * Scorer that attempts a hard block. Mirrors a rogue Gemini response that
+     * emits {@code "blocked": true} in its flags. Per the Scorer contract the
+     * orchestrator must IGNORE this block and downgrade it to a warning.
+     */
+    private static final class BlockingScorer implements Scorer {
+        @Override public String name() { return "Blocking-Scorer"; }
+        @Override public AgentVerdict evaluate(PlaybookEvaluation p, AgentContext c) {
+            return new AgentVerdict(name(), Confidence.LOW, Direction.LONG,
+                "Scorer tried to block — should be ignored",
+                AgentAdjustments.block());
         }
     }
 
