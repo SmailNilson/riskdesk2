@@ -924,4 +924,44 @@ class MentorSignalReviewServiceTest {
         assertThat(effective.analysis().proposedTradePlan().entryPrice()).isEqualTo(3020.0);
         assertThat(effective.analysis().proposedTradePlan().tpSource()).isEqualTo("FORMULA_1.5");
     }
+
+    // ── DST-aware market_session payload field ─────────────────────────
+    // The previous implementation compared hardcoded UTC hours, which
+    // shifted all session boundaries ±1 h between summer (EDT, UTC-4) and
+    // winter (EST, UTC-5). The new mapping routes through
+    // TradingSessionResolver so labels stay correct across DST transitions.
+
+    @Test
+    void inferMarketSession_nyMorningInBothDstPhases_tagsAsNewYork() {
+        // 09:30 ET — winter (EST, UTC-5) = 14:30 UTC
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T14:30:00Z"))).isEqualTo("NEW_YORK");
+        // 09:30 ET — summer (EDT, UTC-4) = 13:30 UTC
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-07-15T13:30:00Z"))).isEqualTo("NEW_YORK");
+    }
+
+    @Test
+    void inferMarketSession_asianOpenInSummer_wasMisTaggedByOldCode() {
+        // 17:30 ET summer = 21:30 UTC. Old code: hour=21 → NEW_YORK (wrong).
+        // New code via America/New_York zone: ASIAN (CME Globex open).
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-07-15T21:30:00Z"))).isEqualTo("ASIAN_OPEN");
+    }
+
+    @Test
+    void inferMarketSession_lateAsianInWinter_wasMisTaggedByOldCode() {
+        // 01:30 ET winter = 06:30 UTC. Old code: hour=6 → LONDON (wrong).
+        // New code: ASIAN (17:00-02:00 ET).
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T06:30:00Z"))).isEqualTo("ASIAN_OPEN");
+    }
+
+    @Test
+    void inferMarketSession_settlementWindow_isOffHours() {
+        // 16:30 ET winter = 21:30 UTC → CLOSE phase (16:00-17:00 ET) → OFF_HOURS
+        // Use a fresh weekday to avoid the weekend CLOSED branch.
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T21:30:00Z"))).isEqualTo("OFF_HOURS");
+    }
 }

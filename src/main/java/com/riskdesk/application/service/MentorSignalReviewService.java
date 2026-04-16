@@ -47,7 +47,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -1719,18 +1718,26 @@ public class MentorSignalReviewService {
         };
     }
 
-    private String inferMarketSession(Instant timestamp) {
-        int hour = timestamp.atOffset(ZoneOffset.UTC).getHour();
-        if (hour >= 22 || hour < 6) {
-            return "ASIAN_OPEN";
-        }
-        if (hour < 12) {
-            return "LONDON";
-        }
-        if (hour < 20) {
-            return "NEW_YORK";
-        }
-        return "OFF_HOURS";
+    /**
+     * Maps the DST-safe America/New_York session phase into the legacy
+     * {@code market_session} vocabulary the Gemini payload schema expects
+     * ({@code ASIAN_OPEN | LONDON | NEW_YORK | OFF_HOURS}).
+     *
+     * <p>Previously this compared a hardcoded UTC hour, which shifted all
+     * boundaries by ±1 hour for half the year (DST) and could tag NY AM as
+     * LONDON in winter. Routes through {@link TradingSessionResolver} so the
+     * on-wire value stays consistent across DST transitions.
+     *
+     * <p>Package-private static so the mapping is unit-testable without
+     * having to spin up the whole service.
+     */
+    static String inferMarketSession(Instant timestamp) {
+        return switch (TradingSessionResolver.currentPhase(timestamp)) {
+            case ASIAN -> "ASIAN_OPEN";
+            case LONDON -> "LONDON";
+            case NY_AM, NY_PM -> "NEW_YORK";
+            case CLOSE, CLOSED -> "OFF_HOURS";
+        };
     }
 
     private int timeToCandleCloseSeconds(String timeframe, Instant timestamp) {

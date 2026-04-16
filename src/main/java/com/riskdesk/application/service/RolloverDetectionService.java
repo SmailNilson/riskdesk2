@@ -217,7 +217,9 @@ public class RolloverDetectionService {
             int year = Integer.parseInt(contractMonth.substring(0, 4));
             int month = Integer.parseInt(contractMonth.substring(4, 6));
             LocalDate firstDay = LocalDate.of(year, month, 1);
-            return ChronoUnit.DAYS.between(LocalDate.now(), firstDay);
+            // CME zone, not JVM default — contract boundaries are an America/New_York concept.
+            // Naked LocalDate.now() shifts rollover decisions by one day across DST.
+            return ChronoUnit.DAYS.between(LocalDate.now(TradingSessionResolver.CME_ZONE), firstDay);
         } catch (Exception e) {
             return -1;
         }
