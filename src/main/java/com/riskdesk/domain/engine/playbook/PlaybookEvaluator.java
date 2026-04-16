@@ -1,5 +1,6 @@
 package com.riskdesk.domain.engine.playbook;
 
+import com.riskdesk.domain.engine.playbook.calculator.LateEntryDetector;
 import com.riskdesk.domain.engine.playbook.calculator.MechanicalPlanCalculator;
 import com.riskdesk.domain.engine.playbook.detector.BreakRetestDetector;
 import com.riskdesk.domain.engine.playbook.detector.LiquiditySweepDetector;
@@ -22,6 +23,7 @@ public class PlaybookEvaluator {
     private final LiquiditySweepDetector liquiditySweepDetector = new LiquiditySweepDetector();
     private final BreakRetestDetector breakRetestDetector = new BreakRetestDetector();
     private final MechanicalPlanCalculator planCalculator = new MechanicalPlanCalculator();
+    private final LateEntryDetector lateEntryDetector = new LateEntryDetector();
 
     public PlaybookEvaluation evaluate(PlaybookInput input) {
         // Step 1: Evaluate filters
@@ -84,13 +86,22 @@ public class PlaybookEvaluator {
         List<ChecklistItem> checklist = bestEntry.checklist();
         int checklistScore = bestEntry.score();
 
+        // PR-8 · Late-entry detection: price has already advanced past entry
+        // in the trade direction by more than 0.5 × ATR. Flag it, surface it
+        // in the verdict, and let downstream decide (size cut, stand-down, etc.).
+        boolean lateEntry = lateEntryDetector.isLate(
+                plan, input.lastPrice(), input.atr(), direction);
+
         String verdict = buildVerdict(direction, best, checklistScore, filters);
+        if (lateEntry) {
+            verdict = "LATE ENTRY — " + verdict;
+        }
 
         List<SetupCandidate> enriched = evaluated.stream()
             .map(EvalEntry::candidate).toList();
 
         return new PlaybookEvaluation(
-            filters, enriched, best, plan, checklist, checklistScore, verdict, Instant.now()
+            filters, enriched, best, plan, checklist, checklistScore, verdict, Instant.now(), lateEntry
         );
     }
 
