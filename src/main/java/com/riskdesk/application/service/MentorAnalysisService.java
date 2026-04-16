@@ -2,7 +2,9 @@ package com.riskdesk.application.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.application.dto.MentorAlternativeEntry;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -18,6 +20,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -82,7 +86,12 @@ public class MentorAnalysisService {
     private MentorStructuredResponse parseStructuredResponse(String rawText) {
         try {
             return objectMapper.readValue(rawText, MentorStructuredResponse.class);
-        } catch (Exception ignored) {
+        } catch (Exception strictFailure) {
+            MentorStructuredResponse recovered = tryRecoverPartialResponse(rawText);
+            if (recovered != null) {
+                log.warn("Mentor response recovered from partial JSON (original length={} chars)", rawText == null ? 0 : rawText.length());
+                return recovered;
+            }
             return new MentorStructuredResponse(
                 rawText,
                 List.of(),
@@ -94,6 +103,176 @@ public class MentorAnalysisService {
                 null
             );
         }
+    }
+
+    /**
+     * Tries to salvage a truncated Gemini response (e.g. cut off mid-string because of
+     * maxOutputTokens). We repair the JSON envelope, then extract whichever fields are
+     * present. Recovered responses stay INELIGIBLE by default — promotion to ELIGIBLE
+     * happens downstream via the playbook fallback circuit when warranted.
+     */
+    private MentorStructuredResponse tryRecoverPartialResponse(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return null;
+        }
+        String repaired = repairTruncatedJson(rawText);
+        if (repaired == null) {
+            return null;
+        }
+        JsonNode node;
+        try {
+            node = objectMapper.readTree(repaired);
+        } catch (Exception ignored) {
+            return null;
+        }
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+
+        String technical = textOrNull(node, "technicalQuickAnalysis");
+        List<String> strengths = readStringList(node, "strengths");
+        List<String> errors = new ArrayList<>(readStringList(node, "errors"));
+        errors.add("Réponse du mentor tronquée — reconstruction partielle appliquée.");
+        String verdict = textOrNull(node, "verdict");
+        if (verdict == null || verdict.isBlank()) {
+            verdict = "Trade Non-Conforme - Analyse Partielle";
+        }
+        String reason = textOrNull(node, "executionEligibilityReason");
+        if (reason == null || reason.isBlank()) {
+            reason = "Gemini response truncated; recovered fields only.";
+        }
+        String improvement = textOrNull(node, "improvementTip");
+        if (improvement == null || improvement.isBlank()) {
+            improvement = "Augmente la robustesse de la sortie structurée du mentor.";
+        }
+        // Recovered responses are kept INELIGIBLE here on purpose. The playbook
+        // fallback circuit (MentorSignalReviewService) may override to ELIGIBLE
+        // when the mechanical plan + checklist score justify it.
+        ExecutionEligibilityStatus eligibility = ExecutionEligibilityStatus.INELIGIBLE;
+        return new MentorStructuredResponse(
+            technical == null ? "" : technical,
+            strengths,
+            errors,
+            verdict,
+            eligibility,
+            reason,
+            improvement,
+            parseProposedPlan(node.get("proposedTradePlan"))
+        );
+    }
+
+    private static String repairTruncatedJson(String raw) {
+        String text = raw.trim();
+        int start = text.indexOf('{');
+        if (start < 0) {
+            return null;
+        }
+        text = text.substring(start);
+        StringBuilder sb = new StringBuilder(text.length() + 16);
+        boolean inString = false;
+        boolean escape = false;
+        int braces = 0;
+        int brackets = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            sb.append(c);
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                escape = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (c == '{') braces++;
+            else if (c == '}') braces--;
+            else if (c == '[') brackets++;
+            else if (c == ']') brackets--;
+        }
+        if (inString) {
+            sb.append('"');
+        }
+        // Strip dangling separators (trailing "," or ":" with nothing after)
+        while (sb.length() > 0) {
+            char last = sb.charAt(sb.length() - 1);
+            if (last == ',' || last == ':') {
+                sb.deleteCharAt(sb.length() - 1);
+            } else {
+                break;
+            }
+        }
+        for (int i = 0; i < brackets; i++) {
+            sb.append(']');
+        }
+        for (int i = 0; i < braces; i++) {
+            sb.append('}');
+        }
+        return sb.toString();
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        if (node == null) return null;
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull()) return null;
+        return child.isTextual() ? child.asText() : child.toString();
+    }
+
+    private static List<String> readStringList(JsonNode node, String field) {
+        if (node == null) return List.of();
+        JsonNode child = node.get(field);
+        if (child == null || !child.isArray()) return List.of();
+        List<String> out = new ArrayList<>(child.size());
+        for (Iterator<JsonNode> it = child.elements(); it.hasNext();) {
+            JsonNode el = it.next();
+            if (el != null && !el.isNull()) {
+                out.add(el.isTextual() ? el.asText() : el.toString());
+            }
+        }
+        return out;
+    }
+
+    private static MentorProposedTradePlan parseProposedPlan(JsonNode node) {
+        if (node == null || !node.isObject()) return null;
+        Double entry = numberOrNull(node, "entryPrice");
+        Double sl = numberOrNull(node, "stopLoss");
+        Double tp = numberOrNull(node, "takeProfit");
+        Double rr = numberOrNull(node, "rewardToRiskRatio");
+        String rationale = textOrNull(node, "rationale");
+        String tpSource = textOrNull(node, "tpSource");
+        MentorAlternativeEntry safeDeep = null;
+        JsonNode safeDeepNode = node.get("safeDeepEntry");
+        if (safeDeepNode != null && safeDeepNode.isObject()) {
+            safeDeep = new MentorAlternativeEntry(
+                numberOrNull(safeDeepNode, "entryPrice"),
+                textOrNull(safeDeepNode, "rationale")
+            );
+        }
+        if (entry == null && sl == null && tp == null && rr == null && rationale == null && safeDeep == null) {
+            return null;
+        }
+        return new MentorProposedTradePlan(entry, sl, tp, rr, rationale, safeDeep, tpSource);
+    }
+
+    private static Double numberOrNull(JsonNode node, String field) {
+        if (node == null) return null;
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull()) return null;
+        if (child.isNumber()) return child.doubleValue();
+        if (child.isTextual()) {
+            try {
+                return Double.parseDouble(child.asText().trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private Long persistSuccess(JsonNode payload,
