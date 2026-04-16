@@ -67,7 +67,11 @@ public class IndicatorAlertEvaluator {
 
     /**
      * Creates an evaluator with persistent state recovery.
-     * Loads recent states from the store (only states < 12h old to avoid stale weekend data).
+     * Loads recent states from the store (only states &lt; 12h old to avoid stale weekend data).
+     *
+     * <p>PR-7: also recovers the {@code lastFiredCandle} guards so an alert that
+     * already fired on the current candle before a restart cannot fire again on
+     * that same candle and trigger a duplicate Mentor (Gemini) review.
      */
     public IndicatorAlertEvaluator(AlertStateStore stateStore) {
         this.stateStore = stateStore;
@@ -80,6 +84,17 @@ public class IndicatorAlertEvaluator {
         }
         if (!recovered.isEmpty()) {
             log.info("IndicatorAlertEvaluator: recovered {} signal states from DB.", recovered.size());
+        }
+
+        Map<String, Instant> recoveredGuards = stateStore.loadRecentCandleGuards();
+        for (Map.Entry<String, Instant> entry : recoveredGuards.entrySet()) {
+            EvalKey key = parseEvalKey(entry.getKey());
+            if (key != null && entry.getValue() != null) {
+                lastFiredCandle.put(key, entry.getValue());
+            }
+        }
+        if (!recoveredGuards.isEmpty()) {
+            log.info("IndicatorAlertEvaluator: recovered {} candle-close guards from DB.", recoveredGuards.size());
         }
     }
 
@@ -132,6 +147,10 @@ public class IndicatorAlertEvaluator {
                 .filter(e -> instrumentName.equals(e.getKey().instrument()))
                 .map(e -> serializeEvalKey(e.getKey()))
                 .toList();
+        List<String> persistedCandleGuardsToRemove = lastFiredCandle.entrySet().stream()
+                .filter(e -> instrumentName.equals(e.getKey().instrument()))
+                .map(e -> serializeEvalKey(e.getKey()))
+                .toList();
 
         int removedStates = removeMatching(lastState, instrumentName);
         int removedCandle = removeMatching(lastFiredCandle, instrumentName);
@@ -144,6 +163,9 @@ public class IndicatorAlertEvaluator {
         // Remove from persistent store so recovery after restart is clean
         for (String key : persistedKeysToRemove) {
             stateStore.remove(key);
+        }
+        for (String key : persistedCandleGuardsToRemove) {
+            persistCandleGuardRemove(key);
         }
 
         log.info("Rollover: cleared alert state for {} — {} states, {} candle guards, {} OB events",
@@ -192,12 +214,17 @@ public class IndicatorAlertEvaluator {
      * Returns true if this is a new candle (different from the last candle on which this
      * signal fired), and records the current candle timestamp. Returns false if no timestamp is
      * available (fail-closed: no timestamp means candle close is not confirmed).
+     *
+     * <p>PR-7: the guard is persisted to {@link AlertStateStore#saveCandleGuard} so that
+     * it survives a restart. Without persistence, the first poll cycle after a restart
+     * could re-admit an alert on the same candle that already triggered a Mentor review.
      */
     private boolean canFireOnCandle(EvalKey candleKey, Instant lastCandleTimestamp) {
         if (lastCandleTimestamp == null) return false;
         Instant prev = lastFiredCandle.get(candleKey);
         if (lastCandleTimestamp.equals(prev)) return false;
         lastFiredCandle.put(candleKey, lastCandleTimestamp);
+        persistCandleGuardSave(candleKey, lastCandleTimestamp);
         return true;
     }
 
@@ -567,6 +594,22 @@ public class IndicatorAlertEvaluator {
             stateStore.remove(serializeEvalKey(key));
         } catch (Exception e) {
             log.debug("Failed to remove alert state for {}: {}", key, e.getMessage());
+        }
+    }
+
+    private void persistCandleGuardSave(EvalKey candleKey, Instant candleTimestamp) {
+        try {
+            stateStore.saveCandleGuard(serializeEvalKey(candleKey), candleTimestamp);
+        } catch (Exception e) {
+            log.debug("Failed to persist candle guard for {}: {}", candleKey, e.getMessage());
+        }
+    }
+
+    private void persistCandleGuardRemove(String serializedKey) {
+        try {
+            stateStore.removeCandleGuard(serializedKey);
+        } catch (Exception e) {
+            log.debug("Failed to remove candle guard for {}: {}", serializedKey, e.getMessage());
         }
     }
 }
