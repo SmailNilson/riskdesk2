@@ -6,6 +6,7 @@ import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
@@ -13,6 +14,7 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -309,11 +311,34 @@ public class GeminiMentorClient implements MentorModelClient {
     private final MentorProperties properties;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
+    /**
+     * Fail-fast breaker. Without this, a Gemini outage let every alert pay the
+     * full {@code timeoutMs} × {@link #MAX_ATTEMPTS} retry budget; the
+     * 4-thread {@code mentorExecutor} saturated in minutes and subsequent
+     * reviews were dropped by the stuck-ANALYZING cleanup. Same calibration as
+     * {@code GeminiAgentAdapter}: 3 consecutive failures → open for 30 s.
+     */
+    private final GeminiCircuitBreaker breaker;
 
+    @Autowired
     public GeminiMentorClient(MentorProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.restTemplate = buildRestTemplate(properties);
+        this.breaker = new GeminiCircuitBreaker(3, Duration.ofSeconds(30));
+    }
+
+    /** Package-private constructor for tests that need to inject a pre-built breaker. */
+    GeminiMentorClient(MentorProperties properties, ObjectMapper objectMapper, GeminiCircuitBreaker breaker) {
+        this.properties = properties;
+        this.objectMapper = objectMapper;
+        this.restTemplate = buildRestTemplate(properties);
+        this.breaker = breaker;
+    }
+
+    /** Exposed for actuator-style introspection. */
+    public GeminiCircuitBreaker.State circuitState() {
+        return breaker.currentState();
     }
 
     private String buildSystemPrompt(String assetClass) {
@@ -385,6 +410,12 @@ public class GeminiMentorClient implements MentorModelClient {
         }
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
             throw new IllegalStateException("GEMINI_API_KEY is not configured on the backend.");
+        }
+        if (!breaker.allowRequest()) {
+            // Fail fast — a real Gemini outage would otherwise block every
+            // caller for 2×timeoutMs (up to ~2 min each) while the 4-thread
+            // mentorExecutor saturates.
+            throw new IllegalStateException("Gemini mentor circuit breaker OPEN — failing fast");
         }
 
         try {
@@ -465,11 +496,14 @@ public class GeminiMentorClient implements MentorModelClient {
 
             String text = extractText(root);
             if (text == null || text.isBlank()) {
+                // The outer catch records the breaker failure — avoid double-counting.
                 throw new IllegalStateException("Gemini returned an empty response.");
             }
 
+            breaker.recordSuccess();
             return new MentorModelResult(properties.getModel(), sanitizeJsonText(text));
         } catch (Exception e) {
+            breaker.recordFailure();
             log.error("Gemini mentor call failed: {}", e.getMessage(), e);
             throw new IllegalStateException("Gemini mentor call failed: " + e.getMessage(), e);
         }
