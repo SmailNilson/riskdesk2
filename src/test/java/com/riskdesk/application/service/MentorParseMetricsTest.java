@@ -70,4 +70,40 @@ class MentorParseMetricsTest {
         MentorParseMetrics metrics = new MentorParseMetrics();
         assertThat(metrics.snapshot().techFailureRatio()).isZero();
     }
+
+    @Test
+    void missedTrades_startsAtZero_andIncrementsIndependently() {
+        // The missed-trade counter reflects recovered responses whose raw
+        // text carried an ELIGIBLE verdict — they MUST also be counted as
+        // recovered (they're not a separate parse path). Guard that the
+        // caller can't silently swap recordRecovered for
+        // recordTruncatedButValidated.
+        MentorParseMetrics metrics = new MentorParseMetrics();
+        assertThat(metrics.snapshot().missedTrades()).isZero();
+
+        metrics.recordRecovered();
+        metrics.recordTruncatedButValidated();
+
+        MentorParseMetrics.Snapshot snap = metrics.snapshot();
+        assertThat(snap.recovered()).isEqualTo(1);
+        assertThat(snap.missedTrades()).isEqualTo(1);
+        assertThat(snap.total()).isEqualTo(1);
+    }
+
+    @Test
+    void missedTrades_doesNotAffectTotalOrTechFailureRatio() {
+        // Missed-trades is a classification of recovered counts, not a parse
+        // bucket of its own. Incrementing it must never move the total or
+        // shift the tech-failure ratio.
+        MentorParseMetrics metrics = new MentorParseMetrics();
+        for (int i = 0; i < 5; i++) metrics.recordSuccess();
+        metrics.recordRecovered();
+        metrics.recordTruncatedButValidated();
+
+        MentorParseMetrics.Snapshot snap = metrics.snapshot();
+
+        assertThat(snap.total()).isEqualTo(6);
+        assertThat(snap.techFailureRatio()).isEqualTo(1.0 / 6.0, within(1e-9));
+        assertThat(snap.missedTrades()).isEqualTo(1);
+    }
 }

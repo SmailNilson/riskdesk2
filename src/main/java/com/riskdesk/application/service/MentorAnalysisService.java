@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.MentorAlternativeEntry;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorInverseBiasHint;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorSimilarAudit;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.application.analysis.InverseBiasAnalyzer;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
@@ -64,7 +66,8 @@ public class MentorAnalysisService {
         List<MentorSimilarAudit> similarAudits = findSimilarAuditsBounded(payload);
         try {
             MentorModelClient.MentorModelResult raw = mentorModelClient.analyze(payload, similarAudits);
-            MentorStructuredResponse structured = parseStructuredResponse(raw.rawText());
+            MentorStructuredResponse parsed = parseStructuredResponse(raw.rawText());
+            MentorStructuredResponse structured = attachInverseBiasHint(parsed, payload);
             Long auditId = mentorProperties.isPersistAudits() ? persistSuccess(payload, raw, structured, sourceRef) : null;
             return new MentorAnalyzeResponse(auditId, raw.model(), payload, structured, raw.rawText(), similarAudits);
         } catch (IllegalStateException e) {
@@ -73,6 +76,40 @@ public class MentorAnalysisService {
             }
             throw e;
         }
+    }
+
+    /**
+     * Attaches an inverse-bias hint to the structured response when Gemini
+     * rejected the trade with enough contradictions pointing the other way.
+     * The hint is advisory — never used to flip the eligibility state — and
+     * is only computed for non-ELIGIBLE outcomes to keep noise down. Reads
+     * the original action from {@code payload.trade_intention.action}; bails
+     * out silently if the payload shape is unexpected.
+     */
+    private MentorStructuredResponse attachInverseBiasHint(MentorStructuredResponse base, JsonNode payload) {
+        if (base == null || payload == null) return base;
+        // Don't annotate successful trades — the inverse is implicitly not on
+        // the table when Gemini validated the direction we asked about.
+        if (base.executionEligibilityStatus() == ExecutionEligibilityStatus.ELIGIBLE) {
+            return base;
+        }
+        JsonNode intention = payload.path("trade_intention");
+        String action = intention.path("action").asText(null);
+        MentorInverseBiasHint hint = InverseBiasAnalyzer.analyze(action, base.errors());
+        if (hint == null) return base;
+        log.info("Inverse bias hint attached: rejected={} → suggested={} (score={})",
+            action, hint.direction(), String.format("%.2f", hint.confidenceScore()));
+        return new MentorStructuredResponse(
+            base.technicalQuickAnalysis(),
+            base.strengths(),
+            base.errors(),
+            base.verdict(),
+            base.executionEligibilityStatus(),
+            base.executionEligibilityReason(),
+            base.improvementTip(),
+            base.proposedTradePlan(),
+            hint
+        );
     }
 
     private List<MentorSimilarAudit> findSimilarAuditsBounded(JsonNode payload) {
@@ -96,6 +133,17 @@ public class MentorAnalysisService {
             if (recovered != null) {
                 log.warn("Mentor response recovered from partial JSON (original length={} chars)", rawText == null ? 0 : rawText.length());
                 parseMetrics.recordRecovered();
+                if (wasValidatedBeforeTruncation(rawText)) {
+                    // Gemini had already committed to ELIGIBLE / Trade Validé in
+                    // the raw text, but the plan was truncated away. The
+                    // persisted review will still land on MENTOR_UNAVAILABLE
+                    // (we won't synthesize an entry/SL/TP from thin air) —
+                    // surface it as a "missed trade" on the diagnostics
+                    // endpoint so operators can see how much tradeable signal
+                    // we're dropping.
+                    parseMetrics.recordTruncatedButValidated();
+                    log.warn("Gemini response truncated after ELIGIBLE verdict — missed tradeable setup");
+                }
                 return recovered;
             }
             parseMetrics.recordFailure();
@@ -174,6 +222,47 @@ public class MentorAnalysisService {
             improvement,
             parseProposedPlan(node.get("proposedTradePlan"))
         );
+    }
+
+    /**
+     * Detects whether a truncated Gemini response carried an explicit positive
+     * verdict before it was cut off. We look for either the ELIGIBLE status
+     * token or the "Trade Validé" verdict string — both are unambiguous
+     * signals that, had the plan not been truncated, the system would have
+     * armed the trade.
+     *
+     * <p>Kept deliberately substring-based: the text may be mid-word or
+     * mid-escape when truncated, so we don't require well-formed JSON. False
+     * positives (the model writing "ELIGIBLE" in a rejection rationale) are
+     * rare because the schema-guided prompt makes those tokens keys, not
+     * free-text content.
+     */
+    static boolean wasValidatedBeforeTruncation(String rawText) {
+        if (rawText == null || rawText.isEmpty()) {
+            return false;
+        }
+        String text = rawText;
+        // Guard against the trivial "INELIGIBLE" containing "ELIGIBLE": match
+        // the status field specifically, tolerating whitespace variations.
+        boolean eligible = text.contains("\"executionEligibilityStatus\"")
+            && text.contains("\"ELIGIBLE\"")
+            && !containsJsonString(text, "executionEligibilityStatus", "INELIGIBLE");
+        boolean tradeValide = text.contains("Trade Validé");
+        return eligible || tradeValide;
+    }
+
+    private static boolean containsJsonString(String text, String key, String value) {
+        // Looks for the "key": "value" pattern with optional whitespace.
+        String needle = "\"" + key + "\"";
+        int idx = text.indexOf(needle);
+        if (idx < 0) return false;
+        int colon = text.indexOf(':', idx + needle.length());
+        if (colon < 0) return false;
+        int valueStart = text.indexOf('"', colon);
+        if (valueStart < 0) return false;
+        int valueEnd = text.indexOf('"', valueStart + 1);
+        if (valueEnd < 0) return false;
+        return value.equals(text.substring(valueStart + 1, valueEnd));
     }
 
     private static String repairTruncatedJson(String raw) {
