@@ -31,6 +31,16 @@ import java.util.List;
  * call is O(1) — it only reads the last candle. The list parameter is forward-
  * looking: callers can pass a longer series in case we later extend to 2-bar or
  * 3-bar patterns without changing the API surface.
+ *
+ * <p><b>Ordering contract — READ THIS BEFORE WIRING A NEW CALLER.</b> The list
+ * MUST be in ascending timestamp order (newest candle at index
+ * {@code size - 1}). This matches the convention produced by
+ * {@code IndicatorService.loadCandles} but NOT the raw output of
+ * {@code CandleRepositoryPort.findRecentCandles}, which returns descending. A
+ * caller passing raw repository output would cause this detector to classify the
+ * oldest candle in the window — every trigger vote would be (limit−1) bars
+ * stale. Callers sourcing candles directly from the repository MUST reverse the
+ * list first.
  */
 public final class ReactionPatternDetector {
 
