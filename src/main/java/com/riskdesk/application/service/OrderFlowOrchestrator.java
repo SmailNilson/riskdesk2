@@ -101,6 +101,10 @@ public class OrderFlowOrchestrator {
         nativeClient.setSubscriptionRegistry(subscriptionRegistry);
         nativeClient.setContractResolver(contractResolver);
         nativeClient.setDepthNumRows(properties.getDepth().getNumRows());
+        tickByTickClient.setDisconnectionCallback(() -> {
+            log.warn("Order flow: tick-by-tick connection lost — will reconnect on next scheduled check");
+            tickByTickSubscribed = false;
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -391,6 +395,13 @@ public class OrderFlowOrchestrator {
         // trigger resubscription — but only if subscriptions are old enough.
         // During low-liquidity periods (Sunday evening, holidays), ticks can be
         // sparse. Aggressive resubscription kills active subscriptions.
+        // Safety net: if tick client silently dropped without firing connectionClosed()
+        if (tickByTickSubscribed && !tickByTickClient.isConnected()) {
+            log.warn("Connection health check: tick client disconnected without callback — resetting subscription flag");
+            tickByTickSubscribed = false;
+            return;
+        }
+
         if (tickByTickSubscribed) {
             // Don't re-subscribe within 5 minutes of initial subscription
             long elapsed = System.currentTimeMillis() - tickByTickSubscribedAt;
@@ -410,9 +421,8 @@ public class OrderFlowOrchestrator {
             }
 
             if (!anyDataFlowing) {
-                log.warn("Connection health check: connected but no tick data flowing after 5+ min — triggering resubscribeAll");
-                nativeClient.resubscribeAll();
-                tickByTickSubscribedAt = System.currentTimeMillis(); // reset cooldown
+                log.warn("Connection health check: connected but no tick data flowing after 5+ min — resetting subscription flag");
+                tickByTickSubscribed = false;
             }
         }
     }
