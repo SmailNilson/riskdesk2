@@ -13,10 +13,13 @@ import com.riskdesk.domain.engine.strategy.agent.trigger.DeltaFlowTriggerAgent;
 import com.riskdesk.domain.engine.strategy.agent.trigger.ReactionTriggerAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.LiquidityZoneAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.OrderBlockZoneAgent;
+import com.riskdesk.domain.engine.strategy.playbook.LondonSweepPlaybook;
 import com.riskdesk.domain.engine.strategy.playbook.LsarPlaybook;
+import com.riskdesk.domain.engine.strategy.playbook.NyOpenReversalPlaybook;
 import com.riskdesk.domain.engine.strategy.playbook.Playbook;
 import com.riskdesk.domain.engine.strategy.playbook.PlaybookSelector;
 import com.riskdesk.domain.engine.strategy.playbook.SbdrPlaybook;
+import com.riskdesk.domain.engine.strategy.playbook.SilverBulletPlaybook;
 import com.riskdesk.domain.engine.strategy.policy.StrategyScoringPolicy;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -58,10 +61,33 @@ public class StrategyEngineConfig {
 
     @Bean public LsarPlaybook lsarPlaybook() { return new LsarPlaybook(); }
     @Bean public SbdrPlaybook sbdrPlaybook() { return new SbdrPlaybook(); }
+    @Bean public SilverBulletPlaybook silverBulletPlaybook() { return new SilverBulletPlaybook(); }
+    @Bean public NyOpenReversalPlaybook nyOpenReversalPlaybook() { return new NyOpenReversalPlaybook(); }
+    @Bean public LondonSweepPlaybook londonSweepPlaybook() { return new LondonSweepPlaybook(); }
 
+    /**
+     * Playbook priority order — <b>most specific first, fallback last</b>.
+     *
+     * <p>The selector returns the first applicable playbook, so placing session-
+     * scoped setups ahead of session-agnostic ones guarantees that during a NY
+     * kill zone with an FVG+bias we pick {@code SB}, not the generic
+     * {@code SBDR} that would also match. Outside a kill zone, session-scoped
+     * playbooks abstain via {@link Playbook#isApplicable(com.riskdesk.domain.engine.strategy.model.MarketContext)}
+     * and the fallback tier applies.
+     *
+     * <p>Explicit ordering here (rather than relying on {@code List<Playbook>}
+     * autowire order, which is fragile across Spring versions) is the only
+     * contract guaranteeing that priority rule holds.
+     */
     @Bean
-    public PlaybookSelector playbookSelector(List<Playbook> playbooks) {
-        return new PlaybookSelector(playbooks);
+    public PlaybookSelector playbookSelector(SilverBulletPlaybook sb,
+                                              NyOpenReversalPlaybook nor,
+                                              LondonSweepPlaybook ls,
+                                              SbdrPlaybook sbdr,
+                                              LsarPlaybook lsar) {
+        // Order: most specific (session + structural) → least specific (structural only)
+        List<Playbook> ordered = List.of(sb, nor, ls, sbdr, lsar);
+        return new PlaybookSelector(ordered);
     }
 
     // ── Engine core ─────────────────────────────────────────────────────────
