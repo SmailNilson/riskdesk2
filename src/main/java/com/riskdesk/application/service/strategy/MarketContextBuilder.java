@@ -7,7 +7,9 @@ import com.riskdesk.domain.engine.strategy.model.MarketContext;
 import com.riskdesk.domain.engine.strategy.model.MarketRegime;
 import com.riskdesk.domain.engine.strategy.model.MtfSnapshot;
 import com.riskdesk.domain.engine.strategy.model.PdZone;
+import com.riskdesk.domain.engine.strategy.model.PortfolioState;
 import com.riskdesk.domain.engine.strategy.model.PriceLocation;
+import com.riskdesk.domain.engine.strategy.model.SessionInfo;
 import com.riskdesk.domain.model.Instrument;
 import org.springframework.stereotype.Component;
 
@@ -32,10 +34,17 @@ public class MarketContextBuilder {
     private final MarketRegimeDetector regimeDetector = new MarketRegimeDetector();
     private final Clock clock;
     private final MtfSnapshotBuilder mtfBuilder;
+    private final PortfolioStateBuilder portfolioBuilder;
+    private final SessionInfoBuilder sessionBuilder;
 
-    public MarketContextBuilder(Clock clock, MtfSnapshotBuilder mtfBuilder) {
+    public MarketContextBuilder(Clock clock,
+                                 MtfSnapshotBuilder mtfBuilder,
+                                 PortfolioStateBuilder portfolioBuilder,
+                                 SessionInfoBuilder sessionBuilder) {
         this.clock = clock;
         this.mtfBuilder = mtfBuilder;
+        this.portfolioBuilder = portfolioBuilder;
+        this.sessionBuilder = sessionBuilder;
     }
 
     public MarketContext build(Instrument instrument, String timeframe,
@@ -50,13 +59,15 @@ public class MarketContextBuilder {
             POC_TOLERANCE_PCT);
         PdZone pd = PdZone.fromLabel(snapshot.sessionPdZone());
         MtfSnapshot mtf = mtfBuilder.build(instrument, timeframe);
+        PortfolioState portfolio = portfolioBuilder.build(instrument);
+        SessionInfo session = sessionBuilder.build(instrument);
         Instant asOf = snapshot.lastCandleTimestamp() != null
             ? snapshot.lastCandleTimestamp()
             : clock.instant();
 
         return new MarketContext(
             instrument, timeframe, bias, regime, loc, pd,
-            snapshot.lastPrice(), atr, mtf, asOf
+            snapshot.lastPrice(), atr, mtf, portfolio, session, asOf
         );
     }
 }
