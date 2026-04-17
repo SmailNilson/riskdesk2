@@ -15,6 +15,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -78,7 +80,17 @@ public class TriggerContextBuilder {
         try {
             List<Candle> candles = candleRepository.findRecentCandles(
                 instrument, timeframe, REACTION_CANDLE_LIMIT);
-            return ReactionPatternDetector.classifyLatest(candles);
+            // IMPORTANT: CandleRepositoryPort.findRecentCandles returns candles in
+            // DESCENDING timestamp order (newest first — see
+            // JpaCandleRepositoryAdapter.findRecentCandles). ReactionPatternDetector
+            // assumes ASCENDING order (newest last), consistent with the convention
+            // used by IndicatorService.loadCandles. Reverse here so the detector
+            // classifies the newest candle — otherwise it would read the
+            // (limit-1)-bars-stale candle and systematically delay / mis-fire the
+            // reaction-trigger vote.
+            List<Candle> ascending = new ArrayList<>(candles);
+            Collections.reverse(ascending);
+            return ReactionPatternDetector.classifyLatest(ascending);
         } catch (Exception e) {
             log.debug("Reaction detection failed for {} {}: {}",
                 instrument, timeframe, e.getMessage());
