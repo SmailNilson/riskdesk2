@@ -5,6 +5,8 @@ import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
+import com.riskdesk.application.service.strategy.GateOutcome;
+import com.riskdesk.application.service.strategy.StrategyExecutionGate;
 import com.riskdesk.infrastructure.config.RiskProperties;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -53,6 +55,27 @@ class ExecutionManagerServiceTest {
         return p;
     }
 
+    /**
+     * Pass-through gate for legacy tests — simulates the S4 disabled state.
+     * The gate always approves, so execution behaviour is identical to pre-S4
+     * and the existing assertions hold. Dedicated tests for the gate live in
+     * {@link com.riskdesk.application.service.strategy.StrategyExecutionGateTest},
+     * and the test below verifies ExecutionManagerService honours a blocking gate.
+     */
+    private final StrategyExecutionGate passThroughGate = new PassThroughGate(GateOutcome.pass("test-passthrough"));
+
+    /** Test-only subclass that bypasses the engine and returns a fixed outcome. */
+    private static final class PassThroughGate extends StrategyExecutionGate {
+        private final GateOutcome outcome;
+        PassThroughGate(GateOutcome outcome) {
+            super(new com.riskdesk.infrastructure.config.StrategyExecutionGateProperties(), null);
+            this.outcome = outcome;
+        }
+        @Override public GateOutcome check(MentorSignalReviewRecord review) {
+            return outcome;
+        }
+    }
+
     @Test
     void ensureExecutionCreated_buildsPendingExecutionFromEligibleReview() throws Exception {
         ExecutionManagerService service = new ExecutionManagerService(
@@ -60,7 +83,8 @@ class ExecutionManagerServiceTest {
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -104,7 +128,8 @@ class ExecutionManagerServiceTest {
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -130,7 +155,8 @@ class ExecutionManagerServiceTest {
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -166,13 +192,48 @@ class ExecutionManagerServiceTest {
     }
 
     @Test
+    void ensureExecutionCreated_rejectsWhenStrategyGateBlocks() throws Exception {
+        // S4 concurrence check: even with a fully-eligible Mentor review, an
+        // enrolled instrument is blocked if the strategy engine disagrees.
+        StrategyExecutionGate blockingGate = new PassThroughGate(
+            GateOutcome.block("engine-decision=NO_TRADE score=22.0"));
+
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository,
+            tradeExecutionRepository,
+            ibkrOrderService,
+            objectMapper,
+            riskProperties,
+            blockingGate
+        );
+
+        MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
+        when(reviewRepository.findById(77L)).thenReturn(Optional.of(review));
+
+        assertThatThrownBy(() -> service.ensureExecutionCreated(new CreateExecutionCommand(
+            77L, "DU1234567", 1,
+            ExecutionTriggerSource.MANUAL_ARMING,
+            Instant.parse("2026-03-28T16:01:00Z"),
+            "mentor-panel"
+        )))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("strategy gate blocked")
+            .hasMessageContaining("engine-decision=NO_TRADE");
+
+        // No IBKR side-effect, no persistence — the gate halts the flow before
+        // any broker contact.
+        verify(tradeExecutionRepository, org.mockito.Mockito.never()).createIfAbsent(any());
+    }
+
+    @Test
     void ensureExecutionCreated_usesReviewIdAsIdempotenceUnit() throws Exception {
         ExecutionManagerService service = new ExecutionManagerService(
             reviewRepository,
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         MentorSignalReviewRecord reviewV1 = eligibleReview(77L, 1, "2026-03-28T16:00:00Z");
@@ -212,7 +273,8 @@ class ExecutionManagerServiceTest {
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         TradeExecutionRecord existing = new TradeExecutionRecord();
@@ -247,7 +309,8 @@ class ExecutionManagerServiceTest {
             tradeExecutionRepository,
             ibkrOrderService,
             objectMapper,
-            riskProperties
+            riskProperties,
+            passThroughGate
         );
 
         TradeExecutionRecord execution = new TradeExecutionRecord();

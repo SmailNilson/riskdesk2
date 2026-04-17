@@ -5,6 +5,8 @@ import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.service.strategy.GateOutcome;
+import com.riskdesk.application.service.strategy.StrategyExecutionGate;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
@@ -14,6 +16,8 @@ import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.trading.service.PositionSizeValidator;
 import com.riskdesk.infrastructure.config.RiskProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,17 +32,21 @@ import java.util.Optional;
 @Service
 public class ExecutionManagerService {
 
+    private static final Logger log = LoggerFactory.getLogger(ExecutionManagerService.class);
+
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final IbkrOrderService ibkrOrderService;
     private final ObjectMapper objectMapper;
     private final PositionSizeValidator positionSizeValidator;
+    private final StrategyExecutionGate strategyExecutionGate;
 
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
                                    IbkrOrderService ibkrOrderService,
                                    ObjectMapper objectMapper,
-                                   RiskProperties riskProperties) {
+                                   RiskProperties riskProperties,
+                                   StrategyExecutionGate strategyExecutionGate) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.ibkrOrderService = ibkrOrderService;
@@ -46,6 +54,7 @@ public class ExecutionManagerService {
         this.positionSizeValidator = new PositionSizeValidator(
             riskProperties.getMaxRiskPerTradeUsd(),
             riskProperties.getMaxQuantityPerOrder());
+        this.strategyExecutionGate = strategyExecutionGate;
     }
 
     public TradeExecutionRecord ensureExecutionCreated(CreateExecutionCommand command) {
@@ -219,6 +228,19 @@ public class ExecutionManagerService {
             throw new IllegalStateException("mentor review is missing execution context");
         }
         extractTradePlan(review);
+
+        // S4 — concurrence gate. When an instrument is enrolled, the
+        // probabilistic strategy engine must also approve before we touch IBKR.
+        // Gate is VETO_ONLY: it can block a legacy-approved trade but can never
+        // create one. Disabled by default — production behaviour is unchanged
+        // until an operator flips `riskdesk.strategy.execution-gate.enabled=true`
+        // AND lists the instrument in `.instruments`.
+        GateOutcome outcome = strategyExecutionGate.check(review);
+        if (!outcome.allow()) {
+            log.warn("ExecutionManager blocked review {} ({}): strategy gate reason={}",
+                review.getId(), review.getInstrument(), outcome.reason());
+            throw new IllegalStateException("strategy gate blocked: " + outcome.reason());
+        }
     }
 
     private MentorProposedTradePlan extractTradePlan(MentorSignalReviewRecord review) {
