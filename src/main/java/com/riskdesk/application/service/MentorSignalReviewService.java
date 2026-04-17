@@ -86,6 +86,15 @@ public class MentorSignalReviewService {
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
+    /**
+     * Optional collaborator — provides the probabilistic-engine view of the same
+     * (instrument, timeframe). Injected via {@link ObjectProvider} so a test /
+     * boot configuration that disables the strategy wiring still creates a valid
+     * review service. When absent, the {@code strategy_engine_analysis} payload
+     * section is simply omitted.
+     */
+    private final ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+        strategyEngineServiceProvider;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
     private final PlaybookEvaluator playbookEvaluator = new PlaybookEvaluator();
 
@@ -113,6 +122,8 @@ public class MentorSignalReviewService {
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
                                      ApplicationEventPublisher eventPublisher,
+                                     ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+                                         strategyEngineServiceProvider,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -125,6 +136,7 @@ public class MentorSignalReviewService {
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
         this.eventPublisher = eventPublisher;
+        this.strategyEngineServiceProvider = strategyEngineServiceProvider;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -1085,6 +1097,29 @@ public class MentorSignalReviewService {
             payload.put("playbook_pre_analysis", pbMap);
         } catch (Exception e) {
             log.debug("Playbook pre-analysis skipped: {}", e.getMessage());
+        }
+
+        // S3b — attach the probabilistic strategy engine's view alongside the
+        // legacy 7/7 playbook. Gemini receives both so it can reason over the
+        // structured agent-by-agent evidence rather than inferring everything
+        // from raw indicators. The call is best-effort: any failure is logged
+        // and the section omitted, so Mentor reviews never break because the
+        // new engine errored.
+        try {
+            com.riskdesk.application.service.strategy.StrategyEngineService engine =
+                strategyEngineServiceProvider.getIfAvailable();
+            if (engine != null) {
+                com.riskdesk.domain.engine.strategy.model.StrategyDecision decision =
+                    engine.evaluate(candidate.instrument(), candidate.timeframe());
+                Map<String, Object> analysis =
+                    com.riskdesk.application.service.strategy.StrategyEngineAnalysisPayload.build(decision);
+                if (analysis != null) {
+                    payload.put("strategy_engine_analysis", analysis);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Strategy engine analysis skipped for {} {}: {}",
+                candidate.instrument(), candidate.timeframe(), e.getMessage());
         }
 
         return objectMapper.valueToTree(payload);

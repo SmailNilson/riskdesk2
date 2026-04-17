@@ -77,6 +77,17 @@ class MentorSignalReviewServiceTest {
     @Mock
     private ApplicationEventPublisher eventPublisher;
 
+    /**
+     * Strategy engine is an optional collaborator via {@link ObjectProvider} —
+     * these tests leave it unwired (getIfAvailable returns null), so the new
+     * strategy_engine_analysis payload section is omitted during test runs.
+     * Dedicated tests for the S3b integration live in
+     * {@code StrategyEngineAnalysisPayloadTest}.
+     */
+    @Mock
+    private ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+        strategyEngineServiceProvider;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -93,6 +104,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
 
@@ -254,6 +266,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
 
@@ -423,6 +436,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -488,7 +502,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -539,7 +553,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -575,7 +589,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -600,7 +614,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -742,6 +756,7 @@ class MentorSignalReviewServiceTest {
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
     }
