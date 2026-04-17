@@ -737,6 +737,7 @@ public class MentorSignalReviewService {
             return;
         }
         var plan = analysis.analysis().proposedTradePlan();
+        StrategyVerdictSnapshot strategy = captureStrategyVerdict(review);
         try {
             eventPublisher.publishEvent(new TradeValidatedEvent(
                     review.getInstrument(),
@@ -749,10 +750,50 @@ public class MentorSignalReviewService {
                     plan.stopLoss(),
                     plan.takeProfit(),
                     plan.rewardToRiskRatio(),
-                    Instant.now()
+                    Instant.now(),
+                    strategy.playbookId(),
+                    strategy.decision(),
+                    strategy.finalScore(),
+                    strategy.agreesWithReview()
             ));
         } catch (Exception e) {
             log.warn("Failed to publish TradeValidatedEvent for review {} — {}", review.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Lightweight snapshot of the probabilistic engine verdict, attached to
+     * every Telegram notification so operators see both engines side-by-side.
+     * All fields null when the engine wasn't wired or evaluation failed — the
+     * Telegram adapter renders the null case by hiding the section.
+     */
+    private record StrategyVerdictSnapshot(String playbookId, String decision,
+                                            Double finalScore, Boolean agreesWithReview) {
+        static StrategyVerdictSnapshot unknown() {
+            return new StrategyVerdictSnapshot(null, null, null, null);
+        }
+    }
+
+    private StrategyVerdictSnapshot captureStrategyVerdict(MentorSignalReviewRecord review) {
+        try {
+            com.riskdesk.application.service.strategy.StrategyEngineService engine =
+                strategyEngineServiceProvider.getIfAvailable();
+            if (engine == null) return StrategyVerdictSnapshot.unknown();
+            Instrument instrument = Instrument.valueOf(review.getInstrument());
+            com.riskdesk.domain.engine.strategy.model.StrategyDecision decision =
+                engine.evaluate(instrument, review.getTimeframe());
+            String playbook = decision.candidatePlaybookId().orElse(null);
+            String decisionName = decision.decision().name();
+            double score = decision.finalScore();
+            boolean directionAligned = decision.direction()
+                .map(d -> d.name().equalsIgnoreCase(review.getAction()))
+                .orElse(false);
+            boolean agrees = decision.decision().isTradeable() && directionAligned;
+            return new StrategyVerdictSnapshot(playbook, decisionName, score, agrees);
+        } catch (Exception e) {
+            log.debug("Strategy verdict snapshot failed for review {} {}: {}",
+                review.getId(), review.getInstrument(), e.getMessage());
+            return StrategyVerdictSnapshot.unknown();
         }
     }
 

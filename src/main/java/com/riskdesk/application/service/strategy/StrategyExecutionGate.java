@@ -97,7 +97,7 @@ public class StrategyExecutionGate {
                 instrumentCode, review.getTimeframe(),
                 decision.decision(), String.format("%.1f", decision.finalScore()));
             return GateOutcome.block(String.format("engine-decision=%s score=%.1f",
-                decision.decision(), decision.finalScore()));
+                decision.decision(), decision.finalScore()), decision);
         }
 
         Direction engineDirection = decision.direction().orElse(null);
@@ -107,7 +107,7 @@ public class StrategyExecutionGate {
                 + "(engine={}, review={})",
                 instrumentCode, review.getTimeframe(), engineDirection, reviewAction);
             return GateOutcome.block(String.format("direction-mismatch engine=%s review=%s",
-                engineDirection, reviewAction));
+                engineDirection, reviewAction), decision);
         }
 
         String playbook = decision.candidatePlaybookId().orElse("?");
@@ -115,6 +115,6 @@ public class StrategyExecutionGate {
             instrumentCode, review.getTimeframe(), playbook,
             decision.decision(), String.format("%.1f", decision.finalScore()));
         return GateOutcome.pass(String.format("engine-agrees playbook=%s decision=%s score=%.1f",
-            playbook, decision.decision(), decision.finalScore()));
+            playbook, decision.decision(), decision.finalScore()), decision);
     }
 }
