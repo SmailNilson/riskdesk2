@@ -5,6 +5,8 @@ import com.riskdesk.domain.engine.strategy.StrategyEngine;
 import com.riskdesk.domain.engine.strategy.agent.StrategyAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.HtfAlignmentAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.RegimeContextAgent;
+import com.riskdesk.domain.engine.strategy.agent.context.RiskGateAgent;
+import com.riskdesk.domain.engine.strategy.agent.context.SessionTimingAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.SmcMacroBiasAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.VolumeProfileContextAgent;
 import com.riskdesk.domain.engine.strategy.agent.trigger.DeltaFlowTriggerAgent;
@@ -41,6 +43,12 @@ public class StrategyEngineConfig {
     @Bean public VolumeProfileContextAgent volumeProfileContextAgent() { return new VolumeProfileContextAgent(); }
     @Bean public RegimeContextAgent regimeContextAgent() { return new RegimeContextAgent(); }
     @Bean public HtfAlignmentAgent htfAlignmentAgent() { return new HtfAlignmentAgent(); }
+    @Bean public RiskGateAgent strategyRiskGateAgent() { return new RiskGateAgent(); }
+    // Deliberately named `strategySessionTimingAgent` — the legacy
+    // TradingAgentConfig already contributes a bean named `sessionTimingAgent`
+    // (the pre-hexagonal playbook agent of the same short name). Spring rejects
+    // duplicate bean names, so we keep the two ecosystems namespace-prefixed.
+    @Bean public SessionTimingAgent strategySessionTimingAgent() { return new SessionTimingAgent(); }
     @Bean public OrderBlockZoneAgent orderBlockZoneAgent() { return new OrderBlockZoneAgent(); }
     @Bean public LiquidityZoneAgent liquidityZoneAgent() { return new LiquidityZoneAgent(); }
     @Bean public DeltaFlowTriggerAgent deltaFlowTriggerAgent() { return new DeltaFlowTriggerAgent(); }
