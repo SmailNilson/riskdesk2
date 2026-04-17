@@ -165,6 +165,28 @@ class StrategyExecutionGateTest {
         assertThat(out.reason()).contains("unknown-instrument");
     }
 
+    @Test
+    void engine_throwing_illegal_argument_reports_engine_error_not_unknown_instrument() {
+        // Regression for the original PR #242 review: a narrow IllegalArgumentException
+        // thrown by the engine itself (validation on a malformed input) used to
+        // be mislabeled "unknown-instrument" because both Instrument.valueOf AND
+        // engine.evaluate were wrapped in the same catch. After the fix the
+        // enum-parse catch is scoped to valueOf only, and engine faults flow
+        // through the generic Exception branch as "engine-error".
+        StrategyExecutionGateProperties props = enrolledFor("MGC");
+        StubEngine engine = new StubEngine(null,
+            new IllegalArgumentException("agent misconfiguration"));
+        StrategyExecutionGate gate = new StrategyExecutionGate(props, provider(engine));
+
+        GateOutcome out = gate.check(review("MGC", "1h", "LONG"));
+
+        assertThat(out.allow()).isFalse();
+        assertThat(out.reason())
+            .doesNotContain("unknown-instrument")
+            .contains("engine-error")
+            .contains("agent misconfiguration");
+    }
+
     // ── Property defaults ───────────────────────────────────────────────────
 
     @Test

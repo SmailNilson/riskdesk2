@@ -7,6 +7,7 @@ import com.riskdesk.application.dto.MentorProposedTradePlan;
 import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.application.service.strategy.GateOutcome;
 import com.riskdesk.application.service.strategy.StrategyExecutionGate;
+import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.infrastructure.config.RiskProperties;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -15,6 +16,9 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import org.springframework.context.ApplicationEventPublisher;
+
+import java.util.ArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -76,6 +80,18 @@ class ExecutionManagerServiceTest {
         }
     }
 
+    /**
+     * Captures every published event — tests inspect {@link #events} to verify
+     * {@link TradeBlockedByStrategyGateEvent} is emitted when the gate blocks.
+     */
+    private final RecordingEventPublisher eventPublisher = new RecordingEventPublisher();
+
+    private static final class RecordingEventPublisher implements ApplicationEventPublisher {
+        final java.util.List<Object> events = new ArrayList<>();
+        @Override public void publishEvent(Object event) { events.add(event); }
+        @Override public void publishEvent(org.springframework.context.ApplicationEvent event) { events.add(event); }
+    }
+
     @Test
     void ensureExecutionCreated_buildsPendingExecutionFromEligibleReview() throws Exception {
         ExecutionManagerService service = new ExecutionManagerService(
@@ -84,7 +100,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -129,7 +146,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -156,7 +174,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -204,7 +223,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            blockingGate
+            blockingGate,
+            eventPublisher
         );
 
         MentorSignalReviewRecord review = eligibleReview(77L, 2, "2026-03-28T16:00:00Z");
@@ -223,6 +243,18 @@ class ExecutionManagerServiceTest {
         // No IBKR side-effect, no persistence — the gate halts the flow before
         // any broker contact.
         verify(tradeExecutionRepository, org.mockito.Mockito.never()).createIfAbsent(any());
+
+        // D2 — gate block MUST publish a TradeBlockedByStrategyGateEvent so the
+        // Telegram adapter can surface the block to operators.
+        TradeBlockedByStrategyGateEvent published = eventPublisher.events.stream()
+            .filter(e -> e instanceof TradeBlockedByStrategyGateEvent)
+            .map(e -> (TradeBlockedByStrategyGateEvent) e)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("expected a TradeBlockedByStrategyGateEvent"));
+        assertThat(published.instrument()).isEqualTo(review.getInstrument());
+        assertThat(published.action()).isEqualTo(review.getAction());
+        assertThat(published.reviewId()).isEqualTo(77L);
+        assertThat(published.gateReason()).contains("engine-decision=NO_TRADE");
     }
 
     @Test
@@ -233,7 +265,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         MentorSignalReviewRecord reviewV1 = eligibleReview(77L, 1, "2026-03-28T16:00:00Z");
@@ -274,7 +307,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         TradeExecutionRecord existing = new TradeExecutionRecord();
@@ -310,7 +344,8 @@ class ExecutionManagerServiceTest {
             ibkrOrderService,
             objectMapper,
             riskProperties,
-            passThroughGate
+            passThroughGate,
+            eventPublisher
         );
 
         TradeExecutionRecord execution = new TradeExecutionRecord();
