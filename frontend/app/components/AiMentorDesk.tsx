@@ -9,8 +9,9 @@ import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
 import PlaybookPanel from './PlaybookPanel';
+import StrategyPanel from './StrategyPanel';
 
-type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK';
+type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK' | 'STRATEGY';
 
 interface TabDef {
   key: TabKey;
@@ -24,6 +25,7 @@ const TABS: TabDef[] = [
   { key: 'BEHAVIOUR', label: 'BEHAVIOUR', icon: '\uD83D\uDCD0' },
   { key: 'MANUAL', label: 'MANUEL', icon: '\uD83D\uDC64' },
   { key: 'PLAYBOOK', label: 'PLAYBOOK', icon: '\uD83D\uDCCB' },
+  { key: 'STRATEGY', label: 'STRATEGY', icon: '\uD83C\uDFAF' },
 ];
 
 interface AiMentorDeskProps {
@@ -82,6 +84,7 @@ export default function AiMentorDesk({
     BEHAVIOUR: behaviourReviews.length,
     MANUAL: 0,
     PLAYBOOK: 0,
+    STRATEGY: 0,
   }), [reviews.length, signalReviews.length, behaviourReviews.length]);
 
   return (
@@ -182,6 +185,10 @@ export default function AiMentorDesk({
           <div className="p-4">
             <PlaybookPanel instrument={instrument} timeframe={timeframe} />
           </div>
+        )}
+
+        {activeTab === 'STRATEGY' && (
+          <StrategyPanel instrument={instrument} timeframe={timeframe} />
         )}
       </div>
     </div>

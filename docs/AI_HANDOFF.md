@@ -1,10 +1,62 @@
 # AI Handoff
 
-Last updated: 2026-04-01
+Last updated: 2026-04-17
 
 ## Goal of this file
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.
+
+## Latest change — Probabilistic Strategy Engine (Slices S1 + S2)
+
+A new top-down decision funnel has been added alongside the legacy 7/7 Playbook. It
+is **read-only in this slice** — no execution, no persistence, no WebSocket push.
+The legacy `PlaybookEvaluator`, `SignalConfluenceBuffer` and `ExecutionManagerService`
+are **untouched**; both engines run side by side so a/b comparison is possible.
+
+**New packages:**
+- `domain/engine/strategy/` — pure domain, framework-free
+  - `model/` — records: `MarketContext`, `ZoneContext`, `TriggerContext`,
+    `AgentVote`, `StrategyInput`, `StrategyDecision`, `MechanicalPlan`,
+    `OrderBlockZone`, `FvgZone`, `LiquidityLevel`; enums: `StrategyLayer`,
+    `MacroBias`, `MarketRegime`, `PriceLocation`, `PdZone`, `DeltaSignature`,
+    `DomSignal`, `TickDataQuality`, `ReactionPattern`, `DecisionType`
+  - `agent/` — `StrategyAgent` port + 7 pilot agents (3 CONTEXT, 2 ZONE, 2 TRIGGER)
+  - `playbook/` — `Playbook` port + `LsarPlaybook` + `SbdrPlaybook` + `PlaybookSelector`
+  - `policy/StrategyScoringPolicy` — Bayesian per-layer aggregation with veto &
+    inter-layer coherence gates
+  - `DefaultStrategyEngine` — pure-domain wiring
+- `application/service/strategy/` — builders + `StrategyEngineService`
+- `presentation/controller/StrategyController` → `GET /api/strategy/{instrument}/{timeframe}`
+- `presentation/dto/StrategyDecisionView` — Optional-flattened JSON shape
+- `infrastructure/config/StrategyEngineConfig` — Spring wiring (agents + playbooks + Clock)
+- Frontend `components/StrategyPanel.tsx` — dedicated STRATEGY tab in `AiMentorDesk`
+
+**Scoring doctrine (CLAUDE.md-aligned):** `0.50 × CONTEXT + 0.30 × ZONE + 0.20 × TRIGGER`.
+Abstain ≠ neutral vote — agents lacking data drop out of the denominator rather
+than pulling the score to zero.
+
+**Thresholds (in `StrategyScoringPolicy`):**
+- `|score| < 30` → `NO_TRADE`
+- `|score| < playbook.min` → `PAPER_TRADE`
+- `|score| < playbook.min + 20` → `HALF_SIZE`
+- else → `FULL_SIZE`
+- Any agent `vetoReason` → forces `NO_TRADE` regardless of score
+- Inter-layer coherence: if `sign(CONTEXT) ≠ sign(TRIGGER)` and `|score| < 70` →
+  `MONITORING` (this is the gate that catches "SMC says LONG but flow says SHORT")
+
+**Playbook minima:** LSAR = 55 (reversal), SBDR = 65 (trend-continuation).
+
+**Tests:** 29 new tests under `src/test/java/com/riskdesk/domain/engine/strategy/`
+plus `architecture/StrategyLayerIsolationTest` enforcing package discipline.
+Total suite: **1040 tests, all passing**.
+
+**Pending — next slices:**
+- **S3** — wire the legacy agents (`MtfConfluenceAIAgent` etc.) into
+  `StrategyAgent` so only one agent abstraction remains. Route Mentor Gemini
+  through `StrategyDecision.evidence` instead of the verdict text.
+- **S4** — swap `ExecutionManagerService` off `executionEligibilityStatus` onto
+  `StrategyDecision.decision`. Needs a feature flag
+  `riskdesk.strategy.new-engine.enabled` for per-instrument rollout.
 
 ## Important Decisions Already Made
 
