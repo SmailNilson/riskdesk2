@@ -774,27 +774,62 @@ public class MentorSignalReviewService {
         }
     }
 
+    /**
+     * <b>Reads from the frozen {@code snapshotJson}, NOT a fresh engine call.</b>
+     *
+     * <p>The {@code strategy_engine_analysis} section was populated by
+     * {@link #buildPayload} at alert time, then travelled intact through the
+     * Gemini async round-trip (up to {@code ANALYSIS_TIMEOUT_SECONDS}).
+     * Re-evaluating the engine here would use a later market snapshot, and in
+     * volatile markets the Telegram "agree/disagree" emoji could contradict
+     * the exact context Gemini just reasoned over. Sourcing from the stored
+     * payload guarantees the Telegram message matches the review bytes.
+     *
+     * <p>Graceful degradation — when the section is missing (e.g. engine was
+     * unavailable at alert time, old review pre-dates S3b, or the JSON is
+     * unreadable) we return {@link StrategyVerdictSnapshot#unknown()} and the
+     * Telegram adapter hides the engine line.
+     */
     private StrategyVerdictSnapshot captureStrategyVerdict(MentorSignalReviewRecord review) {
+        String snapshotJson = review.getSnapshotJson();
+        if (snapshotJson == null || snapshotJson.isBlank()) {
+            return StrategyVerdictSnapshot.unknown();
+        }
         try {
-            com.riskdesk.application.service.strategy.StrategyEngineService engine =
-                strategyEngineServiceProvider.getIfAvailable();
-            if (engine == null) return StrategyVerdictSnapshot.unknown();
-            Instrument instrument = Instrument.valueOf(review.getInstrument());
-            com.riskdesk.domain.engine.strategy.model.StrategyDecision decision =
-                engine.evaluate(instrument, review.getTimeframe());
-            String playbook = decision.candidatePlaybookId().orElse(null);
-            String decisionName = decision.decision().name();
-            double score = decision.finalScore();
-            boolean directionAligned = decision.direction()
-                .map(d -> d.name().equalsIgnoreCase(review.getAction()))
-                .orElse(false);
-            boolean agrees = decision.decision().isTradeable() && directionAligned;
-            return new StrategyVerdictSnapshot(playbook, decisionName, score, agrees);
+            JsonNode root = objectMapper.readTree(snapshotJson);
+            JsonNode analysis = root.path("strategy_engine_analysis");
+            if (analysis.isMissingNode() || analysis.isNull()) {
+                return StrategyVerdictSnapshot.unknown();
+            }
+            String playbook = textOrNull(analysis, "candidate_playbook");
+            String decisionName = textOrNull(analysis, "decision");
+            Double finalScore = analysis.hasNonNull("final_score")
+                ? analysis.get("final_score").asDouble()
+                : null;
+            String direction = textOrNull(analysis, "direction");
+
+            // "agrees" — match the isTradeable() contract of DecisionType. We
+            // keep the check in text form (HALF_SIZE / FULL_SIZE) rather than
+            // importing the enum back here, so the JSON schema can evolve
+            // without a deserialize step.
+            boolean tradeable = "HALF_SIZE".equals(decisionName) || "FULL_SIZE".equals(decisionName);
+            boolean directionAligned = direction != null
+                && direction.equalsIgnoreCase(review.getAction());
+            Boolean agrees = (decisionName == null) ? null : (tradeable && directionAligned);
+
+            return new StrategyVerdictSnapshot(playbook, decisionName, finalScore, agrees);
         } catch (Exception e) {
-            log.debug("Strategy verdict snapshot failed for review {} {}: {}",
+            log.debug("Strategy verdict snapshot read failed for review {} {}: {}",
                 review.getId(), review.getInstrument(), e.getMessage());
             return StrategyVerdictSnapshot.unknown();
         }
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode child = node.path(field);
+        if (child.isMissingNode() || child.isNull()) return null;
+        String text = child.asText();
+        return text.isEmpty() ? null : text;
     }
 
     private void completeWithError(Long reviewId, String message) {

@@ -77,14 +77,23 @@ public class StrategyExecutionGate {
             return GateOutcome.block("strategy-engine-unavailable");
         }
 
-        StrategyDecision decision;
+        // Narrow catch for enum parsing — the ONLY source of a legitimate
+        // "unknown-instrument" label. Wrapping engine.evaluate() in the same
+        // catch(IllegalArgumentException) would mislabel internal validation
+        // failures (a pure-domain agent throwing IAE on a malformed context)
+        // as "unknown-instrument", hiding real engine bugs from operators.
+        Instrument instrument;
         try {
-            Instrument instrument = Instrument.valueOf(instrumentCode);
-            decision = engine.evaluate(instrument, review.getTimeframe());
+            instrument = Instrument.valueOf(instrumentCode);
         } catch (IllegalArgumentException e) {
             log.warn("Strategy execution gate blocked execution for {}: unknown instrument",
                 instrumentCode);
             return GateOutcome.block("unknown-instrument: " + instrumentCode);
+        }
+
+        StrategyDecision decision;
+        try {
+            decision = engine.evaluate(instrument, review.getTimeframe());
         } catch (Exception e) {
             log.warn("Strategy execution gate blocked execution for {}: engine error: {}",
                 instrumentCode, e.getMessage());
