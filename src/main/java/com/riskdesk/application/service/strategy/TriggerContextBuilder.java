@@ -1,14 +1,21 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.IndicatorSnapshot;
+import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.engine.strategy.detector.ReactionPatternDetector;
 import com.riskdesk.domain.engine.strategy.model.DeltaSignature;
 import com.riskdesk.domain.engine.strategy.model.DomSignal;
 import com.riskdesk.domain.engine.strategy.model.ReactionPattern;
 import com.riskdesk.domain.engine.strategy.model.TickDataQuality;
 import com.riskdesk.domain.engine.strategy.model.TriggerContext;
+import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.model.Instrument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * Produces a {@link TriggerContext} from the indicator snapshot — the cheap path.
@@ -20,10 +27,26 @@ import java.math.BigDecimal;
 @Component
 public class TriggerContextBuilder {
 
+    private static final Logger log = LoggerFactory.getLogger(TriggerContextBuilder.class);
+
     /** |cumulativeDelta| above this fraction of volume is "heavy" — tunable. */
     private static final double HEAVY_DELTA_RATIO = 0.3;
 
-    public TriggerContext build(IndicatorSnapshot snapshot) {
+    /**
+     * Candle window for reaction classification. We only look at the latest closed
+     * candle today, but leave room to grow into 2- or 3-bar patterns without
+     * changing the repository call shape.
+     */
+    private static final int REACTION_CANDLE_LIMIT = 3;
+
+    private final CandleRepositoryPort candleRepository;
+
+    public TriggerContextBuilder(CandleRepositoryPort candleRepository) {
+        this.candleRepository = candleRepository;
+    }
+
+    public TriggerContext build(Instrument instrument, String timeframe,
+                                 IndicatorSnapshot snapshot) {
         BigDecimal buyRatio = snapshot.buyRatio();
         BigDecimal cumulativeDelta = snapshot.cumulativeDelta();
         TickDataQuality quality = inferQuality(snapshot);
@@ -32,11 +55,35 @@ public class TriggerContextBuilder {
         // DOM is not yet on the snapshot — report UNAVAILABLE. A later slice wires
         // MarketDepthPort here.
         DomSignal dom = DomSignal.UNAVAILABLE;
-        // Reaction pattern detection requires recent candles; leave NONE until a
-        // dedicated detector is wired up.
-        ReactionPattern reaction = ReactionPattern.NONE;
+        ReactionPattern reaction = classifyReaction(instrument, timeframe);
 
         return new TriggerContext(signature, buyRatio, cumulativeDelta, dom, reaction, quality);
+    }
+
+    /**
+     * Back-compat shim — keeps the old 1-arg signature so tests / callers that
+     * don't need reaction detection still work. The shim reports no reaction
+     * (equivalent to {@link ReactionPattern#NONE}).
+     */
+    public TriggerContext build(IndicatorSnapshot snapshot) {
+        BigDecimal buyRatio = snapshot.buyRatio();
+        BigDecimal cumulativeDelta = snapshot.cumulativeDelta();
+        TickDataQuality quality = inferQuality(snapshot);
+        DeltaSignature signature = classify(snapshot, buyRatio, cumulativeDelta);
+        return new TriggerContext(signature, buyRatio, cumulativeDelta,
+            DomSignal.UNAVAILABLE, ReactionPattern.NONE, quality);
+    }
+
+    private ReactionPattern classifyReaction(Instrument instrument, String timeframe) {
+        try {
+            List<Candle> candles = candleRepository.findRecentCandles(
+                instrument, timeframe, REACTION_CANDLE_LIMIT);
+            return ReactionPatternDetector.classifyLatest(candles);
+        } catch (Exception e) {
+            log.debug("Reaction detection failed for {} {}: {}",
+                instrument, timeframe, e.getMessage());
+            return ReactionPattern.NONE;
+        }
     }
 
     private static TickDataQuality inferQuality(IndicatorSnapshot s) {

@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   api,
+  ComparisonAgreement,
+  DecisionComparisonView,
   StrategyAgentVote,
   StrategyDecisionView,
   StrategyLayer,
@@ -66,6 +68,8 @@ function gaugePct(score: number): number {
 
 export default function StrategyPanel({ instrument, timeframe }: StrategyPanelProps) {
   const [decision, setDecision] = useState<StrategyDecisionView | null>(null);
+  const [comparison, setComparison] = useState<DecisionComparisonView | null>(null);
+  const [showCompare, setShowCompare] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,14 +77,20 @@ export default function StrategyPanel({ instrument, timeframe }: StrategyPanelPr
     setLoading(true);
     setError(null);
     try {
-      const result = await api.getStrategyDecision(instrument, timeframe);
-      setDecision(result);
+      if (showCompare) {
+        const result = await api.getStrategyComparison(instrument, timeframe);
+        setComparison(result);
+        setDecision(result.strategyDecision);
+      } else {
+        const result = await api.getStrategyDecision(instrument, timeframe);
+        setDecision(result);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load strategy');
     } finally {
       setLoading(false);
     }
-  }, [instrument, timeframe]);
+  }, [instrument, timeframe, showCompare]);
 
   useEffect(() => {
     fetchDecision();
@@ -120,8 +130,8 @@ export default function StrategyPanel({ instrument, timeframe }: StrategyPanelPr
 
   return (
     <div className="p-4 space-y-4 text-sm">
-      {/* Header: playbook candidate + decision bucket + final score */}
-      <div className="flex items-center gap-3">
+      {/* Header: playbook candidate + decision bucket + final score + compare toggle */}
+      <div className="flex items-center gap-3 flex-wrap">
         <div className="font-mono text-xs uppercase tracking-widest text-zinc-400">
           {decision.candidatePlaybookId ?? 'NO PLAYBOOK'}
         </div>
@@ -140,7 +150,23 @@ export default function StrategyPanel({ instrument, timeframe }: StrategyPanelPr
             {decision.direction}
           </span>
         )}
+        <button
+          type="button"
+          onClick={() => setShowCompare(v => !v)}
+          className={`ml-auto text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border ${
+            showCompare
+              ? 'border-sky-500 text-sky-400 bg-sky-950/40'
+              : 'border-zinc-600 text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          {showCompare ? 'Hide A/B' : 'Compare vs legacy'}
+        </button>
       </div>
+
+      {/* Comparison summary bar */}
+      {showCompare && comparison && (
+        <ComparisonBanner comparison={comparison} />
+      )}
 
       {/* Gauge -100 .. +100 */}
       <div>
@@ -235,6 +261,72 @@ export default function StrategyPanel({ instrument, timeframe }: StrategyPanelPr
 
       <div className="text-[10px] text-zinc-500">
         Evaluated at {new Date(decision.evaluatedAt).toLocaleTimeString()}
+      </div>
+    </div>
+  );
+}
+
+function agreementTone(a: ComparisonAgreement): string {
+  switch (a) {
+    case 'BOTH_TRADEABLE_SAME_DIRECTION':     return 'bg-emerald-600 text-white';
+    case 'BOTH_TRADEABLE_OPPOSITE_DIRECTION': return 'bg-rose-600 text-white';
+    case 'LEGACY_ONLY_TRADEABLE':             return 'bg-amber-600 text-white';
+    case 'NEW_ONLY_TRADEABLE':                return 'bg-sky-600 text-white';
+    case 'BOTH_NO_TRADE':                     return 'bg-zinc-700 text-zinc-200';
+    case 'INCONCLUSIVE':                      return 'bg-zinc-800 text-zinc-400';
+  }
+}
+
+function agreementLabel(a: ComparisonAgreement): string {
+  switch (a) {
+    case 'BOTH_TRADEABLE_SAME_DIRECTION':     return 'Both tradeable — same direction';
+    case 'BOTH_TRADEABLE_OPPOSITE_DIRECTION': return 'Both tradeable — OPPOSITE directions';
+    case 'LEGACY_ONLY_TRADEABLE':             return 'Legacy says trade, new says wait';
+    case 'NEW_ONLY_TRADEABLE':                return 'New engine sees setup, legacy rejected';
+    case 'BOTH_NO_TRADE':                     return 'Both no trade';
+    case 'INCONCLUSIVE':                      return 'Inconclusive';
+  }
+}
+
+function ComparisonBanner({ comparison }: { comparison: DecisionComparisonView }) {
+  const legacy = comparison.legacyPlaybook;
+  const legacyScore = legacy?.checklistScore ?? 0;
+  const legacyVerdict = legacy?.verdict ?? '—';
+  const legacyDir = legacy?.filters?.tradeDirection ?? null;
+  return (
+    <div className="border border-zinc-700 rounded p-2 space-y-2 bg-zinc-900/50">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${agreementTone(comparison.agreement)}`}>
+          {agreementLabel(comparison.agreement)}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <div>
+          <div className="text-[10px] text-zinc-500 uppercase tracking-widest">Legacy 7/7</div>
+          <div className="font-mono">
+            <span className={legacyScore >= 6 ? 'text-emerald-400' : legacyScore >= 4 ? 'text-amber-400' : 'text-rose-400'}>
+              {legacyScore}/7
+            </span>
+            {legacyDir && (
+              <span className="ml-2 text-zinc-400">{legacyDir}</span>
+            )}
+          </div>
+          <div className="text-[10px] text-zinc-400 truncate" title={legacyVerdict}>{legacyVerdict}</div>
+        </div>
+        <div>
+          <div className="text-[10px] text-zinc-500 uppercase tracking-widest">New engine</div>
+          <div className="font-mono">
+            {comparison.strategyDecision?.decision ?? '—'}
+            {comparison.strategyDecision?.direction && (
+              <span className="ml-2 text-zinc-400">{comparison.strategyDecision.direction}</span>
+            )}
+          </div>
+          <div className="text-[10px] text-zinc-400">
+            {comparison.strategyDecision?.candidatePlaybookId ?? 'No playbook'}
+            {' — score '}
+            {comparison.strategyDecision ? formatScore(comparison.strategyDecision.finalScore) : '—'}
+          </div>
+        </div>
       </div>
     </div>
   );

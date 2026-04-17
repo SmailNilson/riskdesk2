@@ -60,7 +60,7 @@ public class StrategyEngineService {
 
         MarketContext context = contextBuilder.build(instrument, timeframe, snapshot, atr);
         ZoneContext zones = zoneBuilder.build(snapshot, atr);
-        TriggerContext trigger = triggerBuilder.build(snapshot);
+        TriggerContext trigger = triggerBuilder.build(instrument, timeframe, snapshot);
 
         StrategyInput input = new StrategyInput(context, zones, trigger, null);
         StrategyDecision decision = engine.evaluate(input);

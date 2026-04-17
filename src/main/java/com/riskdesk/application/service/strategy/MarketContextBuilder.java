@@ -5,6 +5,7 @@ import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.strategy.model.MacroBias;
 import com.riskdesk.domain.engine.strategy.model.MarketContext;
 import com.riskdesk.domain.engine.strategy.model.MarketRegime;
+import com.riskdesk.domain.engine.strategy.model.MtfSnapshot;
 import com.riskdesk.domain.engine.strategy.model.PdZone;
 import com.riskdesk.domain.engine.strategy.model.PriceLocation;
 import com.riskdesk.domain.model.Instrument;
@@ -30,9 +31,11 @@ public class MarketContextBuilder {
 
     private final MarketRegimeDetector regimeDetector = new MarketRegimeDetector();
     private final Clock clock;
+    private final MtfSnapshotBuilder mtfBuilder;
 
-    public MarketContextBuilder(Clock clock) {
+    public MarketContextBuilder(Clock clock, MtfSnapshotBuilder mtfBuilder) {
         this.clock = clock;
+        this.mtfBuilder = mtfBuilder;
     }
 
     public MarketContext build(Instrument instrument, String timeframe,
@@ -46,13 +49,14 @@ public class MarketContextBuilder {
             snapshot.pocPrice(), snapshot.valueAreaHigh(), snapshot.valueAreaLow(),
             POC_TOLERANCE_PCT);
         PdZone pd = PdZone.fromLabel(snapshot.sessionPdZone());
+        MtfSnapshot mtf = mtfBuilder.build(instrument, timeframe);
         Instant asOf = snapshot.lastCandleTimestamp() != null
             ? snapshot.lastCandleTimestamp()
             : clock.instant();
 
         return new MarketContext(
             instrument, timeframe, bias, regime, loc, pd,
-            snapshot.lastPrice(), atr, asOf
+            snapshot.lastPrice(), atr, mtf, asOf
         );
     }
 }
