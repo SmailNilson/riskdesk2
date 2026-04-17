@@ -842,6 +842,9 @@ export const api = {
   // ── Strategy engine (new probabilistic engine — read-only) ────────
   getStrategyDecision: (instrument: string, timeframe: string) =>
     get<StrategyDecisionView>(`/api/strategy/${instrument}/${timeframe}`),
+
+  getStrategyComparison: (instrument: string, timeframe: string) =>
+    get<DecisionComparisonView>(`/api/strategy/${instrument}/${timeframe}/compare`),
 };
 
 // ── Playbook Types ────────────────────────────────────────────────────
@@ -958,4 +961,21 @@ export interface StrategyDecisionView {
   plan: StrategyMechanicalPlan | null;
   vetoReasons: string[];
   evaluatedAt: string;
+}
+
+export type ComparisonAgreement =
+  | 'BOTH_NO_TRADE'
+  | 'BOTH_TRADEABLE_SAME_DIRECTION'
+  | 'BOTH_TRADEABLE_OPPOSITE_DIRECTION'
+  | 'LEGACY_ONLY_TRADEABLE'
+  | 'NEW_ONLY_TRADEABLE'
+  | 'INCONCLUSIVE';
+
+export interface DecisionComparisonView {
+  instrument: string;
+  timeframe: string;
+  evaluatedAt: string;
+  legacyPlaybook: PlaybookEvaluation | null;
+  strategyDecision: StrategyDecisionView | null;
+  agreement: ComparisonAgreement;
 }
