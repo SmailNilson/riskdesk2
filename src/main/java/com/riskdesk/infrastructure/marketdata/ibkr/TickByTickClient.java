@@ -51,6 +51,9 @@ public class TickByTickClient {
     private volatile EReaderSignal signal;
     private volatile boolean connected = false;
 
+    /** Called when IBKR closes the connection — lets the orchestrator reset its subscription flags. */
+    private volatile Runnable disconnectionCallback;
+
     // Fix 2: reqId management — NEVER reuse, always increment
     private final AtomicInteger nextReqId = new AtomicInteger(1000);
 
@@ -74,6 +77,10 @@ public class TickByTickClient {
 
     public void setNativeClient(IbGatewayNativeClient nativeClient) {
         this.nativeClient = nativeClient;
+    }
+
+    public void setDisconnectionCallback(Runnable callback) {
+        this.disconnectionCallback = callback;
     }
 
     /**
@@ -340,6 +347,11 @@ public class TickByTickClient {
         public void connectionClosed() {
             log.warn("TickByTickClient: CONNECTION CLOSED by IBKR");
             connected = false;
+            stopWatchdog();
+            Runnable cb = disconnectionCallback;
+            if (cb != null) {
+                try { cb.run(); } catch (Exception e) { log.error("TickByTickClient: disconnection callback failed", e); }
+            }
         }
 
         @Override
