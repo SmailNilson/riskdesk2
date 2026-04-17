@@ -838,6 +838,10 @@ export const api = {
 
   getFullPlaybook: (instrument: string, timeframe: string) =>
     get<FinalVerdict>(`/api/playbook/${instrument}/${timeframe}/full`),
+
+  // ── Strategy engine (new probabilistic engine — read-only) ────────
+  getStrategyDecision: (instrument: string, timeframe: string) =>
+    get<StrategyDecisionView>(`/api/strategy/${instrument}/${timeframe}`),
 };
 
 // ── Playbook Types ────────────────────────────────────────────────────
@@ -913,4 +917,45 @@ export interface FinalVerdict {
   agentVerdicts: AgentVerdictView[];
   warnings: string[];
   eligibility: string;
+}
+
+// ── Strategy Engine (new probabilistic engine) ────────────────────────────
+
+export type StrategyLayer = 'CONTEXT' | 'ZONE' | 'TRIGGER';
+export type DecisionType =
+  | 'NO_TRADE'
+  | 'MONITORING'
+  | 'PAPER_TRADE'
+  | 'HALF_SIZE'
+  | 'FULL_SIZE';
+
+export interface StrategyAgentVote {
+  agentId: string;
+  layer: StrategyLayer;
+  directionalVote: number;     // -100..+100
+  confidence: number;          // 0..1
+  abstain: boolean;
+  evidence: string[];
+  vetoReason: string | null;
+}
+
+export interface StrategyMechanicalPlan {
+  direction: 'LONG' | 'SHORT';
+  entry: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  rrRatio: number;
+}
+
+export interface StrategyDecisionView {
+  candidatePlaybookId: string | null;   // "LSAR" | "SBDR" | null
+  votes: StrategyAgentVote[];
+  layerScores: Partial<Record<StrategyLayer, number>>;
+  finalScore: number;                    // -100..+100
+  decision: DecisionType;
+  direction: 'LONG' | 'SHORT' | null;
+  plan: StrategyMechanicalPlan | null;
+  vetoReasons: string[];
+  evaluatedAt: string;
 }
