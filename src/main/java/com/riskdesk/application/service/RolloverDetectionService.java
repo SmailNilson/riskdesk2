@@ -131,13 +131,18 @@ public class RolloverDetectionService {
 
     /**
      * Rollover detection strategy:
-     *   1. OI comparison (2 contracts) — if next OI > current OI → RECOMMEND_ROLL
-     *   2. OI empty → calendar fallback: WARNING if ≤ 7 days, CRITICAL if ≤ 3 days
+     *   1. OI comparison (2 contracts from IBKR) — if next OI > current OI → WARNING
+     *   2. OI unavailable or fewer than 2 contracts → calendar fallback:
+     *      CRITICAL if daysToFirstOfMonth ≤ 3 (or already past the 1st — i.e. in the expiry month)
+     *      WARNING  if daysToFirstOfMonth ≤ 7
      *   3. Otherwise → STABLE
      *
      * Note: the 32-day calendarDaysThreshold is used by ActiveContractRegistryInitializer
      * for pre-rolling at startup. For user-facing alerts, we use WARNING_DAYS / CRITICAL_DAYS
      * to avoid false positives on freshly-rolled contracts.
+     *
+     * Calendar fallback clamps daysToFirstOfMonth to 0 when negative: being past the 1st of
+     * the contract month means we are already inside the expiry window and must roll immediately.
      */
     private RolloverInfo computeInfo(Instrument instrument) {
         String currentMonth = contractRegistry.getContractMonth(instrument).orElse(null);
@@ -145,48 +150,45 @@ public class RolloverDetectionService {
             return RolloverInfo.unknown(instrument.name());
         }
 
-        // Get 2 contracts from IBKR for OI comparison
+        // Strategy 1: OI comparison requires 2 contracts from IBKR.
+        // Near-expiry contracts may return fewer — fall through to calendar in that case.
         List<IbGatewayResolvedContract> contracts = resolver.resolveNextContracts(instrument);
-        if (contracts.size() < 2) {
-            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
-        }
+        if (contracts.size() >= 2) {
+            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            String nextMonth  = normalizeMonth(contracts.get(1).contract().lastTradeDateOrContractMonth());
+            if (frontMonth != null && nextMonth != null) {
+                // If we are already on or past the next month (post-rollover), no need to warn.
+                if (currentMonth.compareTo(nextMonth) >= 0) {
+                    return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
+                }
 
-        String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
-        String nextMonth  = normalizeMonth(contracts.get(1).contract().lastTradeDateOrContractMonth());
-        if (frontMonth == null || nextMonth == null) {
-            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
-        }
+                OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
+                OptionalLong nextOI    = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
 
-        // If we are already on or past the next month (post-rollover), no need to warn.
-        if (currentMonth.compareTo(nextMonth) >= 0) {
-            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
-        }
-
-        // Strategy 1: OI comparison — next OI > current OI → recommend roll
-        OptionalLong currentOI = openInterestProvider.fetchOpenInterest(instrument, frontMonth);
-        OptionalLong nextOI    = openInterestProvider.fetchOpenInterest(instrument, nextMonth);
-
-        if (currentOI.isPresent() && nextOI.isPresent()) {
-            if (nextOI.getAsLong() > currentOI.getAsLong()) {
-                log.info("Rollover OI: {} — next {} OI={} > current {} OI={} → RECOMMEND_ROLL",
-                    instrument, nextMonth, nextOI.getAsLong(), frontMonth, currentOI.getAsLong());
-                return new RolloverInfo(instrument.name(), currentMonth, null,
-                    -1, RolloverStatus.WARNING);
+                if (currentOI.isPresent() && nextOI.isPresent()) {
+                    if (nextOI.getAsLong() > currentOI.getAsLong()) {
+                        log.info("Rollover OI: {} — next {} OI={} > current {} OI={} → RECOMMEND_ROLL",
+                            instrument, nextMonth, nextOI.getAsLong(), frontMonth, currentOI.getAsLong());
+                        return new RolloverInfo(instrument.name(), currentMonth, null,
+                            -1, RolloverStatus.WARNING);
+                    }
+                    return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
+                }
             }
-            return new RolloverInfo(instrument.name(), currentMonth, null, -1, RolloverStatus.STABLE);
         }
 
-        // Strategy 2: OI empty → calendar fallback using WARNING_DAYS / CRITICAL_DAYS
-        // (not calendarDaysThreshold which is for pre-roll at startup, too aggressive for alerts)
+        // Strategy 2: OI unavailable or fewer than 2 contracts → calendar fallback.
+        // daysToFirstOfMonth is negative when we are past the 1st of the contract month,
+        // meaning we are already inside the expiry window. Clamp to 0 so CRITICAL fires.
         if (!isSerialMonth(instrument, currentMonth)) {
-            long daysToContractMonth = daysToFirstOfMonth(currentMonth);
-            if (daysToContractMonth >= 0 && daysToContractMonth <= CRITICAL_DAYS) {
+            long daysToContractMonth = Math.max(0L, daysToFirstOfMonth(currentMonth));
+            if (daysToContractMonth <= CRITICAL_DAYS) {
                 log.info("Rollover calendar CRITICAL: {} — {} expires within {}d (OI unavailable)",
                     instrument, currentMonth, daysToContractMonth);
                 return new RolloverInfo(instrument.name(), currentMonth, null,
                     daysToContractMonth, RolloverStatus.CRITICAL);
             }
-            if (daysToContractMonth >= 0 && daysToContractMonth <= WARNING_DAYS) {
+            if (daysToContractMonth <= WARNING_DAYS) {
                 log.info("Rollover calendar WARNING: {} — {} expires within {}d (OI unavailable)",
                     instrument, currentMonth, daysToContractMonth);
                 return new RolloverInfo(instrument.name(), currentMonth, null,
