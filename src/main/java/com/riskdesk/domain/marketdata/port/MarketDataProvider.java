@@ -16,4 +16,12 @@ public interface MarketDataProvider {
     default Optional<BigDecimal> fetchPrice(Instrument instrument) {
         return Optional.ofNullable(fetchPrices().get(instrument));
     }
+
+    /**
+     * Fetches the latest VIX continuous futures price (CFE: CONTFUT).
+     * Returns empty if the subscription is not active or the adapter does not support it.
+     */
+    default Optional<BigDecimal> fetchVixPrice() {
+        return Optional.empty();
+    }
 }

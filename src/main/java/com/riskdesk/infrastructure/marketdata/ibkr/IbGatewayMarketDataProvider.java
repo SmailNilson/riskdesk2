@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.ib.client.Contract;
+import com.ib.client.Types;
 import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.model.Instrument;
@@ -82,6 +83,33 @@ public class IbGatewayMarketDataProvider implements MarketDataProvider {
             log.warn("IB Gateway single snapshot fetch failed for {}: {}", instrument, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Subscribes to the VIX continuous futures contract (CFE: CONTFUT) and returns the latest
+     * streaming price. IBKR handles rollover automatically for CONTFUT — no month management needed.
+     */
+    @Override
+    public Optional<BigDecimal> fetchVixPrice() {
+        try {
+            nativeClient.ensureStreamingPriceSubscription(VIX_CONTFUT);
+            return nativeClient.latestStreamingPrice(VIX_CONTFUT);
+        } catch (Exception e) {
+            log.warn("VIX CONTFUT fetch failed: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** VIX continuous futures contract on CFE (CBOE Futures Exchange). */
+    private static final Contract VIX_CONTFUT = buildVixContract();
+
+    private static Contract buildVixContract() {
+        Contract c = new Contract();
+        c.symbol("VIX");
+        c.secType(Types.SecType.CONTFUT);
+        c.exchange("CFE");
+        c.currency("USD");
+        return c;
     }
 
     /**
