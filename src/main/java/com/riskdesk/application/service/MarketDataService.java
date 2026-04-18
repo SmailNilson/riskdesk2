@@ -165,6 +165,11 @@ public class MarketDataService implements StreamingPriceListener {
 
         dxyMarketService.refreshSyntheticDxy();
 
+        // VIX continuous futures (CFE) — feeds CrossInstrumentAlertService regime filter.
+        // Published as a string-keyed event ("VIX") to avoid adding VIX to the Instrument enum.
+        marketDataProvider.fetchVixPrice().ifPresent(vix ->
+            eventPublisher.publishEvent(new MarketPriceUpdated("VIX", vix, now)));
+
         if (usedDatabaseFallback && !databaseFallbackActive) {
             log.warn("IBKR unavailable: serving last known prices from the database.");
             databaseFallbackActive = true;
