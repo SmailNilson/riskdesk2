@@ -22,29 +22,36 @@ import java.util.*;
  *
  * <p>Uses the project-scoped Vertex AI API key (higher quota than the personal
  * Google AI Studio key used by {@link GeminiMentorClient}). Targets
- * {@code gemini-2.0-flash} — sufficient for short agent calls (400–800 tokens)
- * and ~10× cheaper than Pro.
+ * {@code gemini-3.1-flash-lite-preview} — sufficient for short agent calls (400–800 tokens).
  *
- * <p>Marked {@code @Primary} so Spring injects this adapter into the three AI
- * trading agents (MTF-Confluence, Order-Flow, Zone-Quality) while
- * {@link GeminiAgentAdapter} remains available for fallback wiring if needed.
+ * <p>Marked {@code @Primary} so Spring injects this adapter into the three AI trading
+ * agents (MTF-Confluence, Order-Flow, Zone-Quality). When Vertex is disabled or
+ * {@code VERTEX_API_KEY} is absent, calls are <em>delegated</em> to {@link GeminiAgentAdapter}
+ * so environments with only the Gemini key still get AI responses.
  *
- * <p>Falls back gracefully to {@link AgentAiResponse#fallback} on any failure —
- * domain agents degrade to deterministic rules when {@code aiAvailable=false}.
+ * <p>URL shape: {@code generativelanguage.googleapis.com} uses the Gemini Developer API path
+ * ({@code /v1beta/models/…:generateContent}). A real Vertex AI host
+ * ({@code aiplatform.googleapis.com}) requires a different path and OAuth2 — detected
+ * automatically via {@link #buildEndpointUrl()}.
  */
 @Primary
 @Service
 public class VertexAiAgentAdapter implements GeminiAgentPort {
 
     private static final Logger log = LoggerFactory.getLogger(VertexAiAgentAdapter.class);
+    private static final String VERTEX_AI_HOST = "aiplatform.googleapis.com";
 
     private final VertexProperties properties;
+    private final GeminiAgentAdapter geminiAdapter;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
     private final GeminiCircuitBreaker breaker;
 
-    public VertexAiAgentAdapter(VertexProperties properties, ObjectMapper objectMapper) {
+    public VertexAiAgentAdapter(VertexProperties properties,
+                                GeminiAgentAdapter geminiAdapter,
+                                ObjectMapper objectMapper) {
         this.properties = properties;
+        this.geminiAdapter = geminiAdapter;
         this.objectMapper = objectMapper;
         this.restTemplate = buildRestTemplate();
         this.breaker = new GeminiCircuitBreaker(3, Duration.ofSeconds(30));
@@ -52,11 +59,9 @@ public class VertexAiAgentAdapter implements GeminiAgentPort {
 
     @Override
     public AgentAiResponse analyze(AgentAiRequest request) {
-        if (!properties.isEnabled()) {
-            return AgentAiResponse.fallback("Vertex AI disabled");
-        }
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
-            return AgentAiResponse.fallback("VERTEX_API_KEY missing");
+        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) {
+            log.debug("Vertex not configured — delegating agent '{}' to Gemini adapter", request.agentName());
+            return geminiAdapter.analyze(request);
         }
         if (!breaker.allowRequest()) {
             return AgentAiResponse.fallback("Vertex AI circuit breaker OPEN");
@@ -90,10 +95,7 @@ public class VertexAiAgentAdapter implements GeminiAgentPort {
             headers.set("x-goog-api-key", properties.getApiKey());
             HttpEntity<Map<String, Object>> http = new HttpEntity<>(body, headers);
 
-            String endpoint = properties.getEndpoint()
-                + "/v1beta/models/"
-                + properties.getModel()
-                + ":generateContent";
+            String endpoint = buildEndpointUrl();
 
             long start = System.currentTimeMillis();
             JsonNode root = restTemplate
@@ -131,6 +133,19 @@ public class VertexAiAgentAdapter implements GeminiAgentPort {
 
     public GeminiCircuitBreaker.State circuitState() {
         return breaker.currentState();
+    }
+
+    // Gemini Developer API and true Vertex AI use different URL shapes.
+    // With VERTEX_API_KEY the standard generativelanguage.googleapis.com host works fine.
+    // A real aiplatform.googleapis.com host needs OAuth2 + project/location path — warn if misconfigured.
+    private String buildEndpointUrl() {
+        String base = properties.getEndpoint();
+        if (base.contains(VERTEX_AI_HOST)) {
+            log.warn("Vertex AI host detected ({}). This requires OAuth2 auth and a project/location " +
+                "path not yet supported. Switch endpoint to generativelanguage.googleapis.com " +
+                "and use a Vertex API key instead.", base);
+        }
+        return base + "/v1beta/models/" + properties.getModel() + ":generateContent";
     }
 
     private static Map<String, Object> buildAgentResponseSchema() {

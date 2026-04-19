@@ -35,24 +35,27 @@ public class VertexAiNarrator implements DecisionNarratorPort {
 
     private static final Logger log = LoggerFactory.getLogger(VertexAiNarrator.class);
     private static final int MAX_OUTPUT_TOKENS = 250;
+    private static final String VERTEX_AI_HOST = "aiplatform.googleapis.com";
 
     private final VertexProperties properties;
+    private final GeminiNarrator geminiNarrator;
     private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate;
 
-    public VertexAiNarrator(VertexProperties properties, ObjectMapper objectMapper) {
+    public VertexAiNarrator(VertexProperties properties,
+                            GeminiNarrator geminiNarrator,
+                            ObjectMapper objectMapper) {
         this.properties = properties;
+        this.geminiNarrator = geminiNarrator;
         this.objectMapper = objectMapper;
         this.restTemplate = buildRestTemplate();
     }
 
     @Override
     public NarratorResponse narrate(NarratorRequest request) {
-        if (!properties.isEnabled()) {
-            return NarratorResponse.fallback(templatedFallback(request, "Vertex disabled"));
-        }
-        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
-            return NarratorResponse.fallback(templatedFallback(request, "VERTEX_API_KEY missing"));
+        if (!properties.isEnabled() || properties.getApiKey() == null || properties.getApiKey().isBlank()) {
+            log.debug("Vertex not configured — delegating narrator to Gemini");
+            return geminiNarrator.narrate(request);
         }
 
         try {
@@ -78,10 +81,7 @@ public class VertexAiNarrator implements DecisionNarratorPort {
             headers.set("x-goog-api-key", properties.getApiKey());
             HttpEntity<Map<String, Object>> http = new HttpEntity<>(body, headers);
 
-            String endpoint = properties.getEndpoint()
-                + "/v1beta/models/"
-                + properties.getModel()
-                + ":generateContent";
+            String endpoint = buildEndpointUrl();
 
             long start = System.currentTimeMillis();
             JsonNode root = restTemplate
@@ -241,6 +241,15 @@ public class VertexAiNarrator implements DecisionNarratorPort {
             int out = usage.path("candidatesTokenCount").asInt(0);
             log.info("Narrator Vertex — latency: {}ms | tokens in: {} out: {}", latencyMs, in, out);
         } catch (Exception ignored) {}
+    }
+
+    private String buildEndpointUrl() {
+        String base = properties.getEndpoint();
+        if (base.contains(VERTEX_AI_HOST)) {
+            log.warn("Vertex AI host detected ({}). Requires OAuth2 + project/location path " +
+                "not yet supported. Use generativelanguage.googleapis.com with Vertex API key.", base);
+        }
+        return base + "/v1beta/models/" + properties.getModel() + ":generateContent";
     }
 
     private RestTemplate buildRestTemplate() {
