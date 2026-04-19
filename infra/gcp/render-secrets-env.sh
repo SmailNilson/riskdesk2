@@ -81,6 +81,11 @@ chmod 700 /etc/riskdesk
   printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.1-pro-preview}"
   printf 'GEMINI_EMBEDDING_MODEL=%s\n' "${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}"
 
+  if [[ -n "${VERTEX_API_KEY_SECRET:-}" ]]; then
+    printf 'VERTEX_API_KEY=%s\n' "$(read_secret "${VERTEX_API_KEY_SECRET}")"
+  fi
+  printf 'VERTEX_MODEL=%s\n' "${VERTEX_MODEL:-gemini-3.1-flash-lite-preview}"
+
   if [[ -n "${TELEGRAM_BOT_TOKEN_SECRET:-}" && -n "${TELEGRAM_CHAT_ID_SECRET:-}" ]]; then
     printf 'RISKDESK_ALERTS_TELEGRAM_ENABLED=true\n'
     printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(read_secret "${TELEGRAM_BOT_TOKEN_SECRET}")"

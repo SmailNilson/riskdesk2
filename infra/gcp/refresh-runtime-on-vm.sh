@@ -55,6 +55,8 @@ IBKR_TWOFA_DEVICE_SECRET=${IBKR_TWOFA_DEVICE_SECRET:-$(metadata_optional ibkr-tw
 IBKR_VNC_PASSWORD_SECRET=${IBKR_VNC_PASSWORD_SECRET:-$(metadata_optional ibkr-vnc-password-secret)}
 GEMINI_MODEL=${GEMINI_MODEL:-$(metadata_optional gemini-model)}
 GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-$(metadata_optional gemini-embedding-model)}
+VERTEX_API_KEY_SECRET=${VERTEX_API_KEY_SECRET:-$(metadata_optional vertex-api-key-secret)}
+VERTEX_MODEL=${VERTEX_MODEL:-$(metadata_optional vertex-model)}
 TELEGRAM_BOT_TOKEN_SECRET=${TELEGRAM_BOT_TOKEN_SECRET:-$(metadata_optional telegram-bot-token-secret)}
 TELEGRAM_CHAT_ID_SECRET=${TELEGRAM_CHAT_ID_SECRET:-$(metadata_optional telegram-chat-id-secret)}
 
@@ -85,6 +87,8 @@ export IBKR_TWOFA_DEVICE_SECRET
 export IBKR_VNC_PASSWORD_SECRET
 export GEMINI_MODEL
 export GEMINI_EMBEDDING_MODEL
+export VERTEX_API_KEY_SECRET
+export VERTEX_MODEL
 export TELEGRAM_BOT_TOKEN_SECRET
 export TELEGRAM_CHAT_ID_SECRET
 
