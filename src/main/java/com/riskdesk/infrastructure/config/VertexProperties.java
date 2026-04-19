@@ -9,7 +9,7 @@ public class VertexProperties {
 
     private boolean enabled = true;
     private String apiKey = "";
-    private String model = "gemini-2.0-flash";
+    private String model = "gemini-2.0-flash-lite";
     private String endpoint = "https://generativelanguage.googleapis.com";
     private int timeoutMs = 15000;
 
