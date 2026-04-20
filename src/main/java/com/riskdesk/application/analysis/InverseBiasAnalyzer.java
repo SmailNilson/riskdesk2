@@ -67,6 +67,20 @@ public final class InverseBiasAnalyzer {
         "manque de pression vendeuse"
     );
 
+    // DXY phrases are inherently inverted for risk assets: "DXY bullish" is
+    // BEARISH for risk, "DXY bearish" is BULLISH. Without masking, the
+    // substring match below would let generic cues like "bullish" / "bearish"
+    // / "haussier" / "baissier" false-match inside a DXY phrase and count
+    // toward the WRONG inverse direction. We strip these phrases before the
+    // generic-cue pass; the DXY-specific cues themselves still match against
+    // the original (unmasked) string.
+    private static final List<String> DXY_PHRASES = List.of(
+        "dxy haussier",
+        "dxy bullish",
+        "dxy baissier",
+        "dxy bearish"
+    );
+
     private InverseBiasAnalyzer() {}
 
     /**
@@ -96,8 +110,13 @@ public final class InverseBiasAnalyzer {
         for (String err : errors) {
             if (err == null) continue;
             String lower = err.toLowerCase(Locale.ROOT);
+            // Strip DXY phrases before running generic-cue matches so that
+            // e.g. "DXY bullish" does not false-match the generic "bullish"
+            // cue (DXY bullish is bearish for risk assets — the opposite).
+            String masked = maskDxyPhrases(lower);
             for (String cue : cues) {
-                if (lower.contains(cue)) {
+                String haystack = cue.startsWith("dxy ") ? lower : masked;
+                if (haystack.contains(cue)) {
                     matches.add(err);
                     break;   // one error contributes once, not once per cue
                 }
@@ -111,5 +130,21 @@ public final class InverseBiasAnalyzer {
             "Rejected %s has %d contradictions pointing to %s — worth a second look at the inverse side.",
             normalized, matches.size(), inverseDirection);
         return new MentorInverseBiasHint(inverseDirection, score, matches, reasoning);
+    }
+
+    /**
+     * Replaces every DXY phrase in {@link #DXY_PHRASES} with a single space so
+     * that the generic bull/bear substring match below cannot land inside a
+     * DXY context (where the sign is flipped for risk assets). The input must
+     * already be lower-cased.
+     */
+    private static String maskDxyPhrases(String lowerInput) {
+        String out = lowerInput;
+        for (String dxy : DXY_PHRASES) {
+            if (out.contains(dxy)) {
+                out = out.replace(dxy, " ");
+            }
+        }
+        return out;
     }
 }
