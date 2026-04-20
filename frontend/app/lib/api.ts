@@ -730,6 +730,42 @@ export interface TrailingStopStats {
   improvement: TrailingImprovement;
 }
 
+// ── Order Flow History (persisted events, newest first) ───────────────────────
+// Backs the historical lists in OrderFlowPanel. Field names mirror the backend
+// DTOs in com.riskdesk.application.dto.*EventView — keep in sync.
+
+export interface IcebergEventHistory {
+  instrument: string;
+  timestamp: string;     // ISO-8601 UTC
+  side: 'BID_ICEBERG' | 'ASK_ICEBERG';
+  priceLevel: number;
+  rechargeCount: number;
+  avgRechargeSize: number;
+  durationSeconds: number;
+  icebergScore: number;
+}
+
+export interface AbsorptionEventHistory {
+  instrument: string;
+  timestamp: string;
+  side: 'BULLISH_ABSORPTION' | 'BEARISH_ABSORPTION';
+  absorptionScore: number;
+  aggressiveDelta: number;
+  priceMoveTicks: number;
+  totalVolume: number;
+}
+
+export interface SpoofingEventHistory {
+  instrument: string;
+  timestamp: string;
+  side: 'BID_SPOOF' | 'ASK_SPOOF';
+  priceLevel: number;
+  wallSize: number;
+  durationSeconds: number;
+  priceCrossed: boolean;
+  spoofScore: number;
+}
+
 // ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
 export interface OrderFlowDepthSnapshot {
   instrument: string;
@@ -835,6 +871,13 @@ export const api = {
     ),
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
+  // ── Order Flow history (last N persisted events, newest first) ──────────
+  getIcebergEvents: (instrument: string, limit = 20) =>
+    get<IcebergEventHistory[]>(`/api/order-flow/iceberg/${instrument}?limit=${limit}`),
+  getAbsorptionEvents: (instrument: string, limit = 20) =>
+    get<AbsorptionEventHistory[]>(`/api/order-flow/absorption/${instrument}?limit=${limit}`),
+  getSpoofingEvents: (instrument: string, limit = 20) =>
+    get<SpoofingEventHistory[]>(`/api/order-flow/spoofing/${instrument}?limit=${limit}`),
   getTrailingStats: (days = 7) =>
     get<TrailingStopStats>(`/api/mentor/simulation/trailing-stats?days=${days}`),
   getCorrelationStatus: () =>
