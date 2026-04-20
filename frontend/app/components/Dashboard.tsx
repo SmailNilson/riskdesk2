@@ -17,6 +17,7 @@ import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
+import CollapsibleZone from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -193,57 +194,53 @@ export default function Dashboard() {
         })}
       </div>
 
-      {/* Main content — full width, padding bottom so content clears the fixed alerts bar */}
-      <div className="flex-1 flex flex-col gap-3 p-3 pb-14">
-        {/* Chart */}
-        <Chart
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone.tz}
-          theme={theme}
-          snapshot={snapshot}
-          livePrice={prices[instrument]}
-        />
+      {/* Trade Desk — 3-zone grid. Below lg breakpoint the grid collapses to a single column. */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[auto_1fr_auto] gap-3 p-3 pb-14">
+        {/* Left zone — Context */}
+        <CollapsibleZone id="left-context" title="Context" side="left">
+          <DxyPanel />
+          <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
+          <IbkrPortfolioPanel
+            selectedAccountId={selectedIbkrAccountId}
+            onAccountChange={setSelectedIbkrAccountId}
+            onRefreshRequested={loadSummary}
+          />
+          <CorrelationPanel />
+          <BacktestPanel />
+        </CollapsibleZone>
 
-        {/* Indicators + Order Flow side by side */}
-        <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null}>
+        {/* Center zone — Chart + Order Flow (always visible) */}
+        <section className="flex flex-col gap-3 min-w-0">
+          <Chart
+            instrument={instrument}
+            timeframe={timeframe}
+            timezone={timezone.tz}
+            theme={theme}
+            snapshot={snapshot}
+            livePrice={prices[instrument]}
+          />
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
-        </IndicatorPanel>
+          <FlashCrashPanel />
+        </section>
 
-        {/* Flash Crash Detection */}
-        <FlashCrashPanel />
-
-        {/* Trailing Stop simulation stats (7d / 14d / 30d) */}
-        <TrailingStopStatsPanel />
-
-        {/* ONIMS Oil-Nasdaq correlation — hides itself when engine disabled */}
-        <CorrelationPanel />
-
-        <DxyPanel />
-
-        <IbkrPortfolioPanel
-          selectedAccountId={selectedIbkrAccountId}
-          onAccountChange={setSelectedIbkrAccountId}
-          onRefreshRequested={loadSummary}
-        />
-
-        <AiMentorDesk
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone}
-          connected={connected}
-          summary={summary}
-          snapshot={snapshot}
-          prices={prices}
-          alerts={alerts}
-          reviews={mentorSignalReviews}
-          selectedBrokerAccountId={selectedIbkrAccountId}
-          onRefresh={refresh}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
+        {/* Right zone — AI Trade Desk */}
+        <CollapsibleZone id="right-ai-desk" title="AI Trade Desk" side="right">
+          <AiMentorDesk
+            instrument={instrument}
+            timeframe={timeframe}
+            timezone={timezone}
+            connected={connected}
+            summary={summary}
+            snapshot={snapshot}
+            prices={prices}
+            alerts={alerts}
+            reviews={mentorSignalReviews}
+            selectedBrokerAccountId={selectedIbkrAccountId}
+            onRefresh={refresh}
+          />
+          <TrailingStopStatsPanel />
+        </CollapsibleZone>
       </div>
 
       <AlertsFeed alerts={alerts} />
