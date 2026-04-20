@@ -46,9 +46,9 @@ public final class SbdrPlaybook implements Playbook {
         if (context.regime() != MarketRegime.TRENDING) return false;
         if (context.macroBias() == MacroBias.NEUTRAL) return false;
         // Pullback guard: bias BULL requires price in DISCOUNT (discount-long),
-        // bias BEAR requires PREMIUM. UNKNOWN PD zone degrades gracefully — we still
-        // allow applicability but rely on the score to demote.
-        if (context.pdZone() == PdZone.UNKNOWN) return true;
+        // bias BEAR requires PREMIUM. UNKNOWN and EQUILIBRIUM degrade gracefully —
+        // EQUILIBRIUM (session midpoint) is a valid OB retest location, not a premium chase.
+        if (context.pdZone() == PdZone.UNKNOWN || context.pdZone() == PdZone.EQUILIBRIUM) return true;
         if (context.macroBias() == MacroBias.BULL && context.pdZone() == PdZone.DISCOUNT) return true;
         return context.macroBias() == MacroBias.BEAR && context.pdZone() == PdZone.PREMIUM;
     }
