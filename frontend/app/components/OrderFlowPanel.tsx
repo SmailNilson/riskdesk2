@@ -27,7 +27,12 @@ interface OrderFlowPanelProps {
  * the same field names as the WebSocket payload, so a single type covers both.
  */
 type IcebergRow = IcebergEvent;
-type AbsorptionRow = AbsorptionEvent & { absorptionScore?: number; priceMoveTicks?: number; totalVolume?: number };
+type AbsorptionRow = AbsorptionEvent & {
+  absorptionScore?: number;
+  aggressiveDelta?: number;
+  priceMoveTicks?: number;
+  totalVolume?: number;
+};
 type SpoofingRow = SpoofingEvent & { durationSeconds?: number; priceCrossed?: boolean };
 
 function prependUnique<T extends { timestamp: string; instrument: string }>(
