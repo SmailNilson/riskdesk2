@@ -2,8 +2,10 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
+import com.riskdesk.domain.orderflow.event.IcebergDetected;
 import com.riskdesk.domain.orderflow.event.SpoofingDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
+import com.riskdesk.domain.orderflow.model.IcebergSignal;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +71,27 @@ public class OrderFlowCorrelationService {
         payload.put("timestamp", event.timestamp().toString());
 
         messagingTemplate.convertAndSend("/topic/spoofing", payload);
+    }
+
+    @EventListener
+    public void onIcebergDetected(IcebergDetected event) {
+        log.info("Iceberg detected: {} {} level={} recharges={} score={} at {}",
+                event.instrument(), event.signal().side(),
+                event.signal().priceLevel(), event.signal().rechargeCount(),
+                event.signal().icebergScore(), event.timestamp());
+
+        IcebergSignal signal = event.signal();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instrument", event.instrument().name());
+        payload.put("side", signal.side().name());
+        payload.put("priceLevel", signal.priceLevel());
+        payload.put("rechargeCount", signal.rechargeCount());
+        payload.put("avgRechargeSize", signal.avgRechargeSize());
+        payload.put("durationSeconds", signal.durationSeconds());
+        payload.put("icebergScore", signal.icebergScore());
+        payload.put("timestamp", event.timestamp().toString());
+
+        messagingTemplate.convertAndSend("/topic/iceberg", payload);
     }
 
     @EventListener

@@ -47,6 +47,17 @@ export interface SpoofingEvent {
   timestamp: string;
 }
 
+export interface IcebergEvent {
+  instrument: string;
+  side: string;             // BID_ICEBERG | ASK_ICEBERG
+  priceLevel: number;
+  rechargeCount: number;
+  avgRechargeSize: number;
+  durationSeconds: number;
+  icebergScore: number;
+  timestamp: string;
+}
+
 export interface FlashCrashState {
   instrument: string;
   phase: string;
@@ -99,6 +110,7 @@ export function useOrderFlow() {
   const [depthData, setDepthData] = useState<Map<string, DepthMetrics>>(new Map());
   const [absorptionEvents, setAbsorptionEvents] = useState<AbsorptionEvent[]>([]);
   const [spoofingEvents, setSpoofingEvents] = useState<SpoofingEvent[]>([]);
+  const [icebergEvents, setIcebergEvents] = useState<IcebergEvent[]>([]);
   const [flashCrashState, setFlashCrashState] = useState<Map<string, FlashCrashState>>(new Map());
   const [footprintData, setFootprintData] = useState<Map<string, FootprintBar>>(new Map());
   const [connected, setConnected] = useState(false);
@@ -136,6 +148,11 @@ export function useOrderFlow() {
         client.subscribe('/topic/spoofing', (msg: IMessage) => {
           const event: SpoofingEvent = JSON.parse(msg.body);
           setSpoofingEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
+
+        client.subscribe('/topic/iceberg', (msg: IMessage) => {
+          const event: IcebergEvent = JSON.parse(msg.body);
+          setIcebergEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
         });
 
         client.subscribe('/topic/flash-crash', (msg: IMessage) => {
@@ -176,6 +193,7 @@ export function useOrderFlow() {
     depthData,
     absorptionEvents,
     spoofingEvents,
+    icebergEvents,
     flashCrashState,
     footprintData,
     connected,

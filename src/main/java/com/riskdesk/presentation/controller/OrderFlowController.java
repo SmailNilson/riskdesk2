@@ -1,19 +1,25 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.service.OrderFlowHistoryService;
 import com.riskdesk.application.service.OrderFlowOrchestrator;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
+import com.riskdesk.application.dto.AbsorptionEventView;
+import com.riskdesk.application.dto.IcebergEventView;
+import com.riskdesk.application.dto.SpoofingEventView;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -24,16 +30,21 @@ import java.util.Optional;
 @RequestMapping("/api/order-flow")
 public class OrderFlowController {
 
+    private static final int DEFAULT_HISTORY_LIMIT = 20;
+
     private final ObjectProvider<OrderFlowOrchestrator> orchestratorProvider;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
+    private final OrderFlowHistoryService historyService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
-                                ObjectProvider<MarketDepthPort> depthPortProvider) {
+                                ObjectProvider<MarketDepthPort> depthPortProvider,
+                                OrderFlowHistoryService historyService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
+        this.historyService = historyService;
     }
 
     /**
@@ -130,6 +141,65 @@ public class OrderFlowController {
             }
             result.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : null);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Historical endpoints — last N persisted events for the instrument.
+    // Backed by order_flow_{iceberg,absorption,spoofing}_events (90-day retention).
+    // ---------------------------------------------------------------------------
+
+    /**
+     * GET /api/order-flow/iceberg/{instrument}?limit=20
+     * Returns the most recent iceberg detection events for the given instrument,
+     * newest first.
+     */
+    @GetMapping("/iceberg/{instrument}")
+    public ResponseEntity<?> getRecentIcebergs(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<IcebergEventView> events = historyService.recentIcebergs(inst, limit);
+            return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/absorption/{instrument}?limit=20
+     * Returns the most recent absorption detection events for the given instrument,
+     * newest first.
+     */
+    @GetMapping("/absorption/{instrument}")
+    public ResponseEntity<?> getRecentAbsorptions(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<AbsorptionEventView> events = historyService.recentAbsorptions(inst, limit);
+            return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/spoofing/{instrument}?limit=20
+     * Returns the most recent spoofing detection events for the given instrument,
+     * newest first.
+     */
+    @GetMapping("/spoofing/{instrument}")
+    public ResponseEntity<?> getRecentSpoofings(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<SpoofingEventView> events = historyService.recentSpoofings(inst, limit);
+            return ResponseEntity.ok(events);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }
