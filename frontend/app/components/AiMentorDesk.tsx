@@ -10,8 +10,9 @@ import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
 import PlaybookPanel from './PlaybookPanel';
 import StrategyPanel from './StrategyPanel';
+import TradeDecisionPanel from './TradeDecisionPanel';
 
-type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK' | 'STRATEGY';
+type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK' | 'STRATEGY' | 'DECISIONS';
 
 interface TabDef {
   key: TabKey;
@@ -26,6 +27,7 @@ const TABS: TabDef[] = [
   { key: 'MANUAL', label: 'MANUEL', icon: '\uD83D\uDC64' },
   { key: 'PLAYBOOK', label: 'PLAYBOOK', icon: '\uD83D\uDCCB' },
   { key: 'STRATEGY', label: 'STRATEGY', icon: '\uD83C\uDFAF' },
+  { key: 'DECISIONS', label: 'DECISIONS', icon: '\uD83D\uDCCA' },
 ];
 
 interface AiMentorDeskProps {
@@ -85,6 +87,7 @@ export default function AiMentorDesk({
     MANUAL: 0,
     PLAYBOOK: 0,
     STRATEGY: 0,
+    DECISIONS: 0,
   }), [reviews.length, signalReviews.length, behaviourReviews.length]);
 
   return (
@@ -189,6 +192,10 @@ export default function AiMentorDesk({
 
         {activeTab === 'STRATEGY' && (
           <StrategyPanel instrument={instrument} timeframe={timeframe} />
+        )}
+
+        {activeTab === 'DECISIONS' && (
+          <TradeDecisionPanel instrument={instrument} timeframe={timeframe} />
         )}
       </div>
     </div>

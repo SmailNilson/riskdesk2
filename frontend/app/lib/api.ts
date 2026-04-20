@@ -879,6 +879,32 @@ export const api = {
 
   getStrategyComparison: (instrument: string, timeframe: string) =>
     get<DecisionComparisonView>(`/api/strategy/${instrument}/${timeframe}/compare`),
+
+  // ── Trade Decisions (agent orchestrator + narrator, read-only) ────
+  getRecentDecisions: (limit?: number) =>
+    get<TradeDecision[]>(
+      `/api/decisions/recent${limit !== undefined ? `?limit=${limit}` : ''}`
+    ),
+  getDecisionsByInstrument: (instrument: string, limit?: number) =>
+    get<TradeDecision[]>(
+      `/api/decisions/by-instrument/${encodeURIComponent(instrument)}${
+        limit !== undefined ? `?limit=${limit}` : ''
+      }`
+    ),
+  getDecisionById: (id: number) =>
+    get<TradeDecision>(`/api/decisions/${id}`),
+  getDecisionThread: (
+    instrument: string,
+    timeframe: string,
+    direction: string,
+    zoneName: string,
+  ) =>
+    get<TradeDecision[]>(
+      `/api/decisions/thread?instrument=${encodeURIComponent(instrument)}` +
+        `&timeframe=${encodeURIComponent(timeframe)}` +
+        `&direction=${encodeURIComponent(direction)}` +
+        `&zoneName=${encodeURIComponent(zoneName)}`
+    ),
 };
 
 // ── Playbook Types ────────────────────────────────────────────────────
@@ -1012,4 +1038,54 @@ export interface DecisionComparisonView {
   legacyPlaybook: PlaybookEvaluation | null;
   strategyDecision: StrategyDecisionView | null;
   agreement: ComparisonAgreement;
+}
+
+// ── Trade Decisions (agent orchestrator + narrator) ───────────────────────
+//
+// Backend counterpart: com.riskdesk.domain.decision.model.TradeDecision
+// Endpoints: /api/decisions/{recent,by-instrument/{instrument},{id},thread}
+//
+// Agent verdicts and warnings are persisted as JSON strings on the row so the
+// decision history stays self-contained even if upstream models evolve.
+
+export type TradeDecisionStatus = 'NARRATING' | 'DONE' | 'ERROR';
+
+/** One entry from the serialized {@code agentVerdictsJson} column. */
+export interface TradeDecisionAgentVerdict {
+  agentName: string;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  bias: 'LONG' | 'SHORT' | null;
+  reasoning: string;
+  adjustments?: unknown;
+}
+
+export interface TradeDecision {
+  id: number | null;
+  revision: number;
+  createdAt: string;
+
+  instrument: string;
+  timeframe: string;
+  direction: string;        // "LONG" | "SHORT" | "FLAT"
+  setupType: string | null; // e.g. "ZONE_RETEST"
+  zoneName: string | null;
+
+  eligibility: string;      // "ELIGIBLE" | "INELIGIBLE" | "BLOCKED"
+  sizePercent: number;
+  verdict: string;
+  agentVerdictsJson: string | null;
+  warningsJson: string | null;
+
+  entryPrice: number | null;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
+  rrRatio: number | null;
+
+  narrative: string | null;
+  narrativeModel: string | null;
+  narrativeLatencyMs: number | null;
+
+  status: TradeDecisionStatus;
+  errorMessage: string | null;
 }
