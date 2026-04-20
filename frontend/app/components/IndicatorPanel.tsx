@@ -1,6 +1,7 @@
 'use client';
 
-import { IndicatorSnapshot, OrderBlockView } from '@/app/lib/api';
+import { useEffect, useState } from 'react';
+import { IndicatorSnapshot, OrderBlockView, api } from '@/app/lib/api';
 import { breakerOriginalType, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 
 interface Props {
@@ -66,6 +67,59 @@ function biasColor(bias: string | null): 'green' | 'red' | 'gray' {
 }
 
 export default function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
+  const [mutedTimeframes, setMutedTimeframes] = useState<Set<string>>(new Set());
+  const [muteError, setMuteError] = useState<string | null>(null);
+  const [mutePending, setMutePending] = useState(false);
+
+  // Hydrate muted timeframes once on mount — backend holds the authoritative set.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getMutedTimeframes()
+      .then((list) => {
+        if (!cancelled) setMutedTimeframes(new Set(list));
+      })
+      .catch(() => {
+        // Non-fatal: toggle starts as "unmuted"; user click will surface errors.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const currentTimeframe = s?.timeframe ?? null;
+  const currentlyMuted = currentTimeframe != null && mutedTimeframes.has(currentTimeframe);
+
+  async function toggleMute() {
+    if (!currentTimeframe || mutePending) return;
+    const tf = currentTimeframe;
+    const nextMuted = !currentlyMuted;
+    setMutePending(true);
+    setMuteError(null);
+    // Optimistic update
+    setMutedTimeframes((prev) => {
+      const next = new Set(prev);
+      if (nextMuted) next.add(tf);
+      else next.delete(tf);
+      return next;
+    });
+    try {
+      await api.setTimeframeMuted(tf, nextMuted);
+    } catch (err) {
+      // Revert
+      setMutedTimeframes((prev) => {
+        const next = new Set(prev);
+        if (nextMuted) next.delete(tf);
+        else next.add(tf);
+        return next;
+      });
+      setMuteError(err instanceof Error ? err.message : 'Mute toggle failed');
+      window.setTimeout(() => setMuteError(null), 4000);
+    } finally {
+      setMutePending(false);
+    }
+  }
+
   if (!s) return (
     <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4 text-zinc-500 text-sm">
       Loading indicators…
@@ -111,15 +165,37 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
 
   return (
     <div className="grid grid-cols-2 gap-3">
-      {/* UC-OF-013: Session Phase Badge + Market Regime Badge */}
-      {(s.sessionPhase || s.ema9 != null) && (
-        <div className="col-span-2 flex items-center flex-wrap gap-3">
-          {s.sessionPhase && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Session</span>
-              <Badge label={sessionPhaseLabel(s.sessionPhase)} color={sessionPhaseColor(s.sessionPhase)} />
-            </div>
-          )}
+      {/* Header row: Timeframe mute toggle + Session Phase Badge + Market Regime Badge */}
+      <div className="col-span-2 flex items-center flex-wrap gap-3">
+        {currentTimeframe && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 uppercase tracking-widest">TF {currentTimeframe}</span>
+            <button
+              type="button"
+              onClick={toggleMute}
+              disabled={mutePending}
+              className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider border transition-colors ${
+                currentlyMuted
+                  ? 'bg-red-900/40 border-red-700/60 text-red-300 hover:bg-red-900/60'
+                  : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+              } ${mutePending ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+              title={currentlyMuted ? `Unmute ${currentTimeframe} alerts` : `Mute ${currentTimeframe} alerts`}
+            >
+              {currentlyMuted ? 'Muted' : 'On'}
+            </button>
+            {muteError && (
+              <span className="text-[10px] text-red-400" title={muteError}>
+                (error)
+              </span>
+            )}
+          </div>
+        )}
+        {s.sessionPhase && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Session</span>
+            <Badge label={sessionPhaseLabel(s.sessionPhase)} color={sessionPhaseColor(s.sessionPhase)} />
+          </div>
+        )}
           {(() => {
             const regime = detectMarketRegime(s.ema9, s.ema50, s.ema200, s.bbTrendExpanding);
             if (!regime) return null;
@@ -138,8 +214,7 @@ export default function IndicatorPanel({ snapshot: s, currentPrice, children }: 
               </div>
             );
           })()}
-        </div>
-      )}
+      </div>
 
       {/* RSI */}
       <Section title="RSI (14)">

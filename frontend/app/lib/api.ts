@@ -288,6 +288,28 @@ async function del<T>(path: string): Promise<T> {
   return res.json();
 }
 
+async function put<T>(path: string, body?: unknown): Promise<T | void> {
+  const init: RequestInit = { method: 'PUT' };
+  if (body !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${BASE}${path}`, init);
+  if (!res.ok) throw new Error(`PUT ${path} → ${res.status}${await readErrorSuffix(res)}`);
+  if (res.status === 204) return;
+  const text = await res.text();
+  return text ? (JSON.parse(text) as T) : undefined;
+}
+
+async function postNoContent(path: string, body: unknown): Promise<void> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST ${path} → ${res.status}${await readErrorSuffix(res)}`);
+}
+
 async function readErrorSuffix(res: Response) {
   try {
     const data = await res.clone().json();
@@ -343,11 +365,18 @@ export interface IndicatorSeriesSnapshot {
 }
 
 export interface AlertPayload {
+  key?: string;
   severity: 'INFO' | 'WARNING' | 'DANGER';
   category: string;
   message: string;
   instrument: string | null;
   timestamp: string;
+}
+
+/** Body for POST /api/alerts/snooze — see AlertController.snoozeAlert. */
+export interface SnoozeAlertRequest {
+  key: string;
+  durationSeconds: number;
 }
 
 export interface LivePriceView {
@@ -764,6 +793,11 @@ export const api = {
   getCandles: (instrument: string, timeframe: string, limit = 300) =>
     get<CandleBar[]>(`/api/candles/${instrument}/${timeframe}?limit=${limit}`),
   getRecentAlerts: () => get<AlertPayload[]>('/api/alerts/recent'),
+  clearRecentAlerts: () => del<{ cleared: number }>('/api/alerts/recent').then(() => undefined as void),
+  snoozeAlert: (body: SnoozeAlertRequest) => postNoContent('/api/alerts/snooze', body),
+  getMutedTimeframes: () => get<string[]>('/api/alerts/muted-timeframes'),
+  setTimeframeMuted: (timeframe: string, muted: boolean) =>
+    put<void>(`/api/alerts/muted-timeframes/${encodeURIComponent(timeframe)}?muted=${muted}`).then(() => undefined as void),
   getLivePrice: (instrument: string) => get<LivePriceView>(`/api/live-price/${instrument}`),
   getDxyLatest: () => get<DxySnapshotView>('/api/market/dxy/latest'),
   getDxyHistory: (from: string, to: string) =>
