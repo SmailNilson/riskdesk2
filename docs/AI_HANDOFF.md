@@ -1,12 +1,67 @@
 # AI Handoff
 
-Last updated: 2026-04-17
+Last updated: 2026-04-20
 
 ## Goal of this file
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.
 
-## Latest change — Probabilistic Strategy Engine (Slices S1 + S2)
+## Latest change — Simulation Decoupling Phase 1 (a + b) complete
+
+The TECH DEBT around simulation state living on `MentorSignalReviewRecord` /
+`MentorAudit` is now being unwound. Phase 1 is **additive only** — no legacy
+field, endpoint, or WebSocket topic has been removed yet.
+
+**Phase 1a (foundation, already merged — PR #253):**
+- Domain aggregate `domain/simulation/TradeSimulation` (pure record, no Spring/JPA)
+- Discriminator enum `domain/simulation/ReviewType` — `SIGNAL` | `AUDIT`
+- Port `domain/simulation/port/TradeSimulationRepositoryPort`
+- JPA side: `TradeSimulationEntity` (table `trade_simulations`), `JpaTradeSimulationRepository`, `JpaTradeSimulationRepositoryAdapter`, `TradeSimulationEntityMapper`
+
+**Phase 1b (wire-up, this PR):**
+- `TradeSimulationService` now injects `TradeSimulationRepositoryPort` and
+  **dual-writes** every state transition to the new port IN ADDITION to the
+  legacy review/audit repositories. Dual-write is wrapped in try/catch + warn
+  log so a new-side failure cannot break the legacy flow.
+- A back-fill pass at the top of each scheduler run ensures reviews created
+  by `MentorSignalReviewService.initializeSimulationState()` get their
+  `trade_simulations` row on the next poll, even without a state change.
+  Back-fill is idempotent via the `(review_id, review_type)` unique constraint.
+- New REST endpoints on `SimulationController`:
+  - `GET /api/simulations/recent?limit=50`
+  - `GET /api/simulations/by-instrument/{instrument}?limit=20`
+  - `GET /api/simulations/by-review/{reviewId}?type=SIGNAL|AUDIT` (404 if missing)
+- New WebSocket topic `/topic/simulations` — published alongside (not instead
+  of) the legacy `/topic/mentor-alerts` push. Payload is the `TradeSimulation`
+  domain aggregate.
+- Frontend `app/lib/api.ts` exposes typed wrappers
+  (`getRecentSimulations`, `getSimulationsByInstrument`, `getSimulationByReview`)
+  and `TradeSimulationView` type. **No UI component has been migrated yet** —
+  Phase 2 will swap `MentorSignalPanel` / `MentorPanel` to read from these
+  endpoints and subscribe to `/topic/simulations`.
+
+**What is NOT changed by Phase 1:**
+- Simulation fields on `MentorSignalReviewRecord` / `MentorAudit` are still the
+  primary source of truth. `TradeSimulationService` still writes to them.
+- `/topic/mentor-alerts` still carries simulation updates.
+- `MentorSignalReviewRepositoryPort.findBySimulationStatuses()` is still the
+  scheduler's entry point.
+
+**Phase 2 plan (next PR):** migrate frontend (`MentorSignalPanel`,
+`MentorPanel`) to consume `/api/simulations/*` + `/topic/simulations`; drop
+simulation fields from `MentorSignalReview` / `MentorManualReview` JSON DTOs.
+
+**Phase 3 plan (follow-up):** drop simulation columns from `mentor_signal_reviews`
+and `mentor_audits`; remove `findBySimulationStatuses()` from the review port;
+make `TradeSimulationRepositoryPort` the sole query path. Requires a data
+backfill script and a deprecation release.
+
+**Tests:** new dual-write suite `TradeSimulationServiceDualWriteTest` (5 tests),
+new controller test `SimulationControllerTest` (8 tests). Existing
+`TradeSimulationServiceTest` updated for the new constructor arg. Hex-arch
+tests and full suite green (1188 tests, all passing).
+
+## Previous change — Probabilistic Strategy Engine (Slices S1 + S2)
 
 A new top-down decision funnel has been added alongside the legacy 7/7 Playbook. It
 is **read-only in this slice** — no execution, no persistence, no WebSocket push.
