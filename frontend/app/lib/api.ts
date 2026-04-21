@@ -958,14 +958,17 @@ export const api = {
     reviewId: number,
     type: 'SIGNAL' | 'AUDIT' = 'SIGNAL',
   ): Promise<TradeSimulationView | null> => {
-    // Plain fetch (no credentials): the backend controller advertises
-    // `@CrossOrigin(origins = "*")`, and browsers reject credentialed CORS
-    // responses when the allowed origin is the wildcard. Sibling wrappers in
-    // this file route through `get<T>()` which defaults to `same-origin`, so
-    // this path must match that convention to stay usable across deployment
-    // topologies (Next.js and Spring on different origins).
+    // - No `credentials` option: the backend controller advertises
+    //   `@CrossOrigin(origins = "*")`, and browsers reject credentialed CORS
+    //   responses when the allowed origin is the wildcard.
+    // - `cache: 'no-store'` to match the shared `get<T>()` helper — simulation
+    //   status changes on every scheduler tick, and server-rendered Next.js
+    //   contexts would otherwise cache and surface stale status after a
+    //   terminal transition. Sibling wrappers (`getRecentSimulations`,
+    //   `getSimulationsByInstrument`) already inherit this from `get<T>()`.
     const response = await fetch(
       `${BASE}/api/simulations/by-review/${reviewId}?type=${encodeURIComponent(type)}`,
+      { cache: 'no-store' },
     );
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}`);

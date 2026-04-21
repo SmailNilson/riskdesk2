@@ -225,6 +225,46 @@ class TradeSimulationServiceDualWriteTest {
     }
 
     @Test
+    void dualWriteFailure_queuesCandidateAndRetriesOnNextSchedulerPass() {
+        // ACTIVE review (not expired, no candles → candle-eval short-circuits),
+        // so the first pass makes exactly one dual-write attempt which fails.
+        // The second pass sees no open reviews (simulating the review
+        // transitioning to a terminal status elsewhere) — the retry queue is
+        // the only path that can still fix the stale trade_simulations row.
+        MentorSignalReviewRecord review = signalReview(
+            123L, "MNQ", "LONG",
+            TradeSimulationStatus.ACTIVE,
+            Instant.now().minusSeconds(60)
+        );
+        when(reviewRepository.findBySimulationStatuses(any()))
+            .thenReturn(List.of(review))   // pass 1: review is open
+            .thenReturn(List.of());        // pass 2: review left open statuses
+        when(auditRepository.findBySimulationStatuses(any())).thenReturn(List.of());
+        when(simulationRepository.findByReviewId(anyLong(), any())).thenReturn(Optional.empty());
+        // First save throws, subsequent saves succeed.
+        when(simulationRepository.save(any()))
+            .thenThrow(new RuntimeException("transient DB error"))
+            .thenAnswer(inv -> inv.getArgument(0));
+        when(candleRepositoryPort.findCandles(any(), any(), any())).thenReturn(List.of());
+
+        // --- Pass 1: dual-write throws, candidate queued for retry ---
+        service.refreshPendingSimulations();
+        assertThat(service.pendingDualWriteRetryCount()).isEqualTo(1);
+        verify(simulationRepository, times(1)).save(any(TradeSimulation.class));
+
+        // --- Pass 2: retry drains the queue even though the review is no
+        //            longer in the open-status query ---
+        service.refreshPendingSimulations();
+
+        ArgumentCaptor<TradeSimulation> captor = ArgumentCaptor.forClass(TradeSimulation.class);
+        verify(simulationRepository, times(2)).save(captor.capture());
+        TradeSimulation retriedCandidate = captor.getAllValues().get(1);
+        assertThat(retriedCandidate.reviewId()).isEqualTo(123L);
+        assertThat(retriedCandidate.reviewType()).isEqualTo(ReviewType.SIGNAL);
+        assertThat(service.pendingDualWriteRetryCount()).isEqualTo(0);
+    }
+
+    @Test
     void backfill_writesAndPublishesWhenExistingSimulationDiffersInMutableField() {
         // Review is stable in PENDING_ENTRY, but the existing new-side row still
         // carries a stale maxDrawdownPoints — gate must treat that as a change.
