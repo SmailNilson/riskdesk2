@@ -195,6 +195,62 @@ class TradeSimulationServiceDualWriteTest {
         verifyNoInteractions(candleRepositoryPort);
     }
 
+    @Test
+    void backfill_skipsSaveAndPublishWhenExistingSimulationUnchanged() {
+        // Review is stable (PENDING_ENTRY, still within timeout, no candles)
+        Instant created = Instant.now().minusSeconds(60);
+        MentorSignalReviewRecord review = signalReview(
+            55L, "MGC", "LONG",
+            TradeSimulationStatus.PENDING_ENTRY,
+            created
+        );
+        when(reviewRepository.findBySimulationStatuses(any())).thenReturn(List.of(review));
+        when(auditRepository.findBySimulationStatuses(any())).thenReturn(List.of());
+        // Existing new-side row with identical mutable fields → gate must skip save + publish.
+        TradeSimulation existing = new TradeSimulation(
+            7L, 55L, ReviewType.SIGNAL, "MGC", "LONG",
+            TradeSimulationStatus.PENDING_ENTRY,
+            null, null, BigDecimal.ZERO, null, null, null, created
+        );
+        when(simulationRepository.findByReviewId(eq(55L), eq(ReviewType.SIGNAL)))
+            .thenReturn(Optional.of(existing));
+        SimpMessagingTemplate messaging = org.mockito.Mockito.mock(SimpMessagingTemplate.class);
+        when(messagingProvider.getIfAvailable()).thenReturn(messaging);
+
+        service.refreshPendingSimulations();
+
+        // No new-side write and no /topic/simulations publication because nothing changed.
+        verify(simulationRepository, times(0)).save(any(TradeSimulation.class));
+        verifyNoInteractions(messaging);
+    }
+
+    @Test
+    void backfill_writesAndPublishesWhenExistingSimulationDiffersInMutableField() {
+        // Review is stable in PENDING_ENTRY, but the existing new-side row still
+        // carries a stale maxDrawdownPoints — gate must treat that as a change.
+        Instant created = Instant.now().minusSeconds(60);
+        MentorSignalReviewRecord review = signalReview(
+            66L, "MNQ", "SHORT",
+            TradeSimulationStatus.PENDING_ENTRY,
+            created
+        );
+        review.setMaxDrawdownPoints(new BigDecimal("1.25"));
+        when(reviewRepository.findBySimulationStatuses(any())).thenReturn(List.of(review));
+        when(auditRepository.findBySimulationStatuses(any())).thenReturn(List.of());
+        TradeSimulation existing = new TradeSimulation(
+            9L, 66L, ReviewType.SIGNAL, "MNQ", "SHORT",
+            TradeSimulationStatus.PENDING_ENTRY,
+            null, null, new BigDecimal("0.50"), null, null, null, created
+        );
+        when(simulationRepository.findByReviewId(eq(66L), eq(ReviewType.SIGNAL)))
+            .thenReturn(Optional.of(existing));
+        when(simulationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        service.refreshPendingSimulations();
+
+        verify(simulationRepository, atLeastOnce()).save(any(TradeSimulation.class));
+    }
+
     private MentorSignalReviewRecord signalReview(Long id, String instrument, String action,
                                                    TradeSimulationStatus status, Instant createdAt) {
         MentorSignalReviewRecord r = new MentorSignalReviewRecord();

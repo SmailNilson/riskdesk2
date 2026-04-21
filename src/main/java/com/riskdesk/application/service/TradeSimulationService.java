@@ -623,6 +623,16 @@ public class TradeSimulationService {
                 review.getBestFavorablePrice(),
                 createdAt
             );
+
+            // Gate: when the new-side row already exists and matches the candidate
+            // content, skip the save + WebSocket publication. Otherwise every
+            // scheduler tick would rewrite unchanged rows and re-emit identical
+            // events on /topic/simulations — consumers would see those as fresh
+            // state transitions.
+            if (existing != null && !hasSimulationContentChanged(existing, sim)) {
+                return;
+            }
+
             TradeSimulation saved = simulationRepository.save(sim);
             publishSimulationEvent(saved);
         } catch (Exception e) {
@@ -664,12 +674,47 @@ public class TradeSimulationService {
                 null,
                 createdAt
             );
+
+            // Same gate as the signal path — avoid DB churn + duplicate events
+            // when the existing row already matches.
+            if (existing != null && !hasSimulationContentChanged(existing, sim)) {
+                return;
+            }
+
             TradeSimulation saved = simulationRepository.save(sim);
             publishSimulationEvent(saved);
         } catch (Exception e) {
             log.warn("Dual-write to trade_simulations failed for audit {} (legacy write succeeded): {}",
                 audit.getId(), e.getMessage());
         }
+    }
+
+    /**
+     * Returns {@code true} when any mutable simulation field differs between
+     * {@code existing} (loaded from the repository) and {@code candidate} (built
+     * from the legacy review/audit record). Identity fields (id, reviewId,
+     * reviewType, instrument, action, createdAt) are not compared — they never
+     * change during the simulation lifecycle.
+     *
+     * <p>BigDecimal comparisons use {@link BigDecimal#compareTo(BigDecimal)} so
+     * that scale differences (e.g. {@code 0} vs {@code 0.000000}) do not trigger
+     * a spurious "changed" result.
+     */
+    private static boolean hasSimulationContentChanged(TradeSimulation existing, TradeSimulation candidate) {
+        return !java.util.Objects.equals(existing.simulationStatus(), candidate.simulationStatus())
+            || !java.util.Objects.equals(existing.activationTime(), candidate.activationTime())
+            || !java.util.Objects.equals(existing.resolutionTime(), candidate.resolutionTime())
+            || !bigDecimalValueEquals(existing.maxDrawdownPoints(), candidate.maxDrawdownPoints())
+            || !java.util.Objects.equals(existing.trailingStopResult(), candidate.trailingStopResult())
+            || !bigDecimalValueEquals(existing.trailingExitPrice(), candidate.trailingExitPrice())
+            || !bigDecimalValueEquals(existing.bestFavorablePrice(), candidate.bestFavorablePrice());
+    }
+
+    private static boolean bigDecimalValueEquals(BigDecimal a, BigDecimal b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return a.compareTo(b) == 0;
     }
 
     /**
