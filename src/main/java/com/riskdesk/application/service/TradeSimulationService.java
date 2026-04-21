@@ -14,6 +14,9 @@ import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.model.TrailingStopResult;
+import com.riskdesk.domain.simulation.ReviewType;
+import com.riskdesk.domain.simulation.TradeSimulation;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +34,8 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class TradeSimulationService {
@@ -48,6 +53,18 @@ public class TradeSimulationService {
     private final ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
     private final TrailingStopProperties trailingStopProperties;
+    private final TradeSimulationRepositoryPort simulationRepository;
+
+    /**
+     * In-memory queue of dual-writes that failed — keyed by {@code type:reviewId},
+     * value = the exact {@link TradeSimulation} candidate we tried to persist.
+     * Drained and re-attempted at the top of every scheduler pass. Needed
+     * because {@link #refreshPendingSimulations()} / {@link #refreshPendingAuditSimulations()}
+     * only revisit open statuses; a terminal transition (e.g. ACTIVE → WIN)
+     * whose dual-write failed would otherwise never be retried, leaving
+     * {@code trade_simulations} permanently stale relative to the legacy row.
+     */
+    private final Map<String, TradeSimulation> pendingDualWriteRetries = new ConcurrentHashMap<>();
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
@@ -55,7 +72,8 @@ public class TradeSimulationService {
                                   ObjectMapper objectMapper,
                                   ObjectProvider<MentorSignalReviewService> reviewServiceProvider,
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider,
-                                  TrailingStopProperties trailingStopProperties) {
+                                  TrailingStopProperties trailingStopProperties,
+                                  TradeSimulationRepositoryPort simulationRepository) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
@@ -63,6 +81,7 @@ public class TradeSimulationService {
         this.reviewServiceProvider = reviewServiceProvider;
         this.messagingProvider = messagingProvider;
         this.trailingStopProperties = trailingStopProperties;
+        this.simulationRepository = simulationRepository;
     }
 
     public SimulationResult evaluateTradeOutcome(MentorSignalReviewRecord review, List<Candle> subsequentCandles) {
@@ -280,10 +299,25 @@ public class TradeSimulationService {
 
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingSimulations() {
+        // Retry any terminal dual-writes (ACTIVE → WIN/LOSS/MISSED/CANCELLED)
+        // whose new-side save failed in an earlier pass. The queries below
+        // only revisit open statuses, so without this pass a failed terminal
+        // write would leave trade_simulations stale indefinitely.
+        retryPendingDualWrites();
+
         List<MentorSignalReviewRecord> candidates = reviewRepository.findBySimulationStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
         ));
+
+        // --- Phase 1 dual-write back-fill: ensure every open review has a matching
+        // row in the new trade_simulations table. Reviews created by
+        // MentorSignalReviewService.initializeSimulationState() arrive here without
+        // a new-side row on their first poll cycle — back-fill is idempotent via
+        // the (review_id, review_type) unique constraint. ---
+        for (MentorSignalReviewRecord review : candidates) {
+            dualWriteSignalSimulation(review);
+        }
 
         // --- Phase 1: Cancel expired PENDING_ENTRY (>1h without activation) ---
         Instant now = Instant.now();
@@ -312,6 +346,7 @@ public class TradeSimulationService {
                     review.setTrailingExitPrice(result.trailingExitPrice());
                     review.setBestFavorablePrice(result.bestFavorablePrice());
                     reviewRepository.save(review);
+                    dualWriteSignalSimulation(review);
                     pushSimulationUpdate(review);
                 }
             } catch (Exception e) {
@@ -333,6 +368,7 @@ public class TradeSimulationService {
                 review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
                 review.setResolutionTime(now);
                 reviewRepository.save(review);
+                dualWriteSignalSimulation(review);
                 pushSimulationUpdate(review);
                 log.info("Simulation {} CANCELLED — PENDING_ENTRY expired after 1h (instrument={}, action={})",
                         review.getId(), review.getInstrument(), review.getAction());
@@ -386,6 +422,7 @@ public class TradeSimulationService {
             stale.setSimulationStatus(closeStatus);
             stale.setResolutionTime(now);
             reviewRepository.save(stale);
+            dualWriteSignalSimulation(stale);
             pushSimulationUpdate(stale);
             surviving.remove(stale);
             log.info("Simulation {} {} — directional reversal on {} (was {}, newer {} signal exists)",
@@ -397,10 +434,20 @@ public class TradeSimulationService {
 
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingAuditSimulations() {
+        // Same rationale as in refreshPendingSimulations(): drain the retry
+        // queue first so a prior terminal dual-write failure gets re-attempted.
+        retryPendingDualWrites();
+
         List<MentorAudit> candidates = auditRepository.findBySimulationStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
         ));
+
+        // --- Phase 1 dual-write back-fill: mirror every open audit simulation
+        // into the new trade_simulations table (idempotent via unique constraint). ---
+        for (MentorAudit audit : candidates) {
+            dualWriteAuditSimulation(audit);
+        }
 
         // --- Phase 1: Cancel expired PENDING_ENTRY (>1h) ---
         Instant now = Instant.now();
@@ -412,6 +459,7 @@ public class TradeSimulationService {
                 audit.setSimulationStatus(TradeSimulationStatus.CANCELLED);
                 audit.setResolutionTime(now);
                 auditRepository.save(audit);
+                dualWriteAuditSimulation(audit);
                 log.info("Audit simulation {} CANCELLED — PENDING_ENTRY expired after 1h", audit.getId());
             } else {
                 surviving.add(audit);
@@ -446,6 +494,7 @@ public class TradeSimulationService {
             stale.setSimulationStatus(closeStatus);
             stale.setResolutionTime(now);
             auditRepository.save(stale);
+            dualWriteAuditSimulation(stale);
             surviving.remove(stale);
             log.info("Audit simulation {} {} — directional reversal on {}", stale.getId(), closeStatus, stale.getInstrument());
         }
@@ -466,6 +515,7 @@ public class TradeSimulationService {
                     audit.setResolutionTime(result.resolutionTime());
                     audit.setMaxDrawdownPoints(result.maxDrawdownPoints());
                     auditRepository.save(audit);
+                    dualWriteAuditSimulation(audit);
                 }
             } catch (Exception e) {
                 log.debug("Audit simulation skipped for audit {}: {}", audit.getId(), e.getMessage());
@@ -546,11 +596,225 @@ public class TradeSimulationService {
             SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
             MentorSignalReviewService reviewService = reviewServiceProvider.getIfAvailable();
             if (messaging != null && reviewService != null) {
+                // Legacy WS topic — preserved in Phase 1 per Simulation Decoupling Rule.
                 messaging.convertAndSend("/topic/mentor-alerts", reviewService.toDto(review));
                 log.debug("Pushed simulation update for review {} → {}", review.getId(), review.getSimulationStatus());
             }
         } catch (Exception e) {
             log.debug("Could not push simulation update for review {}: {}", review.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Phase 1 dual-write: persist simulation state to the new {@code trade_simulations}
+     * aggregate IN ADDITION to the legacy review/audit fields. Wrapped in try/catch so
+     * a new-side failure does not break the existing review flow.
+     *
+     * <p>Also publishes the resulting {@link TradeSimulation} to {@code /topic/simulations}
+     * on success. The legacy {@code /topic/mentor-alerts} push stays in place until Phase 2.
+     */
+    private void dualWriteSignalSimulation(MentorSignalReviewRecord review) {
+        if (review == null || review.getId() == null) {
+            return;
+        }
+        attemptDualWrite(buildSignalCandidate(review));
+    }
+
+    private void dualWriteAuditSimulation(MentorAudit audit) {
+        if (audit == null || audit.getId() == null) {
+            return;
+        }
+        attemptDualWrite(buildAuditCandidate(audit));
+    }
+
+    /**
+     * Build a {@link TradeSimulation} candidate from a legacy signal review. Does
+     * not touch the repository — caller is responsible for reconciling with the
+     * existing row (ID, createdAt) via {@link #attemptDualWrite(TradeSimulation)}.
+     */
+    private TradeSimulation buildSignalCandidate(MentorSignalReviewRecord review) {
+        String action = review.getAction() != null ? review.getAction() : "LONG";
+        String instrument = review.getInstrument() != null ? review.getInstrument() : "UNKNOWN";
+        TradeSimulationStatus status = review.getSimulationStatus() != null
+            ? review.getSimulationStatus()
+            : TradeSimulationStatus.PENDING_ENTRY;
+        Instant createdAt = review.getCreatedAt() != null ? review.getCreatedAt() : Instant.now();
+        return new TradeSimulation(
+            null,
+            review.getId(),
+            ReviewType.SIGNAL,
+            instrument,
+            action,
+            status,
+            review.getActivationTime(),
+            review.getResolutionTime(),
+            review.getMaxDrawdownPoints(),
+            review.getTrailingStopResult() != null ? review.getTrailingStopResult().name() : null,
+            review.getTrailingExitPrice(),
+            review.getBestFavorablePrice(),
+            createdAt
+        );
+    }
+
+    private TradeSimulation buildAuditCandidate(MentorAudit audit) {
+        String action = audit.getAction() != null ? audit.getAction() : "LONG";
+        String instrument = audit.getInstrument() != null ? audit.getInstrument() : "UNKNOWN";
+        TradeSimulationStatus status = audit.getSimulationStatus() != null
+            ? audit.getSimulationStatus()
+            : TradeSimulationStatus.PENDING_ENTRY;
+        Instant createdAt = audit.getCreatedAt() != null ? audit.getCreatedAt() : Instant.now();
+        return new TradeSimulation(
+            null,
+            audit.getId(),
+            ReviewType.AUDIT,
+            instrument,
+            action,
+            status,
+            audit.getActivationTime(),
+            audit.getResolutionTime(),
+            audit.getMaxDrawdownPoints(),
+            null,
+            null,
+            null,
+            createdAt
+        );
+    }
+
+    /**
+     * Single entry point for dual-write persistence. Handles:
+     * <ul>
+     *   <li>reading the existing row and reconciling id + createdAt,</li>
+     *   <li>gating on {@link #hasSimulationContentChanged} to avoid DB churn
+     *       and duplicate {@code /topic/simulations} emissions,</li>
+     *   <li>queuing the candidate into {@link #pendingDualWriteRetries} on
+     *       failure (so a terminal transition whose dual-write throws is
+     *       retried on the next scheduler tick instead of being lost).</li>
+     * </ul>
+     * Success paths also remove any prior retry entry for the same key.
+     */
+    private void attemptDualWrite(TradeSimulation candidate) {
+        if (candidate == null || candidate.reviewId() == 0L) {
+            return;
+        }
+        String key = retryKey(candidate.reviewId(), candidate.reviewType());
+        try {
+            TradeSimulation existing = simulationRepository
+                .findByReviewId(candidate.reviewId(), candidate.reviewType())
+                .orElse(null);
+            TradeSimulation toSave = reconcileWithExisting(candidate, existing);
+
+            if (existing != null && !hasSimulationContentChanged(existing, toSave)) {
+                // Existing row already matches — nothing to do, and the
+                // previous retry (if any) is no longer needed.
+                pendingDualWriteRetries.remove(key);
+                return;
+            }
+
+            TradeSimulation saved = simulationRepository.save(toSave);
+            publishSimulationEvent(saved);
+            pendingDualWriteRetries.remove(key);
+        } catch (Exception e) {
+            // Queue the candidate as-is. On retry we re-read existing to pick
+            // up whatever id/createdAt the other race has written in the
+            // meantime. Legacy write is already committed, so state is not
+            // lost — only the new-side mirror is behind.
+            pendingDualWriteRetries.put(key, candidate);
+            log.warn("Dual-write to trade_simulations failed for {} (legacy write succeeded, queued for retry): {}",
+                key, e.getMessage());
+        }
+    }
+
+    /**
+     * Drain the retry map and re-attempt each failed candidate. Called at the
+     * top of both scheduler passes — works for signal and audit candidates
+     * since the key carries the type.
+     */
+    private void retryPendingDualWrites() {
+        if (pendingDualWriteRetries.isEmpty()) {
+            return;
+        }
+        // Snapshot to avoid ConcurrentModification as attemptDualWrite mutates
+        // the map on success.
+        List<TradeSimulation> snapshot = new ArrayList<>(pendingDualWriteRetries.values());
+        for (TradeSimulation pending : snapshot) {
+            attemptDualWrite(pending);
+        }
+    }
+
+    private TradeSimulation reconcileWithExisting(TradeSimulation candidate, TradeSimulation existing) {
+        if (existing == null) {
+            return candidate;
+        }
+        Instant createdAt = existing.createdAt() != null ? existing.createdAt() : candidate.createdAt();
+        return new TradeSimulation(
+            existing.id(),
+            candidate.reviewId(),
+            candidate.reviewType(),
+            candidate.instrument(),
+            candidate.action(),
+            candidate.simulationStatus(),
+            candidate.activationTime(),
+            candidate.resolutionTime(),
+            candidate.maxDrawdownPoints(),
+            candidate.trailingStopResult(),
+            candidate.trailingExitPrice(),
+            candidate.bestFavorablePrice(),
+            createdAt
+        );
+    }
+
+    private static String retryKey(long reviewId, ReviewType type) {
+        return type.name() + ":" + reviewId;
+    }
+
+    // Visible for testing — allows assertions on retry state without exposing
+    // the backing map.
+    int pendingDualWriteRetryCount() {
+        return pendingDualWriteRetries.size();
+    }
+
+    /**
+     * Returns {@code true} when any mutable simulation field differs between
+     * {@code existing} (loaded from the repository) and {@code candidate} (built
+     * from the legacy review/audit record). Identity fields (id, reviewId,
+     * reviewType, instrument, action, createdAt) are not compared — they never
+     * change during the simulation lifecycle.
+     *
+     * <p>BigDecimal comparisons use {@link BigDecimal#compareTo(BigDecimal)} so
+     * that scale differences (e.g. {@code 0} vs {@code 0.000000}) do not trigger
+     * a spurious "changed" result.
+     */
+    private static boolean hasSimulationContentChanged(TradeSimulation existing, TradeSimulation candidate) {
+        return !Objects.equals(existing.simulationStatus(), candidate.simulationStatus())
+            || !Objects.equals(existing.activationTime(), candidate.activationTime())
+            || !Objects.equals(existing.resolutionTime(), candidate.resolutionTime())
+            || !bigDecimalValueEquals(existing.maxDrawdownPoints(), candidate.maxDrawdownPoints())
+            || !Objects.equals(existing.trailingStopResult(), candidate.trailingStopResult())
+            || !bigDecimalValueEquals(existing.trailingExitPrice(), candidate.trailingExitPrice())
+            || !bigDecimalValueEquals(existing.bestFavorablePrice(), candidate.bestFavorablePrice());
+    }
+
+    private static boolean bigDecimalValueEquals(BigDecimal a, BigDecimal b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return a.compareTo(b) == 0;
+    }
+
+    /**
+     * Publish the new-side simulation payload to {@code /topic/simulations}.
+     * Runs alongside (not instead of) the legacy {@code /topic/mentor-alerts} push.
+     */
+    private void publishSimulationEvent(TradeSimulation sim) {
+        try {
+            SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
+            if (messaging != null && sim != null) {
+                messaging.convertAndSend("/topic/simulations", sim);
+                log.debug("Published simulation event on /topic/simulations for review {}:{} → {}",
+                    sim.reviewType(), sim.reviewId(), sim.simulationStatus());
+            }
+        } catch (Exception e) {
+            log.debug("Could not push simulation event on /topic/simulations: {}", e.getMessage());
         }
     }
 

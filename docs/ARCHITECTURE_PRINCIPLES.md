@@ -223,9 +223,11 @@ When evaluating whether a saved Mentor trade plan was correct:
 - do not recompute the original Mentor review payload during outcome evaluation
 - use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
 
-#### Simulation Decoupling Rule (TECH DEBT — active)
+#### Simulation Decoupling Rule (TECH DEBT — Phase 1 DONE, Phase 2/3 pending)
 
-**Current state:** Simulation fields (`simulationStatus`, `activationTime`, `resolutionTime`, `maxDrawdownPoints`, `trailingStopResult`, `trailingExitPrice`, `bestFavorablePrice`) live directly on `MentorSignalReviewRecord` and `MentorAudit`. This creates tight coupling: 29+ references across 11 files, 5 layers deep. The same model carries signal review concerns AND simulation lifecycle concerns.
+**Current state (post Phase 1b):** Simulation fields (`simulationStatus`, `activationTime`, `resolutionTime`, `maxDrawdownPoints`, `trailingStopResult`, `trailingExitPrice`, `bestFavorablePrice`) **still live directly on `MentorSignalReviewRecord` and `MentorAudit`** — they are the legacy primary source of truth and are still written by `TradeSimulationService` on every transition. In parallel, Phase 1 introduced a dedicated `TradeSimulation` aggregate (`domain/simulation/`) with its own JPA table (`trade_simulations`) and port (`TradeSimulationRepositoryPort`). `TradeSimulationService` now dual-writes to both on every state transition, and new REST endpoints (`/api/simulations/*`) + a new WS topic (`/topic/simulations`) expose the decoupled side. Frontend still reads from the legacy DTOs.
+
+**Implication for new agents:** the old coupling is not yet gone — do not add new simulation fields to the review/audit models (rule 1 below is still in force). Prefer reading from `TradeSimulationRepositoryPort`; writing is owned exclusively by `TradeSimulationService`.
 
 **Target state:** A dedicated `TradeSimulation` aggregate owns all simulation state:
 
@@ -254,15 +256,15 @@ trade_simulations
 4. **New simulation strategies (trailing stop variants, bracket orders, time-based exits) must be additive columns or new entities on the simulation aggregate**, never on the review model.
 5. **The `TradeSimulationService` is the sole writer of simulation state.** `MentorSignalReviewService.initializeSimulationState()` may set `PENDING_ENTRY` at creation time, but all subsequent state transitions belong to `TradeSimulationService`.
 
-**Migration plan (when the refactor happens):**
+**Migration plan:**
 
-Phase 1 — Create `trade_simulations` table with FK to reviews. Dual-write: `TradeSimulationService` writes to both old fields and new table. New code reads from new table.
+Phase 1 — **DONE.** Create `trade_simulations` table with `(review_id, review_type)` unique constraint; dual-write from `TradeSimulationService` on every transition (including a back-fill pass on each scheduler run for PENDING_ENTRY rows created by `MentorSignalReviewService.initializeSimulationState`). Expose read-only REST at `/api/simulations/*` and publish on `/topic/simulations`. Legacy writes to review/audit fields and `/topic/mentor-alerts` remain untouched. See PR `claude/simulation-decoupling-p1a-foundation` (foundation) and `claude/simulation-decoupling-p1b-wireup` (wire-up).
 
-Phase 2 — Migrate frontend to read simulation state from new `/topic/simulations` or from a joined DTO. Remove simulation fields from `MentorSignalReview` DTO.
+Phase 2 — Migrate frontend `MentorSignalPanel` / `MentorPanel` to consume `/api/simulations/*` + subscribe to `/topic/simulations`. Remove simulation fields from `MentorSignalReview` / `MentorManualReview` JSON DTOs. `TradeSimulationService` continues to dual-write but the review-side writes become dead data from the UI's perspective.
 
-Phase 3 — Drop simulation columns from `mentor_signal_reviews` and `mentor_audits`. Remove `findBySimulationStatuses()` from `MentorSignalReviewRepositoryPort`.
+Phase 3 — Drop simulation columns from `mentor_signal_reviews` and `mentor_audits`. Remove `findBySimulationStatuses()` from `MentorSignalReviewRepositoryPort`; make `TradeSimulationRepositoryPort` the sole query path for the scheduler. Requires a one-shot backfill script to populate `trade_simulations` from any residual review rows and a deprecation release.
 
-**Why not now:** The refactor touches 11+ files, changes the REST API contract, requires frontend migration, and risks breaking the 60s scheduled poller that drives all simulation state. It should be a standalone PR with full regression testing, not bundled with feature work.
+**Why phased:** The refactor touches 11+ files, changes the REST API contract, requires frontend migration, and risks breaking the 60s scheduled poller that drives all simulation state. Slicing it in three releases lets us ship the foundation and the write-side separately from the frontend cutover and the destructive schema drop.
 
 ### Live Execution Foundation Rule
 

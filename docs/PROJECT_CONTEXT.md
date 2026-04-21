@@ -108,8 +108,18 @@ These should stay transport-oriented only.
 - `application/service/MentorAnalysisService.java`
 - `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
+- `application/service/TradeSimulationService.java` — owner of simulation state transitions. Post Phase 1b, dual-writes every transition to the legacy review/audit repositories AND to `TradeSimulationRepositoryPort`.
 
 These coordinate use cases and should not become infrastructure adapters.
+
+### Simulation decoupling (Phase 1 — dual-write active)
+
+- Domain port: `domain/simulation/port/TradeSimulationRepositoryPort`
+- Aggregate: `domain/simulation/TradeSimulation` (+ `ReviewType` enum)
+- REST controller: `presentation/controller/SimulationController` — `GET /api/simulations/{recent,by-instrument/{instrument},by-review/{reviewId}}`
+- WebSocket topic: `/topic/simulations` (published alongside the legacy `/topic/mentor-alerts`; consumers should prefer the new topic)
+
+Legacy path (still the primary) for simulation fields: `MentorSignalReviewRecord` + `MentorAudit`. See `docs/ARCHITECTURE_PRINCIPLES.md` § Simulation Decoupling Rule for the Phase 2/3 cutover plan.
 
 ### IBKR integration
 
@@ -131,6 +141,16 @@ Relevant DXY persistence now includes:
 
 - `infrastructure/persistence/entity/MarketDxySnapshotEntity.java`
 - `infrastructure/persistence/JpaDxySnapshotRepositoryAdapter.java`
+
+Relevant simulation persistence (Phase 1 — new `trade_simulations` table running alongside the legacy simulation columns on `mentor_signal_reviews` / `mentor_audits`):
+
+- `infrastructure/persistence/entity/TradeSimulationEntity.java`
+- `infrastructure/persistence/JpaTradeSimulationRepository.java`
+- `infrastructure/persistence/JpaTradeSimulationRepositoryAdapter.java`
+- `infrastructure/persistence/TradeSimulationEntityMapper.java`
+
+Schema of `trade_simulations` (unique constraint `(review_id, review_type)`):
+`id`, `review_id`, `review_type` (`SIGNAL`|`AUDIT`), `instrument`, `action`, `simulation_status`, `activation_time`, `resolution_time`, `max_drawdown_points`, `trailing_stop_result`, `trailing_exit_price`, `best_favorable_price`, `created_at`.
 
 ## Frontend Map
 
@@ -186,6 +206,7 @@ Current behavior:
 - a re-review payload mixes live indicators with `original_alert_context` so Gemini can judge whether the old setup is still valid now
 - raw alerts still flow through `/topic/alerts`
 - Mentor review updates still flow through `/topic/mentor-alerts`
+- simulation state transitions are additionally published on `/topic/simulations` (Phase 1 dual-publish; `/topic/mentor-alerts` continues to carry the same events until Phase 2 frontend cutover)
 - manual `Ask Mentor` analyses are stored separately in `mentor_audits` with a dedicated `manual-mentor:` source reference and exposed through `/api/mentor/manual-reviews/recent`
 
 ### Mentor Outcome Tracker

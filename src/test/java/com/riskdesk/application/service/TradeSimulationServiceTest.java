@@ -13,6 +13,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.model.TrailingStopResult;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -47,6 +48,9 @@ class TradeSimulationServiceTest {
     @Mock
     private ObjectProvider<SimpMessagingTemplate> messagingProvider;
 
+    @Mock
+    private TradeSimulationRepositoryPort simulationRepository;
+
     private TradeSimulationService service;
     private ObjectMapper objectMapper;
     private TrailingStopProperties trailingStopProperties;
@@ -65,7 +69,8 @@ class TradeSimulationServiceTest {
             objectMapper,
             reviewServiceProvider,
             messagingProvider,
-            trailingStopProperties
+            trailingStopProperties,
+            simulationRepository
         );
     }
 

@@ -783,6 +783,26 @@ export interface OrderFlowDepthSnapshot {
   error?: string;
 }
 
+// ── Trade Simulation views (GET /api/simulations/*) ────────────────────────────
+// Phase 1b: read-only wrappers. Source of truth is the new `trade_simulations`
+// table; legacy simulation fields on MentorSignalReview/MentorAudit DTOs still
+// exist but are slated for removal in Phase 3.
+export interface TradeSimulationView {
+  id: number;
+  reviewId: number;
+  reviewType: 'SIGNAL' | 'AUDIT';
+  instrument: string;
+  action: string;
+  simulationStatus: string;
+  activationTime: string | null;
+  resolutionTime: string | null;
+  maxDrawdownPoints: number | null;
+  trailingStopResult: string | null;
+  trailingExitPrice: number | null;
+  bestFavorablePrice: number | null;
+  createdAt: string;
+}
+
 // ── ONIMS Correlation (GET /api/correlation/oil-nasdaq/*) ──────────────────────
 // Matches CrossInstrumentAlertService.toPayload() exactly.
 export interface CorrelationSignal {
@@ -922,6 +942,38 @@ export const api = {
 
   getStrategyComparison: (instrument: string, timeframe: string) =>
     get<DecisionComparisonView>(`/api/strategy/${instrument}/${timeframe}/compare`),
+
+  // ── Trade Simulations (Phase 1 read-only wrappers — Phase 2 will migrate UI) ────
+  getRecentSimulations: (limit?: number) =>
+    get<TradeSimulationView[]>(
+      `/api/simulations/recent${limit !== undefined ? `?limit=${limit}` : ''}`,
+    ),
+  getSimulationsByInstrument: (instrument: string, limit?: number) =>
+    get<TradeSimulationView[]>(
+      `/api/simulations/by-instrument/${encodeURIComponent(instrument)}${
+        limit !== undefined ? `?limit=${limit}` : ''
+      }`,
+    ),
+  getSimulationByReview: async (
+    reviewId: number,
+    type: 'SIGNAL' | 'AUDIT' = 'SIGNAL',
+  ): Promise<TradeSimulationView | null> => {
+    // - No `credentials` option: the backend controller advertises
+    //   `@CrossOrigin(origins = "*")`, and browsers reject credentialed CORS
+    //   responses when the allowed origin is the wildcard.
+    // - `cache: 'no-store'` to match the shared `get<T>()` helper — simulation
+    //   status changes on every scheduler tick, and server-rendered Next.js
+    //   contexts would otherwise cache and surface stale status after a
+    //   terminal transition. Sibling wrappers (`getRecentSimulations`,
+    //   `getSimulationsByInstrument`) already inherit this from `get<T>()`.
+    const response = await fetch(
+      `${BASE}/api/simulations/by-review/${reviewId}?type=${encodeURIComponent(type)}`,
+      { cache: 'no-store' },
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()) as TradeSimulationView;
+  },
 
   // ── Trade Decisions (agent orchestrator + narrator, read-only) ────
   getRecentDecisions: (limit?: number) =>
