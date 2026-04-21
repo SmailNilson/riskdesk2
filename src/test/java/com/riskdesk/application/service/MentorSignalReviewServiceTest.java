@@ -79,22 +79,18 @@ class MentorSignalReviewServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private MentorSignalReviewService createService(boolean autoAnalysisEnabled) {
+        return new MentorSignalReviewService(
+            mentorAnalysisService, indicatorService, mentorIntermarketService,
+            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
+            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider,
+            eventPublisher, autoAnalysisEnabled
+        );
+    }
+
     @Test
     void reanalyzeAlert_rebuildsLivePayloadAndPreservesOriginalAlertContext() throws Exception {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
+        MentorSignalReviewService service = createService(true);
 
         Alert alert = new Alert(
             "smc:MNQ:2026-03-26T02:30:39Z",
@@ -242,20 +238,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void reanalyzeAlert_reusesLatestProposedTradePlanWhenAvailable() throws Exception {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
+        MentorSignalReviewService service = createService(true);
 
         Alert alert = new Alert(
             "smc:MNQ:2026-03-26T02:30:39Z",
@@ -410,20 +393,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureInitialReview_storesUtcSelectedTimezoneForAutoReviews() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
+        MentorSignalReviewService service = createService(true);
         service.setAutoAnalysisEnabled(true);
 
         Instant alertTime = Instant.now();
@@ -481,20 +451,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureGroupReview_preservesPrimaryAlertKeyForGroupedAlerts() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
+        MentorSignalReviewService service = createService(true);
         service.setAutoAnalysisEnabled(true);
 
         Instant primaryTimestamp = Instant.now();
@@ -539,11 +496,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureBehaviourReview_setsSourceTypeBehaviourAndIneligible() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService, indicatorService, mentorIntermarketService,
-            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
-        );
+        MentorSignalReviewService service = createService(true);
         service.setAutoAnalysisEnabled(true);
 
         Instant now = Instant.now();
@@ -590,11 +543,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureBehaviourReview_recordsErrorWhenAutoAnalysisDisabled() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService, indicatorService, mentorIntermarketService,
-            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
-        );
+        MentorSignalReviewService service = createService(false);
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
             "ema50:proximity:MCL:10m",
@@ -626,11 +575,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureBehaviourReview_deduplicatesByAlertKey() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService, indicatorService, mentorIntermarketService,
-            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
-        );
+        MentorSignalReviewService service = createService(true);
         service.setAutoAnalysisEnabled(true);
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -651,11 +596,7 @@ class MentorSignalReviewServiceTest {
 
     @Test
     void captureBehaviourReview_ignoresInvalidInstrument() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService, indicatorService, mentorIntermarketService,
-            marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
-        );
+        MentorSignalReviewService service = createService(true);
         service.setAutoAnalysisEnabled(true);
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
