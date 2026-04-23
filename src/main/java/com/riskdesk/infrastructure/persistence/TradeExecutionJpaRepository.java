@@ -20,4 +20,8 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select e from TradeExecutionEntity e where e.id = :id")
     Optional<TradeExecutionEntity> findByIdForUpdate(@Param("id") Long id);
+
+    Optional<TradeExecutionEntity> findByIbkrOrderId(Integer ibkrOrderId);
+
+    Optional<TradeExecutionEntity> findByExecutionKey(String executionKey);
 }

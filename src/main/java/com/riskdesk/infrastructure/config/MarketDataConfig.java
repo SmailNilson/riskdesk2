@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
@@ -99,6 +100,21 @@ public class MarketDataConfig {
         listener.ifPresent(l -> {
             nativeClient.setPriceListener(l);
             log.info("Push-based price listener wired to IB Gateway native client");
+        });
+        return new Object(); // marker bean
+    }
+
+    /**
+     * Slice 3a — wires the execution fill-tracking listener so IBKR execDetails
+     * and orderStatus callbacks are forwarded to the application layer.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayExecutionFillListenerWiring(IbGatewayNativeClient nativeClient,
+                                                        Optional<ExecutionFillListener> listener) {
+        listener.ifPresent(l -> {
+            nativeClient.setExecutionFillListener(l);
+            log.info("Execution fill listener wired to IB Gateway native client");
         });
         return new Object(); // marker bean
     }

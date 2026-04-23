@@ -27,7 +27,8 @@ import java.time.Instant;
     indexes = {
         @Index(name = "idx_trade_executions_status", columnList = "status"),
         @Index(name = "idx_trade_executions_review_alert_key", columnList = "reviewAlertKey"),
-        @Index(name = "idx_trade_executions_created_at", columnList = "createdAt")
+        @Index(name = "idx_trade_executions_created_at", columnList = "createdAt"),
+        @Index(name = "idx_trade_executions_ibkr_order_id", columnList = "ibkrOrderId")
     }
 )
 public class TradeExecutionEntity {
@@ -124,6 +125,35 @@ public class TradeExecutionEntity {
 
     @Column
     private Instant closedAt;
+
+    /**
+     * Slice 3a — IBKR execDetails/orderStatus fill tracking.
+     * These raw IBKR feedback fields live alongside (not in place of) the domain
+     * execution lifecycle status enum. They record the broker's view of the order:
+     *   - filledQuantity     : cumulative quantity filled (BigDecimal, IBKR Decimal mirror)
+     *   - avgFillPrice       : volume-weighted average fill price
+     *   - lastFillTime       : UTC timestamp of the last processed exec report
+     *   - orderStatus        : IBKR status name (Submitted, PreSubmitted, PartiallyFilled, Filled, Cancelled, …)
+     *   - ibkrOrderId        : TWS orderId (used for startup reconciliation in 3b)
+     *   - lastExecId         : per-fill idempotence key (IBKR execId of the last applied exec report)
+     */
+    @Column(precision = 19, scale = 6)
+    private BigDecimal filledQuantity;
+
+    @Column(precision = 19, scale = 6)
+    private BigDecimal avgFillPrice;
+
+    @Column
+    private Instant lastFillTime;
+
+    @Column(length = 32)
+    private String orderStatus;
+
+    @Column
+    private Integer ibkrOrderId;
+
+    @Column(length = 64)
+    private String lastExecId;
 
     public Long getId() {
         return id;
@@ -363,5 +393,53 @@ public class TradeExecutionEntity {
 
     public void setClosedAt(Instant closedAt) {
         this.closedAt = closedAt;
+    }
+
+    public BigDecimal getFilledQuantity() {
+        return filledQuantity;
+    }
+
+    public void setFilledQuantity(BigDecimal filledQuantity) {
+        this.filledQuantity = filledQuantity;
+    }
+
+    public BigDecimal getAvgFillPrice() {
+        return avgFillPrice;
+    }
+
+    public void setAvgFillPrice(BigDecimal avgFillPrice) {
+        this.avgFillPrice = avgFillPrice;
+    }
+
+    public Instant getLastFillTime() {
+        return lastFillTime;
+    }
+
+    public void setLastFillTime(Instant lastFillTime) {
+        this.lastFillTime = lastFillTime;
+    }
+
+    public String getOrderStatus() {
+        return orderStatus;
+    }
+
+    public void setOrderStatus(String orderStatus) {
+        this.orderStatus = orderStatus;
+    }
+
+    public Integer getIbkrOrderId() {
+        return ibkrOrderId;
+    }
+
+    public void setIbkrOrderId(Integer ibkrOrderId) {
+        this.ibkrOrderId = ibkrOrderId;
+    }
+
+    public String getLastExecId() {
+        return lastExecId;
+    }
+
+    public void setLastExecId(String lastExecId) {
+        this.lastExecId = lastExecId;
     }
 }

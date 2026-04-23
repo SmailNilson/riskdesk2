@@ -40,6 +40,12 @@ final class TradeExecutionEntityMapper {
         entity.setVirtualExitTriggeredAt(execution.getVirtualExitTriggeredAt());
         entity.setExitSubmittedAt(execution.getExitSubmittedAt());
         entity.setClosedAt(execution.getClosedAt());
+        entity.setFilledQuantity(execution.getFilledQuantity());
+        entity.setAvgFillPrice(execution.getAvgFillPrice());
+        entity.setLastFillTime(execution.getLastFillTime());
+        entity.setOrderStatus(execution.getOrderStatus());
+        entity.setIbkrOrderId(execution.getIbkrOrderId());
+        entity.setLastExecId(execution.getLastExecId());
         return entity;
     }
 
@@ -75,6 +81,12 @@ final class TradeExecutionEntityMapper {
         execution.setVirtualExitTriggeredAt(entity.getVirtualExitTriggeredAt());
         execution.setExitSubmittedAt(entity.getExitSubmittedAt());
         execution.setClosedAt(entity.getClosedAt());
+        execution.setFilledQuantity(entity.getFilledQuantity());
+        execution.setAvgFillPrice(entity.getAvgFillPrice());
+        execution.setLastFillTime(entity.getLastFillTime());
+        execution.setOrderStatus(entity.getOrderStatus());
+        execution.setIbkrOrderId(entity.getIbkrOrderId());
+        execution.setLastExecId(entity.getLastExecId());
         return execution;
     }
 }

@@ -1,8 +1,11 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.ib.client.CommissionAndFeesReport;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Decimal;
+import com.ib.client.Execution;
+import com.ib.client.ExecutionFilter;
 import com.ib.client.Order;
 import com.ib.client.OrderState;
 import com.ib.client.OrderStatus;
@@ -18,6 +21,7 @@ import com.ib.controller.ApiConnection;
 import com.ib.controller.ApiController;
 import com.ib.controller.Bar;
 import com.ib.controller.Position;
+import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
@@ -28,6 +32,8 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -93,6 +99,9 @@ public class IbGatewayNativeClient {
     private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
     private volatile StreamingPriceListener priceListener;
+    private volatile ExecutionFillListener executionFillListener;
+    private volatile ApiController.ITradeReportHandler tradeReportHandlerRef;
+    private volatile ApiController.ILiveOrderHandler fillTrackingOrderHandler;
     private volatile SubscriptionRegistry subscriptionRegistry;
     private volatile IbGatewayContractResolver contractResolverRef;
     private volatile int depthNumRows = 10;
@@ -130,6 +139,196 @@ public class IbGatewayNativeClient {
      */
     public void setPriceListener(StreamingPriceListener listener) {
         this.priceListener = listener;
+    }
+
+    /**
+     * Slice 3a — registers a sink that receives raw IBKR {@code execDetails}
+     * and {@code orderStatus} feedback. Called by the application layer during
+     * startup wiring. The listener MUST be non-blocking (runs on the IBKR
+     * EReader thread) — heavy work should be offloaded.
+     *
+     * <p>Setting the listener also registers persistent order/trade-report
+     * handlers with the {@link ApiController} so existing ad-hoc lookups
+     * (e.g. {@code findOpenOrderByOrderRef}) keep working alongside them.</p>
+     */
+    public void setExecutionFillListener(ExecutionFillListener listener) {
+        this.executionFillListener = listener;
+        if (listener == null) {
+            return;
+        }
+        ApiController ctrl = controller;
+        if (ctrl == null) {
+            // Handlers will be attached lazily once a connection is established.
+            return;
+        }
+        attachFillTrackingHandlersIfNeeded(ctrl);
+    }
+
+    private void attachFillTrackingHandlersIfNeeded(ApiController ctrl) {
+        if (ctrl == null || executionFillListener == null) {
+            return;
+        }
+        synchronized (orderPlacementLock) {
+            if (tradeReportHandlerRef == null) {
+                ApiController.ITradeReportHandler handler = new ApiController.ITradeReportHandler() {
+                    @Override
+                    public void tradeReport(String tradeKey, Contract contract, Execution execution) {
+                        dispatchExecDetails(execution);
+                    }
+
+                    @Override
+                    public void tradeReportEnd() {
+                        // no-op — persistent subscription
+                    }
+
+                    @Override
+                    public void commissionAndFeesReport(String tradeKey, CommissionAndFeesReport report) {
+                        // Commission data is out of scope for Slice 3a.
+                    }
+                };
+                try {
+                    ctrl.reqExecutions(executionFilterForToday(), handler);
+                    tradeReportHandlerRef = handler;
+                    log.info("IBKR execution fill tracking: trade report handler attached");
+                } catch (Exception e) {
+                    log.warn("Failed to attach IBKR trade report handler: {}", e.getMessage());
+                }
+            }
+
+            if (fillTrackingOrderHandler == null) {
+                ApiController.ILiveOrderHandler handler = new ApiController.ILiveOrderHandler() {
+                    @Override
+                    public void openOrder(Contract contract, Order order, OrderState orderState) {
+                        // no-op — the lookup-style handler still uses its own listener
+                    }
+
+                    @Override
+                    public void openOrderEnd() {
+                        // no-op
+                    }
+
+                    @Override
+                    public void orderStatus(int orderId,
+                                            OrderStatus status,
+                                            Decimal filled,
+                                            Decimal remaining,
+                                            double avgFillPrice,
+                                            long permId,
+                                            int parentId,
+                                            double lastFillPrice,
+                                            int clientId,
+                                            String whyHeld,
+                                            double mktCapPrice) {
+                        dispatchOrderStatus(orderId, status, filled, remaining, avgFillPrice);
+                    }
+
+                    @Override
+                    public void handle(int orderId, int errorCode, String errorMsg) {
+                        // IBKR surfaces async order errors here — we log and move on.
+                        log.debug("IBKR fill-tracking order error orderId={} code={} msg={}",
+                            orderId, errorCode, errorMsg);
+                    }
+                };
+                try {
+                    ctrl.reqLiveOrders(handler);
+                    fillTrackingOrderHandler = handler;
+                    log.info("IBKR execution fill tracking: live order status handler attached");
+                } catch (Exception e) {
+                    log.warn("Failed to attach IBKR live order handler: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void dispatchExecDetails(Execution execution) {
+        ExecutionFillListener listener = executionFillListener;
+        if (listener == null || execution == null) {
+            return;
+        }
+        try {
+            int orderId = execution.orderId();
+            String execId = execution.execId();
+            String orderRef = execution.orderRef();
+            BigDecimal cumQty = execution.cumQty() == null ? null : execution.cumQty().value();
+            BigDecimal avgPrice = BigDecimal.valueOf(execution.avgPrice());
+            BigDecimal lastFillPrice = BigDecimal.valueOf(execution.price());
+            String side = execution.side();
+            Instant time = parseExecutionTime(execution.time());
+            listener.onExecDetails(orderId, execId, orderRef, cumQty, avgPrice, lastFillPrice, side, time);
+        } catch (RuntimeException e) {
+            log.warn("execDetails dispatch failed: {}", e.getMessage());
+        }
+    }
+
+    private void dispatchOrderStatus(int orderId,
+                                     OrderStatus status,
+                                     Decimal filled,
+                                     Decimal remaining,
+                                     double avgFillPrice) {
+        ExecutionFillListener listener = executionFillListener;
+        if (listener == null || status == null) {
+            return;
+        }
+        try {
+            BigDecimal filledBd = filled == null ? null : filled.value();
+            BigDecimal remainingBd = remaining == null ? null : remaining.value();
+            BigDecimal avgPx = BigDecimal.valueOf(avgFillPrice);
+            listener.onOrderStatus(orderId, status.name(), filledBd, remainingBd, avgPx, Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("orderStatus dispatch failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Parses IBKR's Execution.time() string. The format depends on SDK version;
+     * the most common form is {@code yyyyMMdd  HH:mm:ss} in {@code America/New_York}
+     * time. Returns {@code Instant.now()} on unparseable input — timestamp fidelity
+     * is a soft requirement; we never fail the fill pipeline over it.
+     */
+    private static Instant parseExecutionTime(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Instant.now();
+        }
+        String trimmed = raw.trim();
+        // Try the common "yyyyMMdd  HH:mm:ss" layout first.
+        try {
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd[  ][ ]HH:mm:ss");
+            LocalDateTime ldt = LocalDateTime.parse(trimmed, fmt);
+            return ldt.atZone(ZoneId.of("America/New_York")).toInstant();
+        } catch (Exception ignored) {
+            // fall through
+        }
+        try {
+            // Some SDK versions include a trailing timezone name.
+            int tzSplit = trimmed.lastIndexOf(' ');
+            if (tzSplit > 0) {
+                String head = trimmed.substring(0, tzSplit).trim();
+                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd[  ][ ]HH:mm:ss");
+                LocalDateTime ldt = LocalDateTime.parse(head, fmt);
+                return ldt.atZone(ZoneId.of("America/New_York")).toInstant();
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return Instant.now();
+    }
+
+    /**
+     * Slice 3a — {@link ExecutionFilter} scoped to today so we only pick up
+     * relevant execDetails replays when reqExecutions is called at (re)connect.
+     */
+    private ExecutionFilter executionFilterForToday() {
+        ExecutionFilter filter = new ExecutionFilter();
+        // "yyyymmdd HH:mm:ss" with UTC is accepted by IBKR; anchor to today 00:00 UTC.
+        try {
+            String today = DateTimeFormatter.ofPattern("yyyyMMdd")
+                .withZone(ZoneOffset.UTC)
+                .format(Instant.now()) + "-00:00:00";
+            filter.time(today);
+        } catch (Exception ignored) {
+            // Leave the filter open — IBKR will return all available execs.
+        }
+        return filter;
     }
 
     /**
@@ -912,6 +1111,9 @@ public class IbGatewayNativeClient {
         managedAccounts = List.of();
         streamingSubscriptions.clear();
         streamingQuoteSubscriptions.clear();
+        // Slice 3a — drop stale fill-tracking handler refs so they re-attach on reconnect.
+        tradeReportHandlerRef = null;
+        fillTrackingOrderHandler = null;
         return new DisconnectContext(prev, subs, quoteSubs);
     }
 
@@ -1112,6 +1314,13 @@ public class IbGatewayNativeClient {
             }
             log.info("IB Gateway native API connected on {}:{} with clientId={}",
                 properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId());
+            // Slice 3a — if a fill listener was registered before connect,
+            // attach the persistent handlers now that the controller is live.
+            try {
+                attachFillTrackingHandlersIfNeeded(controller);
+            } catch (Exception e) {
+                log.debug("Could not attach fill tracking handlers on connect: {}", e.getMessage());
+            }
         }
 
         @Override

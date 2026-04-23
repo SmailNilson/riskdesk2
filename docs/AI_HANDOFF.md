@@ -1,12 +1,71 @@
 # AI Handoff
 
-Last updated: 2026-04-20
+Last updated: 2026-04-23
 
 ## Goal of this file
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.
 
-## Latest change — Simulation Decoupling Phase 1 (a + b) complete
+## Latest change — Execution Slice 3a: IBKR execDetails + orderStatus fill tracking
+
+Adds raw IBKR broker feedback to live executions. Slice 3 is split into three
+sub-slices; this PR ships **3a only**.
+
+**What ships now (3a):**
+- New domain port `domain/execution/port/ExecutionFillListener` — callback sink
+  implemented by the application layer. Keeps the hexagonal boundary intact
+  (infrastructure doesn't import application types).
+- New application service `application/service/ExecutionFillTrackingService`
+  persists IBKR feedback on `TradeExecutionEntity` and publishes
+  `/topic/executions` on every state-changing update.
+- `TradeExecutionEntity` + `TradeExecutionRecord` extended with fill-tracking
+  columns (additive only, nothing removed):
+  - `filledQuantity` / `avgFillPrice` (BigDecimal)
+  - `lastFillTime` (Instant / TIMESTAMPTZ)
+  - `orderStatus` (raw IBKR status name — `Submitted`, `PreSubmitted`,
+    `PartiallyFilled`, `Filled`, `Cancelled`, …)
+  - `ibkrOrderId` (Integer — TWS orderId, used by 3b for startup reconciliation)
+  - `lastExecId` (String — per-fill idempotence key, IBKR execId of last
+    applied fill report)
+- `TradeExecutionRepositoryPort` gains `findByIbkrOrderId(...)` +
+  `findByExecutionKey(...)`.
+- `IbGatewayNativeClient` now accepts an `ExecutionFillListener` via
+  `setExecutionFillListener(...)`. On connect it attaches two persistent
+  handlers to `ApiController`:
+  - `ITradeReportHandler` backed by `reqExecutions(filter, handler)` — scoped
+    to today's executions — forwards `execDetails()` callbacks.
+  - `ILiveOrderHandler` backed by `reqLiveOrders(handler)` — forwards
+    `orderStatus()` callbacks. (The existing ad-hoc `findOpenOrderByOrderRef`
+    handler remains untouched — the two handlers coexist.)
+- Wiring in `MarketDataConfig#ibGatewayExecutionFillListenerWiring` (same
+  `IB_GATEWAY` conditional as the price listener).
+- Idempotence: `execDetails` dedups on `execId`; `orderStatus` dedups by
+  comparing all raw fields against the persisted row. Transition from
+  `ENTRY_SUBMITTED` to domain state `ACTIVE` happens on first `Filled` status.
+  Cancellation only flips to `CANCELLED` when no fills have been recorded —
+  partial-fill-then-cancel stays open and is handled in 3c.
+- Existing endpoint `GET /api/mentor/executions/by-review/{reviewId}` now
+  surfaces the new fill fields on `TradeExecutionView` (shape additions
+  only — existing consumers unaffected).
+
+**Tests:** `ExecutionFillTrackingServiceTest` — 8 Mockito scenarios covering
+happy path, execId replay idempotence, orderRef fallback, domain state
+transition on `Filled`, cancel-without-fills flow, unchanged-status no-op,
+unknown-order ignore, and multi-fill sequence. Full suite 1199 tests green,
+`HexagonalArchitectureTest` green.
+
+**What this PR does NOT do (follow-ups):**
+- **3b — startup reconciliation:** on app start, query IBKR open/completed
+  orders and reconcile against `trade_executions` rows left dangling from a
+  prior run.
+- **3c — bracket / virtual exit orchestration:** once `ACTIVE`, submit
+  matching SL + TP orders, monitor and update state through closure.
+- Frontend UI for the new fields — the DTO shape is exposed so a future UI
+  PR can surface it without touching the backend again.
+
+---
+
+## Previous change — Simulation Decoupling Phase 1 (a + b) complete
 
 The TECH DEBT around simulation state living on `MentorSignalReviewRecord` /
 `MentorAudit` is now being unwound. Phase 1 is **additive only** — no legacy
