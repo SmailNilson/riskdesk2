@@ -203,58 +203,100 @@ public class MentorSignalReviewRecord {
         this.executionEligibilityReason = executionEligibilityReason;
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Legacy simulation fields (Phase 3 — write-never from production).
+    //
+    // These accessors survive so the JPA mapper can round-trip existing
+    // rows without data loss, but nothing in the production code path
+    // writes to them. All simulation state lives on
+    // {@link com.riskdesk.domain.simulation.TradeSimulation}.
+    //
+    // Physical column drop on {@code mentor_signal_reviews} requires a
+    // schema migration strategy (no Flyway/Liquibase in this repo) — see
+    // the "Simulation Decoupling Rule" section in
+    // {@code docs/ARCHITECTURE_PRINCIPLES.md}.
+    // ──────────────────────────────────────────────────────────────────
+
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public TradeSimulationStatus getSimulationStatus() {
         return simulationStatus;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setSimulationStatus(TradeSimulationStatus simulationStatus) {
         this.simulationStatus = simulationStatus;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public Instant getActivationTime() {
         return activationTime;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setActivationTime(Instant activationTime) {
         this.activationTime = activationTime;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public Instant getResolutionTime() {
         return resolutionTime;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setResolutionTime(Instant resolutionTime) {
         this.resolutionTime = resolutionTime;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public java.math.BigDecimal getMaxDrawdownPoints() {
         return maxDrawdownPoints;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setMaxDrawdownPoints(java.math.BigDecimal maxDrawdownPoints) {
         this.maxDrawdownPoints = maxDrawdownPoints;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public TrailingStopResult getTrailingStopResult() {
         return trailingStopResult;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setTrailingStopResult(TrailingStopResult trailingStopResult) {
         this.trailingStopResult = trailingStopResult;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public java.math.BigDecimal getTrailingExitPrice() {
         return trailingExitPrice;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setTrailingExitPrice(java.math.BigDecimal trailingExitPrice) {
         this.trailingExitPrice = trailingExitPrice;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public java.math.BigDecimal getBestFavorablePrice() {
         return bestFavorablePrice;
     }
 
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setBestFavorablePrice(java.math.BigDecimal bestFavorablePrice) {
         this.bestFavorablePrice = bestFavorablePrice;
     }

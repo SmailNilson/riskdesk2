@@ -43,9 +43,6 @@ class TradeSimulationServiceTest {
     private MentorAuditRepositoryPort auditRepository;
 
     @Mock
-    private ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
-
-    @Mock
     private ObjectProvider<SimpMessagingTemplate> messagingProvider;
 
     @Mock
@@ -67,7 +64,6 @@ class TradeSimulationServiceTest {
             auditRepository,
             candleRepositoryPort,
             objectMapper,
-            reviewServiceProvider,
             messagingProvider,
             trailingStopProperties,
             simulationRepository

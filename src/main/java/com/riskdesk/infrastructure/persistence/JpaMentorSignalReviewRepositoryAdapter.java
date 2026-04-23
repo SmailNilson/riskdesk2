@@ -2,7 +2,6 @@ package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
-import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
@@ -53,13 +52,6 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
         return repository.findAll(
                 PageRequest.of(0, limit, Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"))))
             .stream()
-            .map(MentorSignalReviewEntityMapper::toDomain)
-            .toList();
-    }
-
-    @Override
-    public List<MentorSignalReviewRecord> findBySimulationStatuses(List<TradeSimulationStatus> statuses) {
-        return repository.findBySimulationStatusInOrderByCreatedAtAsc(statuses).stream()
             .map(MentorSignalReviewEntityMapper::toDomain)
             .toList();
     }

@@ -58,7 +58,84 @@ layout changes.
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.
 
-## Latest change — Execution Slice 3a: IBKR execDetails + orderStatus fill tracking
+## Latest change — Simulation Decoupling Phase 3 delivered
+
+Phase 3 of the Simulation Decoupling Rule is in. The legacy coupling between
+`MentorSignalReview` / `MentorAudit` and simulation state is now effectively
+severed at the code level — only the physical columns remain (pending a
+separate schema-migration PR).
+
+**What changed in Phase 3:**
+
+- `TradeSimulationService.refreshPendingSimulations()` and
+  `refreshPendingAuditSimulations()` now read opens via
+  `TradeSimulationRepositoryPort.findByStatuses(List.of(PENDING_ENTRY, ACTIVE))`.
+  The previous entry points —
+  `MentorSignalReviewRepositoryPort.findBySimulationStatuses(...)` and
+  `MentorAuditRepositoryPort.findBySimulationStatuses(...)` — have been
+  **removed** from both the port interfaces and the JPA adapters.
+- The dual-write machinery is gone:
+  `dualWriteSignalSimulation`, `dualWriteAuditSimulation`,
+  `buildSignalCandidate`, `buildAuditCandidate`, `attemptDualWrite`,
+  `reconcileWithExisting`, `retryPendingDualWrites`,
+  `pendingDualWriteRetries`, `pendingDualWriteRetryCount`,
+  `hasSimulationContentChanged`, `bigDecimalValueEquals` have all been
+  deleted. Each scheduler pass now writes a single `TradeSimulation.save(...)`
+  per transition.
+- Initial `PENDING_ENTRY` creation moved off the legacy review row:
+  - `MentorSignalReviewService.initializeSimulationAggregate()` writes a new
+    row directly into `trade_simulations` when the ELIGIBLE analysis arrives
+    with a complete trade plan.
+  - `MentorAnalysisService.initializeAuditSimulation()` does the same for
+    manual "Ask Mentor" audits.
+  - Neither service calls `review.setSimulationStatus(...)` or
+    `audit.setSimulationStatus(...)` anymore — those setters are write-never
+    from production code paths.
+- Simulation events publish only on `/topic/simulations`. The previous
+  `/topic/mentor-alerts` push from the simulation scheduler is gone.
+  `/topic/mentor-alerts` still carries non-simulation mentor review events
+  (status/verdict/eligibility updates) via `MentorSignalReviewService.publish()`.
+- Legacy sim getters/setters on `MentorSignalReviewRecord` and `MentorAudit`
+  are annotated `@Deprecated(since = "phase-3")` with a Javadoc note
+  pointing to `TradeSimulation`.
+
+**What intentionally stayed (tech debt to close in a follow-up):**
+
+- Physical columns on `mentor_signal_reviews` and `mentor_audits`
+  (`simulation_status`, `activation_time`, `resolution_time`,
+  `max_drawdown_points`, `trailing_stop_result`, `trailing_exit_price`,
+  `best_favorable_price`) still exist on the JPA entities. This is because
+  the repo has no Flyway/Liquibase and Hibernate `ddl-auto=update` never
+  drops columns. The JPA mappers still round-trip them so historical rows
+  remain readable. Dropping these columns needs a schema-migration strategy
+  PR — do not remove them inline.
+
+**Tests reshuffled:**
+
+- `TradeSimulationServiceDualWriteTest` deleted.
+- New `TradeSimulationServiceSchedulerTest` (7 tests) asserts the post-Phase-3
+  contract: scheduler reads from the simulation port, writes only to the
+  simulation aggregate, publishes only on `/topic/simulations`, and never
+  touches the legacy review/audit `save(...)` path for simulation transitions.
+- `MentorAnalysisServiceTest.analyze_eligibleWithFullPlan_*` rewritten — it
+  now asserts a `TradeSimulation(AUDIT, PENDING_ENTRY)` row is persisted and
+  the audit legacy sim field stays null.
+- `MentorSignalReviewService` constructor extended with
+  `TradeSimulationRepositoryPort`; all test call sites updated.
+- Full suite: 1191 tests, all green. `HexagonalArchitectureTest` passes.
+
+**Follow-up PRs needed:**
+
+1. Introduce Flyway (or Liquibase), then drop the seven legacy sim columns
+   from `mentor_signal_reviews` and `mentor_audits`. At that point the
+   `@Deprecated` getters can disappear too.
+2. Optional: extend the simulation REST API with a writable endpoint so an
+   operator can manually cancel a stuck `PENDING_ENTRY` (previously possible
+   via a direct UPDATE on the review table).
+
+---
+
+## Previous change — Execution Slice 3a: IBKR execDetails + orderStatus fill tracking
 
 Adds raw IBKR broker feedback to live executions. Slice 3 is split into three
 sub-slices; this PR ships **3a only**.
@@ -103,8 +180,7 @@ sub-slices; this PR ships **3a only**.
 **Tests:** `ExecutionFillTrackingServiceTest` — 8 Mockito scenarios covering
 happy path, execId replay idempotence, orderRef fallback, domain state
 transition on `Filled`, cancel-without-fills flow, unchanged-status no-op,
-unknown-order ignore, and multi-fill sequence. Full suite 1199 tests green,
-`HexagonalArchitectureTest` green.
+unknown-order ignore, and multi-fill sequence.
 
 **What this PR does NOT do (follow-ups):**
 - **3b — startup reconciliation:** on app start, query IBKR open/completed
@@ -117,7 +193,7 @@ unknown-order ignore, and multi-fill sequence. Full suite 1199 tests green,
 
 ---
 
-## Previous change — Simulation Decoupling Phase 1 (a + b) complete
+## Earlier change — Simulation Decoupling Phase 1 (a + b)
 
 The TECH DEBT around simulation state living on `MentorSignalReviewRecord` /
 `MentorAudit` is now being unwound. Phase 1 is **additive only** — no legacy
