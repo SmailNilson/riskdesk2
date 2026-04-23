@@ -627,13 +627,20 @@ public class MentorSignalReviewService {
      * with INELIGIBLE simply because Gemini's response was truncated or returned an error
      * envelope — even though the deterministic playbook checklist had produced a high-score
      * setup with a full mechanical plan (entry/SL/TP). We treat the playbook as a safety
-     * net: when Gemini is unusable AND the playbook produced a score ≥ 6/7 with a complete
-     * mechanical plan, we override eligibility to ELIGIBLE and wire the mechanical plan as
-     * the proposedTradePlan.</p>
+     * net: when Gemini is <b>unusable</b> AND the playbook produced a score ≥ 6/7 with a
+     * complete mechanical plan, we override eligibility to ELIGIBLE and wire the mechanical
+     * plan as the proposedTradePlan.</p>
      *
-     * <p>Guards:
+     * <p><b>Critical gating rule (Codex P1):</b> the fallback activates ONLY on
+     * {@link ExecutionEligibilityStatus#MENTOR_UNAVAILABLE} — i.e. a technical failure
+     * (truncated response, parse error, empty body). A genuine {@code INELIGIBLE}
+     * verdict from Gemini means the model intentionally blocked the trade and must
+     * NEVER be flipped to ELIGIBLE — doing so would trigger downstream trade tracking
+     * and WebSocket validation events for setups the model rejected on purpose.</p>
+     *
+     * <p>Other guards:
      * <ul>
-     *   <li>Never overrides a Gemini ELIGIBLE verdict — only promotes INELIGIBLE → ELIGIBLE.</li>
+     *   <li>Never overrides a Gemini ELIGIBLE verdict.</li>
      *   <li>Behaviour alerts are not touched (handled downstream).</li>
      *   <li>If the payload has no playbook_pre_analysis, no mechanical_plan, or score < 6 → no-op.</li>
      * </ul>
@@ -643,7 +650,11 @@ public class MentorSignalReviewService {
             return analysis;
         }
         MentorStructuredResponse structured = analysis.analysis();
-        if (structured.executionEligibilityStatus() == ExecutionEligibilityStatus.ELIGIBLE) {
+        // Codex P1: the fallback is only for technical failures (MENTOR_UNAVAILABLE),
+        // NOT for legitimate Gemini rejections (INELIGIBLE). A structured INELIGIBLE
+        // carries Gemini's reasoning — promoting it would silently override a real
+        // "no" verdict.
+        if (structured.executionEligibilityStatus() != ExecutionEligibilityStatus.MENTOR_UNAVAILABLE) {
             return analysis;
         }
         JsonNode pb = payload.get("playbook_pre_analysis");
@@ -667,7 +678,7 @@ public class MentorSignalReviewService {
         }
         String slRationale = mech.path("sl_rationale").asText(null);
         String pbVerdict = pb.path("verdict").asText(null);
-        String reason = "Playbook fallback — Gemini unusable, checklist=" + score + "/7"
+        String reason = "Playbook fallback — mentor unavailable, checklist=" + score + "/7"
             + (pbVerdict != null && !pbVerdict.isBlank() ? " (" + pbVerdict + ")" : "")
             + ". Mechanical plan applied.";
 
@@ -679,7 +690,7 @@ public class MentorSignalReviewService {
         );
 
         List<String> errors = new ArrayList<>(structured.errors() != null ? structured.errors() : List.of());
-        errors.add("Gemini rejection overridden by playbook fallback circuit.");
+        errors.add("Mentor unavailable — decision delegated to playbook fallback circuit.");
 
         MentorStructuredResponse promoted = new MentorStructuredResponse(
             structured.technicalQuickAnalysis(),
@@ -701,6 +712,26 @@ public class MentorSignalReviewService {
             analysis.rawResponse(),
             analysis.similarAudits()
         );
+    }
+
+    /**
+     * Maps ATR percentile rank to a volatility regime label consumed by the Gemini
+     * system prompt. Tier thresholds MUST stay in sync with the prompt calibration
+     * in {@code GeminiMentorClient.BASE_SYSTEM_PROMPT}:
+     * <ul>
+     *   <li>{@code null} → {@code null} (missing data, no regime to signal)</li>
+     *   <li>&lt; 20 → {@code LOW} (compressed market, breakouts violent)</li>
+     *   <li>20–80 → {@code NORMAL}</li>
+     *   <li>80–90 → {@code ELEVATED} (above-average, tradable with flow confirmation)</li>
+     *   <li>&gt; 90 → {@code EXTREME} (crisis, news, liquidation)</li>
+     * </ul>
+     */
+    static String classifyVolatilityRegime(Integer atrPercentileRank) {
+        if (atrPercentileRank == null) return null;
+        if (atrPercentileRank > 90) return "EXTREME";
+        if (atrPercentileRank > 80) return "ELEVATED";
+        if (atrPercentileRank < 20) return "LOW";
+        return "NORMAL";
     }
 
     private static int parsePlaybookScore(String raw) {
@@ -1098,10 +1129,7 @@ public class MentorSignalReviewService {
         ));
 
         Integer atrPctRank = computeAtrPercentileRank(candles, 14);
-        String volatilityRegime = atrPctRank == null ? null
-            : atrPctRank > 80 ? "EXTREME"
-            : atrPctRank < 20 ? "LOW"
-            : "NORMAL";
+        String volatilityRegime = classifyVolatilityRegime(atrPctRank);
         payload.put("risk_management_gatekeeper", linkedMap(
             "current_atr_focus", atr,
             "atr_percentile_rank", atrPctRank,

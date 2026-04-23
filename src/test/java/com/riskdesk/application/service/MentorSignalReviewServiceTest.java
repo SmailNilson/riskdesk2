@@ -761,13 +761,14 @@ class MentorSignalReviewServiceTest {
         );
     }
 
-    private static MentorAnalyzeResponse ineligibleResponse(String reason) {
+    /** Simulates a truncated / unparseable Gemini response — the only case where the fallback should activate. */
+    private static MentorAnalyzeResponse mentorUnavailableResponse(String reason) {
         MentorStructuredResponse structured = new MentorStructuredResponse(
             "Truncated analysis.",
             List.of(),
             new java.util.ArrayList<>(List.of("Réponse du mentor tronquée — reconstruction partielle appliquée.")),
             "Trade Non-Conforme - Analyse Partielle",
-            ExecutionEligibilityStatus.INELIGIBLE,
+            ExecutionEligibilityStatus.MENTOR_UNAVAILABLE,
             reason,
             "Improve mentor robustness.",
             null
@@ -775,10 +776,25 @@ class MentorSignalReviewServiceTest {
         return new MentorAnalyzeResponse(null, "gemini-test", null, structured, "{truncated}", List.of());
     }
 
+    /** Simulates a clean, structured INELIGIBLE verdict from Gemini — must NEVER be flipped to ELIGIBLE. */
+    private static MentorAnalyzeResponse genuineIneligibleResponse(String reason) {
+        MentorStructuredResponse structured = new MentorStructuredResponse(
+            "Setup rejected — DXY bullish against LONG.",
+            List.of("Structure respectée"),
+            new java.util.ArrayList<>(List.of("Macro contre le trade", "R:R insuffisant")),
+            "Trade Non-Conforme - Erreur de Processus",
+            ExecutionEligibilityStatus.INELIGIBLE,
+            reason,
+            "Attendre un alignement macro avant d'entrer.",
+            null
+        );
+        return new MentorAnalyzeResponse(1L, "gemini-test", null, structured, "{valid-json}", List.of());
+    }
+
     @Test
     void applyPlaybookFallback_promotesToEligibleWhenScoreHighAndMechanicalPlanPresent() throws Exception {
         MentorSignalReviewService service = newServiceForFallbackTests();
-        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini truncated, no decision.");
+        MentorAnalyzeResponse ineligible = mentorUnavailableResponse("Gemini truncated, no decision.");
         JsonNode payload = objectMapper.readTree("""
             {
               "metadata": {"asset": "MGC1!"},
@@ -815,7 +831,7 @@ class MentorSignalReviewServiceTest {
     @Test
     void applyPlaybookFallback_leavesResponseUnchangedWhenScoreTooLow() throws Exception {
         MentorSignalReviewService service = newServiceForFallbackTests();
-        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini rejected.");
+        MentorAnalyzeResponse unavailable = mentorUnavailableResponse("Gemini truncated.");
         JsonNode payload = objectMapper.readTree("""
             {
               "playbook_pre_analysis": {
@@ -825,15 +841,15 @@ class MentorSignalReviewServiceTest {
             }
             """);
 
-        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(unavailable, payload);
 
-        assertThat(effective).isSameAs(ineligible);
+        assertThat(effective).isSameAs(unavailable);
     }
 
     @Test
     void applyPlaybookFallback_leavesResponseUnchangedWhenMechanicalPlanMissing() throws Exception {
         MentorSignalReviewService service = newServiceForFallbackTests();
-        MentorAnalyzeResponse ineligible = ineligibleResponse("Gemini rejected.");
+        MentorAnalyzeResponse unavailable = mentorUnavailableResponse("Gemini truncated.");
         JsonNode payload = objectMapper.readTree("""
             {
               "playbook_pre_analysis": {
@@ -843,9 +859,39 @@ class MentorSignalReviewServiceTest {
             }
             """);
 
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(unavailable, payload);
+
+        assertThat(effective).isSameAs(unavailable);
+    }
+
+    @Test
+    void applyPlaybookFallback_neverPromotesGenuineIneligibleVerdict() throws Exception {
+        // Codex P1: a real Gemini "no" must stay a no. The playbook fallback only
+        // activates for technical failures (MENTOR_UNAVAILABLE), never for a
+        // structured INELIGIBLE verdict — otherwise we silently flip trades the
+        // model rejected on purpose.
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = genuineIneligibleResponse("Macro contre le trade.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "verdict": "TRADE_VALID",
+                "mechanical_plan": {
+                  "entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0,
+                  "sl_rationale": "Below demand OB."
+                }
+              }
+            }
+            """);
+
         MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
 
+        // Must remain the exact same instance — no promotion, no mutation.
         assertThat(effective).isSameAs(ineligible);
+        assertThat(effective.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(effective.analysis().verdict()).doesNotContain("Playbook Fallback");
     }
 
     @Test
@@ -890,6 +936,27 @@ class MentorSignalReviewServiceTest {
     // shifted all session boundaries ±1 h between summer (EDT, UTC-4) and
     // winter (EST, UTC-5). The new mapping routes through
     // TradingSessionResolver so labels stay correct across DST transitions.
+
+    // ── Volatility regime tier labels (Codex P2) ─────────────────────────
+    // The payload builder labels must match the GeminiMentorClient prompt
+    // calibration: ELEVATED = 80-90, EXTREME = >90. A mismatch makes the
+    // prompt's ELEVATED branch unreachable and all 80+ setups get flagged
+    // EXTREME, defeating the intended relaxation of volatility filtering.
+
+    @Test
+    void classifyVolatilityRegime_mapsThresholdsToExpectedLabels() {
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(null)).isNull();
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(0)).isEqualTo("LOW");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(19)).isEqualTo("LOW");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(20)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(50)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(80)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(81)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(85)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(90)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(91)).isEqualTo("EXTREME");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(99)).isEqualTo("EXTREME");
+    }
 
     @Test
     void inferMarketSession_nyMorningInBothDstPhases_tagsAsNewYork() {
