@@ -94,23 +94,32 @@ export default function AiMentorDesk({
   }), [reviews.length, signalReviews.length, behaviourReviews.length]);
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 overflow-hidden">
-      {/* Header + Tab bar */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800">
-        <h2 className="text-sm font-bold tracking-tight text-white">
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 overflow-hidden min-w-0">
+      {/* Header + Tab bar. Two rows so the 7 tabs stay legible even when the
+          right zone is compressed — the tab bar scrolls horizontally before
+          the content wraps word-by-word. */}
+      <div className="flex flex-col gap-2 px-3 py-2 border-b border-zinc-800">
+        <h2 className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
           AI Mentor<span className="text-emerald-400">Desk</span>
         </h2>
 
-        {/* Segmented control */}
-        <div className="flex rounded-lg overflow-hidden border border-zinc-700 bg-zinc-800/50">
+        {/* Segmented control — scrollable when narrower than content. */}
+        <div
+          className="flex rounded-lg overflow-x-auto overflow-y-hidden border border-zinc-700 bg-zinc-800/50 scrollbar-thin"
+          role="tablist"
+        >
           {TABS.map(tab => {
             const isActive = activeTab === tab.key;
             const count = tabCounts[tab.key];
             return (
               <button
                 key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
                 onClick={() => setActiveTab(tab.key)}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                title={tab.label}
+                className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors flex items-center gap-1 shrink-0 whitespace-nowrap ${
                   isActive
                     ? 'bg-zinc-600 text-white'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50'

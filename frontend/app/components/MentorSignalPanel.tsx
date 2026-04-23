@@ -438,14 +438,17 @@ export default function MentorSignalPanel({
 
   return (
     <div className="rounded-lg border border-cyan-900/40 bg-zinc-900/80 p-3">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
+      {/* Header: title on row 1; controls wrap to subsequent rows as needed so
+          a compressed side-zone width doesn't force vertical single-letter
+          wrapping of the control labels. */}
+      <div className="mb-3 flex flex-col gap-2">
+        <div className="min-w-0">
           <div className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">Mentor Alert Review</div>
-          <div className="text-[10px] text-zinc-500">
+          <div className="text-[10px] text-zinc-500 leading-snug">
             Alertes groupees quand elles arrivent en meme temps (~90s) sur le meme instrument/timeframe/direction.
           </div>
         </div>
-        <div className="flex items-center gap-2 text-[10px]">
+        <div className="flex flex-wrap items-center gap-2 text-[10px]">
           <button
             onClick={() => void toggleAutoAnalysis()}
             disabled={togglingAuto}
@@ -519,7 +522,7 @@ export default function MentorSignalPanel({
           Aucune alerte qualifiee disponible pour l&apos;instant.
         </div>
       ) : (
-        <div className="grid gap-3 xl:grid-cols-[0.95fr_1.45fr]">
+        <div className="grid gap-3">
           <div className="max-h-[500px] space-y-2 overflow-y-auto pr-1">
             {filteredGroups.map(group => {
               const bestReview = groupPreferredReview(group);

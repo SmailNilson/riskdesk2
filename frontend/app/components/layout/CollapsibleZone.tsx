@@ -11,18 +11,25 @@ interface CollapsibleZoneProps {
   side: 'left' | 'right';
   /** Initial collapsed state before localStorage has been read. */
   defaultCollapsed?: boolean;
+  /**
+   * Optional controlled mode. When both are provided, the zone is fully
+   * driven by the parent. This lets the parent mirror the state into the
+   * grid's template-columns so track widths follow the actual zone state.
+   */
+  collapsed?: boolean;
+  onCollapsedChange?: (next: boolean) => void;
   children: React.ReactNode;
 }
 
 const STORAGE_PREFIX = 'riskdesk.layout.zone.';
 
-export default function CollapsibleZone({
-  id,
-  title,
-  side,
-  defaultCollapsed = false,
-  children,
-}: CollapsibleZoneProps) {
+/**
+ * Hook that manages a zone's collapsed state in localStorage. Exported so the
+ * Dashboard can read the same state used by CollapsibleZone to compute the
+ * grid's `grid-template-columns` — without this, the zone shrinks visually
+ * while the grid track keeps its old width.
+ */
+export function useCollapsibleZoneState(id: string, defaultCollapsed = false) {
   const [collapsed, setCollapsed] = useState<boolean>(defaultCollapsed);
   const [hydrated, setHydrated] = useState(false);
 
@@ -48,7 +55,30 @@ export default function CollapsibleZone({
     }
   }, [collapsed, hydrated, id]);
 
-  const toggle = () => setCollapsed(c => !c);
+  return { collapsed, setCollapsed, hydrated };
+}
+
+export default function CollapsibleZone({
+  id,
+  title,
+  side,
+  defaultCollapsed = false,
+  collapsed: controlledCollapsed,
+  onCollapsedChange,
+  children,
+}: CollapsibleZoneProps) {
+  const isControlled = controlledCollapsed !== undefined;
+  const internal = useCollapsibleZoneState(id, defaultCollapsed);
+  const collapsed = isControlled ? controlledCollapsed : internal.collapsed;
+
+  const toggle = () => {
+    const next = !collapsed;
+    if (isControlled) {
+      onCollapsedChange?.(next);
+    } else {
+      internal.setCollapsed(next);
+    }
+  };
 
   // Chevron glyph: collapsed left zone shows ► (expand right), expanded shows ◄ (collapse left).
   const chevron = collapsed
@@ -65,7 +95,7 @@ export default function CollapsibleZone({
   if (collapsed) {
     return (
       <aside
-        className={`${baseClasses} w-10 min-w-[2.5rem] items-center py-2 gap-2 select-none`}
+        className={`${baseClasses} w-full lg:w-10 lg:min-w-[2.5rem] items-center py-2 gap-2 select-none`}
         aria-label={`${title} (collapsed)`}
       >
         <button
@@ -77,7 +107,7 @@ export default function CollapsibleZone({
           {chevron}
         </button>
         <div
-          className="text-[10px] tracking-widest uppercase text-zinc-500 font-semibold"
+          className="hidden lg:block text-[10px] tracking-widest uppercase text-zinc-500 font-semibold"
           style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
         >
           {title}
@@ -88,23 +118,23 @@ export default function CollapsibleZone({
 
   return (
     <aside
-      className={`${baseClasses} w-full lg:w-[340px] lg:min-w-[320px] lg:max-w-[420px]`}
+      className={`${baseClasses} w-full min-w-0`}
       aria-label={title}
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
-        <span className="text-[11px] tracking-widest uppercase text-zinc-400 font-semibold">
+        <span className="text-[11px] tracking-widest uppercase text-zinc-400 font-semibold truncate">
           {title}
         </span>
         <button
           type="button"
           onClick={toggle}
           title={`Collapse ${title}`}
-          className="text-xs text-zinc-500 hover:text-zinc-200 px-1"
+          className="text-xs text-zinc-500 hover:text-zinc-200 px-1 shrink-0"
         >
           {chevron}
         </button>
       </div>
-      <div className="flex flex-col gap-3 p-3 overflow-y-auto">{children}</div>
+      <div className="flex flex-col gap-3 p-3 overflow-y-auto overflow-x-hidden">{children}</div>
     </aside>
   );
 }
