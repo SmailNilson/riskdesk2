@@ -40,10 +40,12 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -85,9 +87,21 @@ public class OrderFlowOrchestrator {
     /** Cached ATR(14) per instrument from 5m candles — refreshed every 60s. */
     private final ConcurrentHashMap<Instrument, Double> atrCache = new ConcurrentHashMap<>();
 
-    private volatile boolean tickByTickSubscribed = false;
-    private volatile boolean depthSubscribed = false;
-    private volatile long tickByTickSubscribedAt = 0;
+    /**
+     * Per-instrument tick-by-tick subscription tracking.
+     * <p>
+     * Previously a global {@code tickByTickSubscribed} flag marked "all or nothing",
+     * which meant a single-instrument drop (e.g. MCL during the 17:00 ET WTI session
+     * break) could not be detected or re-subscribed without a full service restart.
+     * Now tracked per-instrument so we can evict and re-subscribe individually.
+     */
+    private final Set<Instrument> subscribedTickByTick = ConcurrentHashMap.newKeySet();
+    /** When each instrument was last successfully subscribed (for the 5 min grace period). */
+    private final ConcurrentHashMap<Instrument, Long> tickSubscribedAt = new ConcurrentHashMap<>();
+
+    /** Per-instrument market-depth subscription tracking. Same rationale as tick-by-tick. */
+    private final Set<Instrument> subscribedDepth = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<Instrument, Long> depthSubscribedAt = new ConcurrentHashMap<>();
 
     public OrderFlowOrchestrator(IbGatewayNativeClient nativeClient,
                                   IbGatewayContractResolver contractResolver,
@@ -146,8 +160,9 @@ public class OrderFlowOrchestrator {
         nativeClient.setContractResolver(contractResolver);
         nativeClient.setDepthNumRows(properties.getDepth().getNumRows());
         tickByTickClient.setDisconnectionCallback(() -> {
-            log.warn("Order flow: tick-by-tick connection lost — will reconnect on next scheduled check");
-            tickByTickSubscribed = false;
+            log.warn("Order flow: tick-by-tick connection lost — clearing all subscriptions, will reconnect on next scheduled check");
+            subscribedTickByTick.clear();
+            tickSubscribedAt.clear();
         });
     }
 
@@ -156,20 +171,24 @@ public class OrderFlowOrchestrator {
     // -------------------------------------------------------------------------
 
     /**
-     * Periodically attempts to subscribe tick-by-tick for configured instruments.
-     * Runs every 30 seconds until all instruments are subscribed.
-     * Contracts must be resolved first (handled by ActiveContractRegistryInitializer).
+     * Periodically subscribes tick-by-tick for any configured instrument not yet subscribed.
+     * <p>
+     * Runs every 30 seconds and only touches instruments <b>missing</b> from
+     * {@link #subscribedTickByTick}. A single-instrument drop (e.g. MCL during the
+     * 17:00 ET WTI session break) is therefore recovered on the next tick without
+     * affecting other instruments.
      */
     @Scheduled(fixedDelay = 30_000, initialDelay = 60_000)
     public void ensureTickByTickSubscriptions() {
-        if (!properties.getTickByTick().isEnabled() || tickByTickSubscribed) {
-            return;
-        }
+        if (!properties.getTickByTick().isEnabled()) return;
 
         // Wait for main connection to be up (needed for contract resolution + bid/ask quotes)
-        if (!nativeClient.isConnected()) {
-            return;
-        }
+        if (!nativeClient.isConnected()) return;
+
+        // Early-out: nothing left to subscribe
+        List<String> configured = properties.getTickByTick().getInstruments();
+        List<Instrument> missing = missingInstruments(configured, subscribedTickByTick);
+        if (missing.isEmpty()) return;
 
         // Connect the dedicated tick-by-tick EClientSocket (separate clientId)
         if (!tickByTickClient.isConnected()) {
@@ -180,10 +199,9 @@ public class OrderFlowOrchestrator {
             }
         }
 
-        int subscribed = 0;
-        for (String instrumentName : properties.getTickByTick().getInstruments()) {
+        long now = System.currentTimeMillis();
+        for (Instrument instrument : missing) {
             try {
-                Instrument instrument = Instrument.valueOf(instrumentName);
                 if (!instrument.isExchangeTradedFuture()) continue;
 
                 Optional<IbGatewayResolvedContract> resolved = contractResolver.resolve(instrument);
@@ -193,19 +211,31 @@ public class OrderFlowOrchestrator {
                 }
 
                 tickByTickClient.subscribeTickByTick(resolved.get().contract(), instrument);
-                subscribed++;
-            } catch (IllegalArgumentException e) {
-                log.warn("Unknown instrument in tick-by-tick config: {}", instrumentName);
+                subscribedTickByTick.add(instrument);
+                tickSubscribedAt.put(instrument, now);
+                log.info("Order flow: tick-by-tick subscribed for {} ({}/{})",
+                         instrument, subscribedTickByTick.size(), configured.size());
             } catch (Exception e) {
-                log.warn("Failed to subscribe tick-by-tick for {}: {}", instrumentName, e.getMessage());
+                log.warn("Failed to subscribe tick-by-tick for {}: {}", instrument, e.getMessage());
             }
         }
+    }
 
-        if (subscribed == properties.getTickByTick().getInstruments().size()) {
-            tickByTickSubscribed = true;
-            tickByTickSubscribedAt = System.currentTimeMillis();
-            log.info("Order flow: tick-by-tick subscribed for all {} instruments (via dedicated EClientSocket)", subscribed);
+    /**
+     * Helper: resolve configured instrument names, skip unknown ones, and return
+     * those not yet present in the given subscribed set.
+     */
+    private List<Instrument> missingInstruments(List<String> configured, Set<Instrument> subscribed) {
+        List<Instrument> missing = new ArrayList<>();
+        for (String name : configured) {
+            try {
+                Instrument inst = Instrument.valueOf(name);
+                if (!subscribed.contains(inst)) missing.add(inst);
+            } catch (IllegalArgumentException e) {
+                // Unknown instrument names are logged once by the subscribe loops above/below
+            }
         }
+        return missing;
     }
 
     // -------------------------------------------------------------------------
@@ -213,18 +243,21 @@ public class OrderFlowOrchestrator {
     // -------------------------------------------------------------------------
 
     /**
-     * Periodically attempts to subscribe depth for configured instruments (MNQ, MCL, MGC).
-     * Runs every 30 seconds until all instruments are subscribed.
+     * Periodically subscribes market depth for any configured instrument not yet subscribed.
+     * Runs every 30 seconds — same per-instrument logic as tick-by-tick.
      */
     @Scheduled(fixedDelay = 30_000, initialDelay = 90_000)
     public void ensureDepthSubscriptions() {
-        if (!properties.getDepth().isEnabled() || depthSubscribed) return;
+        if (!properties.getDepth().isEnabled()) return;
         if (!nativeClient.isConnected()) return;
 
-        int subscribed = 0;
-        for (String instrumentName : properties.getDepth().getInstruments()) {
+        List<String> configured = properties.getDepth().getInstruments();
+        List<Instrument> missing = missingInstruments(configured, subscribedDepth);
+        if (missing.isEmpty()) return;
+
+        long now = System.currentTimeMillis();
+        for (Instrument instrument : missing) {
             try {
-                Instrument instrument = Instrument.valueOf(instrumentName);
                 if (!instrument.isExchangeTradedFuture()) continue;
 
                 Optional<IbGatewayResolvedContract> resolved = contractResolver.resolve(instrument);
@@ -235,17 +268,13 @@ public class OrderFlowOrchestrator {
 
                 nativeClient.subscribeDepth(resolved.get().contract(), instrument,
                                              properties.getDepth().getNumRows());
-                subscribed++;
-            } catch (IllegalArgumentException e) {
-                log.warn("Unknown instrument in depth config: {}", instrumentName);
+                subscribedDepth.add(instrument);
+                depthSubscribedAt.put(instrument, now);
+                log.info("Order flow: market depth subscribed for {} ({}/{})",
+                         instrument, subscribedDepth.size(), configured.size());
             } catch (Exception e) {
-                log.warn("Failed to subscribe depth for {}: {}", instrumentName, e.getMessage());
+                log.warn("Failed to subscribe depth for {}: {}", instrument, e.getMessage());
             }
-        }
-
-        if (subscribed == properties.getDepth().getInstruments().size()) {
-            depthSubscribed = true;
-            log.info("Order flow: market depth subscribed for {} instruments", subscribed);
         }
     }
 
@@ -527,39 +556,37 @@ public class OrderFlowOrchestrator {
             return;
         }
 
-        // If tick-by-tick was subscribed but no real tick data is flowing,
-        // trigger resubscription — but only if subscriptions are old enough.
-        // During low-liquidity periods (Sunday evening, holidays), ticks can be
-        // sparse. Aggressive resubscription kills active subscriptions.
-        // Safety net: if tick client silently dropped without firing connectionClosed()
-        if (tickByTickSubscribed && !tickByTickClient.isConnected()) {
-            log.warn("Connection health check: tick client disconnected without callback — resetting subscription flag");
-            tickByTickSubscribed = false;
+        // Safety net: tick client silently dropped without firing connectionClosed()
+        if (!subscribedTickByTick.isEmpty() && !tickByTickClient.isConnected()) {
+            log.warn("Connection health check: tick client disconnected without callback — clearing all subscriptions");
+            subscribedTickByTick.clear();
+            tickSubscribedAt.clear();
             return;
         }
 
-        if (tickByTickSubscribed) {
-            // Don't re-subscribe within 5 minutes of initial subscription
-            long elapsed = System.currentTimeMillis() - tickByTickSubscribedAt;
-            if (elapsed < 300_000) {
-                return;
-            }
+        // Per-instrument eviction: any instrument with no real tick data flowing for
+        // more than the grace period gets evicted, and ensureTickByTickSubscriptions()
+        // will re-subscribe it on the next scheduled tick.
+        // This is what catches single-instrument drops like MCL after its 17:00 ET
+        // session break, without disturbing instruments whose ticks are flowing normally.
+        TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
+        if (tickDataPort == null) return;
 
-            TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
-            if (tickDataPort == null) return;
-
-            boolean anyDataFlowing = false;
-            for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-                if (tickDataPort.isRealTickDataAvailable(instrument)) {
-                    anyDataFlowing = true;
-                    break;
-                }
+        long now = System.currentTimeMillis();
+        long gracePeriodMs = 300_000L;
+        List<Instrument> toEvict = new ArrayList<>();
+        for (Instrument instrument : subscribedTickByTick) {
+            Long subscribedAt = tickSubscribedAt.get(instrument);
+            if (subscribedAt == null || (now - subscribedAt) < gracePeriodMs) continue;
+            if (!tickDataPort.isRealTickDataAvailable(instrument)) {
+                toEvict.add(instrument);
             }
-
-            if (!anyDataFlowing) {
-                log.warn("Connection health check: connected but no tick data flowing after 5+ min — resetting subscription flag");
-                tickByTickSubscribed = false;
-            }
+        }
+        for (Instrument instrument : toEvict) {
+            log.warn("Connection health check: no real tick data for {} after 5+ min — evicting for re-subscription",
+                     instrument);
+            subscribedTickByTick.remove(instrument);
+            tickSubscribedAt.remove(instrument);
         }
     }
 
@@ -568,25 +595,33 @@ public class OrderFlowOrchestrator {
     // -------------------------------------------------------------------------
 
     public boolean isTickByTickActive() {
-        return tickByTickSubscribed;
+        return !subscribedTickByTick.isEmpty();
     }
 
     public Map<String, Object> getStatus() {
         TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
         Map<String, Object> status = new LinkedHashMap<>();
-        status.put("tickByTickSubscribed", tickByTickSubscribed);
+        int configuredTick = properties.getTickByTick().getInstruments().size();
+        status.put("tickByTickSubscribed", subscribedTickByTick.size() == configuredTick && configuredTick > 0);
+        status.put("tickByTickSubscribedCount", subscribedTickByTick.size());
+        status.put("tickByTickConfiguredCount", configuredTick);
+        status.put("depthSubscribedCount", subscribedDepth.size());
         status.put("tickLogBufferSize", tickLogService.getBufferSize());
         status.put("totalTicksLogged", tickLogService.getTotalTicksLogged());
 
-        Map<String, String> instrumentStatus = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> instrumentStatus = new LinkedHashMap<>();
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+            Map<String, Object> perInst = new LinkedHashMap<>();
             String source = "UNAVAILABLE";
             if (tickDataPort != null && tickDataPort.isRealTickDataAvailable(instrument)) {
                 source = "REAL_TICKS";
             } else if (tickDataPort != null) {
                 source = "CLV_ESTIMATED";
             }
-            instrumentStatus.put(instrument.name(), source);
+            perInst.put("source", source);
+            perInst.put("tickSubscribed", subscribedTickByTick.contains(instrument));
+            perInst.put("depthSubscribed", subscribedDepth.contains(instrument));
+            instrumentStatus.put(instrument.name(), perInst);
         }
         status.put("instruments", instrumentStatus);
         return status;
