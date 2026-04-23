@@ -8,6 +8,9 @@ import {
   AbsorptionEvent,
   SpoofingEvent,
   IcebergEvent,
+  DistributionEvent,
+  MomentumEvent,
+  CycleEvent,
 } from '@/app/hooks/useOrderFlow';
 import { api } from '@/app/lib/api';
 
@@ -34,6 +37,9 @@ type AbsorptionRow = AbsorptionEvent & {
   totalVolume?: number;
 };
 type SpoofingRow = SpoofingEvent & { durationSeconds?: number; priceCrossed?: boolean };
+type DistributionRow = DistributionEvent;
+type MomentumRow = MomentumEvent & { momentumScore?: number; aggressiveDelta?: number };
+type CycleRow = CycleEvent;
 
 function prependUnique<T extends { timestamp: string; instrument: string }>(
   list: T[],
@@ -228,6 +234,124 @@ function SpoofingRowView({ event }: { event: SpoofingRow }) {
   );
 }
 
+function DistributionRowView({ event }: { event: DistributionRow }) {
+  const isDistribution = event.type === 'DISTRIBUTION';
+  const confColor =
+    event.confidenceScore >= 80 ? 'text-red-300'
+    : event.confidenceScore >= 60 ? 'text-orange-300'
+    : 'text-yellow-300';
+
+  return (
+    <div className="flex items-center gap-2 px-2 py-1 text-[11px] rounded bg-zinc-800/40 hover:bg-zinc-800/70 transition-colors border-l-2 border-l-amber-600/60">
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-900/60 text-amber-300">
+        {isDistribution ? 'DIST' : 'ACCUM'}
+      </span>
+      <span className="text-zinc-400 shrink-0">{event.instrument}</span>
+      <span className={`shrink-0 ${isDistribution ? 'text-red-400' : 'text-emerald-400'}`}>
+        {isDistribution ? 'BEAR' : 'BULL'}
+      </span>
+      <span className="text-zinc-500 truncate">
+        ×{event.consecutiveCount} · avg: {event.avgScore?.toFixed(1) ?? '—'}
+        {' · conf: '}<span className={confColor}>{event.confidenceScore}</span>
+        {event.resistanceLevel != null ? ` · lvl@${event.resistanceLevel.toFixed(2)}` : ''}
+      </span>
+      <span className="ml-auto text-zinc-600 shrink-0" title={event.timestamp}>
+        {formatRelativeTime(event.timestamp)}
+      </span>
+    </div>
+  );
+}
+
+function MomentumRowView({ event }: { event: MomentumRow }) {
+  const isBull = event.side === 'BULLISH_MOMENTUM';
+  const score = event.momentumScore ?? event.score;
+  const delta = event.delta ?? event.aggressiveDelta;
+  return (
+    <div className="flex items-center gap-2 px-2 py-1 text-[11px] rounded bg-zinc-800/40 hover:bg-zinc-800/70 transition-colors border-l-2 border-l-cyan-600/60">
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-900/60 text-cyan-300">
+        MOM
+      </span>
+      <span className="text-zinc-400 shrink-0">{event.instrument}</span>
+      <span className={`shrink-0 ${isBull ? 'text-emerald-400' : 'text-red-400'}`}>
+        {isBull ? 'BULL' : 'BEAR'}
+      </span>
+      <span className="text-zinc-500 truncate">
+        score: {score?.toFixed(1) ?? '—'} · delta: {delta?.toLocaleString() ?? '—'}
+        {event.priceMoveTicks != null ? ` · move: ${event.priceMoveTicks.toFixed(1)}t` : ''}
+      </span>
+      <span className="ml-auto text-zinc-600 shrink-0" title={event.timestamp}>
+        {formatRelativeTime(event.timestamp)}
+      </span>
+    </div>
+  );
+}
+
+function CyclePhaseBar({ phase }: { phase: CycleRow['currentPhase'] }) {
+  const steps: Array<{ key: CycleRow['currentPhase']; label: string }> = [
+    { key: 'PHASE_1', label: 'P1' },
+    { key: 'PHASE_2', label: 'P2' },
+    { key: 'PHASE_3', label: 'P3' },
+    { key: 'COMPLETE', label: 'DONE' },
+  ];
+  const activeIndex = steps.findIndex(s => s.key === phase);
+
+  return (
+    <div className="flex items-center gap-0.5">
+      {steps.map((s, i) => {
+        const active = i <= activeIndex;
+        return (
+          <span
+            key={s.key}
+            className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
+              active
+                ? i === steps.length - 1
+                  ? 'bg-emerald-900/80 text-emerald-200'
+                  : 'bg-indigo-900/80 text-indigo-200'
+                : 'bg-zinc-800 text-zinc-600'
+            }`}
+          >
+            {s.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function CycleRowView({ event }: { event: CycleRow }) {
+  const isBearish = event.cycleType === 'BEARISH_CYCLE';
+  const complete = event.currentPhase === 'COMPLETE';
+  const confColor =
+    event.confidence >= 80 ? 'text-emerald-300'
+    : event.confidence >= 60 ? 'text-lime-300'
+    : 'text-yellow-300';
+  const move = Math.round(event.totalPriceMove);
+
+  return (
+    <div className={`flex items-center gap-2 px-2 py-1 text-[11px] rounded bg-zinc-800/40 hover:bg-zinc-800/70 transition-colors border-l-2 ${
+      complete ? 'border-l-emerald-500' : 'border-l-indigo-500/60'
+    }`}>
+      <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+        complete ? 'bg-emerald-900/60 text-emerald-300' : 'bg-indigo-900/60 text-indigo-300'
+      }`}>
+        CYCLE
+      </span>
+      <span className="text-zinc-400 shrink-0">{event.instrument}</span>
+      <span className={`shrink-0 ${isBearish ? 'text-red-400' : 'text-emerald-400'}`}>
+        {isBearish ? '▼ BEAR' : '▲ BULL'}
+      </span>
+      <CyclePhaseBar phase={event.currentPhase} />
+      <span className="text-zinc-500 truncate">
+        conf: <span className={confColor}>{event.confidence}</span>
+        {complete ? ` · move: ${move}pts · ${event.totalDurationMinutes.toFixed(1)}min` : ''}
+      </span>
+      <span className="ml-auto text-zinc-600 shrink-0" title={event.timestamp}>
+        {formatRelativeTime(event.timestamp)}
+      </span>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main Panel
 // ---------------------------------------------------------------------------
@@ -239,6 +363,9 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
     absorptionEvents,
     spoofingEvents,
     icebergEvents,
+    distributionEvents,
+    momentumEvents,
+    cycleEvents,
     connected,
   } = useOrderFlow();
 
@@ -247,6 +374,9 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
   const [icebergHistory, setIcebergHistory] = useState<IcebergRow[]>([]);
   const [absorptionHistory, setAbsorptionHistory] = useState<AbsorptionRow[]>([]);
   const [spoofingHistory, setSpoofingHistory] = useState<SpoofingRow[]>([]);
+  const [distributionHistory, setDistributionHistory] = useState<DistributionRow[]>([]);
+  const [momentumHistory, setMomentumHistory] = useState<MomentumRow[]>([]);
+  const [cycleHistory, setCycleHistory] = useState<CycleRow[]>([]);
 
   // --- REST seed on mount / when selected instrument changes -----------------
   useEffect(() => {
@@ -254,6 +384,9 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
       setIcebergHistory([]);
       setAbsorptionHistory([]);
       setSpoofingHistory([]);
+      setDistributionHistory([]);
+      setMomentumHistory([]);
+      setCycleHistory([]);
       return;
     }
     let cancelled = false;
@@ -276,6 +409,27 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
       .getSpoofingEvents(selectedInstrument, HISTORY_LIMIT)
       .then(rows => {
         if (!cancelled) setSpoofingHistory(rows as SpoofingRow[]);
+      })
+      .catch(() => { /* best-effort */ });
+
+    api
+      .getDistributionEvents(selectedInstrument, HISTORY_LIMIT)
+      .then(rows => {
+        if (!cancelled) setDistributionHistory(rows as unknown as DistributionRow[]);
+      })
+      .catch(() => { /* best-effort */ });
+
+    api
+      .getMomentumEvents(selectedInstrument, HISTORY_LIMIT)
+      .then(rows => {
+        if (!cancelled) setMomentumHistory(rows as unknown as MomentumRow[]);
+      })
+      .catch(() => { /* best-effort */ });
+
+    api
+      .getCycleEvents(selectedInstrument, HISTORY_LIMIT)
+      .then(rows => {
+        if (!cancelled) setCycleHistory(rows as unknown as CycleRow[]);
       })
       .catch(() => { /* best-effort */ });
 
@@ -303,6 +457,27 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
     if (latest.instrument !== selectedInstrument) return;
     setSpoofingHistory(prev => prependUnique(prev, latest as SpoofingRow, HISTORY_LIMIT));
   }, [spoofingEvents, selectedInstrument]);
+
+  useEffect(() => {
+    if (!selectedInstrument || distributionEvents.length === 0) return;
+    const latest = distributionEvents[0];
+    if (latest.instrument !== selectedInstrument) return;
+    setDistributionHistory(prev => prependUnique(prev, latest, HISTORY_LIMIT));
+  }, [distributionEvents, selectedInstrument]);
+
+  useEffect(() => {
+    if (!selectedInstrument || momentumEvents.length === 0) return;
+    const latest = momentumEvents[0];
+    if (latest.instrument !== selectedInstrument) return;
+    setMomentumHistory(prev => prependUnique(prev, latest as MomentumRow, HISTORY_LIMIT));
+  }, [momentumEvents, selectedInstrument]);
+
+  useEffect(() => {
+    if (!selectedInstrument || cycleEvents.length === 0) return;
+    const latest = cycleEvents[0];
+    if (latest.instrument !== selectedInstrument) return;
+    setCycleHistory(prev => prependUnique(prev, latest, HISTORY_LIMIT));
+  }, [cycleEvents, selectedInstrument]);
 
   // --- Live metrics filtering (unchanged) ------------------------------------
   const flowEntries = Array.from(orderFlowData.values());
@@ -354,6 +529,57 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
           {filteredDepth.length > 0
             ? filteredDepth.map(m => <DepthGauge key={m.instrument} metrics={m} />)
             : <p className="text-xs text-zinc-600 italic">Waiting for depth data...</p>
+          }
+        </div>
+      </div>
+
+      {/* Section 2b: Smart Money Cycle (highest-signal meta-detector) */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+          Smart Money Cycle{selectedInstrument ? ` — ${selectedInstrument}` : ''}
+        </h4>
+        <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+          {cycleHistory.length > 0
+            ? cycleHistory.map((e, i) => (
+                <CycleRowView key={`cycle-${e.timestamp}-${i}`} event={e} />
+              ))
+            : <p className="text-xs text-zinc-600 italic">
+                {selectedInstrument ? 'No cycle events yet' : 'Select an instrument to see smart money cycles'}
+              </p>
+          }
+        </div>
+      </div>
+
+      {/* Section 2c: Distribution / Accumulation setups */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+          Distribution / Accumulation{selectedInstrument ? ` — ${selectedInstrument}` : ''}
+        </h4>
+        <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+          {distributionHistory.length > 0
+            ? distributionHistory.map((e, i) => (
+                <DistributionRowView key={`dist-${e.timestamp}-${i}`} event={e} />
+              ))
+            : <p className="text-xs text-zinc-600 italic">
+                {selectedInstrument ? 'No distribution setups yet' : 'Select an instrument'}
+              </p>
+          }
+        </div>
+      </div>
+
+      {/* Section 2d: Aggressive Momentum Bursts */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+          Momentum Bursts{selectedInstrument ? ` — ${selectedInstrument}` : ''}
+        </h4>
+        <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+          {momentumHistory.length > 0
+            ? momentumHistory.map((e, i) => (
+                <MomentumRowView key={`mom-${e.timestamp}-${i}`} event={e} />
+              ))
+            : <p className="text-xs text-zinc-600 italic">
+                {selectedInstrument ? 'No momentum bursts yet' : 'Select an instrument'}
+              </p>
           }
         </div>
       </div>

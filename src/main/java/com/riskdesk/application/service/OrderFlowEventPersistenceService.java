@@ -1,20 +1,32 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
+import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
 import com.riskdesk.domain.orderflow.event.IcebergDetected;
+import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
+import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
 import com.riskdesk.domain.orderflow.event.SpoofingDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
+import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.IcebergSignal;
+import com.riskdesk.domain.orderflow.model.MomentumSignal;
+import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaFlashCrashEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
 import com.riskdesk.infrastructure.persistence.entity.AbsorptionEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.FlashCrashEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.IcebergEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.SpoofingEventEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,17 +59,26 @@ public class OrderFlowEventPersistenceService {
     private final JpaIcebergEventRepository icebergRepository;
     private final JpaFlashCrashEventRepository flashCrashRepository;
     private final JpaFootprintBarRepository footprintBarRepository;
+    private final JpaDistributionEventRepository distributionRepository;
+    private final JpaMomentumEventRepository momentumRepository;
+    private final JpaCycleEventRepository cycleRepository;
 
     public OrderFlowEventPersistenceService(JpaAbsorptionEventRepository absorptionRepository,
                                             JpaSpoofingEventRepository spoofingRepository,
                                             JpaIcebergEventRepository icebergRepository,
                                             JpaFlashCrashEventRepository flashCrashRepository,
-                                            JpaFootprintBarRepository footprintBarRepository) {
+                                            JpaFootprintBarRepository footprintBarRepository,
+                                            JpaDistributionEventRepository distributionRepository,
+                                            JpaMomentumEventRepository momentumRepository,
+                                            JpaCycleEventRepository cycleRepository) {
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
         this.icebergRepository = icebergRepository;
         this.flashCrashRepository = flashCrashRepository;
         this.footprintBarRepository = footprintBarRepository;
+        this.distributionRepository = distributionRepository;
+        this.momentumRepository = momentumRepository;
+        this.cycleRepository = cycleRepository;
     }
 
     @Async
@@ -128,6 +149,77 @@ public class OrderFlowEventPersistenceService {
     @Async
     @EventListener
     @Transactional
+    public void onDistributionSetupDetected(DistributionSetupDetected event) {
+        try {
+            DistributionSignal signal = event.signal();
+            var entity = new DistributionEventEntity(
+                    event.instrument(),
+                    event.timestamp(),
+                    signal.type().name(),
+                    signal.consecutiveCount(),
+                    signal.avgScore(),
+                    signal.totalDurationSeconds(),
+                    signal.priceAtDetection(),
+                    signal.resistanceLevel(),
+                    signal.confidenceScore()
+            );
+            distributionRepository.save(entity);
+        } catch (Exception e) {
+            log.warn("Failed to persist distribution event for {}: {}", event.instrument(), e.getMessage());
+        }
+    }
+
+    @Async
+    @EventListener
+    @Transactional
+    public void onMomentumBurstDetected(MomentumBurstDetected event) {
+        try {
+            MomentumSignal signal = event.signal();
+            var entity = new MomentumEventEntity(
+                    event.instrument(),
+                    event.timestamp(),
+                    signal.side().name(),
+                    signal.momentumScore(),
+                    signal.aggressiveDelta(),
+                    signal.priceMoveTicks(),
+                    signal.priceMovePoints(),
+                    signal.totalVolume()
+            );
+            momentumRepository.save(entity);
+        } catch (Exception e) {
+            log.warn("Failed to persist momentum event for {}: {}", event.instrument(), e.getMessage());
+        }
+    }
+
+    @Async
+    @EventListener
+    @Transactional
+    public void onSmartMoneyCycleDetected(SmartMoneyCycleDetected event) {
+        try {
+            SmartMoneyCycleSignal signal = event.signal();
+            var entity = new CycleEventEntity(
+                    event.instrument(),
+                    event.timestamp(),
+                    signal.cycleType() != null ? signal.cycleType().name() : null,
+                    signal.currentPhase().name(),
+                    signal.priceAtPhase1(),
+                    signal.priceAtPhase2(),
+                    signal.priceAtPhase3(),
+                    signal.totalPriceMove(),
+                    signal.totalDurationMinutes(),
+                    signal.confidence(),
+                    signal.startedAt(),
+                    signal.completedAt()
+            );
+            cycleRepository.save(entity);
+        } catch (Exception e) {
+            log.warn("Failed to persist cycle event for {}: {}", event.instrument(), e.getMessage());
+        }
+    }
+
+    @Async
+    @EventListener
+    @Transactional
     public void onFlashCrashPhaseChanged(FlashCrashPhaseChanged event) {
         try {
             var entity = new FlashCrashEventEntity(
@@ -160,9 +252,14 @@ public class OrderFlowEventPersistenceService {
             int iceberg = icebergRepository.deleteByTimestampBefore(cutoff);
             int flashCrash = flashCrashRepository.deleteByTimestampBefore(cutoff);
             int footprint = footprintBarRepository.deleteByTimestampBefore(cutoff);
-            if (absorption + spoofing + iceberg + flashCrash + footprint > 0) {
-                log.info("Purged order flow events: {} absorption, {} spoofing, {} iceberg, {} flash crash, {} footprint bars",
-                         absorption, spoofing, iceberg, flashCrash, footprint);
+            int distribution = distributionRepository.deleteByTimestampBefore(cutoff);
+            int momentum = momentumRepository.deleteByTimestampBefore(cutoff);
+            int cycle = cycleRepository.deleteByTimestampBefore(cutoff);
+            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle > 0) {
+                log.info("Purged order flow events: {} absorption, {} spoofing, {} iceberg, {} flash crash, " +
+                         "{} footprint, {} distribution, {} momentum, {} cycle",
+                         absorption, spoofing, iceberg, flashCrash, footprint,
+                         distribution, momentum, cycle);
             }
         } catch (Exception e) {
             log.error("Failed to purge expired order flow events: {}", e.getMessage(), e);
