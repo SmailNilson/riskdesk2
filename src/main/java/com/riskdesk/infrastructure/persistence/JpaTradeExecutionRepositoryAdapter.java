@@ -78,4 +78,20 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
             .map(TradeExecutionEntityMapper::toDomain)
             .toList();
     }
+
+    @Override
+    public Optional<TradeExecutionRecord> findByIbkrOrderId(Integer ibkrOrderId) {
+        if (ibkrOrderId == null) {
+            return Optional.empty();
+        }
+        return repository.findByIbkrOrderId(ibkrOrderId).map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
+    public Optional<TradeExecutionRecord> findByExecutionKey(String executionKey) {
+        if (executionKey == null || executionKey.isBlank()) {
+            return Optional.empty();
+        }
+        return repository.findByExecutionKey(executionKey).map(TradeExecutionEntityMapper::toDomain);
+    }
 }

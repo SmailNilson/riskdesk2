@@ -36,7 +36,13 @@ public record TradeExecutionView(
     String entryFilledAt,
     String virtualExitTriggeredAt,
     String exitSubmittedAt,
-    String closedAt
+    String closedAt,
+    // Slice 3a — IBKR fill tracking
+    BigDecimal filledQuantity,
+    BigDecimal avgFillPrice,
+    String lastFillTime,
+    String orderStatus,
+    Integer ibkrOrderId
 ) {
 
     public static TradeExecutionView from(TradeExecutionRecord record) {
@@ -70,7 +76,12 @@ public record TradeExecutionView(
             toStringValue(record.getEntryFilledAt()),
             toStringValue(record.getVirtualExitTriggeredAt()),
             toStringValue(record.getExitSubmittedAt()),
-            toStringValue(record.getClosedAt())
+            toStringValue(record.getClosedAt()),
+            record.getFilledQuantity(),
+            record.getAvgFillPrice(),
+            toStringValue(record.getLastFillTime()),
+            record.getOrderStatus(),
+            record.getIbkrOrderId()
         );
     }
 

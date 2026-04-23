@@ -109,6 +109,8 @@ These should stay transport-oriented only.
 - `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
 - `application/service/TradeSimulationService.java` — owner of simulation state transitions. Post Phase 1b, dual-writes every transition to the legacy review/audit repositories AND to `TradeSimulationRepositoryPort`.
+- `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
 
 These coordinate use cases and should not become infrastructure adapters.
 
@@ -207,6 +209,7 @@ Current behavior:
 - raw alerts still flow through `/topic/alerts`
 - Mentor review updates still flow through `/topic/mentor-alerts`
 - simulation state transitions are additionally published on `/topic/simulations` (Phase 1 dual-publish; `/topic/mentor-alerts` continues to carry the same events until Phase 2 frontend cutover)
+- live execution fill/status updates (from IBKR `execDetails` + `orderStatus`) are published on `/topic/executions` — payload is `TradeExecutionView` including the new fill fields (`filledQuantity`, `avgFillPrice`, `lastFillTime`, `orderStatus`, `ibkrOrderId`)
 - manual `Ask Mentor` analyses are stored separately in `mentor_audits` with a dedicated `manual-mentor:` source reference and exposed through `/api/mentor/manual-reviews/recent`
 
 ### Mentor Outcome Tracker
@@ -257,6 +260,13 @@ Current behavior:
   - `POST /api/mentor/executions/{executionId}/submit-entry` submits a simple IBKR limit entry order
   - submission is locked on the execution row before broker side effects
   - the IB Gateway adapter uses `orderRef = executionKey` and checks existing live/completed orders before re-submitting
+- Slice 3a is now live — IBKR `execDetails` + `orderStatus` fill tracking:
+  - `TradeExecutionEntity` carries raw IBKR feedback: `filledQuantity`, `avgFillPrice`, `lastFillTime`, `orderStatus`, `ibkrOrderId`, `lastExecId` (per-fill idempotence key)
+  - `ExecutionFillTrackingService` (application) implements the `ExecutionFillListener` domain port and is invoked from `IbGatewayNativeClient` on every IBKR callback
+  - transition from `ENTRY_SUBMITTED` to domain state `ACTIVE` happens on first IBKR `Filled` status; cancellation without any fill transitions to `CANCELLED`; partial-fill-then-cancel is deferred to Slice 3c
+  - WebSocket topic `/topic/executions` carries every state-changing update
+- Slice 3b (next) will add startup reconciliation: query IBKR open/completed orders and reconcile against dangling `trade_executions` rows from prior runs.
+- Slice 3c (future) will add bracket orders — submit SL + TP once entry fills, monitor and close.
 
 ## Operational Commands
 

@@ -36,6 +36,14 @@ public class TradeExecutionRecord {
     private Instant exitSubmittedAt;
     private Instant closedAt;
 
+    // Slice 3a — IBKR fill tracking (raw broker feedback).
+    private BigDecimal filledQuantity;
+    private BigDecimal avgFillPrice;
+    private Instant lastFillTime;
+    private String orderStatus;
+    private Integer ibkrOrderId;
+    private String lastExecId;
+
     public Long getId() {
         return id;
     }
@@ -274,5 +282,53 @@ public class TradeExecutionRecord {
 
     public void setClosedAt(Instant closedAt) {
         this.closedAt = closedAt;
+    }
+
+    public BigDecimal getFilledQuantity() {
+        return filledQuantity;
+    }
+
+    public void setFilledQuantity(BigDecimal filledQuantity) {
+        this.filledQuantity = filledQuantity;
+    }
+
+    public BigDecimal getAvgFillPrice() {
+        return avgFillPrice;
+    }
+
+    public void setAvgFillPrice(BigDecimal avgFillPrice) {
+        this.avgFillPrice = avgFillPrice;
+    }
+
+    public Instant getLastFillTime() {
+        return lastFillTime;
+    }
+
+    public void setLastFillTime(Instant lastFillTime) {
+        this.lastFillTime = lastFillTime;
+    }
+
+    public String getOrderStatus() {
+        return orderStatus;
+    }
+
+    public void setOrderStatus(String orderStatus) {
+        this.orderStatus = orderStatus;
+    }
+
+    public Integer getIbkrOrderId() {
+        return ibkrOrderId;
+    }
+
+    public void setIbkrOrderId(Integer ibkrOrderId) {
+        this.ibkrOrderId = ibkrOrderId;
+    }
+
+    public String getLastExecId() {
+        return lastExecId;
+    }
+
+    public void setLastExecId(String lastExecId) {
+        this.lastExecId = lastExecId;
     }
 }
