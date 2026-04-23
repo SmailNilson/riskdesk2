@@ -8,7 +8,10 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.application.dto.AbsorptionEventView;
+import com.riskdesk.application.dto.CycleEventView;
+import com.riskdesk.application.dto.DistributionEventView;
 import com.riskdesk.application.dto.IcebergEventView;
+import com.riskdesk.application.dto.MomentumEventView;
 import com.riskdesk.application.dto.SpoofingEventView;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.ResponseEntity;
@@ -199,6 +202,58 @@ public class OrderFlowController {
         try {
             Instrument inst = Instrument.valueOf(instrument.toUpperCase());
             List<SpoofingEventView> events = historyService.recentSpoofings(inst, limit);
+            return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/distribution/{instrument}?limit=20
+     * Returns the most recent institutional distribution / accumulation setups,
+     * newest first.
+     */
+    @GetMapping("/distribution/{instrument}")
+    public ResponseEntity<?> getRecentDistributions(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<DistributionEventView> events = historyService.recentDistributions(inst, limit);
+            return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/momentum/{instrument}?limit=20
+     * Returns the most recent aggressive momentum burst events, newest first.
+     */
+    @GetMapping("/momentum/{instrument}")
+    public ResponseEntity<?> getRecentMomentumBursts(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<MomentumEventView> events = historyService.recentMomentumBursts(inst, limit);
+            return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/cycle/{instrument}?limit=20
+     * Returns the most recent smart-money cycle events (partial or complete), newest first.
+     */
+    @GetMapping("/cycle/{instrument}")
+    public ResponseEntity<?> getRecentCycles(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<CycleEventView> events = historyService.recentCycles(inst, limit);
             return ResponseEntity.ok(events);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));

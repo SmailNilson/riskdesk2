@@ -85,6 +85,45 @@ export interface FootprintBar {
   totalDelta: number;
 }
 
+export interface DistributionEvent {
+  instrument: string;
+  type: 'DISTRIBUTION' | 'ACCUMULATION';
+  consecutiveCount: number;
+  avgScore: number;
+  totalDurationSeconds: number;
+  priceAtDetection: number;
+  resistanceLevel: number | null;
+  confidenceScore: number;
+  timestamp: string;
+}
+
+export interface MomentumEvent {
+  instrument: string;
+  side: 'BULLISH_MOMENTUM' | 'BEARISH_MOMENTUM';
+  score: number;
+  delta: number;
+  priceMoveTicks: number;
+  priceMovePoints: number;
+  volume: number;
+  atr: number;
+  timestamp: string;
+}
+
+export interface CycleEvent {
+  instrument: string;
+  cycleType: 'BEARISH_CYCLE' | 'BULLISH_CYCLE';
+  currentPhase: 'PHASE_1' | 'PHASE_2' | 'PHASE_3' | 'COMPLETE';
+  priceAtPhase1: number;
+  priceAtPhase2: number | null;
+  priceAtPhase3: number | null;
+  totalPriceMove: number;
+  totalDurationMinutes: number;
+  confidence: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  timestamp: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -113,6 +152,9 @@ export function useOrderFlow() {
   const [icebergEvents, setIcebergEvents] = useState<IcebergEvent[]>([]);
   const [flashCrashState, setFlashCrashState] = useState<Map<string, FlashCrashState>>(new Map());
   const [footprintData, setFootprintData] = useState<Map<string, FootprintBar>>(new Map());
+  const [distributionEvents, setDistributionEvents] = useState<DistributionEvent[]>([]);
+  const [momentumEvents, setMomentumEvents] = useState<MomentumEvent[]>([]);
+  const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
   const [connected, setConnected] = useState(false);
 
   const connect = useCallback(() => {
@@ -172,6 +214,21 @@ export function useOrderFlow() {
             return next;
           });
         });
+
+        client.subscribe('/topic/distribution', (msg: IMessage) => {
+          const event: DistributionEvent = JSON.parse(msg.body);
+          setDistributionEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
+
+        client.subscribe('/topic/momentum', (msg: IMessage) => {
+          const event: MomentumEvent = JSON.parse(msg.body);
+          setMomentumEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
+
+        client.subscribe('/topic/cycle', (msg: IMessage) => {
+          const event: CycleEvent = JSON.parse(msg.body);
+          setCycleEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
       },
       onDisconnect: () => setConnected(false),
       onStompError: () => setConnected(false),
@@ -196,6 +253,9 @@ export function useOrderFlow() {
     icebergEvents,
     flashCrashState,
     footprintData,
+    distributionEvents,
+    momentumEvents,
+    cycleEvents,
     connected,
   };
 }

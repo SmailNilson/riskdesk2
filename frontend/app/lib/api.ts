@@ -820,6 +820,44 @@ export interface SpoofingEventHistory {
   spoofScore: number;
 }
 
+export interface DistributionEventHistory {
+  instrument: string;
+  timestamp: string;
+  type: 'DISTRIBUTION' | 'ACCUMULATION';
+  consecutiveCount: number;
+  avgScore: number;
+  totalDurationSeconds: number;
+  priceAtDetection: number;
+  resistanceLevel: number | null;
+  confidenceScore: number;
+}
+
+export interface MomentumEventHistory {
+  instrument: string;
+  timestamp: string;
+  side: 'BULLISH_MOMENTUM' | 'BEARISH_MOMENTUM';
+  momentumScore: number;
+  aggressiveDelta: number;
+  priceMoveTicks: number;
+  priceMovePoints: number;
+  totalVolume: number;
+}
+
+export interface CycleEventHistory {
+  instrument: string;
+  timestamp: string;
+  cycleType: 'BEARISH_CYCLE' | 'BULLISH_CYCLE';
+  currentPhase: 'PHASE_1' | 'PHASE_2' | 'PHASE_3' | 'COMPLETE';
+  priceAtPhase1: number;
+  priceAtPhase2: number | null;
+  priceAtPhase3: number | null;
+  totalPriceMove: number;
+  totalDurationMinutes: number;
+  confidence: number;
+  startedAt: string;
+  completedAt: string | null;
+}
+
 // ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
 export interface OrderFlowDepthSnapshot {
   instrument: string;
@@ -967,6 +1005,12 @@ export const api = {
     get<AbsorptionEventHistory[]>(`/api/order-flow/absorption/${instrument}?limit=${limit}`),
   getSpoofingEvents: (instrument: string, limit = 20) =>
     get<SpoofingEventHistory[]>(`/api/order-flow/spoofing/${instrument}?limit=${limit}`),
+  getDistributionEvents: (instrument: string, limit = 20) =>
+    get<DistributionEventHistory[]>(`/api/order-flow/distribution/${instrument}?limit=${limit}`),
+  getMomentumEvents: (instrument: string, limit = 20) =>
+    get<MomentumEventHistory[]>(`/api/order-flow/momentum/${instrument}?limit=${limit}`),
+  getCycleEvents: (instrument: string, limit = 20) =>
+    get<CycleEventHistory[]>(`/api/order-flow/cycle/${instrument}?limit=${limit}`),
   getTrailingStats: (days = 7) =>
     get<TrailingStopStats>(`/api/mentor/simulation/trailing-stats?days=${days}`),
   getCorrelationStatus: () =>

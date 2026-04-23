@@ -7,12 +7,21 @@ import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
+import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
+import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
+import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
+import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
+import com.riskdesk.domain.orderflow.model.MomentumSignal;
+import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.domain.orderflow.port.FootprintPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.orderflow.service.AbsorptionDetector;
+import com.riskdesk.domain.orderflow.service.AggressiveMomentumDetector;
+import com.riskdesk.domain.orderflow.service.DistributionCycleDetector;
+import com.riskdesk.domain.orderflow.service.InstitutionalDistributionDetector;
 import org.springframework.context.ApplicationEventPublisher;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -30,6 +39,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +72,15 @@ public class OrderFlowOrchestrator {
     private final ApplicationEventPublisher eventPublisher;
     private final CandleRepositoryPort candleRepository;
     private final AbsorptionDetector absorptionDetector = new AbsorptionDetector();
+    private final AggressiveMomentumDetector momentumDetector;
+
+    /** Per-instrument stateful distribution detectors (streak of same-side absorptions). */
+    private final ConcurrentHashMap<Instrument, InstitutionalDistributionDetector> distributionDetectors
+        = new ConcurrentHashMap<>();
+
+    /** Per-instrument stateful cycle detectors (chained phases). */
+    private final ConcurrentHashMap<Instrument, DistributionCycleDetector> cycleDetectors
+        = new ConcurrentHashMap<>();
 
     /** Cached ATR(14) per instrument from 5m candles — refreshed every 60s. */
     private final ConcurrentHashMap<Instrument, Double> atrCache = new ConcurrentHashMap<>();
@@ -94,6 +113,31 @@ public class OrderFlowOrchestrator {
         this.footprintPortProvider = footprintPortProvider;
         this.eventPublisher = eventPublisher;
         this.candleRepository = candleRepository;
+        this.momentumDetector = new AggressiveMomentumDetector(
+            properties.getMomentum().getScoreThreshold(),
+            properties.getMomentum().getMinPriceMoveFractionOfAtr()
+        );
+    }
+
+    private InstitutionalDistributionDetector distributionDetectorFor(Instrument instrument) {
+        return distributionDetectors.computeIfAbsent(instrument, i ->
+            new InstitutionalDistributionDetector(
+                i,
+                properties.getDistribution().getMinConsecutiveCount(),
+                properties.getDistribution().getMinAvgScore(),
+                Duration.ofMinutes(properties.getDistribution().getWindowTtlMinutes()),
+                Duration.ofSeconds(properties.getDistribution().getMaxInterEventGapSeconds())
+            ));
+    }
+
+    private DistributionCycleDetector cycleDetectorFor(Instrument instrument) {
+        return cycleDetectors.computeIfAbsent(instrument, i ->
+            new DistributionCycleDetector(
+                i,
+                Duration.ofMinutes(properties.getCycle().getMomentumWindowMinutes()),
+                Duration.ofMinutes(properties.getCycle().getMirrorWindowMinutes()),
+                Duration.ofMinutes(properties.getCycle().getCooldownMinutes())
+            ));
     }
 
     @PostConstruct
@@ -269,26 +313,34 @@ public class OrderFlowOrchestrator {
     private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
         try {
             double deltaThreshold = 50;
-            double avgVolume = (agg.buyVolume() + agg.sellVolume()) / 2.0;
+            double totalVolume = agg.buyVolume() + agg.sellVolume();
+            double avgVolume = totalVolume / 2.0;
             if (avgVolume <= 0) return;
 
             // Real price move from tick window high/low
             double priceMoveTicks = 0;
+            double midPrice = Double.NaN;
             if (!Double.isNaN(agg.highPrice()) && !Double.isNaN(agg.lowPrice())) {
                 priceMoveTicks = agg.highPrice() - agg.lowPrice();
+                midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
             }
+
+            // Signed price move: sign inferred from delta direction as a best-effort proxy
+            // (real directional candle-close requires tick timestamps we do not plumb here).
+            double priceMovePoints = priceMoveTicks * Math.signum((double) agg.delta());
 
             // Real ATR from cache (falls back to 1.0 only before first cache refresh)
             double atr = atrCache.getOrDefault(instrument, 1.0);
+            java.time.Instant now = java.time.Instant.now();
 
-            java.util.Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
+            Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
                 instrument, agg.delta(), priceMoveTicks,
-                agg.buyVolume() + agg.sellVolume(), atr,
-                deltaThreshold, avgVolume, java.time.Instant.now());
+                (long) totalVolume, atr,
+                deltaThreshold, avgVolume, now);
 
             if (signal.isPresent()) {
                 AbsorptionSignal s = signal.get();
-                eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, java.time.Instant.now()));
+                eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, now));
 
                 Map<String, Object> eventPayload = new LinkedHashMap<>();
                 eventPayload.put("instrument", instrument.name());
@@ -297,12 +349,96 @@ public class OrderFlowOrchestrator {
                 eventPayload.put("delta", s.aggressiveDelta());
                 eventPayload.put("priceMove", priceMoveTicks);
                 eventPayload.put("atr", atr);
-                eventPayload.put("timestamp", java.time.Instant.now().toString());
+                eventPayload.put("timestamp", now.toString());
                 messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
+
+                // Feed the distribution detector (Detector 1)
+                if (properties.getDistribution().isEnabled()) {
+                    InstitutionalDistributionDetector distDetector = distributionDetectorFor(instrument);
+                    Optional<DistributionSignal> dist = distDetector.onAbsorption(s, midPrice, null, now);
+                    if (dist.isPresent()) {
+                        publishDistributionSignal(instrument, dist.get(), now);
+
+                        // Feed the cycle detector (Detector 3)
+                        if (properties.getCycle().isEnabled()) {
+                            Optional<SmartMoneyCycleSignal> cycle =
+                                cycleDetectorFor(instrument).onDistribution(dist.get(), now);
+                            cycle.ifPresent(c -> publishCycleSignal(instrument, c, now));
+                        }
+                    }
+                }
+            } else if (properties.getMomentum().isEnabled()) {
+                // Complementary path: absorption silent → check momentum burst (Detector 2)
+                Optional<MomentumSignal> momentum = momentumDetector.evaluate(
+                    instrument, agg.delta(), priceMovePoints, priceMoveTicks,
+                    (long) totalVolume, atr, deltaThreshold, avgVolume, now);
+                if (momentum.isPresent()) {
+                    publishMomentumSignal(instrument, momentum.get(), atr, now);
+
+                    // Feed the cycle detector (Detector 3)
+                    if (properties.getCycle().isEnabled()) {
+                        Optional<SmartMoneyCycleSignal> cycle =
+                            cycleDetectorFor(instrument).onMomentum(momentum.get(), now);
+                        cycle.ifPresent(c -> publishCycleSignal(instrument, c, now));
+                    }
+                }
+            }
+
+            // Advance cycle state machine for timeouts even on quiet ticks
+            if (properties.getCycle().isEnabled()) {
+                cycleDetectorFor(instrument).tick(now);
             }
         } catch (Exception e) {
-            // swallow — absorption evaluation is best-effort
+            // swallow — order flow evaluation is best-effort
         }
+    }
+
+    private void publishDistributionSignal(Instrument instrument, DistributionSignal ds, java.time.Instant now) {
+        eventPublisher.publishEvent(new DistributionSetupDetected(instrument, ds, now));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instrument", instrument.name());
+        payload.put("type", ds.type().name());
+        payload.put("consecutiveCount", ds.consecutiveCount());
+        payload.put("avgScore", ds.avgScore());
+        payload.put("totalDurationSeconds", ds.totalDurationSeconds());
+        payload.put("priceAtDetection", ds.priceAtDetection());
+        payload.put("resistanceLevel", ds.resistanceLevel());
+        payload.put("confidenceScore", ds.confidenceScore());
+        payload.put("timestamp", now.toString());
+        messagingTemplate.convertAndSend("/topic/distribution", payload);
+    }
+
+    private void publishMomentumSignal(Instrument instrument, MomentumSignal m, double atr, java.time.Instant now) {
+        eventPublisher.publishEvent(new MomentumBurstDetected(instrument, m, now));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instrument", instrument.name());
+        payload.put("side", m.side().name());
+        payload.put("score", m.momentumScore());
+        payload.put("delta", m.aggressiveDelta());
+        payload.put("priceMoveTicks", m.priceMoveTicks());
+        payload.put("priceMovePoints", m.priceMovePoints());
+        payload.put("volume", m.totalVolume());
+        payload.put("atr", atr);
+        payload.put("timestamp", now.toString());
+        messagingTemplate.convertAndSend("/topic/momentum", payload);
+    }
+
+    private void publishCycleSignal(Instrument instrument, SmartMoneyCycleSignal c, java.time.Instant now) {
+        eventPublisher.publishEvent(new SmartMoneyCycleDetected(instrument, c, now));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instrument", instrument.name());
+        payload.put("cycleType", c.cycleType() != null ? c.cycleType().name() : null);
+        payload.put("currentPhase", c.currentPhase().name());
+        payload.put("priceAtPhase1", c.priceAtPhase1());
+        payload.put("priceAtPhase2", c.priceAtPhase2());
+        payload.put("priceAtPhase3", c.priceAtPhase3());
+        payload.put("totalPriceMove", c.totalPriceMove());
+        payload.put("totalDurationMinutes", c.totalDurationMinutes());
+        payload.put("confidence", c.confidence());
+        payload.put("startedAt", c.startedAt() != null ? c.startedAt().toString() : null);
+        payload.put("completedAt", c.completedAt() != null ? c.completedAt().toString() : null);
+        payload.put("timestamp", now.toString());
+        messagingTemplate.convertAndSend("/topic/cycle", payload);
     }
 
     // -------------------------------------------------------------------------
