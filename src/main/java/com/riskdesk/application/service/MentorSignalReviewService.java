@@ -5,8 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
+import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.application.dto.MacroCorrelationSnapshot;
 import com.riskdesk.application.dto.MentorIntermarketSnapshot;
+import com.riskdesk.domain.engine.playbook.PlaybookEvaluator;
+import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
+import com.riskdesk.domain.engine.playbook.model.PlaybookInput;
+import com.riskdesk.domain.engine.playbook.model.ChecklistItem;
 import com.riskdesk.application.dto.MentorSignalReview;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
@@ -17,12 +23,18 @@ import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
 import com.riskdesk.domain.behaviouralert.model.BehaviourAlertSignal;
+import com.riskdesk.domain.engine.indicators.AtrCalculator;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.VolumeProfileCalculator;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.simulation.ReviewType;
+import com.riskdesk.domain.simulation.TradeSimulation;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,13 +43,13 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -45,7 +57,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 @Service
@@ -58,6 +74,7 @@ public class MentorSignalReviewService {
     private static final String STATUS_DONE = "DONE";
     private static final String STATUS_ERROR = "ERROR";
     private static final String TRIGGER_INITIAL = "INITIAL";
+    private final MarketRegimeDetector marketRegimeDetector = new MarketRegimeDetector();
     private static final String TRIGGER_MANUAL_REANALYSIS = "MANUAL_REANALYSIS";
     private static final String AUTO_SELECTED_TIMEZONE = "UTC";
 
@@ -68,11 +85,29 @@ public class MentorSignalReviewService {
     private final CandleRepositoryPort candleRepositoryPort;
     private final ActiveContractRegistry contractRegistry;
     private final MentorSignalReviewRepositoryPort reviewRepository;
+    private final TradeSimulationRepositoryPort simulationRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
+    /**
+     * Optional collaborator — provides the probabilistic-engine view of the same
+     * (instrument, timeframe). Injected via {@link ObjectProvider} so a test /
+     * boot configuration that disables the strategy wiring still creates a valid
+     * review service. When absent, the {@code strategy_engine_analysis} payload
+     * section is simply omitted.
+     */
+    private final ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+        strategyEngineServiceProvider;
     private final VolumeProfileCalculator volumeProfileCalculator = new VolumeProfileCalculator();
+    private final PlaybookEvaluator playbookEvaluator = new PlaybookEvaluator();
+
+    /** Dedicated executor for Gemini analysis — avoids ForkJoinPool.commonPool() starvation. */
+    private final ExecutorService mentorExecutor = Executors.newFixedThreadPool(4,
+            r -> { Thread t = new Thread(r, "mentor-analysis"); t.setDaemon(true); return t; });
+
+    /** Max seconds a CompletableFuture may run before auto-failing the review. */
+    private static final long ANALYSIS_TIMEOUT_SECONDS = 180;
 
     /** Auto-analysis mode: when false, incoming alerts are NOT forwarded to Gemini. */
     private volatile boolean autoAnalysisEnabled;
@@ -87,10 +122,13 @@ public class MentorSignalReviewService {
                                      CandleRepositoryPort candleRepositoryPort,
                                      ActiveContractRegistry contractRegistry,
                                      MentorSignalReviewRepositoryPort reviewRepository,
+                                     TradeSimulationRepositoryPort simulationRepository,
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
                                      ApplicationEventPublisher eventPublisher,
+                                     ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+                                         strategyEngineServiceProvider,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -99,10 +137,12 @@ public class MentorSignalReviewService {
         this.candleRepositoryPort = candleRepositoryPort;
         this.contractRegistry = contractRegistry;
         this.reviewRepository = reviewRepository;
+        this.simulationRepository = simulationRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
         this.eventPublisher = eventPublisher;
+        this.strategyEngineServiceProvider = strategyEngineServiceProvider;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -114,35 +154,19 @@ public class MentorSignalReviewService {
         }
     }
 
-    public void captureInitialReview(Alert alert) {
-        captureInitialReview(alert, null);
+    /** Safety net: mark reviews stuck in ANALYZING for > 5 minutes as ERROR (runs every 2 min). */
+    @Scheduled(fixedDelay = 120_000, initialDelay = 300_000)
+    void cleanupStaleAnalyzingReviewsPeriodic() {
+        Instant cutoff = Instant.now().minusSeconds(300);
+        int cleaned = reviewRepository.markStaleAnalyzingAsError(
+                "Analysis timed out (stuck > 5 min).", cutoff);
+        if (cleaned > 0) {
+            log.warn("Periodic cleanup: marked {} stale ANALYZING reviews as ERROR.", cleaned);
+        }
     }
 
-    /**
-     * Batch-capture: groups alerts by direction and creates ONE combined review
-     * per direction instead of one per indicator.
-     * When auto-analysis is disabled, captureInitialReview records ERROR placeholders
-     * so the semantic dedup prevents re-review after restart.
-     */
-    @Deprecated
-    public void captureGroupReview(List<Alert> alerts, IndicatorSnapshot focusSnapshot) {
-        // Group by direction (LONG/SHORT)
-        Map<String, List<Alert>> byDirection = new LinkedHashMap<>();
-        for (Alert alert : alerts) {
-            String action = inferAction(alert.message());
-            if (action == null) continue;
-            byDirection.computeIfAbsent(action, k -> new ArrayList<>()).add(alert);
-        }
-
-        for (Map.Entry<String, List<Alert>> entry : byDirection.entrySet()) {
-            List<Alert> group = entry.getValue();
-            Alert primary = group.get(0);
-            // Persist the review against the exact primary alert shown in the live feed.
-            // The UI correlates reviews back to alert groups through the original
-            // timestamp/category/message triple, so rewriting any of those fields
-            // breaks review attachment and makes fresh groups appear as "No Review".
-            captureInitialReview(primary, focusSnapshot);
-        }
+    public void captureInitialReview(Alert alert) {
+        captureInitialReview(alert, null);
     }
 
     /**
@@ -235,7 +259,7 @@ public class MentorSignalReviewService {
 
         if (snapshotError == null && payload != null) {
             JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload));
+            submitAnalysis(saved.getId(), reviewPayload);
         }
     }
 
@@ -340,11 +364,7 @@ public class MentorSignalReviewService {
 
         if (snapshotError == null && payload != null) {
             JsonNode reviewPayload = payload;
-            CompletableFuture.runAsync(() -> analyzeAndPersist(saved.getId(), reviewPayload))
-                .exceptionally(ex -> {
-                    log.error("Async analysis failed for review {}", saved.getId(), ex);
-                    return null;
-                });
+            submitAnalysis(saved.getId(), reviewPayload);
         }
     }
 
@@ -479,11 +499,7 @@ public class MentorSignalReviewService {
             publish(saved);
             JsonNode reviewPayload = payload;
             Long savedReviewId = saved.getId();
-            CompletableFuture.runAsync(() -> analyzeAndPersist(savedReviewId, reviewPayload))
-                .exceptionally(ex -> {
-                    log.error("Async reanalysis failed for review {}", savedReviewId, ex);
-                    return null;
-                });
+            submitAnalysis(savedReviewId, reviewPayload);
         } catch (Exception e) {
             pending.setStatus(STATUS_ERROR);
             pending.setCompletedAt(Instant.now());
@@ -557,37 +573,201 @@ public class MentorSignalReviewService {
         return null;
     }
 
+    /**
+     * Submits a Gemini analysis on the dedicated mentor executor with timeout and error recovery.
+     */
+    private void submitAnalysis(Long reviewId, JsonNode payload) {
+        CompletableFuture.runAsync(() -> analyzeAndPersist(reviewId, payload), mentorExecutor)
+            .orTimeout(ANALYSIS_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .exceptionally(ex -> {
+                log.error("Async analysis failed or timed out for review {}", reviewId, ex);
+                completeWithError(reviewId, "Analysis timed out or failed: " + ex.getMessage());
+                return null;
+            });
+    }
+
     private void analyzeAndPersist(Long reviewId, JsonNode payload) {
         if (payload == null) {
             completeWithError(reviewId, "Saved alert snapshot is not available.");
             return;
         }
 
+        // Guard: skip if review was already completed (e.g. by timeout or cleanup)
+        MentorSignalReviewRecord guard = reviewRepository.findById(reviewId).orElse(null);
+        if (guard == null || !STATUS_ANALYZING.equals(guard.getStatus())) {
+            return;
+        }
+
         try {
             MentorAnalyzeResponse analysis = mentorAnalysisService.analyze(payload, MentorAnalysisService.ALERT_SOURCE_PREFIX + reviewId);
+            MentorAnalyzeResponse effective = applyPlaybookFallback(analysis, payload);
             reviewRepository.findById(reviewId).ifPresent(review -> {
                 review.setStatus(STATUS_DONE);
                 review.setCompletedAt(Instant.now());
-                review.setAnalysisJson(writeJson(analysis));
-                review.setVerdict(truncate(analysis.analysis() == null ? null : analysis.analysis().verdict(), 512));
+                review.setAnalysisJson(writeJson(effective));
+                review.setVerdict(truncate(effective.analysis() == null ? null : effective.analysis().verdict(), 512));
+                boolean createSimulation;
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
-                    review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+                    createSimulation = false;
                 } else {
-                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(analysis));
-                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(analysis));
-                    initializeSimulationState(review, analysis);
+                    review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(effective));
+                    review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(effective));
+                    createSimulation = shouldTrackOutcome(review, effective);
                 }
                 review.setErrorMessage(null);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
+                if (createSimulation) {
+                    initializeSimulationAggregate(updated);
+                }
                 publish(updated);
-                publishTradeValidatedIfEligible(updated, analysis);
+                publishTradeValidatedIfEligible(updated, effective);
             });
         } catch (Exception e) {
             log.error("analyzeAndPersist failed for review {}", reviewId, e);
             completeWithError(reviewId, errorMessage(e));
         }
+    }
+
+    /**
+     * Playbook → trade fallback circuit.
+     *
+     * <p>The Opus prod audit showed a sizeable fraction of qualified alerts were rejected
+     * with INELIGIBLE simply because Gemini's response was truncated or returned an error
+     * envelope — even though the deterministic playbook checklist had produced a high-score
+     * setup with a full mechanical plan (entry/SL/TP). We treat the playbook as a safety
+     * net: when Gemini is <b>unusable</b> AND the playbook produced a score ≥ 6/7 with a
+     * complete mechanical plan, we override eligibility to ELIGIBLE and wire the mechanical
+     * plan as the proposedTradePlan.</p>
+     *
+     * <p><b>Critical gating rule (Codex P1):</b> the fallback activates ONLY on
+     * {@link ExecutionEligibilityStatus#MENTOR_UNAVAILABLE} — i.e. a technical failure
+     * (truncated response, parse error, empty body). A genuine {@code INELIGIBLE}
+     * verdict from Gemini means the model intentionally blocked the trade and must
+     * NEVER be flipped to ELIGIBLE — doing so would trigger downstream trade tracking
+     * and WebSocket validation events for setups the model rejected on purpose.</p>
+     *
+     * <p>Other guards:
+     * <ul>
+     *   <li>Never overrides a Gemini ELIGIBLE verdict.</li>
+     *   <li>Behaviour alerts are not touched (handled downstream).</li>
+     *   <li>If the payload has no playbook_pre_analysis, no mechanical_plan, or score < 6 → no-op.</li>
+     * </ul>
+     */
+    MentorAnalyzeResponse applyPlaybookFallback(MentorAnalyzeResponse analysis, JsonNode payload) {
+        if (analysis == null || analysis.analysis() == null || payload == null) {
+            return analysis;
+        }
+        MentorStructuredResponse structured = analysis.analysis();
+        // Codex P1: the fallback is only for technical failures (MENTOR_UNAVAILABLE),
+        // NOT for legitimate Gemini rejections (INELIGIBLE). A structured INELIGIBLE
+        // carries Gemini's reasoning — promoting it would silently override a real
+        // "no" verdict.
+        if (structured.executionEligibilityStatus() != ExecutionEligibilityStatus.MENTOR_UNAVAILABLE) {
+            return analysis;
+        }
+        JsonNode pb = payload.get("playbook_pre_analysis");
+        if (pb == null || !pb.isObject()) {
+            return analysis;
+        }
+        int score = parsePlaybookScore(pb.path("checklist_score").asText(null));
+        if (score < 6) {
+            return analysis;
+        }
+        JsonNode mech = pb.get("mechanical_plan");
+        if (mech == null || !mech.isObject()) {
+            return analysis;
+        }
+        Double entry = readDouble(mech, "entry");
+        Double sl = readDouble(mech, "sl");
+        Double tp = readDouble(mech, "tp1");
+        Double rr = readDouble(mech, "rr");
+        if (entry == null || sl == null || tp == null) {
+            return analysis;
+        }
+        String slRationale = mech.path("sl_rationale").asText(null);
+        String pbVerdict = pb.path("verdict").asText(null);
+        String reason = "Playbook fallback — mentor unavailable, checklist=" + score + "/7"
+            + (pbVerdict != null && !pbVerdict.isBlank() ? " (" + pbVerdict + ")" : "")
+            + ". Mechanical plan applied.";
+
+        MentorProposedTradePlan mechanicalPlan = new MentorProposedTradePlan(
+            entry, sl, tp, rr,
+            slRationale != null ? slRationale : "Playbook mechanical plan (structural SL + TP1).",
+            null,
+            "PLAYBOOK_MECHANICAL"
+        );
+
+        List<String> errors = new ArrayList<>(structured.errors() != null ? structured.errors() : List.of());
+        errors.add("Mentor unavailable — decision delegated to playbook fallback circuit.");
+
+        MentorStructuredResponse promoted = new MentorStructuredResponse(
+            structured.technicalQuickAnalysis(),
+            structured.strengths() != null ? structured.strengths() : List.of(),
+            errors,
+            "Trade Validé - Playbook Fallback",
+            ExecutionEligibilityStatus.ELIGIBLE,
+            reason,
+            structured.improvementTip() != null ? structured.improvementTip()
+                : "Surveille le comportement du mentor IA — la décision a été automatisée par le playbook.",
+            mechanicalPlan
+        );
+        log.warn("Playbook fallback promoted review to ELIGIBLE (score={}/7, entry={}, sl={}, tp={})", score, entry, sl, tp);
+        return new MentorAnalyzeResponse(
+            analysis.auditId(),
+            analysis.model(),
+            analysis.payload(),
+            promoted,
+            analysis.rawResponse(),
+            analysis.similarAudits()
+        );
+    }
+
+    /**
+     * Maps ATR percentile rank to a volatility regime label consumed by the Gemini
+     * system prompt. Tier thresholds MUST stay in sync with the prompt calibration
+     * in {@code GeminiMentorClient.BASE_SYSTEM_PROMPT}:
+     * <ul>
+     *   <li>{@code null} → {@code null} (missing data, no regime to signal)</li>
+     *   <li>&lt; 20 → {@code LOW} (compressed market, breakouts violent)</li>
+     *   <li>20–80 → {@code NORMAL}</li>
+     *   <li>80–90 → {@code ELEVATED} (above-average, tradable with flow confirmation)</li>
+     *   <li>&gt; 90 → {@code EXTREME} (crisis, news, liquidation)</li>
+     * </ul>
+     */
+    static String classifyVolatilityRegime(Integer atrPercentileRank) {
+        if (atrPercentileRank == null) return null;
+        if (atrPercentileRank > 90) return "EXTREME";
+        if (atrPercentileRank > 80) return "ELEVATED";
+        if (atrPercentileRank < 20) return "LOW";
+        return "NORMAL";
+    }
+
+    private static int parsePlaybookScore(String raw) {
+        if (raw == null || raw.isBlank()) return -1;
+        // Format: "6/7" — take the numerator.
+        int slash = raw.indexOf('/');
+        String numerator = slash >= 0 ? raw.substring(0, slash) : raw;
+        try {
+            return Integer.parseInt(numerator.trim());
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    private static Double readDouble(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull()) return null;
+        if (child.isNumber()) return child.doubleValue();
+        if (child.isTextual()) {
+            try {
+                return Double.parseDouble(child.asText().trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private void publishTradeValidatedIfEligible(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
@@ -598,6 +778,7 @@ public class MentorSignalReviewService {
             return;
         }
         var plan = analysis.analysis().proposedTradePlan();
+        StrategyVerdictSnapshot strategy = captureStrategyVerdict(review);
         try {
             eventPublisher.publishEvent(new TradeValidatedEvent(
                     review.getInstrument(),
@@ -610,11 +791,86 @@ public class MentorSignalReviewService {
                     plan.stopLoss(),
                     plan.takeProfit(),
                     plan.rewardToRiskRatio(),
-                    Instant.now()
+                    Instant.now(),
+                    strategy.playbookId(),
+                    strategy.decision(),
+                    strategy.finalScore(),
+                    strategy.agreesWithReview()
             ));
         } catch (Exception e) {
             log.warn("Failed to publish TradeValidatedEvent for review {} — {}", review.getId(), e.getMessage());
         }
+    }
+
+    /**
+     * Lightweight snapshot of the probabilistic engine verdict, attached to
+     * every Telegram notification so operators see both engines side-by-side.
+     * All fields null when the engine wasn't wired or evaluation failed — the
+     * Telegram adapter renders the null case by hiding the section.
+     */
+    private record StrategyVerdictSnapshot(String playbookId, String decision,
+                                            Double finalScore, Boolean agreesWithReview) {
+        static StrategyVerdictSnapshot unknown() {
+            return new StrategyVerdictSnapshot(null, null, null, null);
+        }
+    }
+
+    /**
+     * <b>Reads from the frozen {@code snapshotJson}, NOT a fresh engine call.</b>
+     *
+     * <p>The {@code strategy_engine_analysis} section was populated by
+     * {@link #buildPayload} at alert time, then travelled intact through the
+     * Gemini async round-trip (up to {@code ANALYSIS_TIMEOUT_SECONDS}).
+     * Re-evaluating the engine here would use a later market snapshot, and in
+     * volatile markets the Telegram "agree/disagree" emoji could contradict
+     * the exact context Gemini just reasoned over. Sourcing from the stored
+     * payload guarantees the Telegram message matches the review bytes.
+     *
+     * <p>Graceful degradation — when the section is missing (e.g. engine was
+     * unavailable at alert time, old review pre-dates S3b, or the JSON is
+     * unreadable) we return {@link StrategyVerdictSnapshot#unknown()} and the
+     * Telegram adapter hides the engine line.
+     */
+    private StrategyVerdictSnapshot captureStrategyVerdict(MentorSignalReviewRecord review) {
+        String snapshotJson = review.getSnapshotJson();
+        if (snapshotJson == null || snapshotJson.isBlank()) {
+            return StrategyVerdictSnapshot.unknown();
+        }
+        try {
+            JsonNode root = objectMapper.readTree(snapshotJson);
+            JsonNode analysis = root.path("strategy_engine_analysis");
+            if (analysis.isMissingNode() || analysis.isNull()) {
+                return StrategyVerdictSnapshot.unknown();
+            }
+            String playbook = textOrNull(analysis, "candidate_playbook");
+            String decisionName = textOrNull(analysis, "decision");
+            Double finalScore = analysis.hasNonNull("final_score")
+                ? analysis.get("final_score").asDouble()
+                : null;
+            String direction = textOrNull(analysis, "direction");
+
+            // "agrees" — match the isTradeable() contract of DecisionType. We
+            // keep the check in text form (HALF_SIZE / FULL_SIZE) rather than
+            // importing the enum back here, so the JSON schema can evolve
+            // without a deserialize step.
+            boolean tradeable = "HALF_SIZE".equals(decisionName) || "FULL_SIZE".equals(decisionName);
+            boolean directionAligned = direction != null
+                && direction.equalsIgnoreCase(review.getAction());
+            Boolean agrees = (decisionName == null) ? null : (tradeable && directionAligned);
+
+            return new StrategyVerdictSnapshot(playbook, decisionName, finalScore, agrees);
+        } catch (Exception e) {
+            log.debug("Strategy verdict snapshot read failed for review {} {}: {}",
+                review.getId(), review.getInstrument(), e.getMessage());
+            return StrategyVerdictSnapshot.unknown();
+        }
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode child = node.path(field);
+        if (child.isMissingNode() || child.isNull()) return null;
+        String text = child.asText();
+        return text.isEmpty() ? null : text;
     }
 
     private void completeWithError(Long reviewId, String message) {
@@ -622,9 +878,15 @@ public class MentorSignalReviewService {
             review.setStatus(STATUS_ERROR);
             review.setCompletedAt(Instant.now());
             review.setErrorMessage(message);
-            review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
+            // Review failed technically (Gemini down, timeout, I/O error). The
+            // trade was never evaluated on merit — surface it as
+            // MENTOR_UNAVAILABLE so the UI doesn't mask it as a real rejection.
+            review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.MENTOR_UNAVAILABLE);
             review.setExecutionEligibilityReason(message);
-            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+            // Phase 3: no legacy sim-status write. If the review already had a
+            // PENDING_ENTRY simulation row (pre-analysis transient state is
+            // not created until the outcome is ELIGIBLE), it will not exist,
+            // so there's nothing to cancel on the simulation side.
             MentorSignalReviewRecord updated = reviewRepository.save(review);
             publish(updated);
         });
@@ -670,21 +932,46 @@ public class MentorSignalReviewService {
             review.getActivationTime() == null ? null : review.getActivationTime().toString(),
             review.getResolutionTime() == null ? null : review.getResolutionTime().toString(),
             review.getMaxDrawdownPoints() == null ? null : review.getMaxDrawdownPoints().doubleValue(),
+            review.getTrailingStopResult(),
+            review.getTrailingExitPrice() == null ? null : review.getTrailingExitPrice().doubleValue(),
+            review.getBestFavorablePrice() == null ? null : review.getBestFavorablePrice().doubleValue(),
             analysis,
             review.getErrorMessage(),
             review.getTriggerPrice() == null ? null : review.getTriggerPrice().doubleValue()
         );
     }
 
-    private void initializeSimulationState(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
-        if (shouldTrackOutcome(review, analysis)) {
-            review.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
-        } else {
-            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+    /**
+     * Phase 3: creates a {@code TradeSimulation(PENDING_ENTRY)} row directly in
+     * the simulation aggregate instead of stamping the legacy sim fields on the
+     * review. Idempotent — if a row already exists for this review (e.g. a
+     * reanalysis revision on an already-tracked alert), we leave the existing
+     * simulation in place so the scheduler isn't confused by a duplicate.
+     */
+    private void initializeSimulationAggregate(MentorSignalReviewRecord review) {
+        if (review == null || review.getId() == null) return;
+        try {
+            Optional<TradeSimulation> existing = simulationRepository.findByReviewId(review.getId(), ReviewType.SIGNAL);
+            if (existing.isPresent()) {
+                return;
+            }
+            String instrument = review.getInstrument() != null ? review.getInstrument() : "UNKNOWN";
+            String action = review.getAction() != null ? review.getAction() : "LONG";
+            Instant createdAt = review.getCreatedAt() != null ? review.getCreatedAt() : Instant.now();
+            simulationRepository.save(new TradeSimulation(
+                null,
+                review.getId(),
+                ReviewType.SIGNAL,
+                instrument,
+                action,
+                TradeSimulationStatus.PENDING_ENTRY,
+                null, null, null, null, null, null,
+                createdAt
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to initialize simulation aggregate for review {}: {}",
+                review.getId(), e.getMessage());
         }
-        review.setActivationTime(null);
-        review.setResolutionTime(null);
-        review.setMaxDrawdownPoints(BigDecimal.ZERO);
     }
 
     private boolean shouldTrackOutcome(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
@@ -701,7 +988,8 @@ public class MentorSignalReviewService {
 
     private ExecutionEligibilityStatus resolveExecutionEligibilityStatus(MentorAnalyzeResponse analysis) {
         if (analysis == null || analysis.analysis() == null || analysis.analysis().executionEligibilityStatus() == null) {
-            return ExecutionEligibilityStatus.INELIGIBLE;
+            // No analysis payload at all — distinct from a real INELIGIBLE verdict.
+            return ExecutionEligibilityStatus.MENTOR_UNAVAILABLE;
         }
         return analysis.analysis().executionEligibilityStatus();
     }
@@ -769,6 +1057,7 @@ public class MentorSignalReviewService {
             "current_price", roundNullable(currentPrice, candidate.instrument()),
             "timeframe_focus", toMentorTimeframe(candidate.timeframe()),
             "market_session", inferMarketSession(contextTimestamp),
+            "session_phase", TradingSessionResolver.currentPhase(contextTimestamp).name(),
             "dashboard_connection_status", "LIVE",
             "selected_timezone", normalizeSelectedTimezone(selectedTimezone)
         ));
@@ -779,15 +1068,16 @@ public class MentorSignalReviewService {
             "entry_price", roundNullable(effectiveEntry, candidate.instrument()),
             "stop_loss", roundNullable(effectiveStopLoss, candidate.instrument()),
             "take_profit", roundNullable(effectiveTakeProfit, candidate.instrument()),
+            "signal_confirmed_on_candle_close", true,
             "time_to_candle_close_seconds", timeToCandleCloseSeconds(candidate.timeframe(), contextTimestamp),
-            "is_market_order", !"ORDER_BLOCK".equals(alert.category().name()),
+            "is_market_order", false,
             "mentor_should_propose_plan", true
         ));
         if (originalAlertContext != null) {
             payload.put("original_alert_context", originalAlertContext);
         }
         payload.put("market_structure_smc", linkedMap(
-            "trend_H1", h1Snapshot.marketStructureTrend(),
+            "trend_H1", buildMultiResolutionTrendH1(candidate.instrument(), h1Snapshot),
             "trend_focus", focusSnapshot.marketStructureTrend(),
             "focus_timeframe", toMentorTimeframe(candidate.timeframe()),
             "pd_array_zone_session", focusSnapshot.sessionPdZone(),
@@ -820,6 +1110,10 @@ public class MentorSignalReviewService {
             "wavetrend_is_oversold", focusSnapshot.wtWt1() != null && focusSnapshot.wtWt1().doubleValue() < -53,
             "rsi_value", focusSnapshot.rsi(),
             "rsi_signal", focusSnapshot.rsiSignal(),
+            "stochastic_k", focusSnapshot.stochK(),
+            "stochastic_d", focusSnapshot.stochD(),
+            "stochastic_signal", focusSnapshot.stochSignal(),
+            "stochastic_crossover", focusSnapshot.stochCrossover(),
             "chaikin_money_flow_cmf", focusSnapshot.cmf(),
             "money_flow_state", inferMoneyFlowState(focusSnapshot),
             "money_flow_trend", inferMoneyFlowTrend(focusSnapshot)
@@ -837,6 +1131,11 @@ public class MentorSignalReviewService {
                     && currentPrice.compareTo(vpResult.valueAreaHigh()) <= 0
             ));
         }
+        // ── Phase 5a: SMC × Order Flow enrichment scores for Gemini ────────────────
+        Map<String, Object> smcOfScores = buildSmcOrderFlowScores(focusSnapshot);
+        if (!smcOfScores.isEmpty()) {
+            orderFlow.put("smc_order_flow_scores", smcOfScores);
+        }
         payload.put("order_flow_and_volume", orderFlow);
         payload.put("macro_correlations_dynamic", linkedMap(
             "dxy_pct_change", macroCorrelation.dxyPctChange(),
@@ -850,8 +1149,26 @@ public class MentorSignalReviewService {
             "correlation_alignment", macroCorrelation.correlationAlignment(),
             "data_availability", macroCorrelation.dataAvailability()
         ));
+        // Market regime from EMA alignment + BB expansion
+        String focusRegime = marketRegimeDetector.detect(
+            focusSnapshot.ema9(), focusSnapshot.ema50(), focusSnapshot.ema200(),
+            Boolean.TRUE.equals(focusSnapshot.bbTrendExpanding()));
+        String h1Regime = marketRegimeDetector.detect(
+            h1Snapshot.ema9(), h1Snapshot.ema50(), h1Snapshot.ema200(),
+            Boolean.TRUE.equals(h1Snapshot.bbTrendExpanding()));
+        boolean htfAligned = marketRegimeDetector.htfAligned(focusRegime, h1Regime);
+        payload.put("market_regime_context", linkedMap(
+            "regime", focusRegime,
+            "htf_regime", h1Regime,
+            "htf_aligned", htfAligned
+        ));
+
+        Integer atrPctRank = computeAtrPercentileRank(candles, 14);
+        String volatilityRegime = classifyVolatilityRegime(atrPctRank);
         payload.put("risk_management_gatekeeper", linkedMap(
             "current_atr_focus", atr,
+            "atr_percentile_rank", atrPctRank,
+            "volatility_regime", volatilityRegime,
             "stop_loss_size_points", roundNullable(stopLossSizePoints, candidate.instrument()),
             "reward_to_risk_ratio", rewardToRiskRatio,
             "is_stop_protected_by_structure", isStopProtectedByStructure(effectiveStopLoss, candidate.action(), nearestSupport, nearestResistance),
@@ -875,6 +1192,75 @@ public class MentorSignalReviewService {
                 "wave_trend_points", indicatorSeries.waveTrend().size()
             )
         ));
+
+        // ── Playbook pre-analysis (mechanical setup detection + checklist) ──
+        try {
+            BigDecimal playbookAtr = atr != null ? atr : BigDecimal.ONE;
+            PlaybookInput pbInput = PlaybookService.toPlaybookInput(focusSnapshot, playbookAtr);
+            PlaybookEvaluation pbEval = playbookEvaluator.evaluate(pbInput);
+            var pbMap = new java.util.LinkedHashMap<String, Object>();
+            pbMap.put("verdict", pbEval.verdict());
+            pbMap.put("checklist_score", pbEval.checklistScore() + "/7");
+            var filtersMap = linkedMap(
+                "bias_aligned", pbEval.filters().biasAligned(),
+                "structure_clean", pbEval.filters().structureClean(),
+                "valid_breaks", pbEval.filters().validBreaks(),
+                "fake_breaks", pbEval.filters().fakeBreaks(),
+                "va_position", pbEval.filters().vaPosition().name(),
+                "size_multiplier", pbEval.filters().sizeMultiplier()
+            );
+            pbMap.put("filters", filtersMap);
+            if (pbEval.bestSetup() != null) {
+                pbMap.put("best_setup", linkedMap(
+                    "type", pbEval.bestSetup().type().name(),
+                    "zone", pbEval.bestSetup().zoneName(),
+                    "price_in_zone", pbEval.bestSetup().priceInZone(),
+                    "distance", pbEval.bestSetup().distanceFromPrice(),
+                    "rr_ratio", pbEval.bestSetup().rrRatio()
+                ));
+            }
+            if (pbEval.plan() != null) {
+                pbMap.put("mechanical_plan", linkedMap(
+                    "entry", pbEval.plan().entryPrice(),
+                    "sl", pbEval.plan().stopLoss(),
+                    "tp1", pbEval.plan().takeProfit1(),
+                    "rr", pbEval.plan().rrRatio(),
+                    "sl_rationale", pbEval.plan().slRationale()
+                ));
+            }
+            if (pbEval.checklist() != null) {
+                pbMap.put("checklist", pbEval.checklist().stream()
+                    .map(c -> linkedMap("step", c.step(), "label", c.label(), "status", c.status().name(), "detail", c.detail()))
+                    .toList());
+            }
+            payload.put("playbook_pre_analysis", pbMap);
+        } catch (Exception e) {
+            log.debug("Playbook pre-analysis skipped: {}", e.getMessage());
+        }
+
+        // S3b — attach the probabilistic strategy engine's view alongside the
+        // legacy 7/7 playbook. Gemini receives both so it can reason over the
+        // structured agent-by-agent evidence rather than inferring everything
+        // from raw indicators. The call is best-effort: any failure is logged
+        // and the section omitted, so Mentor reviews never break because the
+        // new engine errored.
+        try {
+            com.riskdesk.application.service.strategy.StrategyEngineService engine =
+                strategyEngineServiceProvider.getIfAvailable();
+            if (engine != null) {
+                com.riskdesk.domain.engine.strategy.model.StrategyDecision decision =
+                    engine.evaluate(candidate.instrument(), candidate.timeframe());
+                Map<String, Object> analysis =
+                    com.riskdesk.application.service.strategy.StrategyEngineAnalysisPayload.build(decision);
+                if (analysis != null) {
+                    payload.put("strategy_engine_analysis", analysis);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Strategy engine analysis skipped for {} {}: {}",
+                candidate.instrument(), candidate.timeframe(), e.getMessage());
+        }
+
         return objectMapper.valueToTree(payload);
     }
 
@@ -967,26 +1353,30 @@ public class MentorSignalReviewService {
             + ":" + alert.category().name() + ":" + alert.message();
     }
 
-    /** Timeframe-aware semantic dedup window: base duration × 5. */
     /**
-     * Semantic dedup window = 2× the timeframe duration.
-     * Previous ×5 multiplier was too aggressive — blocked re-evaluation when
-     * market conditions changed (e.g. LONG rejected at 02:00, price moved 20pts
-     * by 02:40 but dedup still active for 50 min on 10m).
+     * Semantic dedup window — prevents duplicate reviews for the same signal type.
+     *
+     * <p>Lower timeframes (5m, 10m): 2× the candle period so rapid-fire signals
+     * within two candle closes are deduped (e.g. 10m → 20 min window).
+     *
+     * <p>H1: window must be LESS than one candle period (45 min) because H1 signals
+     * bypass the confluence buffer and each candle close is independently valuable.
+     * A 2× multiplier (2h) blocked consecutive H1 candles when a signal persisted
+     * (e.g. WaveTrend stays oversold for 2h → second candle's review was silently
+     * dropped while the frontend showed "No Review" with 3 signals).
      */
     static long semanticDedupWindowSeconds(String timeframe) {
-        long base = switch (timeframe) {
-            case "1m"  -> 60;
-            case "5m"  -> 300;
-            case "10m" -> 600;
-            case "15m" -> 900;
-            case "30m" -> 1800;
-            case "1h"  -> 3600;
-            case "4h"  -> 14400;
-            case "1d"  -> 86400;
-            default    -> 3600;
+        return switch (timeframe) {
+            case "1m"  -> 60 * 2;
+            case "5m"  -> 300 * 2;
+            case "10m" -> 600 * 2;
+            case "15m" -> 900 * 2;
+            case "30m" -> 1800 * 2;
+            case "1h"  -> 2700;     // 45 min — less than one candle so each H1 close gets its own review
+            case "4h"  -> 14400 * 2;
+            case "1d"  -> 86400 * 2;
+            default    -> 3600 * 2;
         };
-        return base * 2;
     }
 
     private Map<String, Object> buildOriginalAlertContext(Alert alert, MentorSignalReviewRecord originalReview) {
@@ -1092,27 +1482,89 @@ public class MentorSignalReviewService {
         return avg.compareTo(BigDecimal.ZERO) > 0 ? round(avg, instrument) : null;
     }
 
+    /**
+     * Compute ATR percentile rank (0-100) over rolling windows from loaded candles.
+     * Uses AtrCalculator (Wilder's smoothing) on sliding windows of the given period.
+     */
+    private Integer computeAtrPercentileRank(List<Candle> candles, int period) {
+        int minWindows = 20;
+        if (candles.size() < period * 2 + minWindows) {
+            return null;
+        }
+        List<BigDecimal> atrHistory = new ArrayList<>();
+        for (int end = period * 2; end <= candles.size(); end++) {
+            BigDecimal atrVal = AtrCalculator.compute(candles.subList(0, end), period);
+            if (atrVal != null) {
+                atrHistory.add(atrVal);
+            }
+        }
+        if (atrHistory.size() < minWindows) {
+            return null;
+        }
+        BigDecimal currentAtr = atrHistory.get(atrHistory.size() - 1);
+        long below = atrHistory.stream().filter(a -> a.compareTo(currentAtr) < 0).count();
+        return (int) Math.round(100.0 * below / atrHistory.size());
+    }
+
+    /**
+     * Finds the nearest Order Block for a given directional bias.
+     *
+     * <p>Search priority:
+     * <ol>
+     *   <li>Active OBs (untested demand/supply zones) — highest conviction</li>
+     *   <li>Breaker OBs (invalidated + type-flipped zones) — recently broken levels
+     *       acting as support/resistance in opposite direction, often closer to price</li>
+     *   <li>Structural swing levels (weakLow/strongLow/weakHigh/strongHigh) — last resort</li>
+     * </ol>
+     *
+     * The closest OB across both active and breaker pools wins. Breaker blocks are
+     * tagged with {@code DEMAND_BREAKER} / {@code SUPPLY_BREAKER} so Gemini can
+     * differentiate them from untested zones.
+     */
     private Map<String, Object> findNearestOrderBlock(IndicatorSnapshot snapshot, BigDecimal currentPrice, String bias) {
-        if (currentPrice == null || snapshot.activeOrderBlocks() == null) {
+        if (currentPrice == null) {
             return null;
         }
 
-        List<IndicatorSnapshot.OrderBlockView> filtered = snapshot.activeOrderBlocks().stream()
-            .filter(block -> "BULLISH".equals(bias)
-                ? block.mid().compareTo(currentPrice) <= 0
-                : block.mid().compareTo(currentPrice) >= 0)
-            .sorted((left, right) -> left.mid().subtract(currentPrice).abs().compareTo(right.mid().subtract(currentPrice).abs()))
-            .toList();
-        if (!filtered.isEmpty()) {
-            IndicatorSnapshot.OrderBlockView nearest = filtered.get(0);
+        // Merge active + breaker OBs into a single candidate pool
+        record Candidate(IndicatorSnapshot.OrderBlockView ob, boolean isBreaker) {}
+        List<Candidate> candidates = new ArrayList<>();
+
+        if (snapshot.activeOrderBlocks() != null) {
+            for (IndicatorSnapshot.OrderBlockView ob : snapshot.activeOrderBlocks()) {
+                candidates.add(new Candidate(ob, false));
+            }
+        }
+        if (snapshot.breakerOrderBlocks() != null) {
+            for (IndicatorSnapshot.OrderBlockView ob : snapshot.breakerOrderBlocks()) {
+                candidates.add(new Candidate(ob, true));
+            }
+        }
+
+        // Filter by bias direction: BULLISH → OBs below price, BEARISH → OBs above price
+        Optional<Candidate> nearest = candidates.stream()
+            .filter(c -> "BULLISH".equals(bias)
+                ? c.ob().mid().compareTo(currentPrice) <= 0
+                : c.ob().mid().compareTo(currentPrice) >= 0)
+            .min(Comparator.comparing(c -> c.ob().mid().subtract(currentPrice).abs()));
+
+        if (nearest.isPresent()) {
+            Candidate c = nearest.get();
+            String type;
+            if (c.isBreaker()) {
+                type = "BULLISH".equals(bias) ? "DEMAND_BREAKER" : "SUPPLY_BREAKER";
+            } else {
+                type = "BULLISH".equals(bias) ? "DEMAND" : "SUPPLY";
+            }
             return Map.of(
-                "type", "BULLISH".equals(bias) ? "DEMAND" : "SUPPLY",
-                "price_top", nearest.high(),
-                "price_bottom", nearest.low(),
-                "is_tested", false
+                "type", type,
+                "price_top", c.ob().high(),
+                "price_bottom", c.ob().low(),
+                "is_tested", c.isBreaker()
             );
         }
 
+        // Fallback: structural swing levels
         BigDecimal structuralLevel = "BULLISH".equals(bias)
             ? pickNearestLevel(currentPrice, Stream.of(snapshot.weakLow(), snapshot.strongLow()).filter(Objects::nonNull).toList(), true)
             : pickNearestLevel(currentPrice, Stream.of(snapshot.weakHigh(), snapshot.strongHigh()).filter(Objects::nonNull).toList(), false);
@@ -1166,7 +1618,7 @@ public class MentorSignalReviewService {
         if (currentPrice == null || snapshot.vwap() == null || atr == null) {
             return false;
         }
-        return currentPrice.subtract(snapshot.vwap()).abs().compareTo(atr.multiply(BigDecimal.valueOf(1.5))) > 0;
+        return currentPrice.subtract(snapshot.vwap()).abs().compareTo(atr.multiply(BigDecimal.valueOf(2.5))) > 0;
     }
 
     private BigDecimal distance(BigDecimal left, BigDecimal right, Instrument instrument) {
@@ -1283,6 +1735,100 @@ public class MentorSignalReviewService {
         );
     }
 
+    /**
+     * Phase 5a: Build SMC x Order Flow enrichment scores for the Gemini payload.
+     * Extracts OF scores from the enriched IndicatorSnapshot views and assembles
+     * them into a structured map that Gemini can use for zone quality assessment.
+     * Returns an empty map if no enrichment data is available.
+     */
+    private Map<String, Object> buildSmcOrderFlowScores(IndicatorSnapshot focusSnapshot) {
+        Map<String, Object> scores = new LinkedHashMap<>();
+
+        // Order Block scores — top 3 by formation score
+        if (focusSnapshot.activeOrderBlocks() != null && !focusSnapshot.activeOrderBlocks().isEmpty()) {
+            List<Map<String, Object>> obScores = focusSnapshot.activeOrderBlocks().stream()
+                    .filter(ob -> ob.obFormationScore() != null)
+                    .sorted((a, b) -> Double.compare(
+                            b.obFormationScore() != null ? b.obFormationScore() : 0,
+                            a.obFormationScore() != null ? a.obFormationScore() : 0))
+                    .limit(3)
+                    .map(ob -> linkedMap(
+                            "type", ob.type(),
+                            "price_range", ob.low() + " - " + ob.high(),
+                            "formation_delta", ob.formationDelta(),
+                            "formation_score", ob.obFormationScore(),
+                            "live_score", ob.obLiveScore(),
+                            "defended", ob.defended(),
+                            "absorption_score", ob.absorptionScore()
+                    ))
+                    .toList();
+            if (!obScores.isEmpty()) {
+                scores.put("order_block_scores", obScores);
+            }
+        }
+
+        // FVG scores — top 3 by quality score
+        if (focusSnapshot.activeFairValueGaps() != null && !focusSnapshot.activeFairValueGaps().isEmpty()) {
+            List<Map<String, Object>> fvgScores = focusSnapshot.activeFairValueGaps().stream()
+                    .filter(fvg -> fvg.fvgQualityScore() != null)
+                    .sorted((a, b) -> Double.compare(
+                            b.fvgQualityScore() != null ? b.fvgQualityScore() : 0,
+                            a.fvgQualityScore() != null ? a.fvgQualityScore() : 0))
+                    .limit(3)
+                    .map(fvg -> linkedMap(
+                            "bias", fvg.bias(),
+                            "price_range", fvg.bottom() + " - " + fvg.top(),
+                            "gap_delta", fvg.gapDelta(),
+                            "quality_score", fvg.fvgQualityScore()
+                    ))
+                    .toList();
+            if (!fvgScores.isEmpty()) {
+                scores.put("fvg_scores", fvgScores);
+            }
+        }
+
+        // Structure break scores — top 3 most recent with enrichment
+        if (focusSnapshot.recentBreaks() != null && !focusSnapshot.recentBreaks().isEmpty()) {
+            List<Map<String, Object>> breakScores = focusSnapshot.recentBreaks().stream()
+                    .filter(br -> br.breakConfidenceScore() != null)
+                    .limit(3)
+                    .map(br -> linkedMap(
+                            "type", br.type(),
+                            "trend", br.trend(),
+                            "level", br.level(),
+                            "break_delta", br.breakDelta(),
+                            "volume_spike", br.volumeSpike(),
+                            "confirmed", br.confirmed(),
+                            "confidence_score", br.breakConfidenceScore()
+                    ))
+                    .toList();
+            if (!breakScores.isEmpty()) {
+                scores.put("structure_break_scores", breakScores);
+            }
+        }
+
+        // Liquidity pool scores — all enriched pools
+        List<IndicatorSnapshot.EqualLevelView> allPools = new ArrayList<>();
+        if (focusSnapshot.equalHighs() != null) allPools.addAll(focusSnapshot.equalHighs());
+        if (focusSnapshot.equalLows() != null) allPools.addAll(focusSnapshot.equalLows());
+        List<Map<String, Object>> poolScores = allPools.stream()
+                .filter(eq -> eq.liquidityConfirmScore() != null)
+                .map(eq -> linkedMap(
+                        "type", eq.type(),
+                        "price", eq.price(),
+                        "touch_count", eq.touchCount(),
+                        "orders_visible", eq.ordersVisible(),
+                        "depth_size_at_level", eq.depthSizeAtLevel(),
+                        "liquidity_confirm_score", eq.liquidityConfirmScore()
+                ))
+                .toList();
+        if (!poolScores.isEmpty()) {
+            scores.put("liquidity_pool_scores", poolScores);
+        }
+
+        return scores;
+    }
+
     private boolean isStopProtectedByStructure(BigDecimal stopLoss, String action,
                                                 Map<String, Object> nearestSupport,
                                                 Map<String, Object> nearestResistance) {
@@ -1323,18 +1869,26 @@ public class MentorSignalReviewService {
         };
     }
 
-    private String inferMarketSession(Instant timestamp) {
-        int hour = timestamp.atOffset(ZoneOffset.UTC).getHour();
-        if (hour >= 22 || hour < 6) {
-            return "ASIAN_OPEN";
-        }
-        if (hour < 12) {
-            return "LONDON";
-        }
-        if (hour < 20) {
-            return "NEW_YORK";
-        }
-        return "OFF_HOURS";
+    /**
+     * Maps the DST-safe America/New_York session phase into the legacy
+     * {@code market_session} vocabulary the Gemini payload schema expects
+     * ({@code ASIAN_OPEN | LONDON | NEW_YORK | OFF_HOURS}).
+     *
+     * <p>Previously this compared a hardcoded UTC hour, which shifted all
+     * boundaries by ±1 hour for half the year (DST) and could tag NY AM as
+     * LONDON in winter. Routes through {@link TradingSessionResolver} so the
+     * on-wire value stays consistent across DST transitions.
+     *
+     * <p>Package-private static so the mapping is unit-testable without
+     * having to spin up the whole service.
+     */
+    static String inferMarketSession(Instant timestamp) {
+        return switch (TradingSessionResolver.currentPhase(timestamp)) {
+            case ASIAN -> "ASIAN_OPEN";
+            case LONDON -> "LONDON";
+            case NY_AM, NY_PM -> "NEW_YORK";
+            case CLOSE, CLOSED -> "OFF_HOURS";
+        };
     }
 
     private int timeToCandleCloseSeconds(String timeframe, Instant timestamp) {
@@ -1447,6 +2001,47 @@ public class MentorSignalReviewService {
 
     private BigDecimal decimalValue(Double value) {
         return value == null ? null : BigDecimal.valueOf(value);
+    }
+
+    /**
+     * Build multi-resolution trend_H1: swing bias at lookbacks 50/25/9/5/1 + convergence label.
+     * Gives Gemini granular visibility into H1 trend state instead of a single (often lagging) string.
+     */
+    private Map<String, Object> buildMultiResolutionTrendH1(Instrument instrument,
+                                                             IndicatorSnapshot h1Snapshot) {
+        Map<Integer, String> biases = indicatorService.computeMultiResolutionSwingBias(instrument, "1h");
+        if (biases.isEmpty()) {
+            return linkedMap("primary", h1Snapshot.marketStructureTrend(),
+                             "convergence", "UNAVAILABLE");
+        }
+        String primary = biases.getOrDefault(50, "UNDEFINED");
+        long bullishCount = biases.values().stream().filter("BULLISH"::equals).count();
+        long bearishCount = biases.values().stream().filter("BEARISH"::equals).count();
+        String convergence;
+        if (bullishCount == 5) {
+            convergence = "FULL_BULLISH";
+        } else if (bearishCount == 5) {
+            convergence = "FULL_BEARISH";
+        } else if (bullishCount >= 4) {
+            convergence = "STRONG_BULLISH";
+        } else if (bearishCount >= 4) {
+            convergence = "STRONG_BEARISH";
+        } else if (bullishCount >= 3) {
+            convergence = "EMERGING_BULLISH";
+        } else if (bearishCount >= 3) {
+            convergence = "EMERGING_BEARISH";
+        } else {
+            convergence = "MIXED";
+        }
+        return linkedMap(
+            "primary", primary,
+            "lookback_50", biases.getOrDefault(50, "UNDEFINED"),
+            "lookback_25", biases.getOrDefault(25, "UNDEFINED"),
+            "lookback_9", biases.getOrDefault(9, "UNDEFINED"),
+            "lookback_5", biases.getOrDefault(5, "UNDEFINED"),
+            "lookback_1", biases.getOrDefault(1, "UNDEFINED"),
+            "convergence", convergence
+        );
     }
 
     private Map<String, Object> linkedMap(Object... values) {

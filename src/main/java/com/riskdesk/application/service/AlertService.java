@@ -8,11 +8,15 @@ import com.riskdesk.domain.alert.service.AlertDeduplicator;
 import com.riskdesk.domain.alert.service.IndicatorAlertEvaluator;
 import com.riskdesk.domain.alert.service.RiskAlertEvaluator;
 import com.riskdesk.domain.alert.service.SignalPreFilterService;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.SessionPhase;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.domain.trading.aggregate.Portfolio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -46,6 +50,7 @@ public class AlertService {
     private final MentorSignalReviewService mentorSignalReviewService;
     private final SignalConfluenceBuffer    confluenceBuffer;
     private final SimpMessagingTemplate     messagingTemplate;
+    private final MarketRegimeDetector      regimeDetector = new MarketRegimeDetector();
 
     // Recent alerts buffer (last 50) for REST endpoint
     private final LinkedList<Map<String, Object>> recentAlerts = new LinkedList<>();
@@ -71,6 +76,15 @@ public class AlertService {
         this.mentorSignalReviewService = mentorSignalReviewService;
         this.confluenceBuffer          = confluenceBuffer;
         this.messagingTemplate         = messagingTemplate;
+    }
+
+    /**
+     * On contract rollover, clear all transition state for the rolled instrument
+     * to prevent false alerts from the old-to-new contract price gap.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        indicatorAlertEvaluator.clearStatesForInstrument(event.instrument().name());
     }
 
     /**
@@ -113,6 +127,10 @@ public class AlertService {
         for (String timeframe : List.of("5m", "10m", "1h")) {
             if (mutedTimeframes.contains(timeframe)) continue;
             if ("5m".equals(timeframe) && !TradingSessionResolver.isWithinKillZone(Instant.now())) continue;
+            // E6 Asian session gate — signals are noise during 17:00-02:00 ET (low liquidity)
+            if (instrument == Instrument.E6
+                    && TradingSessionResolver.currentPhase() == SessionPhase.ASIAN
+                    && !"1h".equals(timeframe)) continue;
             try {
                 IndicatorSnapshot snap;
                 if ("1h".equals(timeframe)) snap = h1Snap;
@@ -124,16 +142,30 @@ public class AlertService {
 
                 signalPreFilterService.recordSignals(indicatorAlerts, timeframe);
 
+                // Compute market regime for this timeframe to gate oscillator noise
+                String regime = regimeDetector.detect(
+                        snap.ema9(), snap.ema50(), snap.ema200(), snap.bbTrendExpanding());
+
                 // H4 trend filters 1H signals; H1 trend filters 5m/10m signals
                 String htfTrend = "1h".equals(timeframe) ? h4Trend : h1Trend;
-                List<Alert> filteredAlerts = signalPreFilterService.filter(indicatorAlerts, timeframe, htfTrend);
+                List<Alert> filteredAlerts = signalPreFilterService.filter(
+                        indicatorAlerts, timeframe, htfTrend, regime);
 
                 for (Alert alert : filteredAlerts) {
                     if (publishAlertWithoutMentor(alert)) {
-                        // Route to confluence buffer — standalone signals (3.0) flush immediately
+                        // MGC: alerts published to dashboard but NOT routed to Gemini auto-review
+                        if (instrument == Instrument.MGC) continue;
+
                         SignalWeight sw = SignalWeight.fromAlert(alert);
                         String direction = SignalPreFilterService.extractDirection(alert);
-                        if (sw != null && direction != null) {
+                        if (sw == null || direction == null) continue;
+
+                        if ("1h".equals(timeframe)) {
+                            // H1: every qualified signal triggers a Mentor review immediately
+                            // (no confluence buffer — H1 signals are rare and high-value)
+                            mentorSignalReviewService.captureInitialReview(alert, snap);
+                        } else {
+                            // 5m/10m: route to confluence buffer — standalone signals (3.0) flush immediately
                             confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
                         }
                     }
@@ -250,7 +282,9 @@ public class AlertService {
             snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().high() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().weekly() != null ? snapshot.mtfLevels().weekly().low() : null,
             snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().high() : null,
-            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null
+            snapshot.mtfLevels() != null && snapshot.mtfLevels().monthly() != null ? snapshot.mtfLevels().monthly().low() : null,
+            snapshot.stochSignal(),
+            snapshot.stochCrossover()
         );
     }
 

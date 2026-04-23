@@ -2,6 +2,7 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.contract.port.OpenInterestProvider;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +12,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
+import java.time.YearMonth;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -19,11 +21,14 @@ import java.util.OptionalLong;
  * Initializes the ActiveContractRegistry at startup (Order 1 — before HistoricalDataService).
  *
  * Resolution strategy (in order):
- *   1. Ask IBKR for the front-month contract via IbGatewayContractResolver.refresh().
- *   2. If IBKR is unavailable or disabled, fall back to application properties
- *      (riskdesk.active-contracts.MCL, .MGC, .MNQ, .E6).
- *
- * This guarantees the registry is populated before any service fetches or tags candles.
+ *   1. Ask IBKR for available contracts via IbGatewayContractResolver.
+ *   2. Compare OI across all contracts — pick the one with highest OI.
+ *   3. If OI unavailable, compare volume — pick highest volume.
+ *   4. If neither available, default to front-month (no calendar-roll).
+ *   5. If IBKR is unavailable or disabled, fall back to the last contract
+ *      persisted in the database (hydrated into the registry at construction).
+ *   6. If the DB is also empty (truly cold start), fall back to the
+ *      application properties as a last resort.
  */
 @Component
 @Order(1)
@@ -36,17 +41,20 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
     private final IbkrProperties            ibkrProperties;
     private final OpenInterestProvider      openInterestProvider;
 
-    @Value("${riskdesk.active-contracts.MCL:202505}")
+    @Value("${riskdesk.active-contracts.MCL:202605}")
     private String fallbackMcl;
 
-    @Value("${riskdesk.active-contracts.MGC:202506}")
+    @Value("${riskdesk.active-contracts.MGC:202606}")
     private String fallbackMgc;
 
-    @Value("${riskdesk.active-contracts.MNQ:202506}")
+    @Value("${riskdesk.active-contracts.MNQ:202606}")
     private String fallbackMnq;
 
-    @Value("${riskdesk.active-contracts.E6:202506}")
+    @Value("${riskdesk.active-contracts.E6:202606}")
     private String fallbackE6;
+
+    // calendarDaysThreshold removed — caused Frankenstein charts by rolling the
+    // fallback contract forward when IBKR was unavailable at startup.
 
     public ActiveContractRegistryInitializer(ActiveContractRegistry registry,
                                              IbGatewayContractResolver resolver,
@@ -76,11 +84,28 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 registry.initialize(instrument, resolved);
                 log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
             } else {
-                String fallback = fallbacks.get(instrument);
-                registry.initialize(instrument, fallback);
-                log.warn("ActiveContractRegistry: {} → {} (fallback — IBKR {} or unavailable)",
-                    instrument, fallback,
-                    ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                // Second-tier fallback: the registry constructor has already hydrated
+                // itself from the persistence port, so any previously-confirmed contract
+                // is already in the in-memory map. Prefer that over the static property
+                // default — it represents the last known good value and is self-healing.
+                String fromDb = registry.getContractMonth(instrument).orElse(null);
+                if (fromDb != null) {
+                    log.warn("ActiveContractRegistry: {} → {} (DB last-known — IBKR {} or unavailable)",
+                        instrument, fromDb,
+                        ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                    // Upsert for clarity — ensures the persistence row timestamp is refreshed
+                    // and keeps this path symmetrical with the IBKR/property branches.
+                    registry.initialize(instrument, fromDb);
+                } else {
+                    String fallback = fallbacks.get(instrument);
+                    // Never calendar-roll the fallback — it's operator-configured and represents
+                    // the known active contract. Rolling it forward when IBKR is unavailable
+                    // caused Frankenstein charts (mixing contract price series).
+                    registry.initialize(instrument, fallback);
+                    log.warn("ActiveContractRegistry: {} → {} (fallback property — IBKR {} or unavailable, DB empty)",
+                        instrument, fallback,
+                        ibkrProperties.isEnabled() ? "returned empty" : "disabled");
+                }
             }
         }
 
@@ -89,40 +114,141 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
 
     private String resolveFromIbkr(Instrument instrument) {
         try {
-            List<IbGatewayResolvedContract> topTwo = resolver.resolveTopTwo(instrument);
-            if (topTwo.isEmpty()) return null;
-
-            IbGatewayResolvedContract selected;
-            if (topTwo.size() >= 2) {
-                String frontMonth = normalizeMonth(topTwo.get(0).contract().lastTradeDateOrContractMonth());
-                String nextMonth  = normalizeMonth(topTwo.get(1).contract().lastTradeDateOrContractMonth());
-
-                OptionalLong frontOI = frontMonth != null
-                    ? openInterestProvider.fetchOpenInterest(instrument, frontMonth)
-                    : OptionalLong.empty();
-                OptionalLong nextOI = nextMonth != null
-                    ? openInterestProvider.fetchOpenInterest(instrument, nextMonth)
-                    : OptionalLong.empty();
-
-                if (nextOI.isPresent() && frontOI.isPresent() && nextOI.getAsLong() > frontOI.getAsLong()) {
-                    log.info("ActiveContractRegistry: {} OI-roll → {} (OI={}) over {} (OI={})",
-                        instrument, nextMonth, nextOI.getAsLong(), frontMonth, frontOI.getAsLong());
-                    selected = topTwo.get(1);
-                } else {
-                    selected = topTwo.get(0);
-                }
-            } else {
-                selected = topTwo.get(0);
+            List<IbGatewayResolvedContract> contracts = resolver.resolveNextContracts(instrument);
+            if (contracts.isEmpty()) return null;
+            if (contracts.size() == 1) {
+                resolver.setResolved(instrument, contracts.get(0));
+                return normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
             }
 
-            // Seed resolver cache so downstream resolve() uses the OI-selected contract
-            resolver.setResolved(instrument, selected);
+            // Strategy 1: OI comparison — scan ALL available contracts (not just first 2)
+            IbGatewayResolvedContract oiWinner = selectByOi(instrument, contracts);
+            if (oiWinner != null) {
+                resolver.setResolved(instrument, oiWinner);
+                return normalizeMonth(oiWinner.contract().lastTradeDateOrContractMonth());
+            }
 
-            return normalizeMonth(selected.contract().lastTradeDateOrContractMonth());
+            // Strategy 2: Volume comparison — scan ALL available contracts
+            IbGatewayResolvedContract volWinner = selectByVolume(instrument, contracts);
+            if (volWinner != null) {
+                resolver.setResolved(instrument, volWinner);
+                return normalizeMonth(volWinner.contract().lastTradeDateOrContractMonth());
+            }
+
+            // Default: use front-month when OI+volume are both unavailable.
+            // No calendar-roll — without OI data, we cannot know where liquidity sits.
+            String frontMonth = normalizeMonth(contracts.get(0).contract().lastTradeDateOrContractMonth());
+            log.info("ActiveContractRegistry: {} defaulting to front-month {} (OI+volume unavailable)", instrument, frontMonth);
+            resolver.setResolved(instrument, contracts.get(0));
+            return frontMonth;
         } catch (Exception e) {
             log.debug("ActiveContractRegistryInitializer: IBKR resolution failed for {} — {}", instrument, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Compares OI across ALL available contracts.
+     * Returns the contract with the highest OI, or null if OI is unavailable for all.
+     *
+     * Energy contracts (MCL) have a CME convention where the last trade date is one
+     * month BEFORE the delivery month. IBKR's normalizeMonth("20260421") = "202604"
+     * but that's the MAY contract. So when OI selects "202605" as the winner, it's
+     * actually the JUNE contract. For MCL, we take the contract at index-1 (the one
+     * that expires one month earlier = the real active delivery month).
+     */
+    private IbGatewayResolvedContract selectByOi(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
+        IbGatewayResolvedContract best = null;
+        int bestIndex = -1;
+        long bestOi = -1;
+        boolean anyOiPresent = false;
+        StringBuilder logDetail = new StringBuilder();
+
+        for (int i = 0; i < contracts.size(); i++) {
+            IbGatewayResolvedContract c = contracts.get(i);
+            String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
+            OptionalLong oi = month != null ? openInterestProvider.fetchOpenInterest(instrument, month) : OptionalLong.empty();
+            if (oi.isPresent()) {
+                anyOiPresent = true;
+                logDetail.append(month).append("=").append(oi.getAsLong()).append(" ");
+                if (oi.getAsLong() > bestOi) {
+                    bestOi = oi.getAsLong();
+                    best = c;
+                    bestIndex = i;
+                }
+            }
+        }
+
+        if (!anyOiPresent || best == null) return null;
+
+        // Energy (MCL): IBKR lastTradeDateOrContractMonth gives the expiry month,
+        // which is one month BEFORE the delivery month. The OI winner at index N
+        // is actually the NEXT month's contract. The real active contract is at N-1.
+        if (instrument.assetClass() == AssetClass.ENERGY && bestIndex > 0) {
+            IbGatewayResolvedContract energyAdjusted = contracts.get(bestIndex - 1);
+            log.info("ActiveContractRegistry: {} OI-select → index {} (OI={}, all: [{}]) — ENERGY adjust: using index {} (conId={}) instead of index {} (conId={})",
+                instrument, bestIndex, bestOi, logDetail.toString().trim(),
+                bestIndex - 1, energyAdjusted.contract().conid(),
+                bestIndex, best.contract().conid());
+            return energyAdjusted;
+        }
+
+        log.info("ActiveContractRegistry: {} OI-select → {} (OI={}, all: [{}])",
+            instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()),
+            bestOi, logDetail.toString().trim());
+        return best;
+    }
+
+    /**
+     * Compares volume across ALL available contracts. Returns the one with highest volume,
+     * or null if volume is unavailable for all. Fallback when OI is unavailable.
+     */
+    private IbGatewayResolvedContract selectByVolume(Instrument instrument, List<IbGatewayResolvedContract> contracts) {
+        IbGatewayResolvedContract best = null;
+        long bestVol = -1;
+        boolean anyVolPresent = false;
+
+        for (IbGatewayResolvedContract c : contracts) {
+            String month = normalizeMonth(c.contract().lastTradeDateOrContractMonth());
+            OptionalLong vol = month != null ? openInterestProvider.fetchVolume(instrument, month) : OptionalLong.empty();
+            if (vol.isPresent()) {
+                anyVolPresent = true;
+                if (vol.getAsLong() > bestVol) {
+                    bestVol = vol.getAsLong();
+                    best = c;
+                }
+            }
+        }
+
+        if (best != null && anyVolPresent) {
+            log.info("ActiveContractRegistry: {} volume-select → {} (vol={}, OI was unavailable)",
+                instrument, normalizeMonth(best.contract().lastTradeDateOrContractMonth()), bestVol);
+        }
+        return anyVolPresent ? best : null;
+    }
+
+    /**
+     * Computes the previous contract month based on instrument cycle.
+     * E6/MNQ: quarterly (Mar, Jun, Sep, Dec)
+     * MCL/MGC: monthly
+     */
+    static String previousContractMonth(Instrument instrument, String contractMonth) {
+        if (contractMonth == null || contractMonth.length() < 6) return contractMonth;
+        int year = Integer.parseInt(contractMonth.substring(0, 4));
+        int month = Integer.parseInt(contractMonth.substring(4, 6));
+        YearMonth ym = YearMonth.of(year, month);
+
+        if (instrument == Instrument.E6 || instrument == Instrument.MNQ) {
+            // Quarterly: Mar(3), Jun(6), Sep(9), Dec(12)
+            do {
+                ym = ym.minusMonths(1);
+            } while (ym.getMonthValue() % 3 != 0);
+        } else {
+            // Monthly: MCL, MGC
+            ym = ym.minusMonths(1);
+        }
+
+        return String.format("%04d%02d", ym.getYear(), ym.getMonthValue());
     }
 
     private static String normalizeMonth(String raw) {

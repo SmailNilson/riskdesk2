@@ -2,6 +2,7 @@ package com.riskdesk.infrastructure.persistence.entity;
 
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.model.TrailingStopResult;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -108,6 +109,16 @@ public class MentorSignalReviewEntity {
 
     @Column(precision = 19, scale = 6)
     private BigDecimal maxDrawdownPoints;
+
+    @Enumerated(EnumType.STRING)
+    @Column(length = 32)
+    private TrailingStopResult trailingStopResult;
+
+    @Column(precision = 19, scale = 6)
+    private BigDecimal trailingExitPrice;
+
+    @Column(precision = 19, scale = 6)
+    private BigDecimal bestFavorablePrice;
 
     @Column(length = 16, nullable = false)
     private String sourceType = "SIGNAL";
@@ -313,6 +324,30 @@ public class MentorSignalReviewEntity {
 
     public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) {
         this.maxDrawdownPoints = maxDrawdownPoints;
+    }
+
+    public TrailingStopResult getTrailingStopResult() {
+        return trailingStopResult;
+    }
+
+    public void setTrailingStopResult(TrailingStopResult trailingStopResult) {
+        this.trailingStopResult = trailingStopResult;
+    }
+
+    public BigDecimal getTrailingExitPrice() {
+        return trailingExitPrice;
+    }
+
+    public void setTrailingExitPrice(BigDecimal trailingExitPrice) {
+        this.trailingExitPrice = trailingExitPrice;
+    }
+
+    public BigDecimal getBestFavorablePrice() {
+        return bestFavorablePrice;
+    }
+
+    public void setBestFavorablePrice(BigDecimal bestFavorablePrice) {
+        this.bestFavorablePrice = bestFavorablePrice;
     }
 
     public String getSourceType() {

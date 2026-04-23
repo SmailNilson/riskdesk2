@@ -7,6 +7,7 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -24,14 +25,15 @@ class IndicatorServiceTest {
     void computeSnapshotLoadsSnapshotLookbackAndReturnsLatestTimestamp() {
         FakeCandleRepositoryPort candlePort = new FakeCandleRepositoryPort();
         ActiveContractRegistry contractRegistry = new ActiveContractRegistry();
-        List<Candle> history = buildHistory(2_100);
-        candlePort.stubRecentCandles(Instrument.MCL, "10m", 2_000, descendingTail(history, 2_000));
+        List<Candle> history = buildHistory(1_100);
+        candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_000, descendingTail(history, 1_000));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry);
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider(), new AbsorptionCache());
 
         IndicatorSnapshot snapshot = service.computeSnapshot(Instrument.MCL, "10m");
 
-        assertEquals(List.of("MCL:10m:2000", "MCL:1d:2", "MCL:1w:2", "MCL:1M:2"), candlePort.recentRequests());
+        // 10m uses tiered lookback of 1000 (not the default 2000)
+        assertEquals(List.of("MCL:10m:1000", "MCL:1d:2", "MCL:1w:2", "MCL:1M:2"), candlePort.recentRequests());
         assertEquals("MCL", snapshot.instrument());
         assertEquals("10m", snapshot.timeframe());
         assertNotNull(snapshot.activeFairValueGaps());
@@ -45,7 +47,7 @@ class IndicatorServiceTest {
         List<Candle> history = buildHistory(1_600);
         candlePort.stubRecentCandles(Instrument.MCL, "10m", 1_500, descendingTail(history, 1_500));
 
-        IndicatorService service = new IndicatorService(candlePort, contractRegistry);
+        IndicatorService service = new IndicatorService(candlePort, contractRegistry, emptyProvider(), emptyProvider(), new AbsorptionCache());
 
         IndicatorSeriesSnapshot series = service.computeSeries(Instrument.MCL, "10m", 500);
 
@@ -110,8 +112,18 @@ class IndicatorServiceTest {
         }
 
         @Override
+        public List<Candle> findCandlesBetween(Instrument instrument, String timeframe, Instant from, Instant to) {
+            return Collections.emptyList();
+        }
+
+        @Override
         public List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe, String contractMonth, int limit) {
             return Collections.emptyList();
+        }
+
+        @Override
+        public java.util.Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe) {
+            return java.util.Optional.empty();
         }
 
         @Override
@@ -142,5 +154,16 @@ class IndicatorServiceTest {
         private String key(Instrument instrument, String timeframe, int limit) {
             return instrument.name() + ":" + timeframe + ":" + limit;
         }
+    }
+
+    /** Returns an ObjectProvider that always resolves to null (no bean available). */
+    @SuppressWarnings("unchecked")
+    private static <T> ObjectProvider<T> emptyProvider() {
+        return new ObjectProvider<>() {
+            @Override public T getObject(Object... args) { return null; }
+            @Override public T getIfAvailable() { return null; }
+            @Override public T getIfUnique() { return null; }
+            @Override public T getObject() { return null; }
+        };
     }
 }

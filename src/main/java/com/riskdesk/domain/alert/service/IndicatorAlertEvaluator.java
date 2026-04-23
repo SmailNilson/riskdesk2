@@ -67,7 +67,11 @@ public class IndicatorAlertEvaluator {
 
     /**
      * Creates an evaluator with persistent state recovery.
-     * Loads recent states from the store (only states < 12h old to avoid stale weekend data).
+     * Loads recent states from the store (only states &lt; 12h old to avoid stale weekend data).
+     *
+     * <p>PR-7: also recovers the {@code lastFiredCandle} guards so an alert that
+     * already fired on the current candle before a restart cannot fire again on
+     * that same candle and trigger a duplicate Mentor (Gemini) review.
      */
     public IndicatorAlertEvaluator(AlertStateStore stateStore) {
         this.stateStore = stateStore;
@@ -80,6 +84,17 @@ public class IndicatorAlertEvaluator {
         }
         if (!recovered.isEmpty()) {
             log.info("IndicatorAlertEvaluator: recovered {} signal states from DB.", recovered.size());
+        }
+
+        Map<String, Instant> recoveredGuards = stateStore.loadRecentCandleGuards();
+        for (Map.Entry<String, Instant> entry : recoveredGuards.entrySet()) {
+            EvalKey key = parseEvalKey(entry.getKey());
+            if (key != null && entry.getValue() != null) {
+                lastFiredCandle.put(key, entry.getValue());
+            }
+        }
+        if (!recoveredGuards.isEmpty()) {
+            log.info("IndicatorAlertEvaluator: recovered {} candle-close guards from DB.", recoveredGuards.size());
         }
     }
 
@@ -118,6 +133,55 @@ public class IndicatorAlertEvaluator {
         return new EvalKey(family, instrument, timeframe, qualifier, high, low);
     }
 
+    /**
+     * Clears all transition state for a specific instrument. Called during contract
+     * rollover to prevent the old contract's indicator states from producing false
+     * transition alerts when the new contract's price series kicks in.
+     *
+     * Thread-safe: all maps are ConcurrentHashMap, entrySet().removeIf() is atomic
+     * per-entry.
+     */
+    public void clearStatesForInstrument(String instrumentName) {
+        // Collect keys to remove from persistent store BEFORE clearing in-memory maps
+        List<String> persistedKeysToRemove = lastState.entrySet().stream()
+                .filter(e -> instrumentName.equals(e.getKey().instrument()))
+                .map(e -> serializeEvalKey(e.getKey()))
+                .toList();
+        List<String> persistedCandleGuardsToRemove = lastFiredCandle.entrySet().stream()
+                .filter(e -> instrumentName.equals(e.getKey().instrument()))
+                .map(e -> serializeEvalKey(e.getKey()))
+                .toList();
+
+        int removedStates = removeMatching(lastState, instrumentName);
+        int removedCandle = removeMatching(lastFiredCandle, instrumentName);
+        int removedOB;
+        synchronized (orderBlockEventLock) {
+            removedOB = removeMatching(seenOrderBlockEvents, instrumentName);
+            orderBlockEventOrder.removeIf(k -> instrumentName.equals(k.instrument()));
+        }
+
+        // Remove from persistent store so recovery after restart is clean
+        for (String key : persistedKeysToRemove) {
+            stateStore.remove(key);
+        }
+        for (String key : persistedCandleGuardsToRemove) {
+            persistCandleGuardRemove(key);
+        }
+
+        log.info("Rollover: cleared alert state for {} — {} states, {} candle guards, {} OB events",
+                instrumentName, removedStates, removedCandle, removedOB);
+    }
+
+    private <V> int removeMatching(Map<EvalKey, V> map, String instrumentName) {
+        int[] count = {0};
+        map.entrySet().removeIf(e -> {
+            boolean match = instrumentName.equals(e.getKey().instrument());
+            if (match) count[0]++;
+            return match;
+        });
+        return count[0];
+    }
+
     private record EvalKey(
             String family,
             String instrument,
@@ -150,12 +214,17 @@ public class IndicatorAlertEvaluator {
      * Returns true if this is a new candle (different from the last candle on which this
      * signal fired), and records the current candle timestamp. Returns false if no timestamp is
      * available (fail-closed: no timestamp means candle close is not confirmed).
+     *
+     * <p>PR-7: the guard is persisted to {@link AlertStateStore#saveCandleGuard} so that
+     * it survives a restart. Without persistence, the first poll cycle after a restart
+     * could re-admit an alert on the same candle that already triggered a Mentor review.
      */
     private boolean canFireOnCandle(EvalKey candleKey, Instant lastCandleTimestamp) {
         if (lastCandleTimestamp == null) return false;
         Instant prev = lastFiredCandle.get(candleKey);
         if (lastCandleTimestamp.equals(prev)) return false;
         lastFiredCandle.put(candleKey, lastCandleTimestamp);
+        persistCandleGuardSave(candleKey, lastCandleTimestamp);
         return true;
     }
 
@@ -222,8 +291,13 @@ public class IndicatorAlertEvaluator {
         return true;
     }
 
-    /** OB zone midpoint must be within 1.5% of current price to generate an alert. */
-    private static final BigDecimal OB_PROXIMITY_THRESHOLD = new BigDecimal("0.015");
+    /**
+     * OB zone midpoint must be within 5% of current price to generate an alert.
+     * Widened from 1.5% — the previous threshold silently filtered OBs that were
+     * within valid structural range (2-5× ATR). Noise is now controlled upstream
+     * by the regime gate and structural anchor requirement in the confluence buffer.
+     */
+    private static final BigDecimal OB_PROXIMITY_THRESHOLD = new BigDecimal("0.05");
 
     private static boolean isObProximate(BigDecimal price, BigDecimal obHigh, BigDecimal obLow) {
         if (price == null || obHigh == null || obLow == null || price.signum() == 0) return false;
@@ -477,7 +551,15 @@ public class IndicatorAlertEvaluator {
         new TransitionSignalDef("chk", null, AlertCategory.CHAIKIN,
             IndicatorAlertSnapshot::chaikinCrossover, Map.of(
                 "BULLISH_CROSS", new SignalVariant("bullish", AlertSeverity.INFO,    "Chaikin Oscillator Bullish Cross"),
-                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Chaikin Oscillator Bearish Cross")))
+                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Chaikin Oscillator Bearish Cross"))),
+        new TransitionSignalDef("stoch", null, AlertCategory.STOCHASTIC,
+            IndicatorAlertSnapshot::stochSignal, Map.of(
+                "OVERSOLD",   new SignalVariant("oversold",   AlertSeverity.INFO,    "Stochastic Oversold"),
+                "OVERBOUGHT", new SignalVariant("overbought", AlertSeverity.WARNING, "Stochastic Overbought"))),
+        new TransitionSignalDef("stoch", "cross", AlertCategory.STOCHASTIC,
+            IndicatorAlertSnapshot::stochCrossover, Map.of(
+                "BULLISH_CROSS", new SignalVariant("bullish", AlertSeverity.INFO,    "Stochastic Bullish Cross"),
+                "BEARISH_CROSS", new SignalVariant("bearish", AlertSeverity.WARNING, "Stochastic Bearish Cross")))
     );
 
     private record MtfLevelDef(
@@ -512,6 +594,22 @@ public class IndicatorAlertEvaluator {
             stateStore.remove(serializeEvalKey(key));
         } catch (Exception e) {
             log.debug("Failed to remove alert state for {}: {}", key, e.getMessage());
+        }
+    }
+
+    private void persistCandleGuardSave(EvalKey candleKey, Instant candleTimestamp) {
+        try {
+            stateStore.saveCandleGuard(serializeEvalKey(candleKey), candleTimestamp);
+        } catch (Exception e) {
+            log.debug("Failed to persist candle guard for {}: {}", candleKey, e.getMessage());
+        }
+    }
+
+    private void persistCandleGuardRemove(String serializedKey) {
+        try {
+            stateStore.removeCandleGuard(serializedKey);
+        } catch (Exception e) {
+            log.debug("Failed to remove candle guard for {}: {}", serializedKey, e.getMessage());
         }
     }
 }

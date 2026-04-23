@@ -8,8 +8,12 @@ import { isSignalReview, isBehaviourReview, BEHAVIOUR_CATEGORIES } from '@/app/l
 import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
+import PlaybookPanel from './PlaybookPanel';
+import StrategyPanel from './StrategyPanel';
+import TradeDecisionPanel from './TradeDecisionPanel';
+import SimulationDashboard from './SimulationDashboard';
 
-type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL';
+type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK' | 'STRATEGY' | 'DECISIONS' | 'SIMULATIONS';
 
 interface TabDef {
   key: TabKey;
@@ -22,6 +26,10 @@ const TABS: TabDef[] = [
   { key: 'SIGNALS', label: 'SIGNAUX', icon: '\uD83E\uDD16' },
   { key: 'BEHAVIOUR', label: 'BEHAVIOUR', icon: '\uD83D\uDCD0' },
   { key: 'MANUAL', label: 'MANUEL', icon: '\uD83D\uDC64' },
+  { key: 'PLAYBOOK', label: 'PLAYBOOK', icon: '\uD83D\uDCCB' },
+  { key: 'STRATEGY', label: 'STRATEGY', icon: '\uD83C\uDFAF' },
+  { key: 'DECISIONS', label: 'DECISIONS', icon: '\uD83D\uDCCA' },
+  { key: 'SIMULATIONS', label: 'SIMULATIONS', icon: '\uD83E\uDDEA' },
 ];
 
 interface AiMentorDeskProps {
@@ -78,27 +86,40 @@ export default function AiMentorDesk({
     ALL: reviews.length,
     SIGNALS: signalReviews.length,
     BEHAVIOUR: behaviourReviews.length,
-    MANUAL: 0, // manual reviews are loaded internally by MentorPanel
+    MANUAL: 0,
+    PLAYBOOK: 0,
+    STRATEGY: 0,
+    DECISIONS: 0,
+    SIMULATIONS: 0,
   }), [reviews.length, signalReviews.length, behaviourReviews.length]);
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 overflow-hidden">
-      {/* Header + Tab bar */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800">
-        <h2 className="text-sm font-bold tracking-tight text-white">
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 overflow-hidden min-w-0">
+      {/* Header + Tab bar. Two rows so the 7 tabs stay legible even when the
+          right zone is compressed — the tab bar scrolls horizontally before
+          the content wraps word-by-word. */}
+      <div className="flex flex-col gap-2 px-3 py-2 border-b border-zinc-800">
+        <h2 className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
           AI Mentor<span className="text-emerald-400">Desk</span>
         </h2>
 
-        {/* Segmented control */}
-        <div className="flex rounded-lg overflow-hidden border border-zinc-700 bg-zinc-800/50">
+        {/* Segmented control — scrollable when narrower than content. */}
+        <div
+          className="flex rounded-lg overflow-x-auto overflow-y-hidden border border-zinc-700 bg-zinc-800/50 scrollbar-thin"
+          role="tablist"
+        >
           {TABS.map(tab => {
             const isActive = activeTab === tab.key;
             const count = tabCounts[tab.key];
             return (
               <button
                 key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
                 onClick={() => setActiveTab(tab.key)}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                title={tab.label}
+                className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors flex items-center gap-1 shrink-0 whitespace-nowrap ${
                   isActive
                     ? 'bg-zinc-600 text-white'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50'
@@ -173,6 +194,24 @@ export default function AiMentorDesk({
             prices={prices}
             alerts={alerts}
           />
+        )}
+
+        {activeTab === 'PLAYBOOK' && (
+          <div className="p-4">
+            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
+          </div>
+        )}
+
+        {activeTab === 'STRATEGY' && (
+          <StrategyPanel instrument={instrument} timeframe={timeframe} />
+        )}
+
+        {activeTab === 'DECISIONS' && (
+          <TradeDecisionPanel instrument={instrument} timeframe={timeframe} />
+        )}
+
+        {activeTab === 'SIMULATIONS' && (
+          <SimulationDashboard instrument={instrument} />
         )}
       </div>
     </div>

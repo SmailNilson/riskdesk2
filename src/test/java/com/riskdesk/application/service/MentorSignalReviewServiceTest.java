@@ -12,6 +12,7 @@ import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
@@ -69,6 +70,9 @@ class MentorSignalReviewServiceTest {
     private MentorSignalReviewRepositoryPort reviewRepository;
 
     @Mock
+    private TradeSimulationRepositoryPort simulationRepository;
+
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
 
     @Mock
@@ -76,6 +80,17 @@ class MentorSignalReviewServiceTest {
 
     @Mock
     private ApplicationEventPublisher eventPublisher;
+
+    /**
+     * Strategy engine is an optional collaborator via {@link ObjectProvider} —
+     * these tests leave it unwired (getIfAvailable returns null), so the new
+     * strategy_engine_analysis payload section is omitted during test runs.
+     * Dedicated tests for the S3b integration live in
+     * {@code StrategyEngineAnalysisPayloadTest}.
+     */
+    @Mock
+    private ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
+        strategyEngineServiceProvider;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -89,10 +104,12 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
 
@@ -250,10 +267,12 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
 
@@ -287,6 +306,7 @@ class MentorSignalReviewServiceTest {
                     24280.25,
                     2.00,
                     "Plan existant",
+                    null,
                     null
                 )
             ),
@@ -418,10 +438,12 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
             eventPublisher,
+            strategyEngineServiceProvider,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -479,61 +501,6 @@ class MentorSignalReviewServiceTest {
         assertThat(reviewCaptor.getValue().getSelectedTimezone()).isEqualTo("UTC");
     }
 
-    @Test
-    void captureGroupReview_preservesPrimaryAlertKeyForGroupedAlerts() {
-        MentorSignalReviewService service = new MentorSignalReviewService(
-            mentorAnalysisService,
-            indicatorService,
-            mentorIntermarketService,
-            marketDataServiceProvider,
-            candleRepositoryPort,
-            contractRegistry,
-            reviewRepository,
-            messagingTemplate,
-            objectMapper,
-            tickDataPortProvider,
-            eventPublisher,
-            true
-        );
-        service.setAutoAnalysisEnabled(true);
-
-        Instant primaryTimestamp = Instant.now();
-        Alert primary = new Alert(
-            "ob:mitigated:MCL:10m",
-            AlertSeverity.INFO,
-            "MCL [10m] Bearish order block mitigated",
-            AlertCategory.ORDER_BLOCK,
-            "MCL",
-            primaryTimestamp
-        );
-        Alert confirmation = new Alert(
-            "wt:bearish:MCL:10m",
-            AlertSeverity.INFO,
-            "MCL [10m] WaveTrend Bearish Cross",
-            AlertCategory.WAVETREND,
-            "MCL",
-            primaryTimestamp.plusSeconds(10)
-        );
-
-        when(reviewRepository.existsByAlertKey(any())).thenReturn(false);
-        when(reviewRepository.save(any())).thenAnswer(invocation -> {
-            MentorSignalReviewRecord record = invocation.getArgument(0);
-            if (record.getId() == null) {
-                record.setId(88L);
-            }
-            return record;
-        });
-
-        service.captureGroupReview(List.of(primary, confirmation), null);
-
-        ArgumentCaptor<MentorSignalReviewRecord> reviewCaptor = ArgumentCaptor.forClass(MentorSignalReviewRecord.class);
-        verify(reviewRepository).save(reviewCaptor.capture());
-        assertThat(reviewCaptor.getValue().getAlertKey())
-            .isEqualTo(primaryTimestamp + ":MCL:ORDER_BLOCK:MCL [10m] Bearish order block mitigated");
-        assertThat(reviewCaptor.getValue().getMessage()).isEqualTo(primary.message());
-        assertThat(reviewCaptor.getValue().getAlertTimestamp()).isEqualTo(primaryTimestamp);
-        assertThat(reviewCaptor.getValue().getCategory()).isEqualTo("ORDER_BLOCK");
-    }
 
     // -- captureBehaviourReview tests --
 
@@ -542,7 +509,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -593,7 +560,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, false
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -629,7 +596,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -654,7 +621,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -710,6 +677,8 @@ class MentorSignalReviewServiceTest {
             null,
             "WT_BEARISH",
             "OVERBOUGHT",
+            // Stochastic
+            null, null, null, null,
             // SMC: Internal structure
             "BEARISH",                          // internalBias
             null,                               // internalHigh
@@ -726,6 +695,8 @@ class MentorSignalReviewServiceTest {
             null,                               // lastSwingBreakType
             // SMC: UC-SMC-008 confluence filter state
             false,
+            // SMC: Multi-resolution bias
+            null,
             // SMC: Legacy / derived
             "BEARISH",
             new BigDecimal("24520.00"),
@@ -753,6 +724,10 @@ class MentorSignalReviewServiceTest {
             null,   // mtfLevels (UC-SMC-005)
             // Session PD Array (intraday range-based)
             null, null, null, null,
+            // UC-OF-012: Volume Profile
+            null, null, null,
+            // UC-OF-013: Session CME Context
+            "NY_AM",
             null,
             null    // lastPrice
         );
@@ -769,5 +744,259 @@ class MentorSignalReviewServiceTest {
             new BigDecimal(close),
             100L
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Fix #3 — Playbook → trade fallback circuit
+    // ──────────────────────────────────────────────────────────────────────────
+
+    private MentorSignalReviewService newServiceForFallbackTests() {
+        return new MentorSignalReviewService(
+            mentorAnalysisService,
+            indicatorService,
+            mentorIntermarketService,
+            marketDataServiceProvider,
+            candleRepositoryPort,
+            contractRegistry,
+            reviewRepository,
+            simulationRepository,
+            messagingTemplate,
+            objectMapper,
+            tickDataPortProvider,
+            eventPublisher,
+            strategyEngineServiceProvider,
+            true
+        );
+    }
+
+    /** Simulates a truncated / unparseable Gemini response — the only case where the fallback should activate. */
+    private static MentorAnalyzeResponse mentorUnavailableResponse(String reason) {
+        MentorStructuredResponse structured = new MentorStructuredResponse(
+            "Truncated analysis.",
+            List.of(),
+            new java.util.ArrayList<>(List.of("Réponse du mentor tronquée — reconstruction partielle appliquée.")),
+            "Trade Non-Conforme - Analyse Partielle",
+            ExecutionEligibilityStatus.MENTOR_UNAVAILABLE,
+            reason,
+            "Improve mentor robustness.",
+            null
+        );
+        return new MentorAnalyzeResponse(null, "gemini-test", null, structured, "{truncated}", List.of());
+    }
+
+    /** Simulates a clean, structured INELIGIBLE verdict from Gemini — must NEVER be flipped to ELIGIBLE. */
+    private static MentorAnalyzeResponse genuineIneligibleResponse(String reason) {
+        MentorStructuredResponse structured = new MentorStructuredResponse(
+            "Setup rejected — DXY bullish against LONG.",
+            List.of("Structure respectée"),
+            new java.util.ArrayList<>(List.of("Macro contre le trade", "R:R insuffisant")),
+            "Trade Non-Conforme - Erreur de Processus",
+            ExecutionEligibilityStatus.INELIGIBLE,
+            reason,
+            "Attendre un alignement macro avant d'entrer.",
+            null
+        );
+        return new MentorAnalyzeResponse(1L, "gemini-test", null, structured, "{valid-json}", List.of());
+    }
+
+    @Test
+    void applyPlaybookFallback_promotesToEligibleWhenScoreHighAndMechanicalPlanPresent() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = mentorUnavailableResponse("Gemini truncated, no decision.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "metadata": {"asset": "MGC1!"},
+              "playbook_pre_analysis": {
+                "verdict": "TRADE_VALID",
+                "checklist_score": "6/7",
+                "mechanical_plan": {
+                  "entry": 3012.5,
+                  "sl": 3005.0,
+                  "tp1": 3035.0,
+                  "rr": 3.0,
+                  "sl_rationale": "Below demand OB with 1.5x ATR buffer."
+                }
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+
+        assertThat(effective).isNotSameAs(ineligible);
+        assertThat(effective.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.ELIGIBLE);
+        assertThat(effective.analysis().verdict()).contains("Playbook Fallback");
+        assertThat(effective.analysis().executionEligibilityReason()).contains("6/7");
+        MentorProposedTradePlan plan = effective.analysis().proposedTradePlan();
+        assertThat(plan).isNotNull();
+        assertThat(plan.entryPrice()).isEqualTo(3012.5);
+        assertThat(plan.stopLoss()).isEqualTo(3005.0);
+        assertThat(plan.takeProfit()).isEqualTo(3035.0);
+        assertThat(plan.rewardToRiskRatio()).isEqualTo(3.0);
+        assertThat(plan.tpSource()).isEqualTo("PLAYBOOK_MECHANICAL");
+    }
+
+    @Test
+    void applyPlaybookFallback_leavesResponseUnchangedWhenScoreTooLow() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse unavailable = mentorUnavailableResponse("Gemini truncated.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "4/7",
+                "mechanical_plan": {"entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0}
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(unavailable, payload);
+
+        assertThat(effective).isSameAs(unavailable);
+    }
+
+    @Test
+    void applyPlaybookFallback_leavesResponseUnchangedWhenMechanicalPlanMissing() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse unavailable = mentorUnavailableResponse("Gemini truncated.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "verdict": "TRADE_VALID"
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(unavailable, payload);
+
+        assertThat(effective).isSameAs(unavailable);
+    }
+
+    @Test
+    void applyPlaybookFallback_neverPromotesGenuineIneligibleVerdict() throws Exception {
+        // Codex P1: a real Gemini "no" must stay a no. The playbook fallback only
+        // activates for technical failures (MENTOR_UNAVAILABLE), never for a
+        // structured INELIGIBLE verdict — otherwise we silently flip trades the
+        // model rejected on purpose.
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorAnalyzeResponse ineligible = genuineIneligibleResponse("Macro contre le trade.");
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "verdict": "TRADE_VALID",
+                "mechanical_plan": {
+                  "entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0,
+                  "sl_rationale": "Below demand OB."
+                }
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(ineligible, payload);
+
+        // Must remain the exact same instance — no promotion, no mutation.
+        assertThat(effective).isSameAs(ineligible);
+        assertThat(effective.analysis().executionEligibilityStatus())
+            .isEqualTo(ExecutionEligibilityStatus.INELIGIBLE);
+        assertThat(effective.analysis().verdict()).doesNotContain("Playbook Fallback");
+    }
+
+    @Test
+    void applyPlaybookFallback_neverDowngradesEligibleResponses() throws Exception {
+        MentorSignalReviewService service = newServiceForFallbackTests();
+        MentorProposedTradePlan plan = new MentorProposedTradePlan(
+            3020.0, 3010.0, 3040.0, 2.0, "Gemini plan", null, "FORMULA_1.5");
+        MentorStructuredResponse eligible = new MentorStructuredResponse(
+            "Bullish.",
+            List.of("Flow aligned"),
+            List.of(),
+            "Trade Validé - Discipline Respectée",
+            ExecutionEligibilityStatus.ELIGIBLE,
+            "Plan complet.",
+            "OK.",
+            plan
+        );
+        MentorAnalyzeResponse geminiEligible = new MentorAnalyzeResponse(
+            7L, "gemini-test", null, eligible, "{ok}", List.of()
+        );
+
+        // Playbook would also want to promote — but Gemini already said ELIGIBLE.
+        JsonNode payload = objectMapper.readTree("""
+            {
+              "playbook_pre_analysis": {
+                "checklist_score": "7/7",
+                "mechanical_plan": {"entry": 3012.5, "sl": 3005.0, "tp1": 3035.0, "rr": 3.0}
+              }
+            }
+            """);
+
+        MentorAnalyzeResponse effective = service.applyPlaybookFallback(geminiEligible, payload);
+
+        // Same instance — no override needed when Gemini already validated.
+        assertThat(effective).isSameAs(geminiEligible);
+        assertThat(effective.analysis().proposedTradePlan().entryPrice()).isEqualTo(3020.0);
+        assertThat(effective.analysis().proposedTradePlan().tpSource()).isEqualTo("FORMULA_1.5");
+    }
+
+    // ── DST-aware market_session payload field ─────────────────────────
+    // The previous implementation compared hardcoded UTC hours, which
+    // shifted all session boundaries ±1 h between summer (EDT, UTC-4) and
+    // winter (EST, UTC-5). The new mapping routes through
+    // TradingSessionResolver so labels stay correct across DST transitions.
+
+    // ── Volatility regime tier labels (Codex P2) ─────────────────────────
+    // The payload builder labels must match the GeminiMentorClient prompt
+    // calibration: ELEVATED = 80-90, EXTREME = >90. A mismatch makes the
+    // prompt's ELEVATED branch unreachable and all 80+ setups get flagged
+    // EXTREME, defeating the intended relaxation of volatility filtering.
+
+    @Test
+    void classifyVolatilityRegime_mapsThresholdsToExpectedLabels() {
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(null)).isNull();
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(0)).isEqualTo("LOW");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(19)).isEqualTo("LOW");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(20)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(50)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(80)).isEqualTo("NORMAL");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(81)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(85)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(90)).isEqualTo("ELEVATED");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(91)).isEqualTo("EXTREME");
+        assertThat(MentorSignalReviewService.classifyVolatilityRegime(99)).isEqualTo("EXTREME");
+    }
+
+    @Test
+    void inferMarketSession_nyMorningInBothDstPhases_tagsAsNewYork() {
+        // 09:30 ET — winter (EST, UTC-5) = 14:30 UTC
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T14:30:00Z"))).isEqualTo("NEW_YORK");
+        // 09:30 ET — summer (EDT, UTC-4) = 13:30 UTC
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-07-15T13:30:00Z"))).isEqualTo("NEW_YORK");
+    }
+
+    @Test
+    void inferMarketSession_asianOpenInSummer_wasMisTaggedByOldCode() {
+        // 17:30 ET summer = 21:30 UTC. Old code: hour=21 → NEW_YORK (wrong).
+        // New code via America/New_York zone: ASIAN (CME Globex open).
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-07-15T21:30:00Z"))).isEqualTo("ASIAN_OPEN");
+    }
+
+    @Test
+    void inferMarketSession_lateAsianInWinter_wasMisTaggedByOldCode() {
+        // 01:30 ET winter = 06:30 UTC. Old code: hour=6 → LONDON (wrong).
+        // New code: ASIAN (17:00-02:00 ET).
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T06:30:00Z"))).isEqualTo("ASIAN_OPEN");
+    }
+
+    @Test
+    void inferMarketSession_settlementWindow_isOffHours() {
+        // 16:30 ET winter = 21:30 UTC → CLOSE phase (16:00-17:00 ET) → OFF_HOURS
+        // Use a fresh weekday to avoid the weekend CLOSED branch.
+        assertThat(MentorSignalReviewService.inferMarketSession(
+            Instant.parse("2026-01-15T21:30:00Z"))).isEqualTo("OFF_HOURS");
     }
 }

@@ -1,8 +1,11 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.ib.client.CommissionAndFeesReport;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Decimal;
+import com.ib.client.Execution;
+import com.ib.client.ExecutionFilter;
 import com.ib.client.Order;
 import com.ib.client.OrderState;
 import com.ib.client.OrderStatus;
@@ -18,6 +21,9 @@ import com.ib.controller.ApiConnection;
 import com.ib.controller.ApiController;
 import com.ib.controller.Bar;
 import com.ib.controller.Position;
+import com.riskdesk.domain.execution.port.ExecutionFillListener;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
+import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +32,8 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -89,9 +97,301 @@ public class IbGatewayNativeClient {
     private volatile String lastConnectionFailure = "uninitialized";
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
+    private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
+    private volatile StreamingPriceListener priceListener;
+    private volatile ExecutionFillListener executionFillListener;
+    private volatile ApiController.ITradeReportHandler tradeReportHandlerRef;
+    private volatile ApiController.ILiveOrderHandler fillTrackingOrderHandler;
+    private volatile SubscriptionRegistry subscriptionRegistry;
+    private volatile IbGatewayContractResolver contractResolverRef;
+    private volatile int depthNumRows = 10;
 
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
+    }
+
+    /**
+     * Registers the subscription registry that tracks intended subscriptions
+     * for reconnection resilience (UC-OF-015).
+     */
+    public void setSubscriptionRegistry(SubscriptionRegistry registry) {
+        this.subscriptionRegistry = registry;
+    }
+
+    /**
+     * Registers the contract resolver used by {@link #resubscribeAll()} to map
+     * instruments back to IBKR contracts after a reconnection.
+     */
+    public void setContractResolver(IbGatewayContractResolver resolver) {
+        this.contractResolverRef = resolver;
+    }
+
+    /**
+     * Sets the default depth row count for resubscription.
+     */
+    public void setDepthNumRows(int numRows) {
+        this.depthNumRows = numRows;
+    }
+
+    /**
+     * Registers a listener that will be called on the IBKR EReader thread whenever a
+     * new price tick or 5-second bar arrives. The listener MUST be non-blocking.
+     */
+    public void setPriceListener(StreamingPriceListener listener) {
+        this.priceListener = listener;
+    }
+
+    /**
+     * Slice 3a — registers a sink that receives raw IBKR {@code execDetails}
+     * and {@code orderStatus} feedback. Called by the application layer during
+     * startup wiring. The listener MUST be non-blocking (runs on the IBKR
+     * EReader thread) — heavy work should be offloaded.
+     *
+     * <p>Setting the listener also registers persistent order/trade-report
+     * handlers with the {@link ApiController} so existing ad-hoc lookups
+     * (e.g. {@code findOpenOrderByOrderRef}) keep working alongside them.</p>
+     */
+    public void setExecutionFillListener(ExecutionFillListener listener) {
+        this.executionFillListener = listener;
+        if (listener == null) {
+            return;
+        }
+        ApiController ctrl = controller;
+        if (ctrl == null) {
+            // Handlers will be attached lazily once a connection is established.
+            return;
+        }
+        attachFillTrackingHandlersIfNeeded(ctrl);
+    }
+
+    private void attachFillTrackingHandlersIfNeeded(ApiController ctrl) {
+        if (ctrl == null || executionFillListener == null) {
+            return;
+        }
+        synchronized (orderPlacementLock) {
+            if (tradeReportHandlerRef == null) {
+                ApiController.ITradeReportHandler handler = new ApiController.ITradeReportHandler() {
+                    @Override
+                    public void tradeReport(String tradeKey, Contract contract, Execution execution) {
+                        dispatchExecDetails(execution);
+                    }
+
+                    @Override
+                    public void tradeReportEnd() {
+                        // no-op — persistent subscription
+                    }
+
+                    @Override
+                    public void commissionAndFeesReport(String tradeKey, CommissionAndFeesReport report) {
+                        // Commission data is out of scope for Slice 3a.
+                    }
+                };
+                try {
+                    ctrl.reqExecutions(executionFilterForToday(), handler);
+                    tradeReportHandlerRef = handler;
+                    log.info("IBKR execution fill tracking: trade report handler attached");
+                } catch (Exception e) {
+                    log.warn("Failed to attach IBKR trade report handler: {}", e.getMessage());
+                }
+            }
+
+            if (fillTrackingOrderHandler == null) {
+                ApiController.ILiveOrderHandler handler = new ApiController.ILiveOrderHandler() {
+                    @Override
+                    public void openOrder(Contract contract, Order order, OrderState orderState) {
+                        // no-op — the lookup-style handler still uses its own listener
+                    }
+
+                    @Override
+                    public void openOrderEnd() {
+                        // no-op
+                    }
+
+                    @Override
+                    public void orderStatus(int orderId,
+                                            OrderStatus status,
+                                            Decimal filled,
+                                            Decimal remaining,
+                                            double avgFillPrice,
+                                            long permId,
+                                            int parentId,
+                                            double lastFillPrice,
+                                            int clientId,
+                                            String whyHeld,
+                                            double mktCapPrice) {
+                        dispatchOrderStatus(orderId, status, filled, remaining, avgFillPrice);
+                    }
+
+                    @Override
+                    public void handle(int orderId, int errorCode, String errorMsg) {
+                        // IBKR surfaces async order errors here — we log and move on.
+                        log.debug("IBKR fill-tracking order error orderId={} code={} msg={}",
+                            orderId, errorCode, errorMsg);
+                    }
+                };
+                try {
+                    ctrl.reqLiveOrders(handler);
+                    fillTrackingOrderHandler = handler;
+                    log.info("IBKR execution fill tracking: live order status handler attached");
+                } catch (Exception e) {
+                    log.warn("Failed to attach IBKR live order handler: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void dispatchExecDetails(Execution execution) {
+        ExecutionFillListener listener = executionFillListener;
+        if (listener == null || execution == null) {
+            return;
+        }
+        try {
+            int orderId = execution.orderId();
+            String execId = execution.execId();
+            String orderRef = execution.orderRef();
+            BigDecimal cumQty = execution.cumQty() == null ? null : execution.cumQty().value();
+            BigDecimal avgPrice = BigDecimal.valueOf(execution.avgPrice());
+            BigDecimal lastFillPrice = BigDecimal.valueOf(execution.price());
+            String side = execution.side();
+            Instant time = parseExecutionTime(execution.time());
+            listener.onExecDetails(orderId, execId, orderRef, cumQty, avgPrice, lastFillPrice, side, time);
+        } catch (RuntimeException e) {
+            log.warn("execDetails dispatch failed: {}", e.getMessage());
+        }
+    }
+
+    private void dispatchOrderStatus(int orderId,
+                                     OrderStatus status,
+                                     Decimal filled,
+                                     Decimal remaining,
+                                     double avgFillPrice) {
+        ExecutionFillListener listener = executionFillListener;
+        if (listener == null || status == null) {
+            return;
+        }
+        try {
+            BigDecimal filledBd = filled == null ? null : filled.value();
+            BigDecimal remainingBd = remaining == null ? null : remaining.value();
+            BigDecimal avgPx = BigDecimal.valueOf(avgFillPrice);
+            listener.onOrderStatus(orderId, status.name(), filledBd, remainingBd, avgPx, Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("orderStatus dispatch failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Parses IBKR's Execution.time() string. The format depends on SDK version;
+     * the most common form is {@code yyyyMMdd  HH:mm:ss} in {@code America/New_York}
+     * time. Returns {@code Instant.now()} on unparseable input — timestamp fidelity
+     * is a soft requirement; we never fail the fill pipeline over it.
+     */
+    private static Instant parseExecutionTime(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Instant.now();
+        }
+        String trimmed = raw.trim();
+        // Try the common "yyyyMMdd  HH:mm:ss" layout first.
+        try {
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd[  ][ ]HH:mm:ss");
+            LocalDateTime ldt = LocalDateTime.parse(trimmed, fmt);
+            return ldt.atZone(ZoneId.of("America/New_York")).toInstant();
+        } catch (Exception ignored) {
+            // fall through
+        }
+        try {
+            // Some SDK versions include a trailing timezone name.
+            int tzSplit = trimmed.lastIndexOf(' ');
+            if (tzSplit > 0) {
+                String head = trimmed.substring(0, tzSplit).trim();
+                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMdd[  ][ ]HH:mm:ss");
+                LocalDateTime ldt = LocalDateTime.parse(head, fmt);
+                return ldt.atZone(ZoneId.of("America/New_York")).toInstant();
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return Instant.now();
+    }
+
+    /**
+     * Slice 3a — {@link ExecutionFilter} scoped to today so we only pick up
+     * relevant execDetails replays when reqExecutions is called at (re)connect.
+     */
+    private ExecutionFilter executionFilterForToday() {
+        ExecutionFilter filter = new ExecutionFilter();
+        // "yyyymmdd HH:mm:ss" with UTC is accepted by IBKR; anchor to today 00:00 UTC.
+        try {
+            String today = DateTimeFormatter.ofPattern("yyyyMMdd")
+                .withZone(ZoneOffset.UTC)
+                .format(Instant.now()) + "-00:00:00";
+            filter.time(today);
+        } catch (Exception ignored) {
+            // Leave the filter open — IBKR will return all available execs.
+        }
+        return filter;
+    }
+
+    /**
+     * Associates a subscription key with its domain Instrument so that push callbacks
+     * can identify which instrument a tick belongs to.
+     */
+    public void registerInstrumentMapping(Contract contract, Instrument instrument) {
+        contractKeyToInstrument.put(subscriptionKey(contract), instrument);
+    }
+
+    /**
+     * Atomically cancels all streaming subscriptions for {@code oldContract} and
+     * starts fresh subscriptions for {@code newContract}. Used during contract
+     * rollover to prevent orphaned IBKR data streams and stale reqId mappings.
+     *
+     * Thread-safe: all mutations happen under {@link #streamingLock}.
+     */
+    public void cancelAndResubscribe(Contract oldContract, Contract newContract, Instrument instrument) {
+        if (oldContract == null && newContract == null) return;
+
+        synchronized (streamingLock) {
+            // --- Cancel old subscriptions ---
+            if (oldContract != null) {
+                String oldKey = subscriptionKey(oldContract);
+                ApiController ctrl = controller;
+
+                StreamingPriceSubscription oldPrice = streamingSubscriptions.remove(oldKey);
+                if (oldPrice != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldPrice); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(oldPrice); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled price stream for old contract {}", describeContract(oldContract));
+                }
+
+                StreamingQuoteSubscription oldQuote = streamingQuoteSubscriptions.remove(oldKey);
+                if (oldQuote != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(oldQuote); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled quote stream for old contract {}", describeContract(oldContract));
+                }
+
+                contractKeyToInstrument.remove(oldKey);
+
+                // Cancel depth subscription for old contract
+                DepthSubscription oldDepth = depthSubscriptions.remove(oldKey);
+                if (oldDepth != null && ctrl != null) {
+                    try { ctrl.cancelDeepMktData(false, oldDepth); } catch (Exception ignored) {}
+                    log.info("Rollover: cancelled depth for old contract {}", describeContract(oldContract));
+                }
+            }
+        }
+
+        // --- Subscribe to new contract (outside streamingLock — ensureStreaming acquires it internally) ---
+        if (newContract != null) {
+            if (instrument != null) {
+                registerInstrumentMapping(newContract, instrument);
+            }
+            ensureStreamingPriceSubscription(newContract);
+            ensureStreamingQuoteSubscription(newContract);
+            // Re-subscribe depth if adapter is wired
+            if (depthAdapter != null && instrument != null) {
+                subscribeDepth(newContract, instrument, depthNumRows);
+            }
+            log.info("Rollover: subscribed to new contract {}", describeContract(newContract));
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -453,6 +753,26 @@ public class IbGatewayNativeClient {
         return collector.openInterest();
     }
 
+    /**
+     * One-shot snapshot to get the trading volume for a contract.
+     * Used as fallback when OI is unavailable for contract selection.
+     */
+    public OptionalLong requestSnapshotVolume(Contract contract) {
+        if (!ensureConnected()) {
+            return OptionalLong.empty();
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        VolumeCollector collector = new VolumeCollector(latch);
+
+        // Default ticks include volume (TickType.VOLUME = tick 8)
+        controller.reqTopMktData(contract, "", false, false, collector);
+        awaitLatch(latch, "volume snapshot", REQUEST_TIMEOUT);
+        controller.cancelTopMktData(collector);
+
+        return collector.volume();
+    }
+
     public Optional<NativeMarketQuote> requestSnapshotQuote(Contract contract) {
         if (!ensureConnected()) {
             return Optional.empty();
@@ -504,6 +824,13 @@ public class IbGatewayNativeClient {
             controller.reqRealTimeBars(contract, WhatToShow.TRADES, false, subscription);
             streamingSubscriptions.put(key, subscription);
             log.info("IB Gateway live stream subscribed for {}", describeContract(contract));
+
+            // Register in subscription registry for reconnection resilience
+            SubscriptionRegistry reg = subscriptionRegistry;
+            Instrument inst = contractKeyToInstrument.get(key);
+            if (reg != null && inst != null) {
+                reg.register(inst, SubscriptionRegistry.SubscriptionType.PRICE);
+            }
         }
     }
 
@@ -513,6 +840,39 @@ public class IbGatewayNativeClient {
         }
         StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
         return subscription == null ? Optional.empty() : subscription.bestPrice();
+    }
+
+    /**
+     * Cancels all streaming subscriptions (price + quote) for the given instrument,
+     * regardless of contract month. Called during contract rollover to prevent orphaned
+     * subscriptions on expired months from producing stale prices.
+     */
+    public void cancelInstrumentSubscriptions(Instrument instrument) {
+        List<String> keysToRemove = contractKeyToInstrument.entrySet().stream()
+            .filter(e -> e.getValue() == instrument)
+            .map(Map.Entry::getKey)
+            .toList();
+
+        if (keysToRemove.isEmpty()) return;
+
+        synchronized (streamingLock) {
+            ApiController ctrl = controller;
+            for (String key : keysToRemove) {
+                StreamingPriceSubscription priceSub = streamingSubscriptions.remove(key);
+                if (priceSub != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(priceSub); } catch (Exception ignored) {}
+                    try { ctrl.cancelRealtimeBars(priceSub); } catch (Exception ignored) {}
+                }
+                StreamingQuoteSubscription quoteSub = streamingQuoteSubscriptions.remove(key);
+                if (quoteSub != null && ctrl != null) {
+                    try { ctrl.cancelTopMktData(quoteSub); } catch (Exception ignored) {}
+                }
+                contractKeyToInstrument.remove(key);
+            }
+        }
+
+        log.info("IB Gateway cancelled {} subscription(s) for {} (contract rollover cleanup)",
+            keysToRemove.size(), instrument);
     }
 
     public void ensureStreamingQuoteSubscription(Contract contract) {
@@ -548,6 +908,120 @@ public class IbGatewayNativeClient {
         }
         StreamingQuoteSubscription subscription = streamingQuoteSubscriptions.get(subscriptionKey(contract));
         return subscription == null ? Optional.empty() : subscription.quote();
+    }
+
+    // -------------------------------------------------------------------------
+    // Market depth (Level 2) — UC-OF-003
+    // -------------------------------------------------------------------------
+
+    private volatile IbkrMarketDepthAdapter depthAdapter;
+    private final Map<String, DepthSubscription> depthSubscriptions = new ConcurrentHashMap<>();
+
+    public void setDepthAdapter(IbkrMarketDepthAdapter adapter) {
+        this.depthAdapter = adapter;
+    }
+
+    /**
+     * Subscribes to Level 2 market depth for the given contract.
+     * Only for MNQ, MCL, MGC (max 3 concurrent depth subscriptions on IBKR).
+     */
+    public void subscribeDepth(Contract contract, Instrument instrument, int numRows) {
+        if (contract == null || !ensureConnected()) return;
+        if (depthAdapter == null) {
+            log.warn("Cannot subscribe depth for {} — depthAdapter not wired", instrument);
+            return;
+        }
+
+        String key = subscriptionKey(contract);
+        synchronized (streamingLock) {
+            if (depthSubscriptions.containsKey(key)) return;
+
+            DepthSubscription subscription = new DepthSubscription(instrument);
+            controller.reqDeepMktData(contract, numRows, false, subscription);
+            depthSubscriptions.put(key, subscription);
+            log.info("IB Gateway market depth subscribed for {} ({} rows)", instrument, numRows);
+
+            // Register in subscription registry for reconnection resilience
+            SubscriptionRegistry reg = subscriptionRegistry;
+            if (reg != null) {
+                reg.register(instrument, SubscriptionRegistry.SubscriptionType.DEPTH);
+            }
+        }
+    }
+
+    private final class DepthSubscription implements ApiController.IDeepMktDataHandler {
+        private final Instrument instrument;
+
+        DepthSubscription(Instrument instrument) {
+            this.instrument = instrument;
+        }
+
+        @Override
+        public void updateMktDepth(int position, String marketMaker,
+                                    com.ib.client.Types.DeepType operation,
+                                    com.ib.client.Types.DeepSide side,
+                                    double price, com.ib.client.Decimal size) {
+            IbkrMarketDepthAdapter adapter = depthAdapter;
+            if (adapter != null) {
+                adapter.onDepthUpdate(instrument, position,
+                    operation.name(), side.name(), price,
+                    size != null ? size.longValue() : 0);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Reconnection resilience — UC-OF-015
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-subscribes all entries from the {@link SubscriptionRegistry}.
+     * Called after a reconnection to restore price, quote, tick-by-tick, and depth streams.
+     *
+     * <p>Requires a contract resolver to have been set via {@link #setContractResolver}.
+     * Entries whose contracts cannot be resolved are skipped with a warning.</p>
+     */
+    public void resubscribeAll() {
+        SubscriptionRegistry reg = subscriptionRegistry;
+        IbGatewayContractResolver resolver = contractResolverRef;
+
+        if (reg == null || resolver == null) {
+            log.warn("resubscribeAll: registry or contract resolver not wired — skipping");
+            return;
+        }
+
+        if (!isConnected()) {
+            log.warn("resubscribeAll: not connected — skipping");
+            return;
+        }
+
+        var entries = reg.allEntries();
+        log.info("resubscribeAll: restoring {} subscriptions after reconnect", entries.size());
+
+        for (var entry : entries) {
+            Instrument instrument = entry.instrument();
+            if (!instrument.isExchangeTradedFuture()) continue;
+
+            Optional<IbGatewayResolvedContract> resolved = resolver.resolve(instrument);
+            if (resolved.isEmpty()) {
+                log.warn("resubscribeAll: cannot resolve contract for {} — skipping", instrument);
+                continue;
+            }
+
+            Contract contract = resolved.get().contract();
+            registerInstrumentMapping(contract, instrument);
+
+            try {
+                switch (entry.type()) {
+                    case PRICE -> ensureStreamingPriceSubscription(contract);
+                    case QUOTE -> ensureStreamingQuoteSubscription(contract);
+                    case DEPTH -> subscribeDepth(contract, instrument, depthNumRows);
+                }
+            } catch (Exception e) {
+                log.warn("resubscribeAll: failed to resubscribe {} {} — {}",
+                    entry.type(), instrument, e.getMessage());
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -637,6 +1111,9 @@ public class IbGatewayNativeClient {
         managedAccounts = List.of();
         streamingSubscriptions.clear();
         streamingQuoteSubscriptions.clear();
+        // Slice 3a — drop stale fill-tracking handler refs so they re-attach on reconnect.
+        tradeReportHandlerRef = null;
+        fillTrackingOrderHandler = null;
         return new DisconnectContext(prev, subs, quoteSubs);
     }
 
@@ -837,6 +1314,13 @@ public class IbGatewayNativeClient {
             }
             log.info("IB Gateway native API connected on {}:{} with clientId={}",
                 properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId());
+            // Slice 3a — if a fill listener was registered before connect,
+            // attach the persistent handlers now that the controller is live.
+            try {
+                attachFillTrackingHandlersIfNeeded(controller);
+            } catch (Exception e) {
+                log.debug("Could not attach fill tracking handlers on connect: {}", e.getMessage());
+            }
         }
 
         @Override
@@ -984,6 +1468,32 @@ public class IbGatewayNativeClient {
         }
     }
 
+    private static final class VolumeCollector extends ApiController.TopMktDataAdapter {
+        private final CountDownLatch latch;
+        private volatile Long vol;
+
+        private VolumeCollector(CountDownLatch latch) {
+            this.latch = latch;
+        }
+
+        @Override
+        public void tickSize(TickType tickType, Decimal size) {
+            if (tickType == TickType.VOLUME && size != null && size.longValue() >= 0) {
+                vol = size.longValue();
+                latch.countDown();
+            }
+        }
+
+        @Override
+        public void tickSnapshotEnd() {
+            latch.countDown();
+        }
+
+        private OptionalLong volume() {
+            return vol == null ? OptionalLong.empty() : OptionalLong.of(vol);
+        }
+    }
+
     private static final class QuoteCollector extends ApiController.TopMktDataAdapter {
         private final CountDownLatch latch;
         private volatile Double bid;
@@ -1091,6 +1601,7 @@ public class IbGatewayNativeClient {
             if (bestPrice != null) {
                 lastPriceAt = Instant.now();
                 logFirstPrice("tickPrice");
+                notifyPriceListener(bestPrice, lastPriceAt);
             }
         }
 
@@ -1145,6 +1656,7 @@ public class IbGatewayNativeClient {
             bestPrice = bar.close();
             lastPriceAt = Instant.now();
             logFirstPrice("realtimeBar");
+            notifyPriceListener(bestPrice, lastPriceAt);
         }
 
         private Optional<BigDecimal> bestPrice() {
@@ -1174,6 +1686,18 @@ public class IbGatewayNativeClient {
             if (!loggedFirstPrice) {
                 loggedFirstPrice = true;
                 log.info("IB Gateway first live price for {} received via {}", describeContract(contract), source);
+            }
+        }
+
+        private void notifyPriceListener(double price, Instant timestamp) {
+            StreamingPriceListener listener = priceListener;
+            if (listener == null) return;
+            Instrument instrument = contractKeyToInstrument.get(subscriptionKey(contract));
+            if (instrument == null) return;
+            try {
+                listener.onLivePriceUpdate(instrument, BigDecimal.valueOf(price), timestamp);
+            } catch (Exception e) {
+                log.debug("Price listener error for {}: {}", instrument, e.getMessage());
             }
         }
     }
@@ -1284,4 +1808,5 @@ public class IbGatewayNativeClient {
                                     BigDecimal close,
                                     Instant timestamp) {
     }
+
 }

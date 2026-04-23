@@ -41,7 +41,26 @@ public class SmcStructureEngine {
 
     // ── Value objects ────────────────────────────────────────────────────
 
-    /** A confirmed swing pivot. */
+    /**
+     * A confirmed swing pivot.
+     *
+     * <h3>Confirmation lag</h3>
+     * A pivot is <b>always stale</b> by exactly {@code lookback} bars at the moment
+     * it is emitted. The candidate bar is {@code lookback} positions back in the ring
+     * buffer; confirmation requires the following {@code lookback} bars to not take
+     * out its extreme. So at the instant {@code onCandle(N)} returns a new pivot:
+     * <ul>
+     *   <li>{@link #barIndex} == {@code N - lookback} (the pivot bar)</li>
+     *   <li>{@link #timestamp} is the close time of bar {@code N - lookback},
+     *       which for 10-minute candles is {@code lookback * 10} minutes in the past</li>
+     * </ul>
+     * Defaults: internal lookback = 5, swing lookback = 50. On 10m candles a fresh
+     * {@code SWING} pivot reflects price action roughly <b>8 hours 20 minutes ago</b>;
+     * on 1h candles, <b>~2 days</b>. Consumers that treat {@code timestamp} as "now"
+     * will mis-reason about how recent the swing really is — prefer
+     * {@code StructureEvent.timestamp} for "right now" structure events and reserve
+     * this {@code timestamp} for "where the pivot sits on the historical chart".
+     */
     public record Pivot(PivotSide side, double price, Instant timestamp, int barIndex) {}
 
     /** A BOS or CHoCH event with full context. */
@@ -53,7 +72,16 @@ public class SmcStructureEngine {
             Instant timestamp,
             int barIndex) {}
 
-    /** Immutable snapshot of engine state. */
+    /**
+     * Immutable snapshot of engine state.
+     *
+     * <p><b>Pivot staleness:</b> {@link #internalHigh}, {@link #internalLow},
+     * {@link #swingHigh}, {@link #swingLow} each carry a confirmation lag equal to
+     * the corresponding level's lookback (see {@link Pivot}). The {@code timestamp}
+     * on each pivot is the candidate bar's close time — always in the past — never
+     * the moment the pivot was detected. {@link #trailingTop} and {@link #trailingBottom}
+     * are updated bar-by-bar and are not subject to the lookback lag.
+     */
     public record StructureSnapshot(
             Bias internalBias,
             Bias swingBias,

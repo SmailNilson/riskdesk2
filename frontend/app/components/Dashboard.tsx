@@ -12,6 +12,12 @@ import AiMentorDesk from './AiMentorDesk';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
+import OrderFlowPanel from './OrderFlowPanel';
+import FootprintChart from './FootprintChart';
+import FlashCrashPanel from './FlashCrashPanel';
+import TrailingStopStatsPanel from './TrailingStopStatsPanel';
+import CorrelationPanel from './CorrelationPanel';
+import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -29,8 +35,47 @@ export default function Dashboard() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
   const [selectedIbkrAccountId, setSelectedIbkrAccountId] = useState<string | undefined>(undefined);
+  const [purging, setPurging] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
+
+  const handlePurge = useCallback(async () => {
+    if (purging) return;
+    if (!window.confirm(
+      `Purge all ${instrument} candles (all timeframes) and trigger IBKR re-backfill?\n\nThis is destructive — existing DB history for ${instrument} will be wiped.`
+    )) return;
+    setPurging(true);
+    setPurgeMsg(null);
+    try {
+      const purgeRes = await api.purgeInstrument(instrument);
+      if (purgeRes.error) {
+        setPurgeMsg(`Error: ${purgeRes.error}`);
+        return;
+      }
+      await api.refreshDb();
+      setPurgeMsg(`Purged ${purgeRes.purged ?? 0} • Refill started`);
+    } catch (e) {
+      console.error(`Purge ${instrument} failed:`, e);
+      setPurgeMsg('Error');
+    } finally {
+      setPurging(false);
+      setTimeout(() => setPurgeMsg(null), 6000);
+    }
+  }, [instrument, purging]);
 
   const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
+
+  // Zone collapse state is hoisted so the grid's track widths follow the
+  // actual zone state — without this, the `auto` tracks would shrink below
+  // the zone's min-width because the center column (Chart + OrderFlow) forces
+  // `1fr` to claim the remaining space and squeezes the sides.
+  const leftZone = useCollapsibleZoneState('left-context');
+  const rightZone = useCollapsibleZoneState('right-ai-desk');
+
+  // Track widths (lg and up). The right zone is wider than the left because
+  // AiMentorDesk renders a dense tab bar + verbose mentor review cards.
+  const leftTrack = leftZone.collapsed ? '2.5rem' : '320px';
+  const rightTrack = rightZone.collapsed ? '2.5rem' : '440px';
+  const gridTemplateColumns = `${leftTrack} minmax(0, 1fr) ${rightTrack}`;
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
@@ -112,6 +157,22 @@ export default function Dashboard() {
             </select>
           </div>
 
+          {/* Purge + refill current instrument */}
+          <button
+            onClick={handlePurge}
+            disabled={purging}
+            title={`Wipe all ${instrument} candles (all timeframes) and re-backfill from IBKR`}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs transition-colors select-none ${
+              purging
+                ? 'border-zinc-800 text-zinc-500 cursor-wait'
+                : purgeMsg
+                ? 'border-emerald-700 text-emerald-300'
+                : 'border-zinc-800 text-zinc-400 hover:text-rose-300 hover:border-rose-700'
+            }`}
+          >
+            {purging ? '⟳ Purging…' : purgeMsg ?? `🗑 Purge ${instrument}`}
+          </button>
+
           {/* Theme toggle */}
           <button
             onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
@@ -146,45 +207,74 @@ export default function Dashboard() {
         })}
       </div>
 
-      {/* Main content — full width, padding bottom so content clears the fixed alerts bar */}
-      <div className="flex-1 flex flex-col gap-3 p-3 pb-14">
-        {/* Chart */}
-        <Chart
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone.tz}
-          theme={theme}
-          snapshot={snapshot}
-          livePrice={prices[instrument]}
-        />
+      {/* Trade Desk — 3-zone grid. The grid-template-columns is driven by the
+          actual collapsed state of each side zone (controlled mode) so the
+          track widths follow the UI instead of the other way around. Below
+          `lg` the grid collapses to a single column. */}
+      <div
+        className="flex-1 grid grid-cols-1 gap-3 p-3 pb-14 lg:[grid-template-columns:var(--rd-grid-cols)]"
+        style={{ ['--rd-grid-cols' as string]: gridTemplateColumns }}
+      >
+        {/* Left zone — Context */}
+        <CollapsibleZone
+          id="left-context"
+          title="Context"
+          side="left"
+          collapsed={leftZone.collapsed}
+          onCollapsedChange={leftZone.setCollapsed}
+        >
+          <DxyPanel />
+          <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
+          <IbkrPortfolioPanel
+            selectedAccountId={selectedIbkrAccountId}
+            onAccountChange={setSelectedIbkrAccountId}
+            onRefreshRequested={loadSummary}
+          />
+          <CorrelationPanel />
+          <BacktestPanel />
+        </CollapsibleZone>
 
-        {/* Indicators */}
-        <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
+        {/* Center zone — Chart + Order Flow (always visible). `min-w-0` is
+            essential: without it the Chart would force the grid's `1fr`
+            track to be at least as wide as its intrinsic content, and the
+            side zones would lose their requested widths. */}
+        <section className="flex flex-col gap-3 min-w-0">
+          <Chart
+            instrument={instrument}
+            timeframe={timeframe}
+            timezone={timezone.tz}
+            theme={theme}
+            snapshot={snapshot}
+            livePrice={prices[instrument]}
+          />
+          <OrderFlowPanel selectedInstrument={instrument} />
+          <FootprintChart selectedInstrument={instrument} />
+          <FlashCrashPanel />
+        </section>
 
-        <DxyPanel />
-
-        <IbkrPortfolioPanel
-          selectedAccountId={selectedIbkrAccountId}
-          onAccountChange={setSelectedIbkrAccountId}
-          onRefreshRequested={loadSummary}
-        />
-
-        <AiMentorDesk
-          instrument={instrument}
-          timeframe={timeframe}
-          timezone={timezone}
-          connected={connected}
-          summary={summary}
-          snapshot={snapshot}
-          prices={prices}
-          alerts={alerts}
-          reviews={mentorSignalReviews}
-          selectedBrokerAccountId={selectedIbkrAccountId}
-          onRefresh={refresh}
-        />
-
-        {/* Backtest */}
-        <BacktestPanel />
+        {/* Right zone — AI Trade Desk */}
+        <CollapsibleZone
+          id="right-ai-desk"
+          title="AI Trade Desk"
+          side="right"
+          collapsed={rightZone.collapsed}
+          onCollapsedChange={rightZone.setCollapsed}
+        >
+          <AiMentorDesk
+            instrument={instrument}
+            timeframe={timeframe}
+            timezone={timezone}
+            connected={connected}
+            summary={summary}
+            snapshot={snapshot}
+            prices={prices}
+            alerts={alerts}
+            reviews={mentorSignalReviews}
+            selectedBrokerAccountId={selectedIbkrAccountId}
+            onRefresh={refresh}
+          />
+          <TrailingStopStatsPanel />
+        </CollapsibleZone>
       </div>
 
       <AlertsFeed alerts={alerts} />

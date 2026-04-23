@@ -3,12 +3,21 @@ package com.riskdesk.application.service;
 import com.riskdesk.application.dto.IndicatorSeriesSnapshot;
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.engine.indicators.*;
 import com.riskdesk.domain.engine.smc.*;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.model.*;
+import com.riskdesk.domain.orderflow.port.MarketDepthPort;
+import com.riskdesk.domain.orderflow.service.SmcOrderFlowEnricher;
 import com.riskdesk.domain.shared.CandleSeriesNormalizer;
+import com.riskdesk.domain.shared.SessionPhase;
+import com.riskdesk.domain.shared.TradingSessionResolver;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -19,7 +28,16 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class IndicatorService {
 
-    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;
+    private static final int SNAPSHOT_LOOKBACK_BARS = 2_000;  // default for 1h+
+
+    /** Tiered lookback: shorter timeframes need fewer bars (EMA200 warmup = 200 minimum). */
+    private static int snapshotLookback(String timeframe) {
+        return switch (timeframe) {
+            case "5m"        -> 500;   // ~1.7 trading days — enough for EMA200 + SMC
+            case "10m"       -> 1_000; // ~7 trading days
+            default          -> SNAPSHOT_LOOKBACK_BARS; // 2000 for 1h, 4h, 1d, etc.
+        };
+    }
     private static final int SERIES_LIMIT = 500;
     private static final int SERIES_WARMUP_BARS = 1_000;
     private static final int FVG_LOOKBACK_BARS = SNAPSHOT_LOOKBACK_BARS;
@@ -44,6 +62,10 @@ public class IndicatorService {
 
     private final CandleRepositoryPort  candlePort;
     private final ActiveContractRegistry contractRegistry;
+    private final ObjectProvider<TickDataPort> tickDataPortProvider;
+    private final ObjectProvider<MarketDepthPort> marketDepthPortProvider;
+    private final AbsorptionCache absorptionCache;
+    private final SmcOrderFlowEnricher smcOrderFlowEnricher = new SmcOrderFlowEnricher();
 
     // Indicators — initialized with TradingView defaults
     private final EMAIndicator ema9   = new EMAIndicator(EMA_9_PERIOD);
@@ -57,6 +79,8 @@ public class IndicatorService {
     private final BollingerBandsIndicator bb = new BollingerBandsIndicator(BB_PERIOD, 2.0, BB_TREND_FAST_PERIOD, BB_TREND_SLOW_PERIOD, 2.0);
     private final DeltaFlowProfile deltaFlow = new DeltaFlowProfile(DELTA_FLOW_LOOKBACK);
     private final WaveTrendIndicator waveTrend = new WaveTrendIndicator(WT_N1, WT_N2, WT_SIGNAL_PERIOD);
+    private final StochasticIndicator stochastic = new StochasticIndicator(14, 3, 3);
+    private final VolumeProfileCalculator volumeProfile = new VolumeProfileCalculator();
     private final OrderBlockDetector obDetector = new OrderBlockDetector(10, 3, 0.5);
     // UC-SMC-010: FVG detector with threshold filtering and visual extension
     private final FairValueGapDetector fvgDetector = new FairValueGapDetector(
@@ -65,17 +89,42 @@ public class IndicatorService {
             FVG_EXTENSION_BARS
     );
 
-    // OPT-1: TTL-based snapshot cache — eliminates 55% duplicate computations per poll cycle
+    // OPT-1: TTL-based snapshot cache — tiered by timeframe to avoid recomputing slow-changing HTF
     private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos) {}
     private final ConcurrentHashMap<String, CachedSnapshot> snapshotCache = new ConcurrentHashMap<>();
-    private static final long CACHE_TTL_NANOS = 3_000_000_000L; // 3 seconds, matches poll interval
 
-    public IndicatorService(CandleRepositoryPort candlePort, ActiveContractRegistry contractRegistry) {
+    private static long cacheTtlNanos(String timeframe) {
+        return switch (timeframe) {
+            case "5m", "10m"       -> 3_000_000_000L;   //  3s — fast-moving, keep responsive
+            case "30m", "1h"       -> 30_000_000_000L;   // 30s — changes once per candle close
+            case "4h"              -> 60_000_000_000L;   // 60s
+            case "1d", "1w", "1M"  -> 300_000_000_000L;  //  5 min — daily candle changes once/day
+            default                -> 3_000_000_000L;
+        };
+    }
+
+    public IndicatorService(CandleRepositoryPort candlePort,
+                            ActiveContractRegistry contractRegistry,
+                            ObjectProvider<TickDataPort> tickDataPortProvider,
+                            ObjectProvider<MarketDepthPort> marketDepthPortProvider,
+                            AbsorptionCache absorptionCache) {
         this.candlePort       = candlePort;
         this.contractRegistry = contractRegistry;
+        this.tickDataPortProvider = tickDataPortProvider;
+        this.marketDepthPortProvider = marketDepthPortProvider;
+        this.absorptionCache = absorptionCache;
     }
 
     public void clearSnapshotCache() {
+        snapshotCache.clear();
+    }
+
+    /**
+     * On contract rollover, invalidate all cached indicator snapshots so that the next
+     * poll recomputes from the freshly backfilled candle data of the new contract.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
         snapshotCache.clear();
     }
 
@@ -87,7 +136,8 @@ public class IndicatorService {
             return cached.snapshot();
         }
 
-        List<Candle> candles = loadCandles(instrument, timeframe, SNAPSHOT_LOOKBACK_BARS);
+        int lookback = snapshotLookback(timeframe);
+        List<Candle> candles = loadCandles(instrument, timeframe, lookback);
         if (candles.isEmpty()) {
             return emptySnapshot(instrument, timeframe);
         }
@@ -127,6 +177,9 @@ public class IndicatorService {
         // WaveTrend
         WaveTrendIndicator.WaveTrendResult wt = waveTrend.current(candles);
 
+        // Stochastic
+        StochasticIndicator.StochasticResult stoch = stochastic.current(candles);
+
         // ── SMC (UC-SMC-002: Internal + Swing structure) ─────────────────────────
 
         SmcStructureEngine smcEngine = new SmcStructureEngine(5, 50, SMC_CONFLUENCE_FILTER);
@@ -148,6 +201,14 @@ public class IndicatorService {
         BigDecimal swingLow  = smcSnap.swingLow()  != null ? BigDecimal.valueOf(smcSnap.swingLow().price())  : null;
         Long swingHighTime = smcSnap.swingHigh() != null ? smcSnap.swingHigh().timestamp().getEpochSecond() : null;
         Long swingLowTime  = smcSnap.swingLow()  != null ? smcSnap.swingLow().timestamp().getEpochSecond()  : null;
+
+        // ── Multi-resolution bias (5 lookback scales for richer Gemini context) ────
+        // Reuse existing swing_50 and internal_5, compute 3 extra passes
+        String swing25Bias = biasFromEngine(candles, 5, 25);
+        String swing9Bias  = biasFromEngine(candles, 5, 9);
+        String micro1Bias  = biasFromEngine(candles, 1, 1);
+        IndicatorSnapshot.MultiResolutionBias multiResBias = new IndicatorSnapshot.MultiResolutionBias(
+                swingBias, swing25Bias, swing9Bias, internalBias, micro1Bias);
 
         // Legacy derived fields (backward compat until frontend migrates to internal/swing)
         // marketStructureTrend: prefer swing bias if available, else internal
@@ -172,32 +233,25 @@ public class IndicatorService {
 
         List<IndicatorSnapshot.StructureBreakView> recentBreaks = smcSnap.events().stream()
                 .sorted(Comparator.comparingInt(SmcStructureEngine.StructureEvent::barIndex).reversed())
-                .map(event -> new IndicatorSnapshot.StructureBreakView(
-                        event.type().name(),
-                        event.newBias().name(),
-                        BigDecimal.valueOf(event.breakPrice()),
-                        event.timestamp().getEpochSecond(),
-                        event.level().name()))
+                .map(event -> enrichedBreakView(event, candles))
                 .toList();
 
         // Order Blocks + lifecycle events (UC-SMC-009)
         OrderBlockDetector.DetectionResult obResult = obDetector.detectWithEvents(candles);
+
+        // ── OF enrichment: compute ATR for OB defended check ────────────────
+        BigDecimal atrValue = AtrCalculator.compute(candles, 14);
+        double atrTicks = atrValue != null ? atrValue.doubleValue() : 1.0;
+
         List<IndicatorSnapshot.OrderBlockView> obViews = obResult.activeOrderBlocks().stream()
-                .map(ob -> new IndicatorSnapshot.OrderBlockView(
-                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
-                        ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
-                        ob.type().name(),
-                        null))
+                .map(ob -> enrichedObView(ob, candles, atrTicks, ob.type().name(), null, instrument))
                 .toList();
         List<IndicatorSnapshot.OrderBlockView> breakerViews = obResult.breakerOrderBlocks().stream()
-                .map(ob -> new IndicatorSnapshot.OrderBlockView(
-                        ob.type().name(), ob.status().name(), ob.highPrice(), ob.lowPrice(), ob.midPoint(),
-                        ob.formationIndex() < candles.size()
-                                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L,
+                .map(ob -> enrichedObView(ob, candles, atrTicks,
                         oppositeType(ob.type()).name(),
                         ob.mitigationIndex() >= 0 && ob.mitigationIndex() < candles.size()
-                                ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null))
+                                ? candles.get(ob.mitigationIndex()).getTimestamp().getEpochSecond() : null,
+                        instrument))
                 .toList();
         List<IndicatorSnapshot.OrderBlockEventView> obEventViews = obResult.events().stream()
                 .map(evt -> new IndicatorSnapshot.OrderBlockEventView(
@@ -212,8 +266,7 @@ public class IndicatorService {
                 : candles;
         List<FairValueGapDetector.FairValueGap> fvgs = fvgDetector.detect(fvgCandles);
         List<IndicatorSnapshot.FairValueGapView> fvgViews = fvgs.stream()
-                .map(f -> new IndicatorSnapshot.FairValueGapView(
-                        f.bias(), f.top(), f.bottom(), f.startBarTime(), f.extensionEndTime()))
+                .map(f -> enrichedFvgView(f, fvgCandles))
                 .toList();
 
         // ── Premium / Discount / Equilibrium (UC-SMC-004) ──────────────────
@@ -252,21 +305,11 @@ public class IndicatorService {
         );
         List<IndicatorSnapshot.EqualLevelView> eqhViews = liquidityPools.stream()
                 .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQH)
-                .map(pool -> new IndicatorSnapshot.EqualLevelView(
-                        "EQH",
-                        BigDecimal.valueOf(pool.price()),
-                        pool.firstTime().getEpochSecond(),
-                        pool.lastTime().getEpochSecond(),
-                        pool.touchCount()))
+                .map(pool -> enrichedEqualLevelView("EQH", pool, instrument))
                 .toList();
         List<IndicatorSnapshot.EqualLevelView> eqlViews = liquidityPools.stream()
                 .filter(pool -> pool.type() == EqualLevelDetector.EqualType.EQL)
-                .map(pool -> new IndicatorSnapshot.EqualLevelView(
-                        "EQL",
-                        BigDecimal.valueOf(pool.price()),
-                        pool.firstTime().getEpochSecond(),
-                        pool.lastTime().getEpochSecond(),
-                        pool.touchCount()))
+                .map(pool -> enrichedEqualLevelView("EQL", pool, instrument))
                 .toList();
 
         // ── UC-SMC-005: Multi-timeframe levels (Daily / Weekly / Monthly) ──────────
@@ -275,6 +318,16 @@ public class IndicatorService {
         IndicatorSnapshot.MtfLevelView monthlyLevel = loadMtfLevel(instrument, "1M");
         IndicatorSnapshot.MtfLevelsView mtfLevels =
                 new IndicatorSnapshot.MtfLevelsView(dailyLevel, weeklyLevel, monthlyLevel);
+
+        // ── UC-OF-012: Volume Profile ───────────────────────────────────────
+        VolumeProfileCalculator.VolumeProfileResult vpResult = volumeProfile.compute(
+                candles, instrument.getTickSize(), 10);
+        Double pocPrice = vpResult != null ? vpResult.pocPrice().doubleValue() : null;
+        Double vaHigh   = vpResult != null ? vpResult.valueAreaHigh().doubleValue() : null;
+        Double vaLow    = vpResult != null ? vpResult.valueAreaLow().doubleValue() : null;
+
+        // ── UC-OF-013: Session CME Context ──────────────────────────────────
+        String sessionPhase = TradingSessionResolver.currentPhase().name();
 
         Instant lastCandleTimestamp = candles.get(candles.size() - 1).getTimestamp();
 
@@ -309,6 +362,11 @@ public class IndicatorService {
                 wt != null ? wt.diff()      : null,
                 wt != null ? wt.crossover() : null,
                 wt != null ? wt.signal()    : null,
+                // Stochastic
+                stoch != null ? stoch.k()         : null,
+                stoch != null ? stoch.d()         : null,
+                stoch != null ? stoch.signal()    : null,
+                stoch != null ? stoch.crossover() : null,
                 // SMC: Internal
                 internalBias, internalHigh, internalLow,
                 internalHighTime, internalLowTime, lastInternalBreak,
@@ -317,6 +375,8 @@ public class IndicatorService {
                 swingHighTime, swingLowTime, lastSwingBreak,
                 // SMC: UC-SMC-008 confluence filter state
                 SMC_CONFLUENCE_FILTER,
+                // SMC: Multi-resolution bias
+                multiResBias,
                 // SMC: Legacy / derived
                 marketStructureTrend,
                 strongHigh, strongLow, weakHigh, weakLow,
@@ -334,10 +394,14 @@ public class IndicatorService {
                 mtfLevels,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                pocPrice, vaHigh, vaLow,
+                // UC-OF-013: Session CME Context
+                sessionPhase,
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
-        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + CACHE_TTL_NANOS));
+        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe)));
         return result;
     }
 
@@ -409,6 +473,196 @@ public class IndicatorService {
                 : OrderBlockDetector.OBType.BULLISH;
     }
 
+    // ── Phase 5a: SMC × Order Flow enrichment helpers ─────────────────────────────
+
+    /**
+     * Compute CLV-based delta for a single candle.
+     * CLV = ((Close - Low) - (High - Close)) / (High - Low), range [-1, +1].
+     * Delta = volume * CLV (positive = buying pressure, negative = selling pressure).
+     */
+    private static double clvDelta(Candle c) {
+        double h = c.getHigh().doubleValue();
+        double l = c.getLow().doubleValue();
+        double cl = c.getClose().doubleValue();
+        double range = h - l;
+        if (range <= 0) return 0.0;
+        double clv = ((cl - l) - (h - cl)) / range;
+        return c.getVolume() * clv;
+    }
+
+    /**
+     * Enrich an Order Block with CLV-based order flow data.
+     * Uses the candle at formationIndex for delta/volume and the SmcOrderFlowEnricher for scoring.
+     */
+    private IndicatorSnapshot.OrderBlockView enrichedObView(
+            OrderBlockDetector.OrderBlock ob, List<Candle> candles,
+            double atrTicks, String originalType, Long breakerTime,
+            Instrument instrument) {
+        long startTime = ob.formationIndex() < candles.size()
+                ? candles.get(ob.formationIndex()).getTimestamp().getEpochSecond() : 0L;
+
+        // Compute formation delta/volume from the impulse candle
+        if (ob.formationIndex() >= 0 && ob.formationIndex() < candles.size()) {
+            Candle formationCandle = candles.get(ob.formationIndex());
+            double formationDelta = clvDelta(formationCandle);
+            double formationVolume = formationCandle.getVolume();
+
+            // Query real-time absorption from cache (fed by OrderFlowOrchestrator)
+            var absorption = absorptionCache.latest(instrument);
+            Double absScore = absorption.map(AbsorptionSignal::absorptionScore).orElse(null);
+            String absSide = absorption.map(s -> s.side().name()).orElse(null);
+            double priceMove = absorption.map(AbsorptionSignal::priceMoveTicks).orElse(0.0);
+
+            OrderBlockEnrichment enrichment = smcOrderFlowEnricher.enrichOrderBlock(
+                    formationDelta, formationVolume,
+                    absScore, absSide, null,
+                    priceMove, atrTicks);
+
+            return new IndicatorSnapshot.OrderBlockView(
+                    ob.type().name(), ob.status().name(),
+                    ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                    startTime, originalType, breakerTime,
+                    enrichment.formationDelta(),
+                    enrichment.obFormationScore(),
+                    enrichment.obLiveScore(),
+                    enrichment.defended(),
+                    enrichment.absorptionScore());
+        }
+        // Fallback: no enrichment data
+        return new IndicatorSnapshot.OrderBlockView(
+                ob.type().name(), ob.status().name(),
+                ob.highPrice(), ob.lowPrice(), ob.midPoint(),
+                startTime, originalType, breakerTime);
+    }
+
+    /**
+     * Enrich a Fair Value Gap with CLV-based order flow data.
+     * Uses delta across the 3-candle gap formation window.
+     */
+    private IndicatorSnapshot.FairValueGapView enrichedFvgView(
+            FairValueGapDetector.FairValueGap fvg, List<Candle> fvgCandles) {
+        // FVG startBarTime is epoch seconds — find candles near that timestamp for delta
+        double gapDelta = 0.0;
+        double gapVolume = 0.0;
+        boolean found = false;
+        for (int i = 0; i < fvgCandles.size(); i++) {
+            if (fvgCandles.get(i).getTimestamp().getEpochSecond() == fvg.startBarTime()) {
+                // Sum delta/volume for the 3-candle window (i-1, i, i+1)
+                int start = Math.max(0, i - 1);
+                int end = Math.min(fvgCandles.size(), i + 2);
+                for (int j = start; j < end; j++) {
+                    gapDelta += clvDelta(fvgCandles.get(j));
+                    gapVolume += fvgCandles.get(j).getVolume();
+                }
+                found = true;
+                break;
+            }
+        }
+        if (found) {
+            FvgEnrichment enrichment = smcOrderFlowEnricher.enrichFvg(gapDelta, gapVolume);
+            return new IndicatorSnapshot.FairValueGapView(
+                    fvg.bias(), fvg.top(), fvg.bottom(), fvg.startBarTime(), fvg.extensionEndTime(),
+                    enrichment.gapDelta(), enrichment.fvgQualityScore());
+        }
+        return new IndicatorSnapshot.FairValueGapView(
+                fvg.bias(), fvg.top(), fvg.bottom(), fvg.startBarTime(), fvg.extensionEndTime());
+    }
+
+    /**
+     * Enrich a BOS/CHoCH structure break with CLV-based order flow data.
+     * Uses the break candle delta, volume, and average volume of preceding candles.
+     */
+    private IndicatorSnapshot.StructureBreakView enrichedBreakView(
+            SmcStructureEngine.StructureEvent event, List<Candle> candles) {
+        int idx = event.barIndex();
+        if (idx >= 0 && idx < candles.size()) {
+            Candle breakCandle = candles.get(idx);
+            double breakDelta = clvDelta(breakCandle);
+            double breakVolume = breakCandle.getVolume();
+
+            // Compute average volume of the 20 candles preceding the break
+            int avgStart = Math.max(0, idx - 20);
+            double avgVolume = 0.0;
+            int count = 0;
+            for (int j = avgStart; j < idx; j++) {
+                avgVolume += candles.get(j).getVolume();
+                count++;
+            }
+            avgVolume = count > 0 ? avgVolume / count : 1.0;
+
+            boolean isLongBreak = event.newBias() == SmcStructureEngine.Bias.BULLISH;
+            BreakEnrichment enrichment = smcOrderFlowEnricher.enrichBreak(
+                    breakDelta, breakVolume, avgVolume, isLongBreak);
+
+            return new IndicatorSnapshot.StructureBreakView(
+                    event.type().name(), event.newBias().name(),
+                    BigDecimal.valueOf(event.breakPrice()),
+                    event.timestamp().getEpochSecond(),
+                    event.level().name(),
+                    enrichment.breakDelta(), enrichment.volumeSpike(),
+                    enrichment.confirmed(), enrichment.breakConfidenceScore());
+        }
+        return new IndicatorSnapshot.StructureBreakView(
+                event.type().name(), event.newBias().name(),
+                BigDecimal.valueOf(event.breakPrice()),
+                event.timestamp().getEpochSecond(),
+                event.level().name());
+    }
+
+    /**
+     * Enrich an Equal Level liquidity pool with Level 2 depth data (if available).
+     * Falls back to no enrichment if MarketDepthPort is null or depth unavailable.
+     */
+    private IndicatorSnapshot.EqualLevelView enrichedEqualLevelView(
+            String type, EqualLevelDetector.LiquidityPool pool, Instrument instrument) {
+        MarketDepthPort depthPort = marketDepthPortProvider.getIfAvailable();
+        if (depthPort != null && depthPort.isDepthAvailable(instrument)) {
+            var depthOpt = depthPort.currentDepth(instrument);
+            if (depthOpt.isPresent()) {
+                DepthMetrics depth = depthOpt.get();
+                long totalSize = depth.totalBidSize() + depth.totalAskSize();
+                double avgLevelSize = totalSize > 0 ? totalSize / 20.0 : 1.0; // approximate 10 bid + 10 ask levels
+                // Estimate size at this specific level from total book imbalance
+                long sizeEstimate = "EQH".equals(type) ? depth.totalAskSize() / 10 : depth.totalBidSize() / 10;
+                boolean ordersVisible = sizeEstimate > 0;
+
+                LiquidityEnrichment enrichment = smcOrderFlowEnricher.enrichLiquidity(
+                        ordersVisible, sizeEstimate, avgLevelSize);
+                return new IndicatorSnapshot.EqualLevelView(
+                        type, BigDecimal.valueOf(pool.price()),
+                        pool.firstTime().getEpochSecond(), pool.lastTime().getEpochSecond(),
+                        pool.touchCount(),
+                        enrichment.ordersVisibleAtLevel(), enrichment.totalSizeAtLevel(),
+                        enrichment.liquidityConfirmScore());
+            }
+        }
+        return new IndicatorSnapshot.EqualLevelView(
+                type, BigDecimal.valueOf(pool.price()),
+                pool.firstTime().getEpochSecond(), pool.lastTime().getEpochSecond(),
+                pool.touchCount());
+    }
+
+    /**
+     * Compute swing bias at multiple lookback depths for a given instrument/timeframe.
+     * Returns a map: lookback → bias string (BULLISH / BEARISH / UNDEFINED).
+     * Used by Mentor payload to give Gemini multi-resolution trend context (e.g. trend_H1).
+     */
+    public Map<Integer, String> computeMultiResolutionSwingBias(Instrument instrument, String timeframe) {
+        int lookback = snapshotLookback(timeframe);
+        List<Candle> candles = loadCandles(instrument, timeframe, lookback);
+        if (candles.isEmpty()) {
+            return Map.of();
+        }
+        Map<Integer, String> biases = new LinkedHashMap<>();
+        for (int swingLb : new int[]{50, 25, 9, 5, 1}) {
+            SmcStructureEngine engine = new SmcStructureEngine(5, swingLb, SMC_CONFLUENCE_FILTER);
+            SmcStructureEngine.StructureSnapshot snap = engine.computeFromHistory(candles, RECENT_BREAK_LIMIT);
+            String bias = snap.swingBias() != null ? snap.swingBias().name() : "UNDEFINED";
+            biases.put(swingLb, bias);
+        }
+        return biases;
+    }
+
     private List<Candle> loadCandles(Instrument instrument, String timeframe, int limit) {
         String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
         List<Candle> candles;
@@ -450,6 +704,14 @@ public class IndicatorService {
     private String formatBreakType(SmcStructureEngine.StructureEvent event) {
         if (event == null) return null;
         return event.type().name() + "_" + event.newBias().name();
+    }
+
+    /** Run a lightweight SMC pass and return the swing bias as a string (null → null). */
+    private static String biasFromEngine(List<Candle> candles, int internalLookback, int swingLookback) {
+        SmcStructureEngine engine = new SmcStructureEngine(internalLookback, swingLookback);
+        SmcStructureEngine.StructureSnapshot snap = engine.computeFromHistory(candles, 0);
+        SmcStructureEngine.Bias b = snap.swingBias();
+        return b != null ? b.name() : null;
     }
 
     private int liquidityToleranceTicks(String timeframe) {
@@ -567,12 +829,16 @@ public class IndicatorService {
                 null, false, null,
                 null, null, null, null,
                 null, null, null, null, null,
+                // Stochastic
+                null, null, null, null,
                 // SMC: Internal
                 null, null, null, null, null, null,
                 // SMC: Swing
                 null, null, null, null, null, null,
                 // SMC: UC-SMC-008 confluence filter state
                 false,
+                // SMC: Multi-resolution bias
+                null,
                 // SMC: Legacy / derived
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,
@@ -588,6 +854,10 @@ public class IndicatorService {
                 null,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                null, null, null,
+                // UC-OF-013: Session CME Context
+                TradingSessionResolver.currentPhase().name(),
                 null,
                 null
         );

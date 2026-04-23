@@ -108,8 +108,21 @@ These should stay transport-oriented only.
 - `application/service/MentorAnalysisService.java`
 - `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
+- `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
+- `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
 
 These coordinate use cases and should not become infrastructure adapters.
+
+### Simulation decoupling (Phase 3 — single writer, simulation aggregate)
+
+- Domain port: `domain/simulation/port/TradeSimulationRepositoryPort`
+- Aggregate: `domain/simulation/TradeSimulation` (+ `ReviewType` enum)
+- REST controller: `presentation/controller/SimulationController` — `GET /api/simulations/{recent,by-instrument/{instrument},by-review/{reviewId}}`
+- WebSocket topic: `/topic/simulations` (sole channel for simulation events; `/topic/mentor-alerts` no longer carries simulation transitions)
+- Initial `PENDING_ENTRY` is created directly on `trade_simulations` by `MentorSignalReviewService.initializeSimulationAggregate()` (auto reviews) and `MentorAnalysisService.initializeAuditSimulation()` (manual "Ask Mentor" audits).
+
+**Legacy sim getters on the review/audit records are `@Deprecated(since = "phase-3")`** — write-never from production, read-only for JPA round-trip until the physical columns are dropped. Column drop is a separate follow-up PR that requires adopting Flyway or Liquibase first. See `docs/ARCHITECTURE_PRINCIPLES.md` § Simulation Decoupling Rule.
 
 ### IBKR integration
 
@@ -131,6 +144,16 @@ Relevant DXY persistence now includes:
 
 - `infrastructure/persistence/entity/MarketDxySnapshotEntity.java`
 - `infrastructure/persistence/JpaDxySnapshotRepositoryAdapter.java`
+
+Relevant simulation persistence (Phase 1 — new `trade_simulations` table running alongside the legacy simulation columns on `mentor_signal_reviews` / `mentor_audits`):
+
+- `infrastructure/persistence/entity/TradeSimulationEntity.java`
+- `infrastructure/persistence/JpaTradeSimulationRepository.java`
+- `infrastructure/persistence/JpaTradeSimulationRepositoryAdapter.java`
+- `infrastructure/persistence/TradeSimulationEntityMapper.java`
+
+Schema of `trade_simulations` (unique constraint `(review_id, review_type)`):
+`id`, `review_id`, `review_type` (`SIGNAL`|`AUDIT`), `instrument`, `action`, `simulation_status`, `activation_time`, `resolution_time`, `max_drawdown_points`, `trailing_stop_result`, `trailing_exit_price`, `best_favorable_price`, `created_at`.
 
 ## Frontend Map
 
@@ -186,6 +209,8 @@ Current behavior:
 - a re-review payload mixes live indicators with `original_alert_context` so Gemini can judge whether the old setup is still valid now
 - raw alerts still flow through `/topic/alerts`
 - Mentor review updates still flow through `/topic/mentor-alerts`
+- simulation state transitions are additionally published on `/topic/simulations` (Phase 1 dual-publish; `/topic/mentor-alerts` continues to carry the same events until Phase 2 frontend cutover)
+- live execution fill/status updates (from IBKR `execDetails` + `orderStatus`) are published on `/topic/executions` — payload is `TradeExecutionView` including the new fill fields (`filledQuantity`, `avgFillPrice`, `lastFillTime`, `orderStatus`, `ibkrOrderId`)
 - manual `Ask Mentor` analyses are stored separately in `mentor_audits` with a dedicated `manual-mentor:` source reference and exposed through `/api/mentor/manual-reviews/recent`
 
 ### Mentor Outcome Tracker
@@ -194,14 +219,16 @@ Qualified alert reviews can now also be tracked after the fact as simulated trad
 
 Current behavior:
 
-- when a saved `MentorSignalReview` finishes with a valid trade plan, the backend initializes a trade simulation state
-- tracked fields live on the saved review:
+- when a saved `MentorSignalReview` finishes with a valid trade plan, the backend writes a `TradeSimulation(PENDING_ENTRY, reviewType=SIGNAL)` row into `trade_simulations` (Phase 3+). Manual "Ask Mentor" audits follow the same path with `reviewType=AUDIT`.
+- tracked fields live on the `TradeSimulation` aggregate:
   - `simulationStatus`
   - `activationTime`
   - `resolutionTime`
   - `maxDrawdownPoints`
-- the simulation uses internal `1m` candles from PostgreSQL only
-- the scheduler polls reviews in `PENDING_ENTRY` or `ACTIVE`
+  - `trailingStopResult`, `trailingExitPrice`, `bestFavorablePrice`
+- identical getters still exist on `MentorSignalReviewRecord` / `MentorAudit` but are `@Deprecated(since = "phase-3")` — write-never from production; used only by the JPA mappers for backwards compatibility until the physical columns are dropped in a follow-up PR.
+- the simulation uses internal `5m` candles from PostgreSQL only
+- the scheduler polls `trade_simulations` in `PENDING_ENTRY` or `ACTIVE` via `TradeSimulationRepositoryPort.findByStatuses(...)`
 - trigger logic respects limit-order semantics:
   - if price reaches `TP` before `Entry`, the result becomes `MISSED`
   - once `Entry` is touched, the review becomes `ACTIVE`
@@ -236,6 +263,13 @@ Current behavior:
   - `POST /api/mentor/executions/{executionId}/submit-entry` submits a simple IBKR limit entry order
   - submission is locked on the execution row before broker side effects
   - the IB Gateway adapter uses `orderRef = executionKey` and checks existing live/completed orders before re-submitting
+- Slice 3a is now live — IBKR `execDetails` + `orderStatus` fill tracking:
+  - `TradeExecutionEntity` carries raw IBKR feedback: `filledQuantity`, `avgFillPrice`, `lastFillTime`, `orderStatus`, `ibkrOrderId`, `lastExecId` (per-fill idempotence key)
+  - `ExecutionFillTrackingService` (application) implements the `ExecutionFillListener` domain port and is invoked from `IbGatewayNativeClient` on every IBKR callback
+  - transition from `ENTRY_SUBMITTED` to domain state `ACTIVE` happens on first IBKR `Filled` status; cancellation without any fill transitions to `CANCELLED`; partial-fill-then-cancel is deferred to Slice 3c
+  - WebSocket topic `/topic/executions` carries every state-changing update
+- Slice 3b (next) will add startup reconciliation: query IBKR open/completed orders and reconcile against dangling `trade_executions` rows from prior runs.
+- Slice 3c (future) will add bracket orders — submit SL + TP once entry fills, monitor and close.
 
 ## Operational Commands
 

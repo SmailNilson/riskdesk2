@@ -8,6 +8,7 @@ import {
   createSeriesMarkers,
   SeriesMarker,
   CandlestickSeries,
+  CandlestickData,
   LineSeries,
   HistogramSeries,
   ColorType,
@@ -18,6 +19,7 @@ import {
 import { IndicatorSnapshot, api } from '@/app/lib/api';
 import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
+// useScrollBack removed — scroll-back feature deferred
 import { makeChartTickFormatter, makeChartTimeFormatter } from '@/app/lib/datetime';
 
 interface Props {
@@ -37,6 +39,18 @@ type CandlePoint   = { time: Time; open: number; high: number; low: number; clos
 const WT_OVERBOUGHT = 53;
 const WT_OVERSOLD = -53;
 const PRESENT_OB_WINDOW_BARS = 48;
+
+/** Price format per instrument — precision matches tick size from backend Instrument enum. */
+function priceFormatFor(instrument: string): { type: 'price'; precision: number; minMove: number } {
+  switch (instrument) {
+    case 'E6':  return { type: 'price', precision: 5, minMove: 0.00005 };
+    case 'DXY': return { type: 'price', precision: 3, minMove: 0.005 };
+    case 'MGC': return { type: 'price', precision: 1, minMove: 0.1 };
+    case 'MNQ': return { type: 'price', precision: 2, minMove: 0.25 };
+    case 'MCL': return { type: 'price', precision: 2, minMove: 0.01 };
+    default:    return { type: 'price', precision: 2, minMove: 0.01 };
+  }
+}
 
 function timeframeToSeconds(timeframe: string) {
   return timeframe === '1d' ? 86400 : timeframe === '1h' ? 3600 : timeframe === '5m' ? 300 : 600;
@@ -116,6 +130,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersApiRef  = useRef<any>(null);                        // createSeriesMarkers handle
   const livePriceRef = useRef<PriceUpdate | undefined>(livePrice);
+  const allBarsRef = useRef<CandlestickData<Time>[]>([]);
 
   // ── Indicator visibility toggles ────────────────────────────────────────────
   const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
@@ -215,6 +230,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         .filter((item, idx, arr) => idx === arr.length - 1 || item.time !== arr[idx + 1].time);
 
       candleSeries.setData(candleData);
+      allBarsRef.current = candleData;
       lastCandleRef.current = candleData[candleData.length - 1];
       setLastBarTime(candleData[candleData.length - 1].time);
 
@@ -307,6 +323,7 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e',   wickDownColor: '#ef4444',
       priceLineVisible: false,
+      priceFormat: priceFormatFor(instrument),
     });
     const ema9Series    = priceChart.addSeries(LineSeries, { color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     const ema50Series   = priceChart.addSeries(LineSeries, { color: '#ef4444', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -749,6 +766,13 @@ export default function Chart({ instrument, timeframe, timezone, theme, snapshot
         <div ref={priceContainerRef} className="w-full" />
         {/* SMC zone boxes (OB + FVG) — overlay canvas above the chart canvas */}
         <canvas ref={smcCanvasRef} className="absolute inset-0 pointer-events-none" style={{ zIndex: 20 }} />
+
+        {/* Scroll-back loading indicator — deferred */}
+        {false && (
+          <div className="absolute top-2 right-3 text-xs text-zinc-400 bg-zinc-900/80 px-2 py-1 rounded z-30 pointer-events-none">
+            Loading...
+          </div>
+        )}
 
         {/* Overlay legend tags — click to toggle indicator */}
         {snapshot && (

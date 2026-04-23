@@ -102,8 +102,8 @@ public class WaveTrendIndicator implements TechnicalIndicator<WaveTrendIndicator
             BigDecimal sum = BigDecimal.ZERO;
             for (BigDecimal v : wt1Window) sum = sum.add(v);
             BigDecimal wt2 = sum.divide(BigDecimal.valueOf(signalPeriod), SCALE, RoundingMode.HALF_UP);
-            BigDecimal wt1Scaled = wt1Ema.setScale(4, RoundingMode.HALF_UP);
-            BigDecimal wt2Scaled = wt2.setScale(4, RoundingMode.HALF_UP);
+            BigDecimal wt1Scaled = wt1Ema.setScale(SCALE, RoundingMode.HALF_UP);
+            BigDecimal wt2Scaled = wt2.setScale(SCALE, RoundingMode.HALF_UP);
             BigDecimal diff = wt1Scaled.subtract(wt2Scaled);
 
             // Crossover vs previous bar

@@ -80,6 +80,7 @@ public class DxyMarketService {
     private volatile DxySnapshot lastLiveSnapshot;
     private volatile DxySnapshot lastPersistedSnapshot;
     private volatile DxySnapshot lastAvailableSnapshot;
+    private volatile DxySnapshot closeBaseline;  // DXY computed from IBKR TickType.CLOSE prices
     private volatile DxyHealthView lastHealth = new DxyHealthView("DOWN", null, UNAVAILABLE_SOURCE, 0L, List.of());
     private volatile String lastIssue;
 
@@ -134,8 +135,12 @@ public class DxyMarketService {
             return;
         }
 
-        DxyCalculationOutcome outcome = calculator.calculate(provider.fetchQuotes());
+        var quotes = provider.fetchQuotes();
+        DxyCalculationOutcome outcome = calculator.calculate(quotes);
         List<DxyHealthComponentView> components = toHealthComponents(outcome);
+
+        // Compute close-based baseline from IBKR TickType.CLOSE prices
+        calculator.calculateFromCloses(quotes).ifPresent(cb -> closeBaseline = cb);
 
         switch (outcome) {
             case CompleteSnapshot complete -> handleComplete(complete, components);
@@ -229,8 +234,18 @@ public class DxyMarketService {
         return supportedMode;
     }
 
+    /**
+     * Finds the baseline DXY snapshot for percentage change calculation.
+     * Priority: IBKR close prices (TickType.CLOSE) → session-open snapshot → 1h fallback.
+     * IBKR close aligns best with TradingView's daily % change reference.
+     */
     public Optional<DxySnapshot> findBaselineSnapshot(Instant referenceTime) {
-        return repository.findLatestCompleteAtOrBefore(referenceTime.minus(TEN_MINUTES))
+        if (closeBaseline != null) {
+            return Optional.of(closeBaseline);
+        }
+        // Fallback: session-open snapshot from DB (when IBKR close not yet available)
+        Instant sessionOpen = TradingSessionResolver.dailySessionStart(referenceTime);
+        return repository.findLatestCompleteAtOrBefore(sessionOpen.plusSeconds(300))
             .or(() -> repository.findLatestCompleteAtOrBefore(referenceTime.minus(ONE_HOUR)));
     }
 

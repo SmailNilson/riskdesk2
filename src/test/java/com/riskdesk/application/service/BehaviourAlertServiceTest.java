@@ -237,12 +237,16 @@ class BehaviourAlertServiceTest {
                 null, false, null,
                 null, null, null, null,
                 null, null, null, null, null,
+                // Stochastic
+                null, null, null, null,
                 // SMC: Internal
                 null, null, null, null, null, null,
                 // SMC: Swing
                 null, null, null, null, null, null,
                 // SMC: UC-SMC-008
                 false,
+                // SMC: Multi-resolution bias
+                null,
                 // SMC: Legacy
                 "UNDEFINED", null, null, null, null, null,
                 null, null, null, null,
@@ -258,6 +262,10 @@ class BehaviourAlertServiceTest {
                 null,
                 // Session PD Array (intraday range-based)
                 null, null, null, null,
+                // UC-OF-012: Volume Profile
+                null, null, null,
+                // UC-OF-013: Session CME Context
+                "NY_AM",
                 null,
                 null  // lastPrice
         );

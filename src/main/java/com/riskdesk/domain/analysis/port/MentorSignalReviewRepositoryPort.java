@@ -1,7 +1,6 @@
 package com.riskdesk.domain.analysis.port;
 
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
-import com.riskdesk.domain.model.TradeSimulationStatus;
 
 import java.util.List;
 import java.util.Optional;
@@ -20,8 +19,6 @@ public interface MentorSignalReviewRepositoryPort {
 
     List<MentorSignalReviewRecord> findRecent(int limit);
 
-    List<MentorSignalReviewRecord> findBySimulationStatuses(List<TradeSimulationStatus> statuses);
-
     long deleteByStatuses(List<String> statuses);
 
     /**
@@ -33,4 +30,7 @@ public interface MentorSignalReviewRepositoryPort {
 
     /** Mark all reviews stuck in ANALYZING as ERROR (orphaned by server restart). */
     int markAnalyzingAsError(String errorMessage);
+
+    /** Mark reviews stuck in ANALYZING created before cutoff as ERROR (runtime safety net). */
+    int markStaleAnalyzingAsError(String errorMessage, java.time.Instant createdBefore);
 }

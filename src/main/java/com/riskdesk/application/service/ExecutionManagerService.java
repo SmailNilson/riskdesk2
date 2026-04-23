@@ -5,13 +5,22 @@ import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.MentorAnalyzeResponse;
 import com.riskdesk.application.dto.MentorProposedTradePlan;
+import com.riskdesk.application.service.strategy.GateOutcome;
+import com.riskdesk.application.service.strategy.StrategyExecutionGate;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
+import com.riskdesk.domain.engine.strategy.model.StrategyDecision;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
+import com.riskdesk.domain.trading.service.PositionSizeValidator;
+import com.riskdesk.infrastructure.config.RiskProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,19 +35,32 @@ import java.util.Optional;
 @Service
 public class ExecutionManagerService {
 
+    private static final Logger log = LoggerFactory.getLogger(ExecutionManagerService.class);
+
     private final MentorSignalReviewRepositoryPort reviewRepository;
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final IbkrOrderService ibkrOrderService;
     private final ObjectMapper objectMapper;
+    private final PositionSizeValidator positionSizeValidator;
+    private final StrategyExecutionGate strategyExecutionGate;
+    private final ApplicationEventPublisher eventPublisher;
 
     public ExecutionManagerService(MentorSignalReviewRepositoryPort reviewRepository,
                                    TradeExecutionRepositoryPort tradeExecutionRepository,
                                    IbkrOrderService ibkrOrderService,
-                                   ObjectMapper objectMapper) {
+                                   ObjectMapper objectMapper,
+                                   RiskProperties riskProperties,
+                                   StrategyExecutionGate strategyExecutionGate,
+                                   ApplicationEventPublisher eventPublisher) {
         this.reviewRepository = reviewRepository;
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.ibkrOrderService = ibkrOrderService;
         this.objectMapper = objectMapper;
+        this.positionSizeValidator = new PositionSizeValidator(
+            riskProperties.getMaxRiskPerTradeUsd(),
+            riskProperties.getMaxQuantityPerOrder());
+        this.strategyExecutionGate = strategyExecutionGate;
+        this.eventPublisher = eventPublisher;
     }
 
     public TradeExecutionRecord ensureExecutionCreated(CreateExecutionCommand command) {
@@ -68,6 +90,15 @@ public class ExecutionManagerService {
         MentorProposedTradePlan tradePlan = extractTradePlan(review);
         Instrument instrument = Instrument.valueOf(review.getInstrument());
         Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
+
+        // PR-1 gate: reject oversized orders BEFORE any broker side-effect.
+        // Throws PositionSizeExceededException (runtime) which is translated to
+        // HTTP 422 by the presentation layer.
+        positionSizeValidator.validate(
+            instrument,
+            command.quantity(),
+            normalizeToTick(BigDecimal.valueOf(tradePlan.entryPrice()), instrument),
+            normalizeToTick(BigDecimal.valueOf(tradePlan.stopLoss()), instrument));
 
         TradeExecutionRecord candidate = new TradeExecutionRecord();
         candidate.setExecutionKey("exec:mentor-review:" + review.getId());
@@ -203,6 +234,48 @@ public class ExecutionManagerService {
             throw new IllegalStateException("mentor review is missing execution context");
         }
         extractTradePlan(review);
+
+        // S4 — concurrence gate. When an instrument is enrolled, the
+        // probabilistic strategy engine must also approve before we touch IBKR.
+        // Gate is VETO_ONLY: it can block a legacy-approved trade but can never
+        // create one. Disabled by default — production behaviour is unchanged
+        // until an operator flips `riskdesk.strategy.execution-gate.enabled=true`
+        // AND lists the instrument in `.instruments`.
+        GateOutcome outcome = strategyExecutionGate.check(review);
+        if (!outcome.allow()) {
+            log.warn("ExecutionManager blocked review {} ({}): strategy gate reason={}",
+                review.getId(), review.getInstrument(), outcome.reason());
+            publishGateBlockedEvent(review, outcome);
+            throw new IllegalStateException("strategy gate blocked: " + outcome.reason());
+        }
+    }
+
+    /**
+     * Publish a {@link TradeBlockedByStrategyGateEvent} so the Telegram
+     * adapter (and any future sinks) can surface the block to operators.
+     * Swallows publisher failures — a notification hiccup must never leak
+     * into the execution-path IllegalStateException.
+     */
+    private void publishGateBlockedEvent(MentorSignalReviewRecord review, GateOutcome outcome) {
+        try {
+            String playbookId = outcome.decision().flatMap(StrategyDecision::candidatePlaybookId).orElse(null);
+            String decisionName = outcome.decision().map(d -> d.decision().name()).orElse(null);
+            Double finalScore = outcome.decision().map(StrategyDecision::finalScore).orElse(null);
+            eventPublisher.publishEvent(new TradeBlockedByStrategyGateEvent(
+                review.getInstrument(),
+                review.getAction(),
+                review.getTimeframe(),
+                review.getId(),
+                outcome.reason(),
+                playbookId,
+                decisionName,
+                finalScore,
+                java.time.Instant.now()
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to publish TradeBlockedByStrategyGateEvent for review {} — {}",
+                review.getId(), e.getMessage());
+        }
     }
 
     private MentorProposedTradePlan extractTradePlan(MentorSignalReviewRecord review) {

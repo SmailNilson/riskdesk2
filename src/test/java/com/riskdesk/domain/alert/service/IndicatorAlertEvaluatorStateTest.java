@@ -148,6 +148,9 @@ class IndicatorAlertEvaluatorStateTest {
             @Override public Map<String, String> loadRecent() { return Map.of(); }
             @Override public void save(String evalKey, String signal) { throw new RuntimeException("DB down"); }
             @Override public void remove(String evalKey) { throw new RuntimeException("DB down"); }
+            @Override public Map<String, Instant> loadRecentCandleGuards() { return Map.of(); }
+            @Override public void saveCandleGuard(String evalKey, Instant ts) { throw new RuntimeException("DB down"); }
+            @Override public void removeCandleGuard(String evalKey) { throw new RuntimeException("DB down"); }
         };
 
         IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(failingStore);
@@ -156,6 +159,90 @@ class IndicatorAlertEvaluatorStateTest {
         // Should not throw even if store fails
         List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
         assertFalse(alerts.isEmpty(), "Alerts should still fire even if persistence fails");
+    }
+
+    // ── PR-7 · Candle-guard persistence and recovery ─────────────────────────
+
+    @Test
+    void canFireOnCandle_persistsCandleGuardToStore() {
+        InMemoryAlertStateStore store = new InMemoryAlertStateStore();
+        IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
+
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
+
+        assertFalse(alerts.isEmpty(), "Transition should fire on fresh evaluator");
+        assertFalse(store.getAllCandleGuards().isEmpty(),
+                "Candle guard should be persisted so restart cannot re-fire the same candle");
+        assertTrue(store.getAllCandleGuards().values().stream().anyMatch(CLOSED_CANDLE::equals),
+                "Persisted guard should carry the candle timestamp that admitted the alert");
+    }
+
+    @Test
+    void constructor_recoveredCandleGuard_suppressesReFireOnSameCandle() {
+        // Scenario: alert fired on candle T, state "OVERSOLD" was persisted,
+        // then the process restarted. The same candle T is still live (poll
+        // happens before the next close) — we must NOT re-fire.
+        InMemoryAlertStateStore store = new InMemoryAlertStateStore();
+        // Simulate pre-restart state: signal persisted + candle guard persisted
+        store.save("rsi:MCL:1h:", "OVERSOLD");
+        store.saveCandleGuard("rsi:MCL:1h:candle", CLOSED_CANDLE);
+
+        IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
+
+        // Simulate a post-restart recompute where the evaluator briefly sees
+        // NEUTRAL (because the indicator snapshot is rebuilt without history),
+        // then OVERSOLD again on the same candle. Without the candle guard, the
+        // evaluator would treat the NEUTRAL→OVERSOLD as a transition and fire.
+        IndicatorAlertSnapshot neutral = makeSnapshot(null, new BigDecimal("50.0"), "NEUTRAL", null, null);
+        evaluator.evaluate(Instrument.MCL, "1h", neutral);
+
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
+
+        assertTrue(alerts.stream().noneMatch(a -> a.message().contains("oversold")),
+                "Recovered candle guard should suppress re-firing the same alert on the same candle");
+    }
+
+    @Test
+    void constructor_recoveredCandleGuard_allowsFireOnNextCandle() {
+        InMemoryAlertStateStore store = new InMemoryAlertStateStore();
+        store.save("rsi:MCL:1h:", "NEUTRAL");
+        store.saveCandleGuard("rsi:MCL:1h:candle", CLOSED_CANDLE);
+
+        IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
+
+        // Next candle close — should fire normally
+        Instant nextCandle = CLOSED_CANDLE.plusSeconds(3600);
+        IndicatorAlertSnapshot snap = new IndicatorAlertSnapshot(
+                null,
+                new BigDecimal("25.3"), "OVERSOLD",
+                null, null, null,
+                null, null, null, null, null,
+                Collections.emptyList(), Collections.emptyList(),
+                nextCandle,
+                null, null, null, null, Collections.emptyList(), Collections.emptyList(),
+                null, null, null, null, null, null, null, null,
+                null, null);
+        List<Alert> alerts = evaluator.evaluate(Instrument.MCL, "1h", snap);
+
+        assertTrue(alerts.stream().anyMatch(a -> a.message().contains("oversold")),
+                "New candle should bypass the recovered guard and fire normally");
+    }
+
+    @Test
+    void clearStatesForInstrument_removesPersistedCandleGuards() {
+        InMemoryAlertStateStore store = new InMemoryAlertStateStore();
+        IndicatorAlertEvaluator evaluator = new IndicatorAlertEvaluator(store);
+
+        IndicatorAlertSnapshot snap = makeSnapshot(null, new BigDecimal("25.3"), "OVERSOLD", null, null);
+        evaluator.evaluate(Instrument.MCL, "1h", snap);
+        assertFalse(store.getAllCandleGuards().isEmpty(), "Guard should be persisted before rollover");
+
+        evaluator.clearStatesForInstrument("MCL");
+
+        assertTrue(store.getAllCandleGuards().isEmpty(),
+                "Rollover must remove persisted candle guards to keep DB in sync with in-memory state");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -175,13 +262,15 @@ class IndicatorAlertEvaluatorStateTest {
                 Collections.emptyList(), Collections.emptyList(),
                 CLOSED_CANDLE,
                 null, null, null, null, Collections.emptyList(), Collections.emptyList(),
-                null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null,
+                null, null
         );
     }
 
     /** Simple in-memory implementation of AlertStateStore for testing. */
     private static class InMemoryAlertStateStore implements AlertStateStore {
         private final Map<String, String> state = new ConcurrentHashMap<>();
+        private final Map<String, Instant> candleGuards = new ConcurrentHashMap<>();
 
         @Override
         public Map<String, String> loadRecent() {
@@ -198,8 +287,27 @@ class IndicatorAlertEvaluatorStateTest {
             state.remove(evalKey);
         }
 
+        @Override
+        public Map<String, Instant> loadRecentCandleGuards() {
+            return new HashMap<>(candleGuards);
+        }
+
+        @Override
+        public void saveCandleGuard(String evalKey, Instant candleTimestamp) {
+            candleGuards.put(evalKey, candleTimestamp);
+        }
+
+        @Override
+        public void removeCandleGuard(String evalKey) {
+            candleGuards.remove(evalKey);
+        }
+
         Map<String, String> getAll() {
             return state;
+        }
+
+        Map<String, Instant> getAllCandleGuards() {
+            return candleGuards;
         }
     }
 }

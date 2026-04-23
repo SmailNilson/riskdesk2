@@ -2,7 +2,6 @@ package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
-import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
@@ -58,13 +57,6 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     }
 
     @Override
-    public List<MentorSignalReviewRecord> findBySimulationStatuses(List<TradeSimulationStatus> statuses) {
-        return repository.findBySimulationStatusInOrderByCreatedAtAsc(statuses).stream()
-            .map(MentorSignalReviewEntityMapper::toDomain)
-            .toList();
-    }
-
-    @Override
     @Transactional
     public long deleteByStatuses(List<String> statuses) {
         return repository.deleteByStatusIn(statuses);
@@ -79,5 +71,11 @@ public class JpaMentorSignalReviewRepositoryAdapter implements MentorSignalRevie
     @Transactional
     public int markAnalyzingAsError(String errorMessage) {
         return repository.markAnalyzingAsError(errorMessage, Instant.now());
+    }
+
+    @Override
+    @Transactional
+    public int markStaleAnalyzingAsError(String errorMessage, Instant createdBefore) {
+        return repository.markStaleAnalyzingAsError(errorMessage, createdBefore, Instant.now());
     }
 }

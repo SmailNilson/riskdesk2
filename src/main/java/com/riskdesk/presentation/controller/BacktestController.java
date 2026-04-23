@@ -25,8 +25,8 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -66,6 +66,26 @@ public class BacktestController {
     @PostMapping("/refresh-db")
     public Map<String, Object> refreshDatabase() {
         return historicalDataService.refreshAll();
+    }
+
+    @DeleteMapping("/purge/{instrument}")
+    public Map<String, Object> purgeInstrument(@PathVariable String instrument) {
+        Instrument inst;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return Map.of("error", "Unknown instrument: " + instrument);
+        }
+        int total = 0;
+        for (String tf : List.of("1m", "5m", "10m", "30m", "1h", "4h", "1d")) {
+            List<Candle> existing = candlePort.findCandles(inst, tf, Instant.EPOCH);
+            if (!existing.isEmpty()) {
+                candlePort.deleteByInstrumentAndTimeframe(inst, tf);
+                total += existing.size();
+                log.info("Purged {} {} {} candles", existing.size(), inst, tf);
+            }
+        }
+        return Map.of("instrument", inst.name(), "purged", total);
     }
 
     @GetMapping("/import-history")

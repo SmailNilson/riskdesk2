@@ -48,7 +48,7 @@ public class FairValueGapDetector {
      * @param bias              "BULLISH" or "BEARISH"
      * @param top               upper price boundary of the gap
      * @param bottom            lower price boundary of the gap
-     * @param startBarTime      epoch-seconds of the middle (gap) candle
+     * @param startBarTime      epoch-seconds of the confirming (third) candle that completes the gap
      * @param extensionEndTime  epoch-seconds of the final extended bar (or startBarTime if no extension)
      */
     public record FairValueGap(
@@ -84,7 +84,6 @@ public class FairValueGapDetector {
 
         for (int i = 2; i < candles.size(); i++) {
             Candle prev2 = candles.get(i - 2);
-            Candle prev1 = candles.get(i - 1); // middle "FVG" candle
             Candle curr  = candles.get(i);
 
             // Bullish FVG: gap between prev2.high (bottom) and curr.low (top)
@@ -93,7 +92,7 @@ public class FairValueGapDetector {
                 BigDecimal bottom = prev2.getHigh();
                 if (passesThreshold(top.subtract(bottom))) {
                     long extensionEnd = computeExtensionEndTime(candles, i);
-                    all.add(new FairValueGap("BULLISH", top, bottom, prev1.getTimestamp().getEpochSecond(), extensionEnd));
+                    all.add(new FairValueGap("BULLISH", top, bottom, curr.getTimestamp().getEpochSecond(), extensionEnd));
                 }
             }
 
@@ -103,7 +102,7 @@ public class FairValueGapDetector {
                 BigDecimal bottom = curr.getHigh();
                 if (passesThreshold(top.subtract(bottom))) {
                     long extensionEnd = computeExtensionEndTime(candles, i);
-                    all.add(new FairValueGap("BEARISH", top, bottom, prev1.getTimestamp().getEpochSecond(), extensionEnd));
+                    all.add(new FairValueGap("BEARISH", top, bottom, curr.getTimestamp().getEpochSecond(), extensionEnd));
                 }
             }
         }

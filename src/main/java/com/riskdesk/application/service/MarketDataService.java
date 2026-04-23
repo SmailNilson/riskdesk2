@@ -2,27 +2,32 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.marketdata.event.MarketPriceUpdated;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Profile;
+import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
-import com.riskdesk.domain.model.AssetClass;
-import com.riskdesk.domain.shared.TradingSessionResolver;
-
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,9 +40,12 @@ import java.util.concurrent.TimeUnit;
  */
 @Service
 @Profile("!test")
-public class MarketDataService {
+public class MarketDataService implements StreamingPriceListener {
 
     private static final Logger log = LoggerFactory.getLogger(MarketDataService.class);
+
+    /** Minimum interval between push-based WebSocket updates per instrument. */
+    private static final long PUSH_DEBOUNCE_MS = 100L;
 
     private static final Map<String, Long> TIMEFRAMES = Map.of(
         "5m",  5L,
@@ -66,7 +74,13 @@ public class MarketDataService {
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
     private final Map<Instrument, String>        lastSource   = new ConcurrentHashMap<>();
     private final Map<CandleKey, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
+    private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
+
+    // Dedicated thread pool for alert evaluation — isolated from ForkJoinPool.commonPool
+    // (used by backfill) and the Spring @Async pool (used by signal scanners).
+    private final ExecutorService alertEvalExecutor = Executors.newFixedThreadPool(4,
+            r -> { Thread t = new Thread(r, "alert-eval"); t.setDaemon(true); return t; });
 
     public MarketDataService(MarketDataProvider marketDataProvider,
                              PositionService positionService,
@@ -88,7 +102,8 @@ public class MarketDataService {
         this.dxyMarketService      = dxyMarketService;
     }
 
-    @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}")
+    @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}",
+               initialDelayString = "${riskdesk.market-data.poll-initial-delay:60000}")
     public void pollPrices() {
         Map<Instrument, BigDecimal> prices = marketDataProvider.fetchPrices();
         Instant now = Instant.now();
@@ -135,20 +150,25 @@ public class MarketDataService {
                     accumulate(instrument, tf, price, now);
                 }
 
-                // OPT-2: fire-and-forget on riskdesk-async- pool (core=4, max=8)
+                // OPT-2: fire-and-forget on dedicated alert-eval pool (4 threads, isolated from backfill)
                 final Instrument evalInstrument = instrument;
                 CompletableFuture.runAsync(() -> {
                     try { alertService.evaluate(evalInstrument); }
                     catch (Exception e) { log.debug("Async alert eval error for {}: {}", evalInstrument, e.getMessage()); }
-                });
+                }, alertEvalExecutor);
                 CompletableFuture.runAsync(() -> {
                     try { behaviourAlertService.evaluate(evalInstrument); }
                     catch (Exception e) { log.debug("Async behaviour eval error for {}: {}", evalInstrument, e.getMessage()); }
-                });
+                }, alertEvalExecutor);
             }
         }
 
         dxyMarketService.refreshSyntheticDxy();
+
+        // VIX continuous futures (CFE) — feeds CrossInstrumentAlertService regime filter.
+        // Published as a string-keyed event ("VIX") to avoid adding VIX to the Instrument enum.
+        marketDataProvider.fetchVixPrice().ifPresent(vix ->
+            eventPublisher.publishEvent(new MarketPriceUpdated("VIX", vix, now)));
 
         if (usedDatabaseFallback && !databaseFallbackActive) {
             log.warn("IBKR unavailable: serving last known prices from the database.");
@@ -156,6 +176,49 @@ public class MarketDataService {
         } else if (!usedDatabaseFallback && databaseFallbackActive) {
             log.info("IBKR recovered: live market data polling resumed.");
             databaseFallbackActive = false;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Push-based live price updates (called from IBKR EReader thread)
+    // -------------------------------------------------------------------------
+
+    @Override
+    public void onLivePriceUpdate(Instrument instrument, BigDecimal price, Instant timestamp) {
+        // Debounce: suppress updates faster than PUSH_DEBOUNCE_MS per instrument
+        Instant previousPush = lastPushAt.get(instrument);
+        if (previousPush != null && Duration.between(previousPush, timestamp).toMillis() < PUSH_DEBOUNCE_MS) {
+            return;
+        }
+        lastPushAt.put(instrument, timestamp);
+
+        // Skip if price hasn't changed
+        if (samePrice(lastPrice.get(instrument), price)) {
+            return;
+        }
+
+        lastPrice.put(instrument, price);
+        lastTimestamp.put(instrument, timestamp);
+        lastSource.put(instrument, "LIVE_PUSH");
+
+        positionService.updateMarketPrice(instrument, price);
+        sendPriceUpdate(instrument, price, timestamp, "LIVE_PUSH");
+        eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
+
+        boolean marketOpen = TradingSessionResolver.isMarketOpen(timestamp, instrument);
+        if (marketOpen) {
+            for (String tf : TIMEFRAMES.keySet()) {
+                accumulate(instrument, tf, price, timestamp);
+            }
+
+            CompletableFuture.runAsync(() -> {
+                try { alertService.evaluate(instrument); }
+                catch (Exception e) { log.debug("Push alert eval error for {}: {}", instrument, e.getMessage()); }
+            }, alertEvalExecutor);
+            CompletableFuture.runAsync(() -> {
+                try { behaviourAlertService.evaluate(instrument); }
+                catch (Exception e) { log.debug("Push behaviour eval error for {}: {}", instrument, e.getMessage()); }
+            }, alertEvalExecutor);
         }
     }
 
@@ -323,6 +386,33 @@ public class MarketDataService {
         long epochMin    = ts.getEpochSecond() / 60;
         long periodStart = (epochMin / periodMinutes) * periodMinutes;
         return Instant.ofEpochSecond(periodStart * 60);
+    }
+
+    // -------------------------------------------------------------------------
+    // Rollover: flush stale candle state
+    // -------------------------------------------------------------------------
+
+    /**
+     * On contract rollover, flush all in-memory candle accumulators and cached
+     * price state for the rolled instrument. This prevents the old-contract's
+     * partial candle from contaminating the new contract's first bar.
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        int flushed = 0;
+        var it = accumulators.entrySet().iterator();
+        while (it.hasNext()) {
+            if (it.next().getKey().instrument() == instrument) {
+                it.remove();
+                flushed++;
+            }
+        }
+        lastPrice.remove(instrument);
+        lastTimestamp.remove(instrument);
+        lastSource.remove(instrument);
+        lastPushAt.remove(instrument);
+        log.info("Rollover: flushed {} candle accumulators and price cache for {}", flushed, instrument);
     }
 
     // -------------------------------------------------------------------------

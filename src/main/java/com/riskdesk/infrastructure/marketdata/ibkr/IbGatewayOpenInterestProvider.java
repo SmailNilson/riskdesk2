@@ -40,6 +40,25 @@ public class IbGatewayOpenInterestProvider implements OpenInterestProvider {
         }
     }
 
+    /**
+     * Fetches the current trading volume for a specific contract month.
+     * Used as fallback when OI is unavailable for contract selection.
+     */
+    @Override
+    public OptionalLong fetchVolume(Instrument instrument, String contractMonth) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return OptionalLong.empty();
+        }
+
+        Contract contract = buildContract(instrument, contractMonth);
+        try {
+            return nativeClient.requestSnapshotVolume(contract);
+        } catch (Exception e) {
+            log.debug("Failed to fetch volume for {} {} — {}", instrument, contractMonth, e.getMessage());
+            return OptionalLong.empty();
+        }
+    }
+
     private Contract buildContract(Instrument instrument, String contractMonth) {
         Contract contract = new Contract();
         contract.secType(SecType.FUT);
@@ -62,13 +81,13 @@ public class IbGatewayOpenInterestProvider implements OpenInterestProvider {
             }
             case MNQ -> {
                 contract.symbol("MNQ");
-                contract.exchange("GLOBEX");
+                contract.exchange("CME");
                 contract.multiplier("2");
                 contract.tradingClass("MNQ");
             }
             case E6 -> {
                 contract.symbol("EUR");
-                contract.exchange("GLOBEX");
+                contract.exchange("CME");
                 contract.multiplier("125000");
                 contract.tradingClass("6E");
             }

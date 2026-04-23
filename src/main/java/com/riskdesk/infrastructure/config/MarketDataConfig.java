@@ -1,9 +1,11 @@
 package com.riskdesk.infrastructure.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.marketdata.port.FxQuoteProvider;
 import com.riskdesk.domain.marketdata.port.HistoricalDataProvider;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
+import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
 import com.riskdesk.infrastructure.marketdata.ibkr.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,6 +87,65 @@ public class MarketDataConfig {
     public FxQuoteProvider ibGatewayFxQuoteProvider(IbGatewayNativeClient nativeClient,
                                                     IbGatewayFxContractResolver contractResolver) {
         return new IbGatewayFxQuoteProvider(nativeClient, contractResolver);
+    }
+
+    /**
+     * Wires the push-based price listener so that IBKR ticks are forwarded to
+     * MarketDataService in real-time instead of waiting for the polling cycle.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayPriceListenerWiring(IbGatewayNativeClient nativeClient,
+                                                Optional<StreamingPriceListener> listener) {
+        listener.ifPresent(l -> {
+            nativeClient.setPriceListener(l);
+            log.info("Push-based price listener wired to IB Gateway native client");
+        });
+        return new Object(); // marker bean
+    }
+
+    /**
+     * Slice 3a — wires the execution fill-tracking listener so IBKR execDetails
+     * and orderStatus callbacks are forwarded to the application layer.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayExecutionFillListenerWiring(IbGatewayNativeClient nativeClient,
+                                                        Optional<ExecutionFillListener> listener) {
+        listener.ifPresent(l -> {
+            nativeClient.setExecutionFillListener(l);
+            log.info("Execution fill listener wired to IB Gateway native client");
+        });
+        return new Object(); // marker bean
+    }
+
+    /**
+     * Wires the market depth adapter so that Level 2 order book updates
+     * are routed to the MutableOrderBook infrastructure.
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object ibGatewayDepthWiring(IbGatewayNativeClient nativeClient,
+                                        IbkrMarketDepthAdapter depthAdapter) {
+        nativeClient.setDepthAdapter(depthAdapter);
+        log.info("Market depth adapter wired to IB Gateway native client");
+        return new Object(); // marker bean
+    }
+
+    /**
+     * Wires the dedicated tick-by-tick EClientSocket connection.
+     * Uses a separate clientId to bypass ApiController's buggy tick handler dispatch
+     * (ApiController uses map.remove instead of map.get, killing handlers after 1 tick).
+     */
+    @Bean
+    @ConditionalOnExpression("'${riskdesk.ibkr.enabled:false}' == 'true' and '${riskdesk.ibkr.mode:IB_GATEWAY}' == 'IB_GATEWAY'")
+    public Object tickByTickClientWiring(TickByTickClient tickByTickClient,
+                                          IbGatewayNativeClient nativeClient,
+                                          IbkrTickDataAdapter tickDataAdapter) {
+        tickByTickClient.setTickDataAdapter(tickDataAdapter);
+        tickByTickClient.setNativeClient(nativeClient);
+        log.info("Tick-by-tick EClientSocket client wired (bypasses ApiController)");
+        return new Object();
     }
 
     // -------------------------------------------------------------------------

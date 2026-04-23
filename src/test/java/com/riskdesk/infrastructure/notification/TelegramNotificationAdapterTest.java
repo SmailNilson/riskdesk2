@@ -1,5 +1,6 @@
 package com.riskdesk.infrastructure.notification;
 
+import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import com.riskdesk.infrastructure.config.TelegramProperties;
 import org.junit.jupiter.api.BeforeEach;
@@ -239,5 +240,167 @@ class TelegramNotificationAdapterTest {
             eq("https://api.telegram.org/bottest-bot-token/sendMessage"),
             any(), eq(String.class)
         );
+    }
+
+    // ---- D1: Strategy engine line on validated messages ----
+
+    @Nested
+    class StrategyEngineEnrichment {
+
+        private TradeValidatedEvent enrichedEvent(String playbookId, String decision,
+                                                    Double score, Boolean agrees) {
+            return new TradeValidatedEvent(
+                "MGC", "LONG", "1h",
+                "Trade Valid\u00e9",
+                "Strong bull setup at DISCOUNT.",
+                2015.50, null, 2010.00, 2025.00, 1.9,
+                Instant.parse("2026-04-01T14:30:00Z"),
+                playbookId, decision, score, agrees
+            );
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void addsEngineLineWhenEngineEvaluatedAndAgrees() {
+            adapter.sendTradeValidated(enrichedEvent("NOR", "HALF_SIZE", 72.3, true));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("<b>Engine:</b>");
+            assertThat(text).contains("NOR");
+            assertThat(text).contains("HALF_SIZE");
+            assertThat(text).contains("+72.3");
+            // ✅ check mark when engine agrees
+            assertThat(text).contains("\u2705");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void addsWarningWhenEngineDisagrees() {
+            adapter.sendTradeValidated(enrichedEvent("LSAR", "PAPER_TRADE", 38.1, false));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("<b>Engine:</b>");
+            assertThat(text).contains("LSAR");
+            assertThat(text).contains("PAPER_TRADE");
+            assertThat(text).contains("+38.1");
+            // ⚠️ warning when engine disagrees — the trade still goes ahead but
+            // the operator should see the divergence.
+            assertThat(text).contains("\u26A0");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void omitsEngineLineWhenEngineNotEvaluated() {
+            // All strategy* fields null (engine unavailable in that MentorSignalReviewService
+            // boot configuration). Back-compat ctor path.
+            adapter.sendTradeValidated(sampleEvent("LONG", "MCL"));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).doesNotContain("<b>Engine:</b>");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void negativeScoreRenderedWithoutPlusSign() {
+            adapter.sendTradeValidated(enrichedEvent("LSAR", "PAPER_TRADE", -42.0, false));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("-42.0");
+            assertThat(text).doesNotContain("+-42");
+        }
+    }
+
+    // ---- D2: Gate-block notifications ----
+
+    @Nested
+    class GateBlockNotification {
+
+        private TradeBlockedByStrategyGateEvent blockedEvent(String playbookId,
+                                                               String decision, Double score,
+                                                               String reason) {
+            return new TradeBlockedByStrategyGateEvent(
+                "MGC", "LONG", "1h", 42L,
+                reason, playbookId, decision, score,
+                Instant.parse("2026-04-17T14:30:00Z")
+            );
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void sendsBlockedMessageWithEngineFields() {
+            adapter.sendTradeBlockedByGate(blockedEvent(
+                "NOR", "NO_TRADE", 22.0,
+                "engine-decision=NO_TRADE score=22.0"));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            // Red-themed header 🛑
+            assertThat(text).contains("\uD83D\uDED1");
+            assertThat(text).contains("TRADE BLOQU");
+            assertThat(text).contains("MGC");
+            assertThat(text).contains("LONG");
+            assertThat(text).contains("Review:</b> #42");
+            assertThat(text).contains("Mentor legacy:");
+            assertThat(text).contains("ELIGIBLE");
+            // ✅ for legacy, ❌ for engine (both are expected icons on a block)
+            assertThat(text).contains("\u2705");
+            assertThat(text).contains("\u274C");
+            assertThat(text).contains("NOR");
+            assertThat(text).contains("NO_TRADE");
+            assertThat(text).contains("+22.0");
+            assertThat(text).contains("No IBKR order was placed");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void sendsBlockedMessageWhenEngineEvaluationMissing() {
+            // Gate blocked for a reason that doesn't involve an engine eval
+            // (e.g. strategy-engine-unavailable). All strategy* fields null.
+            adapter.sendTradeBlockedByGate(new TradeBlockedByStrategyGateEvent(
+                "MGC", "LONG", "1h", 77L,
+                "strategy-engine-unavailable", null, null, null,
+                Instant.parse("2026-04-17T14:30:00Z")
+            ));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("TRADE BLOQU");
+            assertThat(text).contains("(no evaluation)");
+            assertThat(text).contains("strategy-engine-unavailable");
+        }
+
+        @Test
+        void skipsBlockedNotificationWhenDisabled() {
+            properties.setEnabled(false);
+            adapter.sendTradeBlockedByGate(blockedEvent(
+                "NOR", "NO_TRADE", 22.0, "engine-decision=NO_TRADE"));
+            verifyNoInteractions(restTemplate);
+        }
+
+        @Test
+        void blockedNetworkFailureDoesNotThrow() {
+            when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
+                .thenThrow(new RestClientException("Connection refused"));
+
+            assertThatCode(() -> adapter.sendTradeBlockedByGate(blockedEvent(
+                "NOR", "NO_TRADE", 22.0, "engine-decision=NO_TRADE")))
+                .doesNotThrowAnyException();
+        }
     }
 }

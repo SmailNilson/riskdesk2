@@ -3,7 +3,10 @@ package com.riskdesk.infrastructure.marketdata.ibkr;
 import com.ib.client.Contract;
 import com.ib.client.ContractDetails;
 import com.ib.client.Types.SecType;
+import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.model.Instrument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -18,11 +21,14 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class IbGatewayContractResolver {
 
+    private static final Logger log = LoggerFactory.getLogger(IbGatewayContractResolver.class);
     private final IbGatewayNativeClient nativeClient;
+    private final ActiveContractRegistry registry;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
 
-    public IbGatewayContractResolver(IbGatewayNativeClient nativeClient) {
+    public IbGatewayContractResolver(IbGatewayNativeClient nativeClient, ActiveContractRegistry registry) {
         this.nativeClient = nativeClient;
+        this.registry = registry;
     }
 
     public Optional<IbGatewayResolvedContract> resolve(Instrument instrument) {
@@ -33,39 +39,85 @@ public class IbGatewayContractResolver {
         if (cached != null) {
             return Optional.of(cached);
         }
+        // Prefer the registry's month — the registry is the Single Source of Truth.
+        // Without this step, refresh() picks min(expiry), which for ENERGY contracts
+        // (CME convention: expiry = 1 month before delivery) selects the contract
+        // about to expire instead of the active delivery month.
+        String registryMonth = registry.getContractMonth(instrument).orElse(null);
+        if (registryMonth != null) {
+            refreshToMonth(instrument, registryMonth);
+            IbGatewayResolvedContract hydrated = cache.get(instrument);
+            if (hydrated != null) {
+                return Optional.of(hydrated);
+            }
+        }
+        // No registry value — fall back to legacy min-expiry behavior (should be rare in prod).
         return refresh(instrument);
     }
 
     /**
      * Directly seeds the cache with an already-resolved contract.
      * Used by ActiveContractRegistryInitializer after OI-based startup selection.
+     *
+     * Always updates the cache (the initializer's OI-based selection is authoritative).
+     * If the conId changes, the old IBKR stream is cancelled and a new one started.
+     * If the conId is the same, the cache is updated silently (no stream disruption).
      */
     public void setResolved(Instrument instrument, IbGatewayResolvedContract resolved) {
-        cache.put(instrument, resolved);
+        IbGatewayResolvedContract previous = cache.put(instrument, resolved);
+        if (previous != null && previous.contract().conid() != resolved.contract().conid()) {
+            log.info("ContractResolver: {} conId changed {} → {} — switching IBKR stream",
+                instrument, previous.contract().conid(), resolved.contract().conid());
+            nativeClient.cancelAndResubscribe(previous.contract(), resolved.contract(), instrument);
+        }
     }
 
     /**
      * Clears the cache for one instrument and re-resolves from IBKR targeting a specific month.
      * Used by confirmRollover() so the new month is immediately cached without falling through
-     * to a stale preconfigured() fallback.
+     * to a stale cached fallback.
      */
     public void refreshToMonth(Instrument instrument, String targetMonth) {
+        // Cancel old IBKR streaming subscriptions BEFORE updating the cache,
+        // so orphaned subscriptions on the expired contract month don't keep
+        // pushing stale prices alongside the new contract.
+        nativeClient.cancelInstrumentSubscriptions(instrument);
         cache.remove(instrument);
         for (Contract query : buildQueries(instrument)) {
-            List<ContractDetails> details = nativeClient.requestContractDetails(query);
-            if (details.isEmpty()) continue;
-            Optional<ContractDetails> match = details.stream()
-                .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
-                .findFirst();
-            if (match.isPresent()) {
-                ContractDetails d = match.get();
-                cache.put(instrument, new IbGatewayResolvedContract(instrument, d.contract(), d));
-                return;
+            try {
+                List<ContractDetails> details = nativeClient.requestContractDetails(query);
+                if (details.isEmpty()) continue;
+                Optional<ContractDetails> match = details.stream()
+                    .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
+                    .findFirst();
+                if (match.isPresent()) {
+                    ContractDetails d = match.get();
+                    cache.put(instrument, new IbGatewayResolvedContract(instrument, d.contract(), d));
+                    return;
+                }
+            } catch (Exception e) {
+                // IBKR may be unavailable — continue to fallback
             }
         }
-        // Not found — cache stays empty; next resolve() will call refresh()
+        // IBKR didn't return the target month — build a synthetic contract from the query
+        // so the cache is seeded and resolve() doesn't fall back to front-month
+        List<Contract> queries = buildQueries(instrument);
+        if (!queries.isEmpty()) {
+            Contract synthetic = queries.get(0);
+            synthetic.lastTradeDateOrContractMonth(targetMonth);
+            cache.put(instrument, new IbGatewayResolvedContract(instrument, synthetic, null));
+            log.warn("refreshToMonth: {} → {} (synthetic fallback — IBKR did not return this month)",
+                instrument, targetMonth);
+        }
     }
 
+    /**
+     * Legacy last-resort path: picks the contract with min(expiry) from IBKR.
+     * For ENERGY products this selects the contract about to expire (wrong).
+     * {@link #resolve(Instrument)} now prefers {@link ActiveContractRegistry}
+     * and only falls through to this method when the registry has no value
+     * (rare in prod — ActiveContractRegistryInitializer runs at @Order(1)).
+     */
     public Optional<IbGatewayResolvedContract> refresh(Instrument instrument) {
         if (!instrument.isExchangeTradedFuture()) {
             return Optional.empty();
@@ -95,10 +147,10 @@ public class IbGatewayContractResolver {
     }
 
     /**
-     * Returns the two nearest contract months (front + next) for an instrument,
-     * sorted by expiry date ascending. Used for Open Interest comparison.
+     * Returns the nearest contract months (up to 3) for an instrument,
+     * sorted by expiry date ascending. Used for OI and volume comparison.
      */
-    public List<IbGatewayResolvedContract> resolveTopTwo(Instrument instrument) {
+    public List<IbGatewayResolvedContract> resolveNextContracts(Instrument instrument) {
         if (!instrument.isExchangeTradedFuture()) {
             return List.of();
         }
@@ -111,18 +163,40 @@ public class IbGatewayContractResolver {
             }
         }
 
-        if (details.size() < 2) {
-            return details.stream()
-                .map(d -> new IbGatewayResolvedContract(instrument, d.contract(), d))
-                .toList();
+        if (details.isEmpty()) {
+            return List.of();
         }
 
         return details.stream()
             .filter(d -> expiryKey(d) != null)
             .sorted(Comparator.comparing(this::expiryKey, Comparator.nullsLast(Comparator.naturalOrder())))
-            .limit(2)
+            .limit(3)
             .map(d -> new IbGatewayResolvedContract(instrument, d.contract(), d))
             .toList();
+    }
+
+    /**
+     * Resolves an expired contract for a specific month (e.g. "202503").
+     * Uses includeExpired=true so IBKR returns historical contracts.
+     * Used by deep backfill to walk across prior contract months.
+     */
+    public Optional<IbGatewayResolvedContract> resolveExpiredMonth(Instrument instrument, String targetMonth) {
+        if (!instrument.isExchangeTradedFuture()) return Optional.empty();
+
+        for (Contract query : buildQueries(instrument)) {
+            query.includeExpired(true);
+            query.lastTradeDateOrContractMonth(targetMonth);
+            try {
+                List<ContractDetails> details = nativeClient.requestContractDetails(query);
+                if (!details.isEmpty()) {
+                    ContractDetails d = details.get(0);
+                    return Optional.of(new IbGatewayResolvedContract(instrument, d.contract(), d));
+                }
+            } catch (Exception e) {
+                log.debug("resolveExpiredMonth: {} {} query failed — {}", instrument, targetMonth, e.getMessage());
+            }
+        }
+        return Optional.empty();
     }
 
     public void clearCache() {
@@ -152,32 +226,17 @@ public class IbGatewayContractResolver {
                 buildQuery("MGC", "COMEX", "USD", null, null)
             );
             case MNQ -> List.of(
-                buildQuery("MNQ", "GLOBEX", "USD", "2", "MNQ"),
-                buildQuery("MNQ", "GLOBEX", "USD", null, "MNQ"),
+                buildQuery("MNQ", "CME", "USD", "2", "MNQ"),
                 buildQuery("MNQ", "CME", "USD", null, "MNQ"),
                 buildQuery("MNQ", "CME", "USD", null, null)
             );
             case E6 -> List.of(
-                buildQuery("EUR", "GLOBEX", "USD", "125000", "6E"),
-                buildQuery("EUR", "GLOBEX", "USD", null, "6E"),
+                buildQuery("EUR", "CME", "USD", "125000", "6E"),
                 buildQuery("EUR", "CME", "USD", null, "6E"),
-                buildQuery("6E", "GLOBEX", "USD", null, "6E")
+                buildQuery("6E", "CME", "USD", null, "6E")
             );
             case DXY -> List.of();
         };
-    }
-
-    private Optional<IbGatewayResolvedContract> preconfigured(Instrument instrument) {
-        Contract contract = switch (instrument) {
-            case MCL -> buildContract(661016514, "MCL", "NYMEX", "USD", "100", "MCL", "202605");
-            case MGC -> buildContract(706903676, "MGC", "COMEX", "USD", "10", "MGC", "202604");
-            case MNQ -> buildContract(770561201, "MNQ", "CME", "USD", "2", "MNQ", "202606");
-            case E6 -> buildContract(496647057, "EUR", "CME", "USD", "125000", "6E", "202606");
-            case DXY -> null;
-        };
-        return contract == null
-            ? Optional.empty()
-            : Optional.of(new IbGatewayResolvedContract(instrument, contract, null));
     }
 
     private Contract buildQuery(String symbol,
@@ -197,26 +256,6 @@ public class IbGatewayContractResolver {
         if (tradingClass != null) {
             contract.tradingClass(tradingClass);
         }
-        return contract;
-    }
-
-    private Contract buildContract(int conid,
-                                   String symbol,
-                                   String exchange,
-                                   String currency,
-                                   String multiplier,
-                                   String tradingClass,
-                                   String contractMonth) {
-        Contract contract = new Contract();
-        contract.conid(conid);
-        contract.secType(SecType.FUT);
-        contract.symbol(symbol);
-        contract.exchange(exchange);
-        contract.currency(currency);
-        contract.multiplier(multiplier);
-        contract.tradingClass(tradingClass);
-        contract.lastTradeDateOrContractMonth(contractMonth);
-        contract.includeExpired(false);
         return contract;
     }
 

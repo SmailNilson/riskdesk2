@@ -22,6 +22,11 @@ public class IbkrTickDataAdapter implements TickDataPort {
     private static final Logger log = LoggerFactory.getLogger(IbkrTickDataAdapter.class);
 
     private final ConcurrentHashMap<Instrument, TickByTickAggregator> aggregators = new ConcurrentHashMap<>();
+    private final IbkrFootprintAdapter footprintAdapter;
+
+    public IbkrTickDataAdapter(IbkrFootprintAdapter footprintAdapter) {
+        this.footprintAdapter = footprintAdapter;
+    }
 
     @Override
     public Optional<TickAggregation> currentAggregation(Instrument instrument) {
@@ -48,6 +53,11 @@ public class IbkrTickDataAdapter implements TickDataPort {
         TickByTickAggregator aggregator = aggregators.computeIfAbsent(
             instrument, k -> new TickByTickAggregator(k));
         aggregator.onTick(price, size, classification, timestamp);
+
+        // Route to footprint aggregator for per-price-level volume profiling
+        if (classification != TickByTickAggregator.TickClassification.UNCLASSIFIED) {
+            footprintAdapter.onTick(instrument, price, size, classification.name(), timestamp);
+        }
     }
 
     /**

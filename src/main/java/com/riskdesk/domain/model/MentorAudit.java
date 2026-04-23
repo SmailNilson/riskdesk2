@@ -136,12 +136,43 @@ public class MentorAudit {
         this.semanticText = semanticText;
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Legacy simulation fields (Phase 3 — write-never from production).
+    //
+    // These accessors survive so the JPA mapper can round-trip existing
+    // rows without data loss, but nothing in the production code path
+    // writes to them. All simulation state for manual "Ask Mentor"
+    // reviews lives on {@link com.riskdesk.domain.simulation.TradeSimulation}
+    // with {@code reviewType = AUDIT}.
+    //
+    // Physical column drop on {@code mentor_audits} requires a schema
+    // migration strategy (no Flyway/Liquibase in this repo) — see
+    // the "Simulation Decoupling Rule" section in
+    // {@code docs/ARCHITECTURE_PRINCIPLES.md}.
+    // ──────────────────────────────────────────────────────────────────
+
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public TradeSimulationStatus getSimulationStatus() { return simulationStatus; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setSimulationStatus(TradeSimulationStatus simulationStatus) { this.simulationStatus = simulationStatus; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public Instant getActivationTime() { return activationTime; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setActivationTime(Instant activationTime) { this.activationTime = activationTime; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public Instant getResolutionTime() { return resolutionTime; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setResolutionTime(Instant resolutionTime) { this.resolutionTime = resolutionTime; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public BigDecimal getMaxDrawdownPoints() { return maxDrawdownPoints; }
+    /** @deprecated since phase-3 — see {@link com.riskdesk.domain.simulation.TradeSimulation}. */
+    @Deprecated(since = "phase-3")
     public void setMaxDrawdownPoints(BigDecimal maxDrawdownPoints) { this.maxDrawdownPoints = maxDrawdownPoints; }
 }

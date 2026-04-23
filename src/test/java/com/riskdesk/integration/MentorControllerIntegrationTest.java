@@ -87,7 +87,8 @@ class MentorControllerIntegrationTest {
                         3035.0,
                         3.0,
                         "Plan proposé",
-                        new MentorAlternativeEntry(3008.0, "Entrée safe plus profonde.")
+                        new MentorAlternativeEntry(3008.0, "Entrée safe plus profonde."),
+                        "EQH_3035.0"
                     )
                 ),
                 "{\"verdict\":\"Trade Non-Conforme - Erreur de Processus\"}",
@@ -207,6 +208,9 @@ class MentorControllerIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
                 null
             )
         ));
@@ -246,6 +250,9 @@ class MentorControllerIntegrationTest {
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
                 null
             ),
             new MentorSignalReview(
@@ -266,6 +273,9 @@ class MentorControllerIntegrationTest {
                 "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -313,6 +323,9 @@ class MentorControllerIntegrationTest {
                 "Africa/Casablanca",
                 ExecutionEligibilityStatus.NOT_EVALUATED,
                 "Mentor analysis pending.",
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,

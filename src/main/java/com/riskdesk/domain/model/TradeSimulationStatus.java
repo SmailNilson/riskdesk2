@@ -6,5 +6,6 @@ public enum TradeSimulationStatus {
     WIN,
     LOSS,
     MISSED,
-    CANCELLED
+    CANCELLED,
+    REVERSED
 }

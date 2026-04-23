@@ -195,6 +195,7 @@ class AlertServiceTest {
             null,
             "WT_BEARISH",
             "OVERBOUGHT",
+            null, null, null, null,  // Stochastic
             "BEARISH",
             null,
             null,
@@ -208,6 +209,7 @@ class AlertServiceTest {
             null,
             null,
             false,
+            null,   // multiResolutionBias
             "BEARISH",
             new BigDecimal("24520.00"),
             new BigDecimal("24320.00"),
@@ -232,6 +234,10 @@ class AlertServiceTest {
             null,
             // Session PD Array (intraday range-based)
             null, null, null, null,
+            // UC-OF-012: Volume Profile
+            null, null, null,
+            // UC-OF-013: Session CME Context
+            "NY_AM",
             null,
             null  // lastPrice
         );

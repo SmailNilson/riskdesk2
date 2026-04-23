@@ -86,12 +86,15 @@ public class MentorManualReviewService {
                 ? null
                 : objectMapper.readValue(rawResponse, MentorStructuredResponse.class);
         } catch (Exception ignored) {
+            // Parse failure: Gemini did not return a consumable JSON. This is a
+            // TECHNICAL failure, not a trade rejection. Use MENTOR_UNAVAILABLE
+            // so the UI can flag it as "retry needed" instead of "rejected".
             return new MentorStructuredResponse(
                 rawResponse == null ? "" : rawResponse,
                 List.of(),
                 List.of("La réponse sauvegardée n'était pas un JSON strictement exploitable."),
-                "Trade Non-Conforme - Erreur de Processus",
-                ExecutionEligibilityStatus.INELIGIBLE,
+                "Mentor Indisponible - Réponse Incomplète",
+                ExecutionEligibilityStatus.MENTOR_UNAVAILABLE,
                 "Structured mentor response unavailable.",
                 "Relance une analyse manuelle si tu veux une version plus structurée.",
                 null

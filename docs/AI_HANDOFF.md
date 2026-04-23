@@ -1,10 +1,304 @@
 # AI Handoff
 
-Last updated: 2026-04-01
+Last updated: 2026-04-23
+
+## Hidden features surfaced — FALLBACK_DB badge, DXY breakdown, Flash Crash status, Rollover OI
+
+Four backend capabilities that already existed but were not wired through to
+the UI are now surfaced. Pure read-path additions — no new business logic, no
+schema migration, no change to existing alert/execution/simulation flows.
+
+- **FALLBACK_DB source badge (Slice A).** `MetricsBar.tsx` now renders per-ticker
+  amber badges whenever `prices[instrument].source` is `FALLBACK_DB` or `STALE`.
+  No new polling — the flag is already carried over the existing
+  `/topic/prices` WebSocket payload (`PriceUpdate.source`). A trader can now see
+  at-a-glance which instrument is being served from PostgreSQL because the IBKR
+  farm is degraded.
+- **DXY breakdown panel (Slice B).** `DxyPanel.tsx` gains a collapsed "Breakdown"
+  section backed by the existing `GET /api/market/dxy/breakdown` endpoint (typed
+  wrapper `api.getDxyBreakdown()`, DTO `FxComponentContributionView`). Refreshes
+  every 30 s. Shows per-FX-pair price, % change, DXY weight, and weighted
+  impact (colour-coded bullish/bearish/flat) so the trader can tell which of
+  the 6 components is driving the index today.
+- **Flash Crash status seed (Slice C).** `FlashCrashController#getStatus` is no
+  longer a stub. It now returns the most recent persisted phase per instrument
+  via a new application-layer `FlashCrashStatusService` reading from
+  `JpaFlashCrashEventRepository.findFirstByInstrumentOrderByTimestampDesc`
+  (hexagonal rule: controller cannot import the JPA repo directly, hence the
+  service in between). `GET /api/order-flow/flash-crash/status` and
+  `GET /api/order-flow/flash-crash/status/{instrument}` are both wired. The
+  `LiveMonitorTab` in `FlashCrashPanel.tsx` seeds its state from REST on mount,
+  and `/topic/flash-crash` WebSocket pushes continue to overlay live updates.
+  Individual condition booleans are not persisted; the REST payload returns an
+  empty `conditions` array and the card renders the 5-dot row without filled
+  circles until a live WS push arrives.
+- **Rollover OI status (Slice D).** `api.getRolloverOiStatus()` wraps the
+  existing `GET /api/rollover/oi-status`. `RolloverBanner.tsx` now fetches OI
+  crossover every 5 min (matching `useRollover`'s cadence) and, when any
+  instrument's backend recommendation is `RECOMMEND_ROLL`, surfaces a red
+  "OI crossover" row with current → next month, both open-interest values, the
+  ratio, and a `SWITCH NOW` button that opens the existing confirm modal
+  pre-filled with the next month. The banner now stays visible when an OI
+  crossover is pending even if no contract is within the time-to-expiry window.
+
+Files touched:
+- Backend: `src/main/java/com/riskdesk/presentation/controller/FlashCrashController.java`,
+  `src/main/java/com/riskdesk/application/service/FlashCrashStatusService.java` (new),
+  `src/main/java/com/riskdesk/infrastructure/persistence/JpaFlashCrashEventRepository.java`.
+- Frontend: `frontend/app/lib/api.ts` (4 new wrappers + DTOs),
+  `frontend/app/components/MetricsBar.tsx`, `frontend/app/components/DxyPanel.tsx`,
+  `frontend/app/components/FlashCrashPanel.tsx`, `frontend/app/components/RolloverBanner.tsx`.
+
+Non-goals for this PR: no new business logic, no new FSM wiring (a live
+per-instrument `FlashCrashFSM` engine feeding real ticks is still future work),
+no changes to `useWebSocket` / `useOrderFlow` hook signatures, no Dashboard
+layout changes.
 
 ## Goal of this file
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.
+
+## Latest change — Simulation Decoupling Phase 3 delivered
+
+Phase 3 of the Simulation Decoupling Rule is in. The legacy coupling between
+`MentorSignalReview` / `MentorAudit` and simulation state is now effectively
+severed at the code level — only the physical columns remain (pending a
+separate schema-migration PR).
+
+**What changed in Phase 3:**
+
+- `TradeSimulationService.refreshPendingSimulations()` and
+  `refreshPendingAuditSimulations()` now read opens via
+  `TradeSimulationRepositoryPort.findByStatuses(List.of(PENDING_ENTRY, ACTIVE))`.
+  The previous entry points —
+  `MentorSignalReviewRepositoryPort.findBySimulationStatuses(...)` and
+  `MentorAuditRepositoryPort.findBySimulationStatuses(...)` — have been
+  **removed** from both the port interfaces and the JPA adapters.
+- The dual-write machinery is gone:
+  `dualWriteSignalSimulation`, `dualWriteAuditSimulation`,
+  `buildSignalCandidate`, `buildAuditCandidate`, `attemptDualWrite`,
+  `reconcileWithExisting`, `retryPendingDualWrites`,
+  `pendingDualWriteRetries`, `pendingDualWriteRetryCount`,
+  `hasSimulationContentChanged`, `bigDecimalValueEquals` have all been
+  deleted. Each scheduler pass now writes a single `TradeSimulation.save(...)`
+  per transition.
+- Initial `PENDING_ENTRY` creation moved off the legacy review row:
+  - `MentorSignalReviewService.initializeSimulationAggregate()` writes a new
+    row directly into `trade_simulations` when the ELIGIBLE analysis arrives
+    with a complete trade plan.
+  - `MentorAnalysisService.initializeAuditSimulation()` does the same for
+    manual "Ask Mentor" audits.
+  - Neither service calls `review.setSimulationStatus(...)` or
+    `audit.setSimulationStatus(...)` anymore — those setters are write-never
+    from production code paths.
+- Simulation events publish only on `/topic/simulations`. The previous
+  `/topic/mentor-alerts` push from the simulation scheduler is gone.
+  `/topic/mentor-alerts` still carries non-simulation mentor review events
+  (status/verdict/eligibility updates) via `MentorSignalReviewService.publish()`.
+- Legacy sim getters/setters on `MentorSignalReviewRecord` and `MentorAudit`
+  are annotated `@Deprecated(since = "phase-3")` with a Javadoc note
+  pointing to `TradeSimulation`.
+
+**What intentionally stayed (tech debt to close in a follow-up):**
+
+- Physical columns on `mentor_signal_reviews` and `mentor_audits`
+  (`simulation_status`, `activation_time`, `resolution_time`,
+  `max_drawdown_points`, `trailing_stop_result`, `trailing_exit_price`,
+  `best_favorable_price`) still exist on the JPA entities. This is because
+  the repo has no Flyway/Liquibase and Hibernate `ddl-auto=update` never
+  drops columns. The JPA mappers still round-trip them so historical rows
+  remain readable. Dropping these columns needs a schema-migration strategy
+  PR — do not remove them inline.
+
+**Tests reshuffled:**
+
+- `TradeSimulationServiceDualWriteTest` deleted.
+- New `TradeSimulationServiceSchedulerTest` (7 tests) asserts the post-Phase-3
+  contract: scheduler reads from the simulation port, writes only to the
+  simulation aggregate, publishes only on `/topic/simulations`, and never
+  touches the legacy review/audit `save(...)` path for simulation transitions.
+- `MentorAnalysisServiceTest.analyze_eligibleWithFullPlan_*` rewritten — it
+  now asserts a `TradeSimulation(AUDIT, PENDING_ENTRY)` row is persisted and
+  the audit legacy sim field stays null.
+- `MentorSignalReviewService` constructor extended with
+  `TradeSimulationRepositoryPort`; all test call sites updated.
+- Full suite: 1191 tests, all green. `HexagonalArchitectureTest` passes.
+
+**Follow-up PRs needed:**
+
+1. Introduce Flyway (or Liquibase), then drop the seven legacy sim columns
+   from `mentor_signal_reviews` and `mentor_audits`. At that point the
+   `@Deprecated` getters can disappear too.
+2. Optional: extend the simulation REST API with a writable endpoint so an
+   operator can manually cancel a stuck `PENDING_ENTRY` (previously possible
+   via a direct UPDATE on the review table).
+
+---
+
+## Previous change — Execution Slice 3a: IBKR execDetails + orderStatus fill tracking
+
+Adds raw IBKR broker feedback to live executions. Slice 3 is split into three
+sub-slices; this PR ships **3a only**.
+
+**What ships now (3a):**
+- New domain port `domain/execution/port/ExecutionFillListener` — callback sink
+  implemented by the application layer. Keeps the hexagonal boundary intact
+  (infrastructure doesn't import application types).
+- New application service `application/service/ExecutionFillTrackingService`
+  persists IBKR feedback on `TradeExecutionEntity` and publishes
+  `/topic/executions` on every state-changing update.
+- `TradeExecutionEntity` + `TradeExecutionRecord` extended with fill-tracking
+  columns (additive only, nothing removed):
+  - `filledQuantity` / `avgFillPrice` (BigDecimal)
+  - `lastFillTime` (Instant / TIMESTAMPTZ)
+  - `orderStatus` (raw IBKR status name — `Submitted`, `PreSubmitted`,
+    `PartiallyFilled`, `Filled`, `Cancelled`, …)
+  - `ibkrOrderId` (Integer — TWS orderId, used by 3b for startup reconciliation)
+  - `lastExecId` (String — per-fill idempotence key, IBKR execId of last
+    applied fill report)
+- `TradeExecutionRepositoryPort` gains `findByIbkrOrderId(...)` +
+  `findByExecutionKey(...)`.
+- `IbGatewayNativeClient` now accepts an `ExecutionFillListener` via
+  `setExecutionFillListener(...)`. On connect it attaches two persistent
+  handlers to `ApiController`:
+  - `ITradeReportHandler` backed by `reqExecutions(filter, handler)` — scoped
+    to today's executions — forwards `execDetails()` callbacks.
+  - `ILiveOrderHandler` backed by `reqLiveOrders(handler)` — forwards
+    `orderStatus()` callbacks. (The existing ad-hoc `findOpenOrderByOrderRef`
+    handler remains untouched — the two handlers coexist.)
+- Wiring in `MarketDataConfig#ibGatewayExecutionFillListenerWiring` (same
+  `IB_GATEWAY` conditional as the price listener).
+- Idempotence: `execDetails` dedups on `execId`; `orderStatus` dedups by
+  comparing all raw fields against the persisted row. Transition from
+  `ENTRY_SUBMITTED` to domain state `ACTIVE` happens on first `Filled` status.
+  Cancellation only flips to `CANCELLED` when no fills have been recorded —
+  partial-fill-then-cancel stays open and is handled in 3c.
+- Existing endpoint `GET /api/mentor/executions/by-review/{reviewId}` now
+  surfaces the new fill fields on `TradeExecutionView` (shape additions
+  only — existing consumers unaffected).
+
+**Tests:** `ExecutionFillTrackingServiceTest` — 8 Mockito scenarios covering
+happy path, execId replay idempotence, orderRef fallback, domain state
+transition on `Filled`, cancel-without-fills flow, unchanged-status no-op,
+unknown-order ignore, and multi-fill sequence.
+
+**What this PR does NOT do (follow-ups):**
+- **3b — startup reconciliation:** on app start, query IBKR open/completed
+  orders and reconcile against `trade_executions` rows left dangling from a
+  prior run.
+- **3c — bracket / virtual exit orchestration:** once `ACTIVE`, submit
+  matching SL + TP orders, monitor and update state through closure.
+- Frontend UI for the new fields — the DTO shape is exposed so a future UI
+  PR can surface it without touching the backend again.
+
+---
+
+## Earlier change — Simulation Decoupling Phase 1 (a + b)
+
+The TECH DEBT around simulation state living on `MentorSignalReviewRecord` /
+`MentorAudit` is now being unwound. Phase 1 is **additive only** — no legacy
+field, endpoint, or WebSocket topic has been removed yet.
+
+**Phase 1a (foundation, already merged — PR #253):**
+- Domain aggregate `domain/simulation/TradeSimulation` (pure record, no Spring/JPA)
+- Discriminator enum `domain/simulation/ReviewType` — `SIGNAL` | `AUDIT`
+- Port `domain/simulation/port/TradeSimulationRepositoryPort`
+- JPA side: `TradeSimulationEntity` (table `trade_simulations`), `JpaTradeSimulationRepository`, `JpaTradeSimulationRepositoryAdapter`, `TradeSimulationEntityMapper`
+
+**Phase 1b (wire-up, this PR):**
+- `TradeSimulationService` now injects `TradeSimulationRepositoryPort` and
+  **dual-writes** every state transition to the new port IN ADDITION to the
+  legacy review/audit repositories. Dual-write is wrapped in try/catch + warn
+  log so a new-side failure cannot break the legacy flow.
+- A back-fill pass at the top of each scheduler run ensures reviews created
+  by `MentorSignalReviewService.initializeSimulationState()` get their
+  `trade_simulations` row on the next poll, even without a state change.
+  Back-fill is idempotent via the `(review_id, review_type)` unique constraint.
+- New REST endpoints on `SimulationController`:
+  - `GET /api/simulations/recent?limit=50`
+  - `GET /api/simulations/by-instrument/{instrument}?limit=20`
+  - `GET /api/simulations/by-review/{reviewId}?type=SIGNAL|AUDIT` (404 if missing)
+- New WebSocket topic `/topic/simulations` — published alongside (not instead
+  of) the legacy `/topic/mentor-alerts` push. Payload is the `TradeSimulation`
+  domain aggregate.
+- Frontend `app/lib/api.ts` exposes typed wrappers
+  (`getRecentSimulations`, `getSimulationsByInstrument`, `getSimulationByReview`)
+  and `TradeSimulationView` type. **No UI component has been migrated yet** —
+  Phase 2 will swap `MentorSignalPanel` / `MentorPanel` to read from these
+  endpoints and subscribe to `/topic/simulations`.
+
+**What is NOT changed by Phase 1:**
+- Simulation fields on `MentorSignalReviewRecord` / `MentorAudit` are still the
+  primary source of truth. `TradeSimulationService` still writes to them.
+- `/topic/mentor-alerts` still carries simulation updates.
+- `MentorSignalReviewRepositoryPort.findBySimulationStatuses()` is still the
+  scheduler's entry point.
+
+**Phase 2 plan (next PR):** migrate frontend (`MentorSignalPanel`,
+`MentorPanel`) to consume `/api/simulations/*` + `/topic/simulations`; drop
+simulation fields from `MentorSignalReview` / `MentorManualReview` JSON DTOs.
+
+**Phase 3 plan (follow-up):** drop simulation columns from `mentor_signal_reviews`
+and `mentor_audits`; remove `findBySimulationStatuses()` from the review port;
+make `TradeSimulationRepositoryPort` the sole query path. Requires a data
+backfill script and a deprecation release.
+
+**Tests:** new dual-write suite `TradeSimulationServiceDualWriteTest` (5 tests),
+new controller test `SimulationControllerTest` (8 tests). Existing
+`TradeSimulationServiceTest` updated for the new constructor arg. Hex-arch
+tests and full suite green (1188 tests, all passing).
+
+## Previous change — Probabilistic Strategy Engine (Slices S1 + S2)
+
+A new top-down decision funnel has been added alongside the legacy 7/7 Playbook. It
+is **read-only in this slice** — no execution, no persistence, no WebSocket push.
+The legacy `PlaybookEvaluator`, `SignalConfluenceBuffer` and `ExecutionManagerService`
+are **untouched**; both engines run side by side so a/b comparison is possible.
+
+**New packages:**
+- `domain/engine/strategy/` — pure domain, framework-free
+  - `model/` — records: `MarketContext`, `ZoneContext`, `TriggerContext`,
+    `AgentVote`, `StrategyInput`, `StrategyDecision`, `MechanicalPlan`,
+    `OrderBlockZone`, `FvgZone`, `LiquidityLevel`; enums: `StrategyLayer`,
+    `MacroBias`, `MarketRegime`, `PriceLocation`, `PdZone`, `DeltaSignature`,
+    `DomSignal`, `TickDataQuality`, `ReactionPattern`, `DecisionType`
+  - `agent/` — `StrategyAgent` port + 7 pilot agents (3 CONTEXT, 2 ZONE, 2 TRIGGER)
+  - `playbook/` — `Playbook` port + `LsarPlaybook` + `SbdrPlaybook` + `PlaybookSelector`
+  - `policy/StrategyScoringPolicy` — Bayesian per-layer aggregation with veto &
+    inter-layer coherence gates
+  - `DefaultStrategyEngine` — pure-domain wiring
+- `application/service/strategy/` — builders + `StrategyEngineService`
+- `presentation/controller/StrategyController` → `GET /api/strategy/{instrument}/{timeframe}`
+- `presentation/dto/StrategyDecisionView` — Optional-flattened JSON shape
+- `infrastructure/config/StrategyEngineConfig` — Spring wiring (agents + playbooks + Clock)
+- Frontend `components/StrategyPanel.tsx` — dedicated STRATEGY tab in `AiMentorDesk`
+
+**Scoring doctrine (CLAUDE.md-aligned):** `0.50 × CONTEXT + 0.30 × ZONE + 0.20 × TRIGGER`.
+Abstain ≠ neutral vote — agents lacking data drop out of the denominator rather
+than pulling the score to zero.
+
+**Thresholds (in `StrategyScoringPolicy`):**
+- `|score| < 30` → `NO_TRADE`
+- `|score| < playbook.min` → `PAPER_TRADE`
+- `|score| < playbook.min + 20` → `HALF_SIZE`
+- else → `FULL_SIZE`
+- Any agent `vetoReason` → forces `NO_TRADE` regardless of score
+- Inter-layer coherence: if `sign(CONTEXT) ≠ sign(TRIGGER)` and `|score| < 70` →
+  `MONITORING` (this is the gate that catches "SMC says LONG but flow says SHORT")
+
+**Playbook minima:** LSAR = 55 (reversal), SBDR = 65 (trend-continuation).
+
+**Tests:** 29 new tests under `src/test/java/com/riskdesk/domain/engine/strategy/`
+plus `architecture/StrategyLayerIsolationTest` enforcing package discipline.
+Total suite: **1040 tests, all passing**.
+
+**Pending — next slices:**
+- **S3** — wire the legacy agents (`MtfConfluenceAIAgent` etc.) into
+  `StrategyAgent` so only one agent abstraction remains. Route Mentor Gemini
+  through `StrategyDecision.evidence` instead of the verdict text.
+- **S4** — swap `ExecutionManagerService` off `executionEligibilityStatus` onto
+  `StrategyDecision.decision`. Needs a feature flag
+  `riskdesk.strategy.new-engine.enabled` for per-instrument rollout.
 
 ## Important Decisions Already Made
 

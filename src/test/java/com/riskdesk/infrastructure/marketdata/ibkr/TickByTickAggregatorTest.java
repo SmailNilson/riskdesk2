@@ -119,6 +119,28 @@ class TickByTickAggregatorTest {
     }
 
     @Test
+    void highLowPriceTracking() {
+        var agg = new TickByTickAggregator(Instrument.MCL);
+        var now = Instant.now();
+        agg.onTick(100.0, 5, BUY, now);
+        agg.onTick(102.5, 10, SELL, now.plusSeconds(1));
+        agg.onTick(99.0, 8, BUY, now.plusSeconds(2));
+        agg.onTick(101.0, 3, SELL, now.plusSeconds(3));
+
+        var snapshot = agg.snapshot();
+        assertEquals(102.5, snapshot.highPrice(), 0.001);
+        assertEquals(99.0, snapshot.lowPrice(), 0.001);
+    }
+
+    @Test
+    void emptyAggregatorReturnsNaNPrices() {
+        var agg = new TickByTickAggregator(Instrument.MCL);
+        var snapshot = agg.snapshot();
+        assertTrue(Double.isNaN(snapshot.highPrice()));
+        assertTrue(Double.isNaN(snapshot.lowPrice()));
+    }
+
+    @Test
     void leeReadyClassification() {
         // Trade at ask = BUY
         assertEquals(BUY, IbkrTickDataAdapter.classifyTrade(100.05, 100.00, 100.05));

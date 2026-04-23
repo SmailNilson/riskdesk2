@@ -56,7 +56,7 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 
 ### Key Domain Packages
 
-- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend, CMF (Chaikin Money Flow), MarketRegimeDetector (TRENDING/RANGING/CHOPPY from EMA alignment + BB width)
+- `domain/engine/indicators/` — EMA, RSI, MACD, Supertrend, VWAP, Bollinger Bands, WaveTrend, CMF (Chaikin Money Flow), Stochastic (%K/%D), MarketRegimeDetector (TRENDING/RANGING/CHOPPY from EMA alignment + BB width)
 - `domain/engine/smc/` — Smart Money Concepts: Market Structure (BOS/CHoCH), Order Blocks, SessionPdArrayCalculator (Premium/Discount/Equilibrium zones)
 - `domain/engine/backtest/` — Backtesting engine using internal 1m candles only
 - `domain/alert/` — **Transition-based** alert evaluation (fire on state *change*, not persistence)
@@ -101,7 +101,8 @@ The domain layer publishes events consumed by application services:
 | Service | Responsibility |
 |---|---|
 | `MarketDataService` | Live price polls, DXY synthesis, WebSocket publication |
-| `HistoricalDataService` | Candle backfill and refresh coordination from IBKR |
+| `HistoricalDataService` | Candle backfill and refresh coordination from IBKR (Phase 1 gap-fill vs Phase 2 deep backfill with throttling) |
+| `SignalConfluenceBuffer` | Weighted signal buffering — accumulates alerts per (instrument, timeframe, direction) before flushing to Mentor |
 | `PositionService` | Position P&L, exposure, risk calculations |
 | `AlertService` | Indicator alert publishing + Mentor review batching by direction |
 | `MentorSignalReviewService` | Persisted review snapshots, re-analysis revisions |
@@ -197,18 +198,51 @@ These paths use different persistence tables and endpoints. Do not merge them.
 
 - **Transition-based**: alerts fire only on state *change*, not persistence. `IndicatorAlertEvaluator` tracks last-known state per indicator/instrument/timeframe.
 - **Grouped reviews**: when multiple indicators fire simultaneously for the same instrument/timeframe/direction, they produce one combined Mentor review via `captureGroupReview`.
-- **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP, Chaikin Behaviour (CMF).
+- **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP, Chaikin Behaviour (CMF), Stochastic cross/extremes.
 - **Mentor reviews are snapshot-based**: first review uses a frozen payload at alert time. `Reanalyse` creates a new revision with live data + original context.
+
+### Confluence Buffer
+
+Qualified alerts route through `SignalConfluenceBuffer` before triggering Mentor reviews. Each alert carries a weight; the buffer accumulates signals per `(instrument, timeframe, direction)` key within a fixed time window.
+
+- **Flush rules**: cumulative weight >= 3.0 → immediate flush; window expires with weight < 3.0 → no review (logged for backtest)
+- **Non-cumul**: signals in the same family (e.g., EMA + MACD = Momentum) count only the max weight, not both
+- **H1 bypass**: H1 alerts skip the confluence buffer and go directly to Mentor review (structural setups don't need confirmation)
+- **5m kill zones**: 5m alerts only evaluate during ICT kill zones (London 02:00-05:00 ET, NY 08:30-11:00 ET)
+- **Active timeframes**: 5m (kill zones only), 10m (always), 1H (bypass). 30m is removed. 4H is a passive trend filter for 1H signals
+- Full spec: `docs/SPEC_CONFLUENCE_BUFFER.md`
 
 ## Trade Simulation (Outcome Tracker)
 
 Qualified alert reviews with valid Entry/SL/TP plans are tracked as simulated trade outcomes:
 - States: `PENDING_ENTRY` → `ACTIVE` → `WIN` | `LOSS` | `MISSED` | `CANCELLED`
-- Uses internal 1m candles from PostgreSQL only (no external replay feeds)
+- Uses internal 5m candles from PostgreSQL only (no external replay feeds)
 - Pessimistic rule: if one candle crosses both SL and TP, result is `LOSS`
 - If TP is hit before Entry, result is `MISSED`
 - `maxDrawdownPoints` records worst adverse excursion before resolution
 - Scheduled backend service (`TradeSimulationService`) polls reviews in `PENDING_ENTRY` or `ACTIVE`
+
+### Trailing Stop (Dual-Track)
+
+- Runs in parallel with fixed SL/TP — both results are persisted on the same review
+- `trailingStopResult`: `TRAILING_WIN` | `TRAILING_BE` | `TRAILING_LOSS` | null
+- `trailingExitPrice`: dynamic exit price from trailing stop
+- `bestFavorablePrice`: Maximum Favorable Excursion (MFE) — best price reached before exit
+- ATR-based trailing: `bestPrice - (ATR * multiplier)` for LONG, `bestPrice + (ATR * multiplier)` for SHORT
+- Activation gate: trailing only engages after +0.5R favorable move (configurable)
+- Config: `riskdesk.simulation.trailing-stop.{enabled,multiplier,activation-threshold}`
+- Stats endpoint: `GET /api/mentor/simulation/trailing-stats?days=7`
+
+### Simulation Decoupling Rule (TECH DEBT)
+
+**Simulation fields currently live on `MentorSignalReviewRecord` and `MentorAudit` — this is legacy coupling.** See `docs/ARCHITECTURE_PRINCIPLES.md` § "Simulation Decoupling Rule" for the full migration plan.
+
+**Immediate rules for all agents:**
+1. Do NOT add new simulation fields to `MentorSignalReviewRecord` or `MentorAudit`
+2. Do NOT extend `findBySimulationStatuses()` on the review repository port
+3. Do NOT push new simulation events through `/topic/mentor-alerts`
+4. New simulation concerns go on the simulation side, not the review side
+5. `TradeSimulationService` is the sole writer of simulation state after initial `PENDING_ENTRY`
 
 ## Execution Workflow
 
@@ -276,3 +310,4 @@ GitHub Actions builds and validates Docker images on push to `main` and PRs. Tag
 - `docs/AI_HANDOFF.md` — Latest engineering state, recent changes, known issues
 - `docs/ARCHITECTURE_PRINCIPLES.md` — Layer constraints, date/time rules, alert rules
 - `docs/PROJECT_CONTEXT.md` — Service map, environment variables, execution state machine
+- `docs/SPEC_CONFLUENCE_BUFFER.md` — Signal buffering weights, flush rules, timeframe windows

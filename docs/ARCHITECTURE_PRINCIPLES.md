@@ -219,10 +219,54 @@ Do not:
 When evaluating whether a saved Mentor trade plan was correct:
 
 - keep the replay/simulation orchestration in `application`
-- keep the simulation state as part of the persisted review model or a closely related persistence model
 - source candles only from the internal PostgreSQL-backed candle repository
 - do not recompute the original Mentor review payload during outcome evaluation
 - use deterministic, pessimistic execution rules when candle granularity cannot disambiguate intrabar order
+
+#### Simulation Decoupling Rule (Phase 1/2/3 DONE — schema drop pending)
+
+**Current state (post Phase 3):** `TradeSimulationService` now reads open simulations exclusively from `TradeSimulationRepositoryPort.findByStatuses(...)` and writes all state transitions to the simulation aggregate only. No production code path writes to the legacy simulation fields on `MentorSignalReviewRecord` / `MentorAudit` anymore — they are vestigial columns and all their getters/setters carry `@Deprecated(since = "phase-3")`. The dual-write machinery (retry queue, candidate reconciliation, content-change gating against the legacy row) has been removed. Simulation events publish exclusively on `/topic/simulations`; the legacy `/topic/mentor-alerts` push for simulation updates is gone (the topic is still used for non-simulation mentor events).
+
+**What still exists on the review/audit model:** the physical columns (`simulation_status`, `activation_time`, `resolution_time`, `max_drawdown_points`, `trailing_stop_result`, `trailing_exit_price`, `best_favorable_price`) remain on `MentorSignalReviewEntity` / `MentorAuditEntity` and their domain records. Dropping them requires a schema migration strategy (the repo has no Flyway/Liquibase and Hibernate `ddl-auto=update` never drops columns). That work is scoped to a dedicated follow-up PR — do not remove these columns inline.
+
+**Implication for new agents:** the simulation aggregate is now the single source of truth for every simulation state transition. Never reintroduce a write path to the deprecated review/audit sim getters. If you need to read simulation state, go through `TradeSimulationRepositoryPort`.
+
+**Target state:** A dedicated `TradeSimulation` aggregate owns all simulation state:
+
+```
+trade_simulations
+  id                  BIGSERIAL PK
+  review_id           BIGINT UNIQUE NOT NULL  → mentor_signal_reviews(id)
+  review_type         VARCHAR(16) NOT NULL     → 'SIGNAL' | 'AUDIT'
+  instrument          VARCHAR(16) NOT NULL
+  action              VARCHAR(16) NOT NULL
+  simulation_status   VARCHAR(32) NOT NULL
+  activation_time     TIMESTAMPTZ
+  resolution_time     TIMESTAMPTZ
+  max_drawdown_points NUMERIC(19,6)
+  trailing_stop_result VARCHAR(32)
+  trailing_exit_price  NUMERIC(19,6)
+  best_favorable_price NUMERIC(19,6)
+  created_at          TIMESTAMPTZ NOT NULL
+```
+
+**Rules for new simulation-related development (still in force):**
+
+1. **Do not add new simulation fields to `MentorSignalReviewRecord` or `MentorAudit`.** Any new simulation concern (e.g., partial TP tracking, multi-leg simulation, paper-trading state) must be modeled on the simulation side, not the review side.
+2. **Do not query simulation state via `MentorSignalReviewRepositoryPort` or `MentorAuditRepositoryPort`.** The legacy `findBySimulationStatuses()` methods were removed in Phase 3. Use `TradeSimulationRepositoryPort.findByStatuses(...)`.
+3. **Do not push simulation updates through `/topic/mentor-alerts`.** Simulation events flow exclusively on `/topic/simulations`; `/topic/mentor-alerts` is reserved for non-simulation mentor events.
+4. **New simulation strategies (trailing stop variants, bracket orders, time-based exits) must be additive columns or new entities on the simulation aggregate**, never on the review model.
+5. **The `TradeSimulationService` is the sole writer of simulation state.** Initial `PENDING_ENTRY` creation for auto reviews is handled in `MentorSignalReviewService.initializeSimulationAggregate()`; initial `PENDING_ENTRY` for manual "Ask Mentor" audits is handled in `MentorAnalysisService.initializeAuditSimulation()`. Every subsequent transition belongs to `TradeSimulationService`.
+
+**Migration plan:**
+
+Phase 1 — **DONE.** Create `trade_simulations` table with `(review_id, review_type)` unique constraint; dual-write from `TradeSimulationService` on every transition (including a back-fill pass on each scheduler run for PENDING_ENTRY rows created by `MentorSignalReviewService.initializeSimulationState`). Expose read-only REST at `/api/simulations/*` and publish on `/topic/simulations`. Legacy writes to review/audit fields and `/topic/mentor-alerts` remain untouched. See PR `claude/simulation-decoupling-p1a-foundation` (foundation) and `claude/simulation-decoupling-p1b-wireup` (wire-up).
+
+Phase 2 — **DONE.** Frontend `SimulationDashboard` consumes `/api/simulations/*` + subscribes to `/topic/simulations`. Simulation data is now sourced from the new aggregate end-to-end in the UI. Legacy simulation fields on the review DTOs remained for backwards compatibility during Phase 2.
+
+Phase 3 — **DONE (this PR).** Scheduler now queries opens via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes only to the simulation aggregate. `findBySimulationStatuses` removed from both `MentorSignalReviewRepositoryPort` and `MentorAuditRepositoryPort`; the dual-write machinery (retry queue, content-change gating, reconciliation) deleted. `/topic/mentor-alerts` no longer carries simulation events. Initial `PENDING_ENTRY` creation for auto reviews and manual audits now writes straight to `trade_simulations`; the legacy sim setters on review/audit records carry `@Deprecated(since = "phase-3")` and have no production writer. **Physical column drop deferred to a follow-up PR** — requires adopting a schema-migration tool (Flyway or Liquibase) before `mentor_signal_reviews` / `mentor_audits` can lose their sim columns without data loss. Until that lands, the JPA mappers continue to round-trip the columns so historical rows remain readable.
+
+**Why phased:** The refactor touched 11+ files, changed the REST API contract, required frontend migration, and risked breaking the 60s scheduled poller that drives all simulation state. Slicing it across four releases (Phase 1a foundation, Phase 1b wire-up, Phase 2 UI, Phase 3 decoupling cleanup, + a future schema-migration PR) let us ship the foundation and the write-side separately from the frontend cutover and the destructive schema drop.
 
 ### Live Execution Foundation Rule
 

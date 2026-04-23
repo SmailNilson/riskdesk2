@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -18,8 +19,8 @@ import java.util.regex.Pattern;
  * Pre-filters indicator alerts before they reach the mentor review pipeline.
  *
  * Rule 1 — HTF Trend Filter:
- *   If H1 trend is UPTREND, block all SHORT signals on lower timeframes (10m).
- *   If H1 trend is DOWNTREND, block all LONG signals on lower timeframes (10m).
+ *   If H1 trend is BULLISH, block all SHORT signals on lower timeframes (10m).
+ *   If H1 trend is BEARISH, block all LONG signals on lower timeframes (10m).
  *
  * Rule 3 — Anti-Chop (Conflicting Signal Suppression):
  *   If both LONG and SHORT signals appear for the same instrument within 60 seconds,
@@ -58,20 +59,31 @@ public class SignalPreFilterService {
     }
 
     /**
-     * Applies HTF trend alignment (Rule 1) and anti-chop suppression (Rule 3).
+     * Applies HTF trend alignment (Rule 1), anti-chop suppression (Rule 3),
+     * and regime-aware noise suppression (Rule 5).
      * Returns only the alerts that pass all filters.
      *
      * @param alerts    Candidate alerts for a given instrument+timeframe
      * @param timeframe The LTF timeframe label (e.g. "10m")
-     * @param h1Trend   H1 marketStructureTrend ("UPTREND" / "DOWNTREND" / "UNDEFINED")
+     * @param h1Trend   H1 marketStructureTrend ("BULLISH" / "BEARISH" / "UNDEFINED")
      */
     public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend) {
+        return filter(alerts, timeframe, h1Trend, null);
+    }
+
+    /**
+     * Applies HTF trend alignment (Rule 1), anti-chop suppression (Rule 3),
+     * and regime-aware noise suppression (Rule 5).
+     *
+     * @param regime  Market regime ("TRENDING_UP"/"TRENDING_DOWN"/"RANGING"/"CHOPPY" or null)
+     */
+    public List<Alert> filter(List<Alert> alerts, String timeframe, String h1Trend, String regime) {
         if (alerts.isEmpty()) return alerts;
         boolean isLtf = !"4h".equals(timeframe);
 
         return alerts.stream()
                 .filter(alert -> {
-                    FilterResult r = applyFilters(alert, timeframe, h1Trend, isLtf);
+                    FilterResult r = applyFilters(alert, timeframe, h1Trend, isLtf, regime);
                     if (!r.allowed()) {
                         log.debug("PRE-FILTER [{}] blocked '{}' — {}", timeframe, alert.message(), r.reason());
                     }
@@ -82,24 +94,61 @@ public class SignalPreFilterService {
 
     // ── Filter logic ──────────────────────────────────────────────────────────
 
-    private FilterResult applyFilters(Alert alert, String timeframe, String h1Trend, boolean isLtf) {
+    /**
+     * Signal families suppressed in CHOPPY regimes — pure noise without trend backing.
+     *
+     * <p>PR-11: "Flow" (CHAIKIN + DELTA_FLOW) is in this list. These are volume-derived
+     * imbalance readings that flip sign rapidly when price is chopping — the exact
+     * regime in which they mislead most. Deliberately NOT here: "OrderFlow" (ABSORPTION
+     * + DELTA_OSCILLATOR), which is real tick-level institutional flow and often
+     * precedes a breakout precisely *when* the surface looks choppy.
+     */
+    private static final Set<String> NOISE_FAMILIES_IN_CHOP = Set.of(
+            "Momentum",          // EMA crosses, MACD histogram whispers
+            "Oscillateur",       // WaveTrend threshold bouncing
+            "Oscillateur_RSI",   // RSI oscillation at 33/60
+            "Oscillateur_Stoch", // Stochastic whipsaw
+            "Tendance",          // Supertrend flip-flops in tight range
+            "Niveaux",           // VWAP crosses in consolidation
+            "Flow"               // CMF zero-line flip-flops, DELTA_FLOW bias reversals
+    );
+
+    private FilterResult applyFilters(Alert alert, String timeframe, String h1Trend,
+                                      boolean isLtf, String regime) {
         String direction = extractDirection(alert);
+
+        // Rule 5: Regime-Aware Noise Suppression — block oscillator/momentum/flow signals
+        // in CHOPPY regimes where they produce only whipsaw noise.
+        // RANGING is allowed: most valid trades happen in BB CONTRACTING / RANGING markets.
+        // Only applied on LTF (5m/10m). H1 signals are rare + high-value and always pass.
+        // Structural signals (SMC, OrderBlock, EqualLevel, FVG) and real order-flow
+        // signals (ABSORPTION, DELTA_OSCILLATOR — family "OrderFlow") always pass.
+        if (isLtf && !"1h".equals(timeframe)
+                && "CHOPPY".equals(regime)) {
+            SignalWeight sw = SignalWeight.fromAlert(alert);
+            if (sw != null && NOISE_FAMILIES_IN_CHOP.contains(sw.family())) {
+                log.debug("REGIME-GATE [{}] blocked '{}' family={} — {} regime suppresses oscillator noise",
+                        timeframe, alert.message(), sw.family(), regime);
+                return new FilterResult(false,
+                        "Regime " + regime + " blocks " + sw.family() + " family signals");
+            }
+        }
 
         // Rule 1: HTF Trend Filter — only applied on lower timeframes with directional signals
         if (isLtf && direction != null) {
-            if ("UPTREND".equals(h1Trend) && "SHORT".equals(direction)) {
+            if ("BULLISH".equals(h1Trend) && "SHORT".equals(direction)) {
                 return new FilterResult(false,
-                        "HTF UPTREND blocks SHORT signal on " + timeframe);
+                        "HTF BULLISH blocks SHORT signal on " + timeframe);
             }
-            if ("DOWNTREND".equals(h1Trend) && "LONG".equals(direction)) {
+            if ("BEARISH".equals(h1Trend) && "LONG".equals(direction)) {
                 return new FilterResult(false,
-                        "HTF DOWNTREND blocks LONG signal on " + timeframe);
+                        "HTF BEARISH blocks LONG signal on " + timeframe);
             }
         }
 
         // Rule 3: Anti-Chop — cancel signal if the opposite direction fired within the chop window
         // Exception: standalone signals (weight >= 3.0) bypass anti-chop — they represent
-        // genuine structural breaks (CHoCH, BOS, WT cross) that should not be suppressed
+        // genuine structural breaks (CHoCH, Order Block) that should not be suppressed
         if (direction != null) {
             SignalWeight sw = SignalWeight.fromAlert(alert);
             boolean isStandaloneSignal = sw != null && sw.weight() >= 3.0f;

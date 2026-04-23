@@ -438,14 +438,17 @@ export default function MentorSignalPanel({
 
   return (
     <div className="rounded-lg border border-cyan-900/40 bg-zinc-900/80 p-3">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
+      {/* Header: title on row 1; controls wrap to subsequent rows as needed so
+          a compressed side-zone width doesn't force vertical single-letter
+          wrapping of the control labels. */}
+      <div className="mb-3 flex flex-col gap-2">
+        <div className="min-w-0">
           <div className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">Mentor Alert Review</div>
-          <div className="text-[10px] text-zinc-500">
+          <div className="text-[10px] text-zinc-500 leading-snug">
             Alertes groupees quand elles arrivent en meme temps (~90s) sur le meme instrument/timeframe/direction.
           </div>
         </div>
-        <div className="flex items-center gap-2 text-[10px]">
+        <div className="flex flex-wrap items-center gap-2 text-[10px]">
           <button
             onClick={() => void toggleAutoAnalysis()}
             disabled={togglingAuto}
@@ -519,7 +522,7 @@ export default function MentorSignalPanel({
           Aucune alerte qualifiee disponible pour l&apos;instant.
         </div>
       ) : (
-        <div className="grid gap-3 xl:grid-cols-[0.95fr_1.45fr]">
+        <div className="grid gap-3">
           <div className="max-h-[500px] space-y-2 overflow-y-auto pr-1">
             {filteredGroups.map(group => {
               const bestReview = groupPreferredReview(group);
@@ -713,6 +716,11 @@ export default function MentorSignalPanel({
                             executionEligibilityStatus={review.executionEligibilityStatus}
                           />
                           <SimulationChip status={review.simulationStatus} maxDrawdown={review.maxDrawdownPoints} />
+                          <TrailingChip
+                            result={review.trailingStopResult}
+                            exitPrice={review.trailingExitPrice}
+                            bestFavorable={review.bestFavorablePrice}
+                          />
                           <ExecutionChip execution={executionsByReviewId[review.id]} />
                           <span className="ml-auto text-[10px] text-zinc-600">
                             {formatTime(review.createdAt, timezone.tz)}
@@ -845,6 +853,20 @@ function StatusChip({
       return (
         <span className="rounded bg-red-950/70 px-2 py-1 text-[10px] font-semibold text-red-300">
           Trade Non-Conforme
+        </span>
+      );
+    }
+    // MENTOR_UNAVAILABLE ≠ rejected trade: amber warning, not red, so the
+    // user knows Gemini itself didn't finish (truncated / parse-failed /
+    // circuit-broken). They can re-run the analysis instead of treating it
+    // as a real "non-conforme" verdict.
+    if (executionEligibilityStatus === 'MENTOR_UNAVAILABLE') {
+      return (
+        <span
+          className="rounded bg-amber-950/70 px-2 py-1 text-[10px] font-semibold text-amber-300"
+          title="La réponse Gemini n'a pas été exploitable (tronquée / parse / timeout). Relance l'analyse — ce n'est PAS un rejet du trade."
+        >
+          Mentor Indisponible
         </span>
       );
     }
@@ -1030,6 +1052,7 @@ function SimulationChip({
     LOSS:          { label: 'LOSS ✗',             cls: 'bg-red-950/70 text-red-300 font-bold' },
     MISSED:        { label: 'Manqué',             cls: 'bg-violet-950/70 text-violet-300' },
     CANCELLED:     { label: '',                   cls: '' },
+    REVERSED:      { label: 'Inversé ↔',          cls: 'bg-orange-950/70 text-orange-300' },
   };
 
   const { label, cls } = configs[status];
@@ -1038,6 +1061,47 @@ function SimulationChip({
   return (
     <span className={`rounded px-2 py-1 text-[10px] ${cls}`}>
       {label}{showDrawdown ? ` −${maxDrawdown.toFixed(1)}pts` : ''}
+    </span>
+  );
+}
+
+/**
+ * Dual-track trailing-stop outcome — runs in parallel with the fixed SL/TP
+ * simulation. See CLAUDE.md § "Trailing Stop (Dual-Track)" for the spec.
+ *
+ * - TRAILING_WIN  — trailing stop exited above break-even (better than fixed TP sometimes)
+ * - TRAILING_BE   — trailing stop exited at / near entry
+ * - TRAILING_LOSS — trailing never activated (price never reached +0.5R) or hit initial SL
+ *
+ * Hides when the trailing track has not yet resolved. MFE (Maximum Favorable
+ * Excursion = best price reached) is shown as a tooltip for quick context.
+ */
+function TrailingChip({
+  result,
+  exitPrice,
+  bestFavorable,
+}: {
+  result: MentorSignalReview['trailingStopResult'];
+  exitPrice: number | null;
+  bestFavorable: number | null;
+}) {
+  if (!result) return null;
+
+  const configs: Record<NonNullable<MentorSignalReview['trailingStopResult']>, { label: string; cls: string }> = {
+    TRAILING_WIN:  { label: 'Trail WIN',  cls: 'bg-emerald-950/40 text-emerald-300/80 border border-emerald-800/40' },
+    TRAILING_BE:   { label: 'Trail BE',   cls: 'bg-zinc-900/60 text-zinc-300 border border-zinc-700/40' },
+    TRAILING_LOSS: { label: 'Trail LOSS', cls: 'bg-red-950/40 text-red-300/80 border border-red-800/40' },
+  };
+  const { label, cls } = configs[result];
+
+  const tooltipParts: string[] = [];
+  if (bestFavorable != null) tooltipParts.push(`MFE ${bestFavorable.toFixed(2)}`);
+  if (exitPrice != null) tooltipParts.push(`exit ${exitPrice.toFixed(2)}`);
+  const tooltip = tooltipParts.join(' · ');
+
+  return (
+    <span className={`rounded px-2 py-1 text-[10px] ${cls}`} title={tooltip || undefined}>
+      {label}
     </span>
   );
 }

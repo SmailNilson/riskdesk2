@@ -4,9 +4,12 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.persistence.entity.CandleEntity;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
 
@@ -18,6 +21,14 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     /** Fetches exactly {@code pageable.getPageSize()} candles newest-first (use PageRequest.of(0, limit)). */
     List<CandleEntity> findByInstrumentAndTimeframeOrderByTimestampDesc(
             Instrument instrument, String timeframe, Pageable pageable);
+
+    /** High-water mark: returns the most recent timestamp for an instrument/timeframe pair. */
+    @Query("SELECT MAX(c.timestamp) FROM CandleEntity c WHERE c.instrument = :instrument AND c.timeframe = :timeframe")
+    Optional<Instant> findMaxTimestamp(@Param("instrument") Instrument instrument, @Param("timeframe") String timeframe);
+
+    /** Fetches candles within a time range, ordered oldest-first. */
+    List<CandleEntity> findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
+            Instrument instrument, String timeframe, Instant from, Instant to);
 
     /** Fetches candles for a specific contract month, newest-first. */
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(

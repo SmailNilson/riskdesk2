@@ -4,6 +4,25 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * Snapshot of all indicator values for one (instrument, timeframe) pair at
+ * one point in time.
+ *
+ * <h2>Pivot staleness — {@code internalHigh/Low}, {@code swingHigh/Low},
+ * {@code strongHigh/Low}, {@code weakHigh/Low}</h2>
+ *
+ * Every pivot-derived level on this record originates in
+ * {@link com.riskdesk.domain.engine.smc.SmcStructureEngine.Pivot} and therefore
+ * carries an inherent confirmation lag equal to the corresponding lookback:
+ * <ul>
+ *   <li>{@code internal*} — default lookback 5 bars (≈50 min on 10m, ≈5 h on 1h)</li>
+ *   <li>{@code swing*}, {@code strong*}, {@code weak*} — default lookback 50 bars
+ *       (≈8 h 20 min on 10m, ≈2 days on 1h)</li>
+ * </ul>
+ * Consequently the {@code *Time} fields here refer to the candidate bar's close
+ * time, not "when the pivot was detected". Any UI element that labels these as
+ * "latest" / "current" should qualify them as structural anchors.
+ */
 public record IndicatorSnapshot(
     String instrument,
     String timeframe,
@@ -41,6 +60,11 @@ public record IndicatorSnapshot(
     BigDecimal wtDiff,
     String wtCrossover,
     String wtSignal,
+    // ── Stochastic Oscillator ───────────────────────────────────────────
+    BigDecimal stochK,
+    BigDecimal stochD,
+    String stochSignal,
+    String stochCrossover,
     // ── SMC: Internal structure ────────────────────────────────────────
     String internalBias,
     BigDecimal internalHigh,
@@ -59,6 +83,9 @@ public record IndicatorSnapshot(
 
     // ── SMC: UC-SMC-008 confluence filter state ──────────────────────
     boolean internalConfluenceFilterEnabled,
+
+    // ── SMC: Multi-resolution bias (swing lookbacks 50/25/9, internal 5, micro 1)
+    MultiResolutionBias multiResolutionBias,
 
     // ── SMC: Legacy / derived (kept for frontend backward compat) ────
     String marketStructureTrend,
@@ -98,6 +125,14 @@ public record IndicatorSnapshot(
     BigDecimal sessionEquilibrium,
     String sessionPdZone,
 
+    // ── UC-OF-012: Volume Profile ─────────────────────────────────────
+    Double pocPrice,
+    Double valueAreaHigh,
+    Double valueAreaLow,
+
+    // ── UC-OF-013: Session CME Context ────────────────────────────────
+    String sessionPhase,
+
     /** Timestamp of the last candle used to compute this snapshot (Rule 4: candle close guard). */
     Instant lastCandleTimestamp,
 
@@ -112,14 +147,60 @@ public record IndicatorSnapshot(
         BigDecimal mid,
         long startTime,
         String originalType,
-        Long breakerTime
-    ) {}
+        Long breakerTime,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double formationDelta,
+        Double obFormationScore,
+        Double obLiveScore,
+        Boolean defended,
+        Double absorptionScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public OrderBlockView(String type, String status, BigDecimal high, BigDecimal low,
+                              BigDecimal mid, long startTime, String originalType, Long breakerTime) {
+            this(type, status, high, low, mid, startTime, originalType, breakerTime,
+                 null, null, null, null, null);
+        }
+    }
 
-    public record FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {}
+    public record FairValueGapView(
+        String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double gapDelta,
+        Double fvgQualityScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public FairValueGapView(String bias, BigDecimal top, BigDecimal bottom, long startTime, long extensionEndTime) {
+            this(bias, top, bottom, startTime, extensionEndTime, null, null);
+        }
+    }
 
-    public record StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {}
+    public record StructureBreakView(
+        String type, String trend, BigDecimal level, long barTime, String structureLevel,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Double breakDelta,
+        Double volumeSpike,
+        Boolean confirmed,
+        Double breakConfidenceScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public StructureBreakView(String type, String trend, BigDecimal level, long barTime, String structureLevel) {
+            this(type, trend, level, barTime, structureLevel, null, null, null, null);
+        }
+    }
 
-    public record EqualLevelView(String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount) {}
+    public record EqualLevelView(
+        String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount,
+        // ── Order Flow enrichment (Phase 5a, nullable) ──────────────
+        Boolean ordersVisible,
+        Long depthSizeAtLevel,
+        Double liquidityConfirmScore
+    ) {
+        /** Backward-compatible constructor — OF fields default to null. */
+        public EqualLevelView(String type, BigDecimal price, long firstBarTime, long lastBarTime, int touchCount) {
+            this(type, price, firstBarTime, lastBarTime, touchCount, null, null, null);
+        }
+    }
 
     /** UC-SMC-009: OB lifecycle event (MITIGATION or INVALIDATION). */
     public record OrderBlockEventView(String eventType, String obType, BigDecimal high, BigDecimal low, long eventTime) {}
@@ -129,4 +210,7 @@ public record IndicatorSnapshot(
 
     /** UC-SMC-005: Multi-timeframe OHLC levels (daily, weekly, monthly). Null means no data for that timeframe. */
     public record MtfLevelsView(MtfLevelView daily, MtfLevelView weekly, MtfLevelView monthly) {}
+
+    /** Multi-resolution market structure bias — 5 lookback scales for richer Gemini context. */
+    public record MultiResolutionBias(String swing50, String swing25, String swing9, String internal5, String micro1) {}
 }

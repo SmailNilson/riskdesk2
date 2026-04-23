@@ -100,7 +100,7 @@ public class MarketRegimeDetector {
     }
 
     private boolean isClose(BigDecimal a, BigDecimal b) {
-        if (b.compareTo(BigDecimal.ZERO) == 0) return true;
+        if (b.compareTo(BigDecimal.ZERO) == 0) return false;
         BigDecimal diff = a.subtract(b).abs();
         BigDecimal ratio = diff.divide(b.abs(), 6, RoundingMode.HALF_UP);
         return ratio.compareTo(EMA_PROXIMITY_THRESHOLD) < 0;

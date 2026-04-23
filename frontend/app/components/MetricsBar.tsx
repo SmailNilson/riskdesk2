@@ -30,9 +30,16 @@ function marginColor(pct: number) {
 
 export default function MetricsBar({ summary, connected, prices }: Props) {
   const s = summary;
-  const priceValues = Object.values(prices ?? {});
-  const marketClosed = connected && priceValues.length > 0 &&
-    priceValues.every(p => p.source === 'STALE' || p.source === 'FALLBACK_DB');
+  const priceEntries = Object.values(prices ?? {});
+  const marketClosed = connected && priceEntries.length > 0 &&
+    priceEntries.every(p => p.source === 'STALE' || p.source === 'FALLBACK_DB');
+
+  // Any instrument currently being served from the DB fallback (IBKR farm
+  // degraded or market closed mid-session). Surfaced as per-ticker badges so
+  // the trader sees exactly which instrument is stale, not just a global flag.
+  const fallbackInstruments = priceEntries
+    .filter(p => p.source === 'FALLBACK_DB' || p.source === 'STALE')
+    .map(p => ({ instrument: p.instrument, source: p.source ?? 'FALLBACK_DB' }));
 
   let statusDot = 'bg-red-500';
   let statusText = 'STREAM OFFLINE';
@@ -51,6 +58,24 @@ export default function MetricsBar({ summary, connected, prices }: Props) {
         <span className={`w-2 h-2 rounded-full ${statusDot}`} />
         <span className="text-xs text-zinc-500">{statusText}</span>
       </div>
+
+      {/* Source badges — only rendered for instruments that are NOT LIVE.
+          LIVE stays silent to avoid clutter; the dot above already signals it. */}
+      {fallbackInstruments.length > 0 && (
+        <div className="flex items-center gap-1.5 mr-2">
+          {fallbackInstruments.map(({ instrument, source }) => (
+            <span
+              key={instrument}
+              title={source === 'STALE'
+                ? `${instrument}: price stream stale — no fresh IBKR ticks`
+                : `${instrument}: DB fallback — live IBKR unavailable`}
+              className="px-1.5 py-0.5 rounded border text-[10px] font-mono font-semibold uppercase tracking-wide border-amber-700 bg-amber-950/60 text-amber-300"
+            >
+              {instrument} · {source === 'STALE' ? 'STALE' : 'DB'}
+            </span>
+          ))}
+        </div>
+      )}
 
       <Metric label="Unrealized P&L"
         value={fmt(s?.totalUnrealizedPnL)}
