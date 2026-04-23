@@ -1,7 +1,6 @@
 package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.infrastructure.persistence.entity.MentorSignalReviewEntity;
-import com.riskdesk.domain.model.TradeSimulationStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -17,8 +16,6 @@ public interface MentorSignalReviewJpaRepository extends JpaRepository<MentorSig
     List<MentorSignalReviewEntity> findByAlertKeyOrderByRevisionAsc(String alertKey);
 
     Optional<MentorSignalReviewEntity> findFirstByAlertKeyOrderByRevisionDesc(String alertKey);
-
-    List<MentorSignalReviewEntity> findBySimulationStatusInOrderByCreatedAtAsc(List<TradeSimulationStatus> statuses);
 
     long deleteByStatusIn(List<String> statuses);
 

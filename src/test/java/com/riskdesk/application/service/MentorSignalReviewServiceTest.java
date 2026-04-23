@@ -12,6 +12,7 @@ import com.riskdesk.application.dto.MentorStructuredResponse;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.contract.ActiveContractRegistry;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.domain.alert.model.Alert;
 import com.riskdesk.domain.alert.model.AlertCategory;
 import com.riskdesk.domain.alert.model.AlertSeverity;
@@ -69,6 +70,9 @@ class MentorSignalReviewServiceTest {
     private MentorSignalReviewRepositoryPort reviewRepository;
 
     @Mock
+    private TradeSimulationRepositoryPort simulationRepository;
+
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
 
     @Mock
@@ -100,6 +104,7 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
@@ -262,6 +267,7 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
@@ -432,6 +438,7 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,
@@ -502,7 +509,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -553,7 +560,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, false
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -589,7 +596,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -614,7 +621,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -752,6 +759,7 @@ class MentorSignalReviewServiceTest {
             candleRepositoryPort,
             contractRegistry,
             reviewRepository,
+            simulationRepository,
             messagingTemplate,
             objectMapper,
             tickDataPortProvider,

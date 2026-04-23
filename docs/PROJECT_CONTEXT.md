@@ -108,20 +108,21 @@ These should stay transport-oriented only.
 - `application/service/MentorAnalysisService.java`
 - `application/service/MentorSignalReviewService.java`
 - `application/service/MentorIntermarketService.java`
-- `application/service/TradeSimulationService.java` — owner of simulation state transitions. Post Phase 1b, dual-writes every transition to the legacy review/audit repositories AND to `TradeSimulationRepositoryPort`.
+- `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
 - `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
 - `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
 
 These coordinate use cases and should not become infrastructure adapters.
 
-### Simulation decoupling (Phase 1 — dual-write active)
+### Simulation decoupling (Phase 3 — single writer, simulation aggregate)
 
 - Domain port: `domain/simulation/port/TradeSimulationRepositoryPort`
 - Aggregate: `domain/simulation/TradeSimulation` (+ `ReviewType` enum)
 - REST controller: `presentation/controller/SimulationController` — `GET /api/simulations/{recent,by-instrument/{instrument},by-review/{reviewId}}`
-- WebSocket topic: `/topic/simulations` (published alongside the legacy `/topic/mentor-alerts`; consumers should prefer the new topic)
+- WebSocket topic: `/topic/simulations` (sole channel for simulation events; `/topic/mentor-alerts` no longer carries simulation transitions)
+- Initial `PENDING_ENTRY` is created directly on `trade_simulations` by `MentorSignalReviewService.initializeSimulationAggregate()` (auto reviews) and `MentorAnalysisService.initializeAuditSimulation()` (manual "Ask Mentor" audits).
 
-Legacy path (still the primary) for simulation fields: `MentorSignalReviewRecord` + `MentorAudit`. See `docs/ARCHITECTURE_PRINCIPLES.md` § Simulation Decoupling Rule for the Phase 2/3 cutover plan.
+**Legacy sim getters on the review/audit records are `@Deprecated(since = "phase-3")`** — write-never from production, read-only for JPA round-trip until the physical columns are dropped. Column drop is a separate follow-up PR that requires adopting Flyway or Liquibase first. See `docs/ARCHITECTURE_PRINCIPLES.md` § Simulation Decoupling Rule.
 
 ### IBKR integration
 
@@ -218,14 +219,16 @@ Qualified alert reviews can now also be tracked after the fact as simulated trad
 
 Current behavior:
 
-- when a saved `MentorSignalReview` finishes with a valid trade plan, the backend initializes a trade simulation state
-- tracked fields live on the saved review:
+- when a saved `MentorSignalReview` finishes with a valid trade plan, the backend writes a `TradeSimulation(PENDING_ENTRY, reviewType=SIGNAL)` row into `trade_simulations` (Phase 3+). Manual "Ask Mentor" audits follow the same path with `reviewType=AUDIT`.
+- tracked fields live on the `TradeSimulation` aggregate:
   - `simulationStatus`
   - `activationTime`
   - `resolutionTime`
   - `maxDrawdownPoints`
-- the simulation uses internal `1m` candles from PostgreSQL only
-- the scheduler polls reviews in `PENDING_ENTRY` or `ACTIVE`
+  - `trailingStopResult`, `trailingExitPrice`, `bestFavorablePrice`
+- identical getters still exist on `MentorSignalReviewRecord` / `MentorAudit` but are `@Deprecated(since = "phase-3")` — write-never from production; used only by the JPA mappers for backwards compatibility until the physical columns are dropped in a follow-up PR.
+- the simulation uses internal `5m` candles from PostgreSQL only
+- the scheduler polls `trade_simulations` in `PENDING_ENTRY` or `ACTIVE` via `TradeSimulationRepositoryPort.findByStatuses(...)`
 - trigger logic respects limit-order semantics:
   - if price reaches `TP` before `Entry`, the result becomes `MISSED`
   - once `Entry` is touched, the review becomes `ACTIVE`

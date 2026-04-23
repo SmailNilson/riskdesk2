@@ -13,6 +13,9 @@ import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.simulation.ReviewType;
+import com.riskdesk.domain.simulation.TradeSimulation;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,19 +45,22 @@ public class MentorAnalysisService {
     private final MentorProperties mentorProperties;
     private final ObjectMapper objectMapper;
     private final MentorParseMetrics parseMetrics;
+    private final TradeSimulationRepositoryPort simulationRepository;
 
     public MentorAnalysisService(MentorModelClient mentorModelClient,
                                  MentorMemoryService mentorMemoryService,
                                  MentorAuditRepositoryPort mentorAuditRepository,
                                  MentorProperties mentorProperties,
                                  ObjectMapper objectMapper,
-                                 MentorParseMetrics parseMetrics) {
+                                 MentorParseMetrics parseMetrics,
+                                 TradeSimulationRepositoryPort simulationRepository) {
         this.mentorModelClient = mentorModelClient;
         this.mentorMemoryService = mentorMemoryService;
         this.mentorAuditRepository = mentorAuditRepository;
         this.mentorProperties = mentorProperties;
         this.objectMapper = objectMapper;
         this.parseMetrics = parseMetrics;
+        this.simulationRepository = simulationRepository;
     }
 
     public MentorAnalyzeResponse analyze(JsonNode payload) {
@@ -420,14 +426,14 @@ public class MentorAnalysisService {
             audit.setVerdict(structured.verdict());
             audit.setSuccess(true);
             audit.setSemanticText(buildSemanticText(payload, structured));
-            // Only enqueue audits that are actually executable. Previously
-            // every manual "Ask Mentor" audit and every INELIGIBLE verdict
-            // was marked PENDING_ENTRY and then clogged TradeSimulationService
-            // because the poller cannot resolve an audit with no trade plan.
-            if (isSimulationCandidate(structured)) {
-                audit.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
-            }
+            // Phase 3: simulation state is no longer stamped on the audit.
+            // Save the audit first so we have an id, then — only when the
+            // verdict is actually executable — create a matching row in the
+            // trade_simulations aggregate.
             MentorAudit saved = mentorAuditRepository.save(audit);
+            if (isSimulationCandidate(structured) && saved.getId() != null) {
+                initializeAuditSimulation(saved);
+            }
             CompletableFuture.runAsync(() -> mentorMemoryService.indexAudit(saved))
                 .exceptionally(ex -> {
                     log.error("Async audit indexing failed for audit {}", saved.getId(), ex);
@@ -436,6 +442,36 @@ public class MentorAnalysisService {
             return saved.getId();
         } catch (Exception ignored) {
             return null;
+        }
+    }
+
+    /**
+     * Phase 3: creates a {@code TradeSimulation(PENDING_ENTRY, AUDIT)} row for
+     * manual "Ask Mentor" audits that resolved to an ELIGIBLE verdict with a
+     * complete trade plan. Idempotent — if a row already exists for this
+     * (auditId, AUDIT) pair it is left alone.
+     */
+    private void initializeAuditSimulation(MentorAudit saved) {
+        try {
+            if (simulationRepository.findByReviewId(saved.getId(), ReviewType.AUDIT).isPresent()) {
+                return;
+            }
+            String instrument = saved.getInstrument() != null ? saved.getInstrument() : "UNKNOWN";
+            String action = saved.getAction() != null ? saved.getAction() : "LONG";
+            Instant createdAt = saved.getCreatedAt() != null ? saved.getCreatedAt() : Instant.now();
+            simulationRepository.save(new TradeSimulation(
+                null,
+                saved.getId(),
+                ReviewType.AUDIT,
+                instrument,
+                action,
+                TradeSimulationStatus.PENDING_ENTRY,
+                null, null, null, null, null, null,
+                createdAt
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to initialize AUDIT simulation aggregate for audit {}: {}",
+                saved.getId(), e.getMessage());
         }
     }
 

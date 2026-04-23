@@ -20,8 +20,8 @@ import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -34,9 +34,31 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Drives the simulation lifecycle: PENDING_ENTRY → ACTIVE → WIN/LOSS/MISSED/CANCELLED/REVERSED.
+ *
+ * <p>Phase 3 of the Simulation Decoupling Rule (see
+ * {@code docs/ARCHITECTURE_PRINCIPLES.md}):
+ * <ul>
+ *   <li>The scheduler queries open simulations via
+ *       {@link TradeSimulationRepositoryPort#findByStatuses} — no longer
+ *       reads via the legacy review/audit sim-status columns.</li>
+ *   <li>On every state transition the service writes ONLY to the simulation
+ *       aggregate. The legacy sim columns on {@code mentor_signal_reviews}
+ *       and {@code mentor_audits} are no longer touched from production
+ *       code paths (physical column drop is a follow-up PR that needs a
+ *       schema-migration tool).</li>
+ *   <li>Simulation events publish exclusively on {@code /topic/simulations}.
+ *       The legacy {@code /topic/mentor-alerts} push for simulation updates
+ *       is gone; the review-side still uses that topic for non-simulation
+ *       mentor events.</li>
+ * </ul>
+ *
+ * <p>The review/audit repositories are still consulted as read-only lookups
+ * for the trade plan (entry / SL / TP) — that's trade-plan data that belongs
+ * to the review aggregate, not the simulation aggregate.
+ */
 @Service
 public class TradeSimulationService {
 
@@ -50,27 +72,14 @@ public class TradeSimulationService {
     private final MentorAuditRepositoryPort auditRepository;
     private final CandleRepositoryPort candleRepositoryPort;
     private final ObjectMapper objectMapper;
-    private final ObjectProvider<MentorSignalReviewService> reviewServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
     private final TrailingStopProperties trailingStopProperties;
     private final TradeSimulationRepositoryPort simulationRepository;
-
-    /**
-     * In-memory queue of dual-writes that failed — keyed by {@code type:reviewId},
-     * value = the exact {@link TradeSimulation} candidate we tried to persist.
-     * Drained and re-attempted at the top of every scheduler pass. Needed
-     * because {@link #refreshPendingSimulations()} / {@link #refreshPendingAuditSimulations()}
-     * only revisit open statuses; a terminal transition (e.g. ACTIVE → WIN)
-     * whose dual-write failed would otherwise never be retried, leaving
-     * {@code trade_simulations} permanently stale relative to the legacy row.
-     */
-    private final Map<String, TradeSimulation> pendingDualWriteRetries = new ConcurrentHashMap<>();
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
                                   CandleRepositoryPort candleRepositoryPort,
                                   ObjectMapper objectMapper,
-                                  ObjectProvider<MentorSignalReviewService> reviewServiceProvider,
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider,
                                   TrailingStopProperties trailingStopProperties,
                                   TradeSimulationRepositoryPort simulationRepository) {
@@ -78,20 +87,36 @@ public class TradeSimulationService {
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
         this.objectMapper = objectMapper;
-        this.reviewServiceProvider = reviewServiceProvider;
         this.messagingProvider = messagingProvider;
         this.trailingStopProperties = trailingStopProperties;
         this.simulationRepository = simulationRepository;
     }
 
+    /**
+     * Pure domain evaluation of a trade's outcome against a candle stream.
+     *
+     * <p>Kept on the service because both the scheduler (internally) and legacy
+     * {@link TradeSimulationServiceTest} cover the evaluation algorithm itself.
+     * The evaluation reads the current simulation state + the trade plan JSON
+     * from the review record, but persistence is handled separately.
+     */
     public SimulationResult evaluateTradeOutcome(MentorSignalReviewRecord review, List<Candle> subsequentCandles) {
         TradePlan plan = extractPlan(review);
+        return evaluateWithPlan(plan, currentSimState(review), subsequentCandles);
+    }
+
+    public SimulationResult evaluateAuditOutcome(MentorAudit audit, List<Candle> subsequentCandles) {
+        TradePlan plan = extractPlanFromAudit(audit);
+        return evaluateWithPlan(plan, currentSimState(audit), subsequentCandles);
+    }
+
+    private SimulationResult evaluateWithPlan(TradePlan plan, SimState state, List<Candle> subsequentCandles) {
         if (plan == null) {
             return new SimulationResult(
                 TradeSimulationStatus.CANCELLED,
-                review.getActivationTime(),
-                review.getResolutionTime(),
-                zero(review.getMaxDrawdownPoints())
+                state.activationTime(),
+                state.resolutionTime(),
+                zero(state.maxDrawdownPoints())
             );
         }
 
@@ -99,14 +124,13 @@ public class TradeSimulationService {
             .sorted(Comparator.comparing(Candle::getTimestamp))
             .toList();
 
-        TradeSimulationStatus currentStatus = review.getSimulationStatus() == null
+        TradeSimulationStatus currentStatus = state.status() == null
             ? TradeSimulationStatus.PENDING_ENTRY
-            : review.getSimulationStatus();
-        Instant activationTime = review.getActivationTime();
-        BigDecimal maxDrawdown = zero(review.getMaxDrawdownPoints());
+            : state.status();
+        Instant activationTime = state.activationTime();
+        BigDecimal maxDrawdown = zero(state.maxDrawdownPoints());
         boolean active = currentStatus == TradeSimulationStatus.ACTIVE;
 
-        // --- Fixed SL/TP evaluation (unchanged) ---
         SimulationResult fixedResult = null;
         int activationIndex = -1;
 
@@ -162,14 +186,19 @@ public class TradeSimulationService {
             );
         }
 
-        // --- Trailing stop second-pass evaluation ---
         if (!trailingStopProperties.isEnabled() || !active) {
-            return withTrailingFromReview(fixedResult, review);
+            return new SimulationResult(
+                fixedResult.status(), fixedResult.activationTime(), fixedResult.resolutionTime(),
+                fixedResult.maxDrawdownPoints(),
+                state.trailingStopResult(),
+                state.trailingExitPrice(),
+                state.bestFavorablePrice()
+            );
         }
 
         TrailingResult trailing = evaluateTrailingStop(
                 plan, orderedCandles, activationIndex,
-                zero(review.getBestFavorablePrice()));
+                zero(state.bestFavorablePrice()));
         return new SimulationResult(
             fixedResult.status(), fixedResult.activationTime(), fixedResult.resolutionTime(),
             fixedResult.maxDrawdownPoints(),
@@ -203,14 +232,12 @@ public class TradeSimulationService {
         for (int i = Math.max(0, activationIndex); i < orderedCandles.size(); i++) {
             Candle candle = orderedCandles.get(i);
 
-            // Update MFE
             if (plan.isLong()) {
                 bestPrice = bestPrice.max(candle.getHigh());
             } else {
                 bestPrice = bestPrice.min(candle.getLow());
             }
 
-            // Check activation gate
             BigDecimal favorableMove = plan.isLong()
                     ? bestPrice.subtract(plan.entryPrice())
                     : plan.entryPrice().subtract(bestPrice);
@@ -223,12 +250,10 @@ public class TradeSimulationService {
                 continue;
             }
 
-            // Compute trailing SL
             BigDecimal trailingSL = plan.isLong()
                     ? bestPrice.subtract(atr.multiply(multiplier))
                     : bestPrice.add(atr.multiply(multiplier));
 
-            // Only use trailing if it's more favorable than original SL
             BigDecimal effectiveSL;
             if (plan.isLong()) {
                 effectiveSL = trailingSL.compareTo(plan.stopLoss()) > 0 ? trailingSL : plan.stopLoss();
@@ -236,7 +261,6 @@ public class TradeSimulationService {
                 effectiveSL = trailingSL.compareTo(plan.stopLoss()) < 0 ? trailingSL : plan.stopLoss();
             }
 
-            // Check if candle hits effective trailing SL
             boolean trailingHit = plan.isLong()
                     ? candle.getLow().compareTo(effectiveSL) <= 0
                     : candle.getHigh().compareTo(effectiveSL) >= 0;
@@ -248,16 +272,13 @@ public class TradeSimulationService {
             }
         }
 
-        // Trade still active or not resolved by trailing — return best price tracked so far
         return new TrailingResult(null, null, bestPrice.setScale(6, RoundingMode.HALF_UP));
     }
 
     private BigDecimal computeAtrAtActivation(List<Candle> orderedCandles, int activationIndex) {
-        // Use candles before activation to compute ATR
         int endIdx = Math.max(0, activationIndex);
         int startIdx = Math.max(0, endIdx - ATR_PERIOD - 1);
         if (endIdx - startIdx < ATR_PERIOD) {
-            // Not enough candles before activation — use all available
             startIdx = 0;
         }
         List<Candle> atrCandles = orderedCandles.subList(startIdx, Math.min(endIdx + 1, orderedCandles.size()));
@@ -284,533 +305,182 @@ public class TradeSimulationService {
         }
     }
 
-    private SimulationResult withTrailingFromReview(SimulationResult fixedResult, MentorSignalReviewRecord review) {
-        return new SimulationResult(
-            fixedResult.status(), fixedResult.activationTime(), fixedResult.resolutionTime(),
-            fixedResult.maxDrawdownPoints(),
-            review.getTrailingStopResult(),
-            review.getTrailingExitPrice(),
-            review.getBestFavorablePrice()
-        );
-    }
-
     private record TrailingResult(TrailingStopResult result, BigDecimal exitPrice, BigDecimal bestFavorablePrice) {
     }
 
+    /**
+     * Ticks the signal-review simulations forward. Reads opens from the
+     * {@link TradeSimulationRepositoryPort}, resolves trade plans from the
+     * review aggregate, and writes state changes back to the simulation
+     * aggregate only.
+     */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingSimulations() {
-        // Retry any terminal dual-writes (ACTIVE → WIN/LOSS/MISSED/CANCELLED)
-        // whose new-side save failed in an earlier pass. The queries below
-        // only revisit open statuses, so without this pass a failed terminal
-        // write would leave trade_simulations stale indefinitely.
-        retryPendingDualWrites();
-
-        List<MentorSignalReviewRecord> candidates = reviewRepository.findBySimulationStatuses(List.of(
+        List<TradeSimulation> openSignalSims = simulationRepository.findByStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
-        ));
+        )).stream().filter(s -> s.reviewType() == ReviewType.SIGNAL).toList();
 
-        // --- Phase 1 dual-write back-fill: ensure every open review has a matching
-        // row in the new trade_simulations table. Reviews created by
-        // MentorSignalReviewService.initializeSimulationState() arrive here without
-        // a new-side row on their first poll cycle — back-fill is idempotent via
-        // the (review_id, review_type) unique constraint. ---
-        for (MentorSignalReviewRecord review : candidates) {
-            dualWriteSignalSimulation(review);
-        }
-
-        // --- Phase 1: Cancel expired PENDING_ENTRY (>1h without activation) ---
         Instant now = Instant.now();
-        List<MentorSignalReviewRecord> surviving = cancelExpiredPendingEntries(candidates, now);
-
-        // --- Phase 2: Reverse conflicting trades (same instrument, opposite direction) ---
+        List<TradeSimulation> surviving = cancelExpiredPendingEntries(openSignalSims, now);
         surviving = reverseConflictingTrades(surviving, now);
 
-        // --- Phase 3: Normal candle-based evaluation ---
-        for (MentorSignalReviewRecord review : surviving) {
+        for (TradeSimulation sim : surviving) {
             try {
-                Instrument instrument = Instrument.valueOf(review.getInstrument());
-                Instant from = review.getActivationTime() != null ? review.getActivationTime() : review.getCreatedAt();
+                MentorSignalReviewRecord review = reviewRepository.findById(sim.reviewId()).orElse(null);
+                if (review == null) {
+                    continue;
+                }
+                Instrument instrument;
+                try {
+                    instrument = Instrument.valueOf(sim.instrument());
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+                Instant from = sim.activationTime() != null ? sim.activationTime() : sim.createdAt();
                 List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
                 if (candles.isEmpty()) {
                     continue;
                 }
 
-                SimulationResult result = evaluateTradeOutcome(review, candles);
-                if (hasSimulationChanged(review, result)) {
-                    review.setSimulationStatus(result.status());
-                    review.setActivationTime(result.activationTime());
-                    review.setResolutionTime(result.resolutionTime());
-                    review.setMaxDrawdownPoints(result.maxDrawdownPoints());
-                    review.setTrailingStopResult(result.trailingStopResult());
-                    review.setTrailingExitPrice(result.trailingExitPrice());
-                    review.setBestFavorablePrice(result.bestFavorablePrice());
-                    reviewRepository.save(review);
-                    dualWriteSignalSimulation(review);
-                    pushSimulationUpdate(review);
+                SimulationResult result = evaluateWithPlan(extractPlan(review), currentSimState(sim), candles);
+                if (hasSimulationChanged(sim, result)) {
+                    TradeSimulation next = applyResult(sim, result);
+                    TradeSimulation saved = simulationRepository.save(next);
+                    publishSimulationEvent(saved);
                 }
             } catch (Exception e) {
-                log.debug("Trade simulation skipped for review {}: {}", review.getId(), e.getMessage());
+                log.debug("Trade simulation skipped for simulation {} (reviewId={}): {}",
+                    sim.id(), sim.reviewId(), e.getMessage());
             }
         }
     }
 
     /**
-     * Cancel PENDING_ENTRY reviews older than 1 hour — the entry was never triggered.
+     * Cancel PENDING_ENTRY simulations older than 1 hour — the entry was never triggered.
+     * Writes exclusively to the simulation aggregate.
      */
-    private List<MentorSignalReviewRecord> cancelExpiredPendingEntries(
-            List<MentorSignalReviewRecord> candidates, Instant now) {
-        List<MentorSignalReviewRecord> surviving = new ArrayList<>();
-        for (MentorSignalReviewRecord review : candidates) {
-            if (review.getSimulationStatus() == TradeSimulationStatus.PENDING_ENTRY
-                    && review.getCreatedAt() != null
-                    && Duration.between(review.getCreatedAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
-                review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
-                review.setResolutionTime(now);
-                reviewRepository.save(review);
-                dualWriteSignalSimulation(review);
-                pushSimulationUpdate(review);
-                log.info("Simulation {} CANCELLED — PENDING_ENTRY expired after 1h (instrument={}, action={})",
-                        review.getId(), review.getInstrument(), review.getAction());
+    private List<TradeSimulation> cancelExpiredPendingEntries(List<TradeSimulation> candidates, Instant now) {
+        List<TradeSimulation> surviving = new ArrayList<>();
+        for (TradeSimulation sim : candidates) {
+            if (sim.simulationStatus() == TradeSimulationStatus.PENDING_ENTRY
+                    && sim.createdAt() != null
+                    && Duration.between(sim.createdAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
+                TradeSimulation cancelled = sim.withStatus(TradeSimulationStatus.CANCELLED, now);
+                TradeSimulation saved = simulationRepository.save(cancelled);
+                publishSimulationEvent(saved);
+                log.info("Simulation {} CANCELLED — PENDING_ENTRY expired after 1h (reviewType={}, reviewId={}, instrument={}, action={})",
+                        saved.id(), saved.reviewType(), saved.reviewId(), saved.instrument(), saved.action());
             } else {
-                surviving.add(review);
+                surviving.add(sim);
             }
         }
         return surviving;
     }
 
     /**
-     * When two open simulations exist for the same instrument with opposite directions,
-     * the older one is closed: PENDING_ENTRY → CANCELLED, ACTIVE → REVERSED.
+     * When two open simulations exist for the same instrument with opposite
+     * directions, the older one is closed: PENDING_ENTRY → CANCELLED,
+     * ACTIVE → REVERSED. Writes exclusively to the simulation aggregate.
      */
-    private List<MentorSignalReviewRecord> reverseConflictingTrades(
-            List<MentorSignalReviewRecord> candidates, Instant now) {
-        // Group open simulations by instrument
-        Map<String, List<MentorSignalReviewRecord>> byInstrument = new HashMap<>();
-        for (MentorSignalReviewRecord r : candidates) {
-            if (r.getInstrument() != null && r.getAction() != null) {
-                byInstrument.computeIfAbsent(r.getInstrument(), k -> new ArrayList<>()).add(r);
+    private List<TradeSimulation> reverseConflictingTrades(List<TradeSimulation> candidates, Instant now) {
+        Map<String, List<TradeSimulation>> byInstrument = new HashMap<>();
+        for (TradeSimulation sim : candidates) {
+            if (sim.instrument() != null && sim.action() != null) {
+                byInstrument.computeIfAbsent(sim.instrument(), k -> new ArrayList<>()).add(sim);
             }
         }
 
-        List<MentorSignalReviewRecord> toClose = new ArrayList<>();
-        for (List<MentorSignalReviewRecord> group : byInstrument.values()) {
+        List<TradeSimulation> toClose = new ArrayList<>();
+        for (List<TradeSimulation> group : byInstrument.values()) {
             if (group.size() < 2) continue;
-
-            boolean hasLong = group.stream().anyMatch(r -> "LONG".equalsIgnoreCase(r.getAction()));
-            boolean hasShort = group.stream().anyMatch(r -> "SHORT".equalsIgnoreCase(r.getAction()));
+            boolean hasLong = group.stream().anyMatch(s -> "LONG".equalsIgnoreCase(s.action()));
+            boolean hasShort = group.stream().anyMatch(s -> "SHORT".equalsIgnoreCase(s.action()));
             if (!hasLong || !hasShort) continue;
 
-            // Sort by createdAt ascending — older trades first
-            group.sort(Comparator.comparing(r -> r.getCreatedAt() != null ? r.getCreatedAt() : Instant.MIN));
+            group.sort(Comparator.comparing(s -> s.createdAt() != null ? s.createdAt() : Instant.MIN));
 
-            // The newest trade wins; all older trades in the opposite direction are closed
-            MentorSignalReviewRecord newest = group.get(group.size() - 1);
-            for (MentorSignalReviewRecord older : group) {
+            TradeSimulation newest = group.get(group.size() - 1);
+            for (TradeSimulation older : group) {
                 if (older == newest) continue;
-                if (older.getAction() != null && !older.getAction().equalsIgnoreCase(newest.getAction())) {
+                if (older.action() != null && !older.action().equalsIgnoreCase(newest.action())) {
                     toClose.add(older);
                 }
             }
         }
 
-        List<MentorSignalReviewRecord> surviving = new ArrayList<>(candidates);
-        for (MentorSignalReviewRecord stale : toClose) {
-            TradeSimulationStatus closeStatus = stale.getSimulationStatus() == TradeSimulationStatus.ACTIVE
+        List<TradeSimulation> surviving = new ArrayList<>(candidates);
+        for (TradeSimulation stale : toClose) {
+            TradeSimulationStatus closeStatus = stale.simulationStatus() == TradeSimulationStatus.ACTIVE
                     ? TradeSimulationStatus.REVERSED
                     : TradeSimulationStatus.CANCELLED;
-            stale.setSimulationStatus(closeStatus);
-            stale.setResolutionTime(now);
-            reviewRepository.save(stale);
-            dualWriteSignalSimulation(stale);
-            pushSimulationUpdate(stale);
+            TradeSimulation closed = stale.withStatus(closeStatus, now);
+            TradeSimulation saved = simulationRepository.save(closed);
+            publishSimulationEvent(saved);
             surviving.remove(stale);
             log.info("Simulation {} {} — directional reversal on {} (was {}, newer {} signal exists)",
-                    stale.getId(), closeStatus, stale.getInstrument(), stale.getAction(),
-                    "LONG".equalsIgnoreCase(stale.getAction()) ? "SHORT" : "LONG");
+                    saved.id(), closeStatus, saved.instrument(), saved.action(),
+                    "LONG".equalsIgnoreCase(saved.action()) ? "SHORT" : "LONG");
         }
         return surviving;
     }
 
+    /**
+     * Audit-side sibling of {@link #refreshPendingSimulations()}. Reads opens
+     * from the simulation port (filtered to {@link ReviewType#AUDIT}), resolves
+     * trade plans from the audit record, and writes only to the simulation
+     * aggregate.
+     */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingAuditSimulations() {
-        // Same rationale as in refreshPendingSimulations(): drain the retry
-        // queue first so a prior terminal dual-write failure gets re-attempted.
-        retryPendingDualWrites();
-
-        List<MentorAudit> candidates = auditRepository.findBySimulationStatuses(List.of(
+        List<TradeSimulation> openAuditSims = simulationRepository.findByStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
-        ));
+        )).stream().filter(s -> s.reviewType() == ReviewType.AUDIT).toList();
 
-        // --- Phase 1 dual-write back-fill: mirror every open audit simulation
-        // into the new trade_simulations table (idempotent via unique constraint). ---
-        for (MentorAudit audit : candidates) {
-            dualWriteAuditSimulation(audit);
-        }
-
-        // --- Phase 1: Cancel expired PENDING_ENTRY (>1h) ---
         Instant now = Instant.now();
-        List<MentorAudit> surviving = new ArrayList<>();
-        for (MentorAudit audit : candidates) {
-            if (audit.getSimulationStatus() == TradeSimulationStatus.PENDING_ENTRY
-                    && audit.getCreatedAt() != null
-                    && Duration.between(audit.getCreatedAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
-                audit.setSimulationStatus(TradeSimulationStatus.CANCELLED);
-                audit.setResolutionTime(now);
-                auditRepository.save(audit);
-                dualWriteAuditSimulation(audit);
-                log.info("Audit simulation {} CANCELLED — PENDING_ENTRY expired after 1h", audit.getId());
-            } else {
-                surviving.add(audit);
-            }
-        }
+        List<TradeSimulation> surviving = cancelExpiredPendingEntries(openAuditSims, now);
+        surviving = reverseConflictingTrades(surviving, now);
 
-        // --- Phase 2: Reverse conflicting trades (same instrument, opposite direction) ---
-        Map<String, List<MentorAudit>> byInstrument = new HashMap<>();
-        for (MentorAudit a : surviving) {
-            if (a.getInstrument() != null && a.getAction() != null) {
-                byInstrument.computeIfAbsent(a.getInstrument(), k -> new ArrayList<>()).add(a);
-            }
-        }
-        List<MentorAudit> toClose = new ArrayList<>();
-        for (List<MentorAudit> group : byInstrument.values()) {
-            if (group.size() < 2) continue;
-            boolean hasLong = group.stream().anyMatch(a -> "LONG".equalsIgnoreCase(a.getAction()));
-            boolean hasShort = group.stream().anyMatch(a -> "SHORT".equalsIgnoreCase(a.getAction()));
-            if (!hasLong || !hasShort) continue;
-            group.sort(Comparator.comparing(a -> a.getCreatedAt() != null ? a.getCreatedAt() : Instant.MIN));
-            MentorAudit newest = group.get(group.size() - 1);
-            for (MentorAudit older : group) {
-                if (older == newest) continue;
-                if (older.getAction() != null && !older.getAction().equalsIgnoreCase(newest.getAction())) {
-                    toClose.add(older);
-                }
-            }
-        }
-        for (MentorAudit stale : toClose) {
-            TradeSimulationStatus closeStatus = stale.getSimulationStatus() == TradeSimulationStatus.ACTIVE
-                    ? TradeSimulationStatus.REVERSED : TradeSimulationStatus.CANCELLED;
-            stale.setSimulationStatus(closeStatus);
-            stale.setResolutionTime(now);
-            auditRepository.save(stale);
-            dualWriteAuditSimulation(stale);
-            surviving.remove(stale);
-            log.info("Audit simulation {} {} — directional reversal on {}", stale.getId(), closeStatus, stale.getInstrument());
-        }
-
-        // --- Phase 3: Normal candle-based evaluation ---
-        for (MentorAudit audit : surviving) {
+        for (TradeSimulation sim : surviving) {
             try {
+                MentorAudit audit = auditRepository.findById(sim.reviewId()).orElse(null);
+                if (audit == null) continue;
                 if (audit.getInstrument() == null) continue;
-                Instrument instrument = Instrument.valueOf(audit.getInstrument());
-                Instant from = audit.getActivationTime() != null ? audit.getActivationTime() : audit.getCreatedAt();
+                Instrument instrument;
+                try {
+                    instrument = Instrument.valueOf(sim.instrument());
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+                Instant from = sim.activationTime() != null ? sim.activationTime() : sim.createdAt();
                 List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
                 if (candles.isEmpty()) continue;
 
-                SimulationResult result = evaluateAuditOutcome(audit, candles);
-                if (hasAuditSimulationChanged(audit, result)) {
-                    audit.setSimulationStatus(result.status());
-                    audit.setActivationTime(result.activationTime());
-                    audit.setResolutionTime(result.resolutionTime());
-                    audit.setMaxDrawdownPoints(result.maxDrawdownPoints());
-                    auditRepository.save(audit);
-                    dualWriteAuditSimulation(audit);
+                SimulationResult result = evaluateWithPlan(extractPlanFromAudit(audit), currentSimState(sim), candles);
+                if (hasSimulationChanged(sim, result)) {
+                    TradeSimulation next = applyResult(sim, result);
+                    TradeSimulation saved = simulationRepository.save(next);
+                    publishSimulationEvent(saved);
                 }
             } catch (Exception e) {
-                log.debug("Audit simulation skipped for audit {}: {}", audit.getId(), e.getMessage());
+                log.debug("Audit simulation skipped for simulation {} (reviewId={}): {}",
+                    sim.id(), sim.reviewId(), e.getMessage());
             }
-        }
-    }
-
-    public SimulationResult evaluateAuditOutcome(MentorAudit audit, List<Candle> subsequentCandles) {
-        TradePlan plan = extractPlanFromAudit(audit);
-        if (plan == null) {
-            return new SimulationResult(
-                TradeSimulationStatus.CANCELLED,
-                audit.getActivationTime(),
-                audit.getResolutionTime(),
-                zero(audit.getMaxDrawdownPoints())
-            );
-        }
-
-        List<Candle> orderedCandles = subsequentCandles.stream()
-            .sorted(Comparator.comparing(Candle::getTimestamp))
-            .toList();
-
-        TradeSimulationStatus currentStatus = audit.getSimulationStatus() == null
-            ? TradeSimulationStatus.PENDING_ENTRY
-            : audit.getSimulationStatus();
-        Instant activationTime = audit.getActivationTime();
-        BigDecimal maxDrawdown = zero(audit.getMaxDrawdownPoints());
-        boolean active = currentStatus == TradeSimulationStatus.ACTIVE;
-
-        for (Candle candle : orderedCandles) {
-            if (!active) {
-                if (isMissed(plan, candle)) {
-                    return new SimulationResult(TradeSimulationStatus.MISSED, null, candle.getTimestamp(), maxDrawdown);
-                }
-                if (touchesEntry(plan, candle)) {
-                    active = true;
-                    activationTime = candle.getTimestamp();
-                    maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
-                    if (touchesStopAndTarget(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
-                    }
-                    if (touchesStop(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
-                    }
-                    if (touchesTarget(plan, candle)) {
-                        return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
-                    }
-                }
-                continue;
-            }
-            maxDrawdown = maxDrawdown.max(adverseMove(plan, candle));
-            if (touchesStopAndTarget(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
-            }
-            if (touchesStop(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.LOSS, activationTime, candle.getTimestamp(), maxDrawdown);
-            }
-            if (touchesTarget(plan, candle)) {
-                return new SimulationResult(TradeSimulationStatus.WIN, activationTime, candle.getTimestamp(), maxDrawdown);
-            }
-        }
-
-        return new SimulationResult(
-            active ? TradeSimulationStatus.ACTIVE : TradeSimulationStatus.PENDING_ENTRY,
-            activationTime, null, maxDrawdown
-        );
-    }
-
-    private boolean hasAuditSimulationChanged(MentorAudit audit, SimulationResult result) {
-        return audit.getSimulationStatus() != result.status()
-            || !sameInstant(audit.getActivationTime(), result.activationTime())
-            || !sameInstant(audit.getResolutionTime(), result.resolutionTime())
-            || zero(audit.getMaxDrawdownPoints()).compareTo(zero(result.maxDrawdownPoints())) != 0;
-    }
-
-    private void pushSimulationUpdate(MentorSignalReviewRecord review) {
-        try {
-            SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
-            MentorSignalReviewService reviewService = reviewServiceProvider.getIfAvailable();
-            if (messaging != null && reviewService != null) {
-                // Legacy WS topic — preserved in Phase 1 per Simulation Decoupling Rule.
-                messaging.convertAndSend("/topic/mentor-alerts", reviewService.toDto(review));
-                log.debug("Pushed simulation update for review {} → {}", review.getId(), review.getSimulationStatus());
-            }
-        } catch (Exception e) {
-            log.debug("Could not push simulation update for review {}: {}", review.getId(), e.getMessage());
         }
     }
 
     /**
-     * Phase 1 dual-write: persist simulation state to the new {@code trade_simulations}
-     * aggregate IN ADDITION to the legacy review/audit fields. Wrapped in try/catch so
-     * a new-side failure does not break the existing review flow.
-     *
-     * <p>Also publishes the resulting {@link TradeSimulation} to {@code /topic/simulations}
-     * on success. The legacy {@code /topic/mentor-alerts} push stays in place until Phase 2.
-     */
-    private void dualWriteSignalSimulation(MentorSignalReviewRecord review) {
-        if (review == null || review.getId() == null) {
-            return;
-        }
-        attemptDualWrite(buildSignalCandidate(review));
-    }
-
-    private void dualWriteAuditSimulation(MentorAudit audit) {
-        if (audit == null || audit.getId() == null) {
-            return;
-        }
-        attemptDualWrite(buildAuditCandidate(audit));
-    }
-
-    /**
-     * Build a {@link TradeSimulation} candidate from a legacy signal review. Does
-     * not touch the repository — caller is responsible for reconciling with the
-     * existing row (ID, createdAt) via {@link #attemptDualWrite(TradeSimulation)}.
-     */
-    private TradeSimulation buildSignalCandidate(MentorSignalReviewRecord review) {
-        String action = review.getAction() != null ? review.getAction() : "LONG";
-        String instrument = review.getInstrument() != null ? review.getInstrument() : "UNKNOWN";
-        TradeSimulationStatus status = review.getSimulationStatus() != null
-            ? review.getSimulationStatus()
-            : TradeSimulationStatus.PENDING_ENTRY;
-        Instant createdAt = review.getCreatedAt() != null ? review.getCreatedAt() : Instant.now();
-        return new TradeSimulation(
-            null,
-            review.getId(),
-            ReviewType.SIGNAL,
-            instrument,
-            action,
-            status,
-            review.getActivationTime(),
-            review.getResolutionTime(),
-            review.getMaxDrawdownPoints(),
-            review.getTrailingStopResult() != null ? review.getTrailingStopResult().name() : null,
-            review.getTrailingExitPrice(),
-            review.getBestFavorablePrice(),
-            createdAt
-        );
-    }
-
-    private TradeSimulation buildAuditCandidate(MentorAudit audit) {
-        String action = audit.getAction() != null ? audit.getAction() : "LONG";
-        String instrument = audit.getInstrument() != null ? audit.getInstrument() : "UNKNOWN";
-        TradeSimulationStatus status = audit.getSimulationStatus() != null
-            ? audit.getSimulationStatus()
-            : TradeSimulationStatus.PENDING_ENTRY;
-        Instant createdAt = audit.getCreatedAt() != null ? audit.getCreatedAt() : Instant.now();
-        return new TradeSimulation(
-            null,
-            audit.getId(),
-            ReviewType.AUDIT,
-            instrument,
-            action,
-            status,
-            audit.getActivationTime(),
-            audit.getResolutionTime(),
-            audit.getMaxDrawdownPoints(),
-            null,
-            null,
-            null,
-            createdAt
-        );
-    }
-
-    /**
-     * Single entry point for dual-write persistence. Handles:
-     * <ul>
-     *   <li>reading the existing row and reconciling id + createdAt,</li>
-     *   <li>gating on {@link #hasSimulationContentChanged} to avoid DB churn
-     *       and duplicate {@code /topic/simulations} emissions,</li>
-     *   <li>queuing the candidate into {@link #pendingDualWriteRetries} on
-     *       failure (so a terminal transition whose dual-write throws is
-     *       retried on the next scheduler tick instead of being lost).</li>
-     * </ul>
-     * Success paths also remove any prior retry entry for the same key.
-     */
-    private void attemptDualWrite(TradeSimulation candidate) {
-        if (candidate == null || candidate.reviewId() == 0L) {
-            return;
-        }
-        String key = retryKey(candidate.reviewId(), candidate.reviewType());
-        try {
-            TradeSimulation existing = simulationRepository
-                .findByReviewId(candidate.reviewId(), candidate.reviewType())
-                .orElse(null);
-            TradeSimulation toSave = reconcileWithExisting(candidate, existing);
-
-            if (existing != null && !hasSimulationContentChanged(existing, toSave)) {
-                // Existing row already matches — nothing to do, and the
-                // previous retry (if any) is no longer needed.
-                pendingDualWriteRetries.remove(key);
-                return;
-            }
-
-            TradeSimulation saved = simulationRepository.save(toSave);
-            publishSimulationEvent(saved);
-            pendingDualWriteRetries.remove(key);
-        } catch (Exception e) {
-            // Queue the candidate as-is. On retry we re-read existing to pick
-            // up whatever id/createdAt the other race has written in the
-            // meantime. Legacy write is already committed, so state is not
-            // lost — only the new-side mirror is behind.
-            pendingDualWriteRetries.put(key, candidate);
-            log.warn("Dual-write to trade_simulations failed for {} (legacy write succeeded, queued for retry): {}",
-                key, e.getMessage());
-        }
-    }
-
-    /**
-     * Drain the retry map and re-attempt each failed candidate. Called at the
-     * top of both scheduler passes — works for signal and audit candidates
-     * since the key carries the type.
-     */
-    private void retryPendingDualWrites() {
-        if (pendingDualWriteRetries.isEmpty()) {
-            return;
-        }
-        // Snapshot to avoid ConcurrentModification as attemptDualWrite mutates
-        // the map on success.
-        List<TradeSimulation> snapshot = new ArrayList<>(pendingDualWriteRetries.values());
-        for (TradeSimulation pending : snapshot) {
-            attemptDualWrite(pending);
-        }
-    }
-
-    private TradeSimulation reconcileWithExisting(TradeSimulation candidate, TradeSimulation existing) {
-        if (existing == null) {
-            return candidate;
-        }
-        Instant createdAt = existing.createdAt() != null ? existing.createdAt() : candidate.createdAt();
-        return new TradeSimulation(
-            existing.id(),
-            candidate.reviewId(),
-            candidate.reviewType(),
-            candidate.instrument(),
-            candidate.action(),
-            candidate.simulationStatus(),
-            candidate.activationTime(),
-            candidate.resolutionTime(),
-            candidate.maxDrawdownPoints(),
-            candidate.trailingStopResult(),
-            candidate.trailingExitPrice(),
-            candidate.bestFavorablePrice(),
-            createdAt
-        );
-    }
-
-    private static String retryKey(long reviewId, ReviewType type) {
-        return type.name() + ":" + reviewId;
-    }
-
-    // Visible for testing — allows assertions on retry state without exposing
-    // the backing map.
-    int pendingDualWriteRetryCount() {
-        return pendingDualWriteRetries.size();
-    }
-
-    /**
-     * Returns {@code true} when any mutable simulation field differs between
-     * {@code existing} (loaded from the repository) and {@code candidate} (built
-     * from the legacy review/audit record). Identity fields (id, reviewId,
-     * reviewType, instrument, action, createdAt) are not compared — they never
-     * change during the simulation lifecycle.
-     *
-     * <p>BigDecimal comparisons use {@link BigDecimal#compareTo(BigDecimal)} so
-     * that scale differences (e.g. {@code 0} vs {@code 0.000000}) do not trigger
-     * a spurious "changed" result.
-     */
-    private static boolean hasSimulationContentChanged(TradeSimulation existing, TradeSimulation candidate) {
-        return !Objects.equals(existing.simulationStatus(), candidate.simulationStatus())
-            || !Objects.equals(existing.activationTime(), candidate.activationTime())
-            || !Objects.equals(existing.resolutionTime(), candidate.resolutionTime())
-            || !bigDecimalValueEquals(existing.maxDrawdownPoints(), candidate.maxDrawdownPoints())
-            || !Objects.equals(existing.trailingStopResult(), candidate.trailingStopResult())
-            || !bigDecimalValueEquals(existing.trailingExitPrice(), candidate.trailingExitPrice())
-            || !bigDecimalValueEquals(existing.bestFavorablePrice(), candidate.bestFavorablePrice());
-    }
-
-    private static boolean bigDecimalValueEquals(BigDecimal a, BigDecimal b) {
-        if (a == null || b == null) {
-            return a == b;
-        }
-        return a.compareTo(b) == 0;
-    }
-
-    /**
-     * Publish the new-side simulation payload to {@code /topic/simulations}.
-     * Runs alongside (not instead of) the legacy {@code /topic/mentor-alerts} push.
+     * Publishes a simulation update on {@code /topic/simulations}. Phase 3
+     * removed the legacy {@code /topic/mentor-alerts} push for simulation
+     * events — that topic is now reserved for non-simulation mentor events.
      */
     private void publishSimulationEvent(TradeSimulation sim) {
         try {
             SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
             if (messaging != null && sim != null) {
                 messaging.convertAndSend("/topic/simulations", sim);
-                log.debug("Published simulation event on /topic/simulations for review {}:{} → {}",
+                log.debug("Published simulation event on /topic/simulations for {}:{} → {}",
                     sim.reviewType(), sim.reviewId(), sim.simulationStatus());
             }
         } catch (Exception e) {
@@ -818,24 +488,57 @@ public class TradeSimulationService {
         }
     }
 
-    private boolean hasSimulationChanged(MentorSignalReviewRecord review, SimulationResult result) {
-        return review.getSimulationStatus() != result.status()
-            || !sameInstant(review.getActivationTime(), result.activationTime())
-            || !sameInstant(review.getResolutionTime(), result.resolutionTime())
-            || zero(review.getMaxDrawdownPoints()).compareTo(zero(result.maxDrawdownPoints())) != 0
-            || review.getTrailingStopResult() != result.trailingStopResult()
-            || zero(review.getTrailingExitPrice()).compareTo(zero(result.trailingExitPrice())) != 0
-            || zero(review.getBestFavorablePrice()).compareTo(zero(result.bestFavorablePrice())) != 0;
+    private static boolean hasSimulationChanged(TradeSimulation sim, SimulationResult result) {
+        return sim.simulationStatus() != result.status()
+            || !sameInstant(sim.activationTime(), result.activationTime())
+            || !sameInstant(sim.resolutionTime(), result.resolutionTime())
+            || bigDecimalCompare(sim.maxDrawdownPoints(), result.maxDrawdownPoints()) != 0
+            || !sameTrailing(sim.trailingStopResult(), result.trailingStopResult())
+            || bigDecimalCompare(sim.trailingExitPrice(), result.trailingExitPrice()) != 0
+            || bigDecimalCompare(sim.bestFavorablePrice(), result.bestFavorablePrice()) != 0;
     }
 
-    private boolean sameInstant(Instant left, Instant right) {
-        if (left == null && right == null) {
-            return true;
-        }
-        if (left == null || right == null) {
-            return false;
-        }
+    private static boolean sameTrailing(String existing, TrailingStopResult incoming) {
+        String incomingName = incoming == null ? null : incoming.name();
+        if (existing == null && incomingName == null) return true;
+        if (existing == null || incomingName == null) return false;
+        return existing.equals(incomingName);
+    }
+
+    private static int bigDecimalCompare(BigDecimal left, BigDecimal right) {
+        BigDecimal a = left == null ? BigDecimal.ZERO : left;
+        BigDecimal b = right == null ? BigDecimal.ZERO : right;
+        return a.compareTo(b);
+    }
+
+    private static boolean sameInstant(Instant left, Instant right) {
+        if (left == null && right == null) return true;
+        if (left == null || right == null) return false;
         return left.equals(right);
+    }
+
+    /**
+     * Build a new {@link TradeSimulation} by applying the evaluation result to
+     * the existing aggregate. Identity and provenance (id, reviewId, reviewType,
+     * instrument, action, createdAt) are preserved; every other field comes from
+     * the fresh evaluation.
+     */
+    private static TradeSimulation applyResult(TradeSimulation sim, SimulationResult result) {
+        return new TradeSimulation(
+            sim.id(),
+            sim.reviewId(),
+            sim.reviewType(),
+            sim.instrument(),
+            sim.action(),
+            result.status(),
+            result.activationTime(),
+            result.resolutionTime(),
+            result.maxDrawdownPoints(),
+            result.trailingStopResult() != null ? result.trailingStopResult().name() : null,
+            result.trailingExitPrice(),
+            result.bestFavorablePrice(),
+            sim.createdAt()
+        );
     }
 
     private TradePlan extractPlan(MentorSignalReviewRecord review) {
@@ -919,22 +622,33 @@ public class TradeSimulationService {
         return value == null ? BigDecimal.ZERO.setScale(6, RoundingMode.HALF_UP) : value.setScale(6, RoundingMode.HALF_UP);
     }
 
+    /**
+     * Aggregate trailing-vs-fixed win-rate / net P&L stats over the last
+     * {@code days} days. Reads resolved simulations from the simulation port
+     * (Phase 3 — no longer sources from review sim fields), then resolves the
+     * trade plan from the matching review for P&L computation.
+     */
     public TrailingStopStatsResponse computeTrailingStats(int days) {
-        List<MentorSignalReviewRecord> resolved = reviewRepository.findBySimulationStatuses(
-                List.of(TradeSimulationStatus.WIN, TradeSimulationStatus.LOSS));
+        List<TradeSimulation> resolved = simulationRepository.findByStatuses(List.of(
+            TradeSimulationStatus.WIN,
+            TradeSimulationStatus.LOSS
+        ));
 
         Instant cutoff = Instant.now().minus(Duration.ofDays(days));
-        List<MentorSignalReviewRecord> recent = resolved.stream()
-                .filter(r -> r.getResolutionTime() != null && r.getResolutionTime().isAfter(cutoff))
-                .toList();
+        List<TradeSimulation> recent = resolved.stream()
+            .filter(s -> s.reviewType() == ReviewType.SIGNAL)
+            .filter(s -> s.resolutionTime() != null && s.resolutionTime().isAfter(cutoff))
+            .toList();
 
         int fixedTrades = 0, fixedWins = 0;
         double fixedNetPnl = 0.0;
         int trailingTrades = 0, trailingWins = 0;
         double trailingNetPnl = 0.0;
 
-        for (MentorSignalReviewRecord r : recent) {
-            TradePlan plan = extractPlan(r);
+        for (TradeSimulation sim : recent) {
+            MentorSignalReviewRecord review = reviewRepository.findById(sim.reviewId()).orElse(null);
+            if (review == null) continue;
+            TradePlan plan = extractPlan(review);
             if (plan == null) continue;
 
             fixedTrades++;
@@ -942,21 +656,21 @@ public class TradeSimulationService {
             double sl = plan.stopLoss().doubleValue();
             double tp = plan.takeProfit().doubleValue();
 
-            if (r.getSimulationStatus() == TradeSimulationStatus.WIN) {
+            if (sim.simulationStatus() == TradeSimulationStatus.WIN) {
                 fixedWins++;
                 fixedNetPnl += plan.isLong() ? (tp - entryPrice) : (entryPrice - tp);
             } else {
                 fixedNetPnl += plan.isLong() ? (sl - entryPrice) : (entryPrice - sl);
             }
 
-            if (r.getTrailingStopResult() != null) {
+            if (sim.trailingStopResult() != null) {
                 trailingTrades++;
-                if (r.getTrailingStopResult() == TrailingStopResult.TRAILING_WIN
-                        || r.getTrailingStopResult() == TrailingStopResult.TRAILING_BE) {
+                if (TrailingStopResult.TRAILING_WIN.name().equals(sim.trailingStopResult())
+                        || TrailingStopResult.TRAILING_BE.name().equals(sim.trailingStopResult())) {
                     trailingWins++;
                 }
-                if (r.getTrailingExitPrice() != null) {
-                    double exitPrice = r.getTrailingExitPrice().doubleValue();
+                if (sim.trailingExitPrice() != null) {
+                    double exitPrice = sim.trailingExitPrice().doubleValue();
                     trailingNetPnl += plan.isLong() ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
                 }
             }
@@ -976,6 +690,58 @@ public class TradeSimulationService {
             new TrailingStopStatsResponse.Improvement(
                     Math.round((trailingWinRate - fixedWinRate) * 100.0) / 100.0,
                     Math.round((trailingNetPnl - fixedNetPnl) * 100.0) / 100.0)
+        );
+    }
+
+    /**
+     * Snapshot of the current simulation state, sourced either from the new
+     * simulation aggregate (scheduler path) or from the legacy review/audit
+     * fields (unit tests still feed us those records). Decouples the
+     * evaluation algorithm from which persistence view it's reading.
+     */
+    private record SimState(
+        TradeSimulationStatus status,
+        Instant activationTime,
+        Instant resolutionTime,
+        BigDecimal maxDrawdownPoints,
+        TrailingStopResult trailingStopResult,
+        BigDecimal trailingExitPrice,
+        BigDecimal bestFavorablePrice
+    ) { }
+
+    private static SimState currentSimState(TradeSimulation sim) {
+        return new SimState(
+            sim.simulationStatus(),
+            sim.activationTime(),
+            sim.resolutionTime(),
+            sim.maxDrawdownPoints(),
+            sim.trailingStopResult() == null ? null : TrailingStopResult.valueOf(sim.trailingStopResult()),
+            sim.trailingExitPrice(),
+            sim.bestFavorablePrice()
+        );
+    }
+
+    @SuppressWarnings("deprecation")
+    private static SimState currentSimState(MentorSignalReviewRecord review) {
+        return new SimState(
+            review.getSimulationStatus(),
+            review.getActivationTime(),
+            review.getResolutionTime(),
+            review.getMaxDrawdownPoints(),
+            review.getTrailingStopResult(),
+            review.getTrailingExitPrice(),
+            review.getBestFavorablePrice()
+        );
+    }
+
+    @SuppressWarnings("deprecation")
+    private static SimState currentSimState(MentorAudit audit) {
+        return new SimState(
+            audit.getSimulationStatus(),
+            audit.getActivationTime(),
+            audit.getResolutionTime(),
+            audit.getMaxDrawdownPoints(),
+            null, null, null
         );
     }
 

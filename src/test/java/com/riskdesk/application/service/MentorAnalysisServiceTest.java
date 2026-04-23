@@ -7,6 +7,9 @@ import com.riskdesk.domain.analysis.port.MentorAuditRepositoryPort;
 import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.simulation.ReviewType;
+import com.riskdesk.domain.simulation.TradeSimulation;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.MentorProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -34,6 +37,9 @@ class MentorAnalysisServiceTest {
     @Mock
     private MentorMemoryService mentorMemoryService;
 
+    @Mock
+    private TradeSimulationRepositoryPort simulationRepository;
+
     private final MentorProperties mentorProperties = new MentorProperties();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -46,7 +52,8 @@ class MentorAnalysisServiceTest {
             mentorAuditRepository,
             mentorProperties,
             objectMapper,
-            new MentorParseMetrics()
+            new MentorParseMetrics(),
+            simulationRepository
         );
 
         String rawJson = """
@@ -110,7 +117,8 @@ class MentorAnalysisServiceTest {
             mentorAuditRepository,
             mentorProperties,
             objectMapper,
-            new MentorParseMetrics()
+            new MentorParseMetrics(),
+            simulationRepository
         );
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
@@ -137,7 +145,8 @@ class MentorAnalysisServiceTest {
             mentorAuditRepository,
             mentorProperties,
             objectMapper,
-            new MentorParseMetrics()
+            new MentorParseMetrics(),
+            simulationRepository
         );
 
         // Truncated mid-technicalQuickAnalysis — no closing quote, no closing brace.
@@ -170,10 +179,14 @@ class MentorAnalysisServiceTest {
     // cannot resolve a row with no Entry/SL/TP.
 
     @Test
-    void analyze_eligibleWithFullPlan_marksAuditPendingEntry() throws Exception {
+    void analyze_eligibleWithFullPlan_createsAuditSimulationInPendingEntry() throws Exception {
+        // Phase 3: simulation state no longer lives on the audit row. Instead,
+        // the service writes a TradeSimulation(PENDING_ENTRY, AUDIT) into the
+        // simulation aggregate when the verdict is ELIGIBLE with a complete
+        // trade plan.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         String rawJson = """
             {
@@ -197,21 +210,35 @@ class MentorAnalysisServiceTest {
             a.setId(1L);
             return a;
         });
+        when(simulationRepository.findByReviewId(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(ReviewType.AUDIT)))
+            .thenReturn(java.util.Optional.empty());
+        when(simulationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         service.analyze(objectMapper.readTree("""
             {"metadata": {"asset": "MGC1!"}, "trade_intention": {"action": "LONG"}}
             """));
 
-        ArgumentCaptor<MentorAudit> c = ArgumentCaptor.forClass(MentorAudit.class);
-        verify(mentorAuditRepository).save(c.capture());
-        assertThat(c.getValue().getSimulationStatus()).isEqualTo(TradeSimulationStatus.PENDING_ENTRY);
+        ArgumentCaptor<MentorAudit> auditCaptor = ArgumentCaptor.forClass(MentorAudit.class);
+        verify(mentorAuditRepository).save(auditCaptor.capture());
+        // Legacy audit field is NEVER written in Phase 3.
+        assertThat(auditCaptor.getValue().getSimulationStatus()).isNull();
+
+        ArgumentCaptor<TradeSimulation> simCaptor = ArgumentCaptor.forClass(TradeSimulation.class);
+        verify(simulationRepository).save(simCaptor.capture());
+        TradeSimulation sim = simCaptor.getValue();
+        assertThat(sim.reviewType()).isEqualTo(ReviewType.AUDIT);
+        assertThat(sim.reviewId()).isEqualTo(1L);
+        assertThat(sim.simulationStatus()).isEqualTo(TradeSimulationStatus.PENDING_ENTRY);
+        assertThat(sim.instrument()).isEqualTo("MGC1!");
+        assertThat(sim.action()).isEqualTo("LONG");
     }
 
     @Test
     void analyze_ineligibleVerdict_doesNotMarkPendingEntry() throws Exception {
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         String rawJson = """
             {
@@ -249,7 +276,7 @@ class MentorAnalysisServiceTest {
         // and stay in PENDING_ENTRY forever.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         String rawJson = """
             {
@@ -288,7 +315,7 @@ class MentorAnalysisServiceTest {
         // built from asset|action|"" |"" |"". The new builder reads v2 keys first.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
         when(mentorModelClient.analyze(any(), any()))
@@ -323,7 +350,7 @@ class MentorAnalysisServiceTest {
         // embedding when re-indexed. The builder reads v2 first, v1 second.
         mentorProperties.setPersistAudits(true);
         MentorAnalysisService service = new MentorAnalysisService(
-            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorModelClient, mentorMemoryService, mentorAuditRepository, mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         when(mentorMemoryService.findSimilar(any())).thenReturn(List.of());
         when(mentorModelClient.analyze(any(), any()))
@@ -360,7 +387,8 @@ class MentorAnalysisServiceTest {
             mentorAuditRepository,
             mentorProperties,
             objectMapper,
-            new MentorParseMetrics()
+            new MentorParseMetrics(),
+            simulationRepository
         );
 
         String truncated = """
@@ -411,7 +439,7 @@ class MentorAnalysisServiceTest {
         MentorParseMetrics metrics = new MentorParseMetrics();
         MentorAnalysisService service = new MentorAnalysisService(
             mentorModelClient, mentorMemoryService, mentorAuditRepository,
-            mentorProperties, objectMapper, metrics);
+            mentorProperties, objectMapper, metrics, simulationRepository);
 
         String truncatedWithEligible = "{"
             + "\"technicalQuickAnalysis\": \"Confluence macro baissière forte alignée avec CHoCH baissier.\","
@@ -442,7 +470,7 @@ class MentorAnalysisServiceTest {
         MentorParseMetrics metrics = new MentorParseMetrics();
         MentorAnalysisService service = new MentorAnalysisService(
             mentorModelClient, mentorMemoryService, mentorAuditRepository,
-            mentorProperties, objectMapper, metrics);
+            mentorProperties, objectMapper, metrics, simulationRepository);
 
         String truncatedIneligible = "{"
             + "\"technicalQuickAnalysis\": \"Setup invalidé — RSI overbought.\","
@@ -487,7 +515,7 @@ class MentorAnalysisServiceTest {
         mentorProperties.setPersistAudits(false);
         MentorAnalysisService service = new MentorAnalysisService(
             mentorModelClient, mentorMemoryService, mentorAuditRepository,
-            mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         // Mirrors prod E6 1h WT LONG rejection — four bearish contradictions
         // that should surface a SHORT hint.
@@ -530,7 +558,7 @@ class MentorAnalysisServiceTest {
         mentorProperties.setPersistAudits(false);
         MentorAnalysisService service = new MentorAnalysisService(
             mentorModelClient, mentorMemoryService, mentorAuditRepository,
-            mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         String rawJson = """
             {
@@ -565,7 +593,7 @@ class MentorAnalysisServiceTest {
         mentorProperties.setPersistAudits(false);
         MentorAnalysisService service = new MentorAnalysisService(
             mentorModelClient, mentorMemoryService, mentorAuditRepository,
-            mentorProperties, objectMapper, new MentorParseMetrics());
+            mentorProperties, objectMapper, new MentorParseMetrics(), simulationRepository);
 
         String rawJson = """
             {

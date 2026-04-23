@@ -32,6 +32,9 @@ import com.riskdesk.domain.model.ExecutionEligibilityStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.simulation.ReviewType;
+import com.riskdesk.domain.simulation.TradeSimulation;
+import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,6 +85,7 @@ public class MentorSignalReviewService {
     private final CandleRepositoryPort candleRepositoryPort;
     private final ActiveContractRegistry contractRegistry;
     private final MentorSignalReviewRepositoryPort reviewRepository;
+    private final TradeSimulationRepositoryPort simulationRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
@@ -118,6 +122,7 @@ public class MentorSignalReviewService {
                                      CandleRepositoryPort candleRepositoryPort,
                                      ActiveContractRegistry contractRegistry,
                                      MentorSignalReviewRepositoryPort reviewRepository,
+                                     TradeSimulationRepositoryPort simulationRepository,
                                      SimpMessagingTemplate messagingTemplate,
                                      ObjectMapper objectMapper,
                                      ObjectProvider<TickDataPort> tickDataPortProvider,
@@ -132,6 +137,7 @@ public class MentorSignalReviewService {
         this.candleRepositoryPort = candleRepositoryPort;
         this.contractRegistry = contractRegistry;
         this.reviewRepository = reviewRepository;
+        this.simulationRepository = simulationRepository;
         this.messagingTemplate = messagingTemplate;
         this.objectMapper = objectMapper;
         this.tickDataPortProvider = tickDataPortProvider;
@@ -600,17 +606,21 @@ public class MentorSignalReviewService {
                 review.setCompletedAt(Instant.now());
                 review.setAnalysisJson(writeJson(effective));
                 review.setVerdict(truncate(effective.analysis() == null ? null : effective.analysis().verdict(), 512));
+                boolean createSimulation;
                 if ("BEHAVIOUR".equals(review.getSourceType())) {
                     review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.INELIGIBLE);
                     review.setExecutionEligibilityReason("Behaviour alerts are vigilance-only.");
-                    review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+                    createSimulation = false;
                 } else {
                     review.setExecutionEligibilityStatus(resolveExecutionEligibilityStatus(effective));
                     review.setExecutionEligibilityReason(resolveExecutionEligibilityReason(effective));
-                    initializeSimulationState(review, effective);
+                    createSimulation = shouldTrackOutcome(review, effective);
                 }
                 review.setErrorMessage(null);
                 MentorSignalReviewRecord updated = reviewRepository.save(review);
+                if (createSimulation) {
+                    initializeSimulationAggregate(updated);
+                }
                 publish(updated);
                 publishTradeValidatedIfEligible(updated, effective);
             });
@@ -842,7 +852,10 @@ public class MentorSignalReviewService {
             // MENTOR_UNAVAILABLE so the UI doesn't mask it as a real rejection.
             review.setExecutionEligibilityStatus(ExecutionEligibilityStatus.MENTOR_UNAVAILABLE);
             review.setExecutionEligibilityReason(message);
-            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+            // Phase 3: no legacy sim-status write. If the review already had a
+            // PENDING_ENTRY simulation row (pre-analysis transient state is
+            // not created until the outcome is ELIGIBLE), it will not exist,
+            // so there's nothing to cancel on the simulation side.
             MentorSignalReviewRecord updated = reviewRepository.save(review);
             publish(updated);
         });
@@ -897,15 +910,37 @@ public class MentorSignalReviewService {
         );
     }
 
-    private void initializeSimulationState(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
-        if (shouldTrackOutcome(review, analysis)) {
-            review.setSimulationStatus(TradeSimulationStatus.PENDING_ENTRY);
-        } else {
-            review.setSimulationStatus(TradeSimulationStatus.CANCELLED);
+    /**
+     * Phase 3: creates a {@code TradeSimulation(PENDING_ENTRY)} row directly in
+     * the simulation aggregate instead of stamping the legacy sim fields on the
+     * review. Idempotent — if a row already exists for this review (e.g. a
+     * reanalysis revision on an already-tracked alert), we leave the existing
+     * simulation in place so the scheduler isn't confused by a duplicate.
+     */
+    private void initializeSimulationAggregate(MentorSignalReviewRecord review) {
+        if (review == null || review.getId() == null) return;
+        try {
+            Optional<TradeSimulation> existing = simulationRepository.findByReviewId(review.getId(), ReviewType.SIGNAL);
+            if (existing.isPresent()) {
+                return;
+            }
+            String instrument = review.getInstrument() != null ? review.getInstrument() : "UNKNOWN";
+            String action = review.getAction() != null ? review.getAction() : "LONG";
+            Instant createdAt = review.getCreatedAt() != null ? review.getCreatedAt() : Instant.now();
+            simulationRepository.save(new TradeSimulation(
+                null,
+                review.getId(),
+                ReviewType.SIGNAL,
+                instrument,
+                action,
+                TradeSimulationStatus.PENDING_ENTRY,
+                null, null, null, null, null, null,
+                createdAt
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to initialize simulation aggregate for review {}: {}",
+                review.getId(), e.getMessage());
         }
-        review.setActivationTime(null);
-        review.setResolutionTime(null);
-        review.setMaxDrawdownPoints(BigDecimal.ZERO);
     }
 
     private boolean shouldTrackOutcome(MentorSignalReviewRecord review, MentorAnalyzeResponse analysis) {
