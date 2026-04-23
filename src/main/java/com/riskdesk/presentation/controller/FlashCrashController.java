@@ -1,6 +1,7 @@
 package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.FlashCrashSimulationService;
+import com.riskdesk.application.service.FlashCrashStatusService;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.FlashCrashThresholds;
 import com.riskdesk.domain.orderflow.port.FlashCrashConfigPort;
@@ -21,11 +22,14 @@ public class FlashCrashController {
 
     private final ObjectProvider<FlashCrashConfigPort> configPortProvider;
     private final ObjectProvider<FlashCrashSimulationService> simulationServiceProvider;
+    private final ObjectProvider<FlashCrashStatusService> statusServiceProvider;
 
     public FlashCrashController(ObjectProvider<FlashCrashConfigPort> configPortProvider,
-                                ObjectProvider<FlashCrashSimulationService> simulationServiceProvider) {
+                                ObjectProvider<FlashCrashSimulationService> simulationServiceProvider,
+                                ObjectProvider<FlashCrashStatusService> statusServiceProvider) {
         this.configPortProvider = configPortProvider;
         this.simulationServiceProvider = simulationServiceProvider;
+        this.statusServiceProvider = statusServiceProvider;
     }
 
     /**
@@ -120,14 +124,52 @@ public class FlashCrashController {
 
     /**
      * GET /api/order-flow/flash-crash/status
-     * Returns the current FSM state per instrument (stub — will be wired to live FSM later).
+     * Returns the most recent FSM phase transition per instrument from the
+     * persisted event log. This is the seed data the frontend needs on a fresh
+     * page load — the {@code /topic/flash-crash} WebSocket stream only delivers
+     * forward-going events, so without this endpoint a just-opened panel would
+     * show "no data" even though the FSM had phase changes earlier in the day.
+     * <p>
+     * Shape per instrument matches the WebSocket payload loosely so the frontend
+     * can reuse the same reducer: {@code instrument}, {@code phase} (current),
+     * {@code previousPhase}, {@code conditionsMet}, {@code conditions} (empty —
+     * individual condition booleans are not persisted), {@code reversalScore},
+     * {@code timestamp}.
      */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getStatus() {
-        Map<String, Object> status = new LinkedHashMap<>();
-        status.put("message", "Flash crash FSM status — not yet wired to live instances");
-        status.put("instruments", Map.of());
-        return ResponseEntity.ok(status);
+        Map<String, Object> perInstrument = new LinkedHashMap<>();
+        FlashCrashStatusService service = statusServiceProvider.getIfAvailable();
+        if (service != null) {
+            service.latestPerInstrument().forEach(
+                (inst, snap) -> perInstrument.put(inst.name(), snap.toMap())
+            );
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("instruments", perInstrument);
+        return ResponseEntity.ok(body);
+    }
+
+    /**
+     * GET /api/order-flow/flash-crash/status/{instrument}
+     * Returns the most recent FSM phase transition for a single instrument, or
+     * 404 if no event has ever been persisted for it (e.g. fresh deployment).
+     */
+    @GetMapping("/status/{instrument}")
+    public ResponseEntity<?> getStatusForInstrument(@PathVariable String instrument) {
+        Instrument inst;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+        FlashCrashStatusService service = statusServiceProvider.getIfAvailable();
+        if (service == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return service.latestForInstrument(inst)
+            .<ResponseEntity<?>>map(snap -> ResponseEntity.ok(snap.toMap()))
+            .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     /**

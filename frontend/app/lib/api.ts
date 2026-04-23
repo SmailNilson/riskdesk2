@@ -422,6 +422,60 @@ export interface DxyHealthView {
   components: DxyHealthComponentView[];
 }
 
+/**
+ * One FX pair's contribution to the current DXY move, relative to today's
+ * session baseline. Returned by GET /api/market/dxy/breakdown — mirrors
+ * {@code com.riskdesk.domain.marketdata.model.FxComponentContribution} on
+ * the backend. Sorted by |weightedImpact| desc so the dominant driver is
+ * index 0.
+ */
+export interface FxComponentContributionView {
+  pair: string;
+  currentRate: number;
+  baselineRate: number;
+  pctChange: number;
+  dxyWeight: number;
+  weightedImpact: number;
+  impactDirection: string;
+}
+
+/**
+ * Shape of the flash-crash status snapshot per instrument — the REST seed
+ * for the Live Monitor tab before /topic/flash-crash starts pushing updates
+ * (see FlashCrashController#getStatus). Fields align with the WebSocket
+ * payload on /topic/flash-crash, plus a {@code timestamp} of the last
+ * persisted transition. {@code conditions} is intentionally empty on the
+ * REST side since individual booleans aren't persisted.
+ */
+export interface FlashCrashStatusView {
+  instrument: string;
+  phase: string;
+  previousPhase: string;
+  conditionsMet: number;
+  conditions: boolean[];
+  reversalScore: number;
+  timestamp: string;
+}
+
+/**
+ * Open Interest comparison between current and next contract month for one
+ * futures instrument. Returned per instrument by GET /api/rollover/oi-status.
+ * <p>When the backend could not fetch OI for an instrument the status map
+ * carries either {@code { status: 'UNAVAILABLE' }} or {@code { status: 'ERROR', message }};
+ * callers must narrow before treating the value as a full recommendation.
+ */
+export interface RolloverOiEntry {
+  currentMonth?: string;
+  nextMonth?: string;
+  currentOI?: number;
+  nextOI?: number;
+  action?: 'NO_ACTION' | 'RECOMMEND_ROLL' | string;
+  status?: 'UNAVAILABLE' | 'ERROR' | string;
+  message?: string;
+}
+
+export type RolloverOiStatus = Record<string, RolloverOiEntry>;
+
 export interface BacktestTrade {
   tradeNo: number;
   side: 'LONG' | 'SHORT';
@@ -859,6 +913,21 @@ export const api = {
   getDxyHistory: (from: string, to: string) =>
     get<DxySnapshotView[]>(`/api/market/dxy/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   getDxyHealth: () => get<DxyHealthView>('/api/market/dxy/health'),
+  // Per-component contribution to the DXY move vs today's session baseline
+  // (driver analysis — which FX pair actually moved the index).
+  getDxyBreakdown: () =>
+    get<FxComponentContributionView[]>('/api/market/dxy/breakdown'),
+  // Flash-crash FSM status for the Live Monitor panel. The WebSocket at
+  // /topic/flash-crash only emits forward-going transitions, so a fresh page
+  // load needs this REST seed to know the current phase of each instrument.
+  getFlashCrashStatus: () =>
+    get<{ instruments: Record<string, FlashCrashStatusView> }>('/api/order-flow/flash-crash/status'),
+  getFlashCrashStatusForInstrument: (instrument: string) =>
+    get<FlashCrashStatusView>(`/api/order-flow/flash-crash/status/${encodeURIComponent(instrument)}`),
+  // Rollover open-interest comparison per instrument — complements the
+  // time-to-expiry data exposed by useRollover with a liquidity-based signal.
+  getRolloverOiStatus: () =>
+    get<RolloverOiStatus>('/api/rollover/oi-status'),
   analyzeMentor: (payload: unknown) =>
     post<MentorAnalyzeResponse>('/api/mentor/analyze', { payload }),
   refreshMentorContext: (instrument: string, timeframe: string) =>
