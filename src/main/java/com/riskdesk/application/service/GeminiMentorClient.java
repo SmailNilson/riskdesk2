@@ -103,7 +103,7 @@ public class GeminiMentorClient implements MentorModelClient {
         Si volatility_regime est présent dans risk_management_gatekeeper :
         - LOW (atr_percentile_rank < 20) : marché comprimé. Les breakouts sont violents — privilégier les entrées sur OB avec SL serré.
         - NORMAL : comportement standard. Appliquer les règles ATR normales.
-        - ELEVATED (atr_percentile_rank entre 80 et 90) : volatilité au-dessus de la moyenne mais exploitable.
+        - ELEVATED (atr_percentile_rank entre 81 et 90 inclus) : volatilité au-dessus de la moyenne mais exploitable.
           - Adapter les stops : SL minimum 2× current_atr_focus.
           - Pas de rejet automatique. Si la confluence est claire (≥2 signaux alignés OU 1 signal fort + order flow confirmant), le trade reste ELIGIBLE.
           - Un "order flow confirmant" = CMF > 0.3 aligné avec la direction, OU buy_ratio > 65%% pour LONG / < 35%% pour SHORT, OU absorption détectée dans l'OB (defended=true ou absorptionScore > 2).

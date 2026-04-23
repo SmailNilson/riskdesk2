@@ -717,13 +717,16 @@ public class MentorSignalReviewService {
     /**
      * Maps ATR percentile rank to a volatility regime label consumed by the Gemini
      * system prompt. Tier thresholds MUST stay in sync with the prompt calibration
-     * in {@code GeminiMentorClient.BASE_SYSTEM_PROMPT}:
+     * in {@code GeminiMentorClient.BASE_SYSTEM_PROMPT}.
+     *
+     * <p>Boundaries are exclusive on the upper side (strict {@code >}) to avoid
+     * double-counting integer ranks:
      * <ul>
      *   <li>{@code null} → {@code null} (missing data, no regime to signal)</li>
-     *   <li>&lt; 20 → {@code LOW} (compressed market, breakouts violent)</li>
-     *   <li>20–80 → {@code NORMAL}</li>
-     *   <li>80–90 → {@code ELEVATED} (above-average, tradable with flow confirmation)</li>
-     *   <li>&gt; 90 → {@code EXTREME} (crisis, news, liquidation)</li>
+     *   <li>rank &lt; 20 → {@code LOW} (compressed market, breakouts violent)</li>
+     *   <li>rank 20–80 inclusive → {@code NORMAL}</li>
+     *   <li>rank 81–90 inclusive → {@code ELEVATED} (above-average, tradable with flow confirmation)</li>
+     *   <li>rank &gt; 90 → {@code EXTREME} (crisis, news, liquidation)</li>
      * </ul>
      */
     static String classifyVolatilityRegime(Integer atrPercentileRank) {
