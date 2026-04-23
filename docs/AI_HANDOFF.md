@@ -2,6 +2,58 @@
 
 Last updated: 2026-04-23
 
+## Hidden features surfaced — FALLBACK_DB badge, DXY breakdown, Flash Crash status, Rollover OI
+
+Four backend capabilities that already existed but were not wired through to
+the UI are now surfaced. Pure read-path additions — no new business logic, no
+schema migration, no change to existing alert/execution/simulation flows.
+
+- **FALLBACK_DB source badge (Slice A).** `MetricsBar.tsx` now renders per-ticker
+  amber badges whenever `prices[instrument].source` is `FALLBACK_DB` or `STALE`.
+  No new polling — the flag is already carried over the existing
+  `/topic/prices` WebSocket payload (`PriceUpdate.source`). A trader can now see
+  at-a-glance which instrument is being served from PostgreSQL because the IBKR
+  farm is degraded.
+- **DXY breakdown panel (Slice B).** `DxyPanel.tsx` gains a collapsed "Breakdown"
+  section backed by the existing `GET /api/market/dxy/breakdown` endpoint (typed
+  wrapper `api.getDxyBreakdown()`, DTO `FxComponentContributionView`). Refreshes
+  every 30 s. Shows per-FX-pair price, % change, DXY weight, and weighted
+  impact (colour-coded bullish/bearish/flat) so the trader can tell which of
+  the 6 components is driving the index today.
+- **Flash Crash status seed (Slice C).** `FlashCrashController#getStatus` is no
+  longer a stub. It now returns the most recent persisted phase per instrument
+  via a new application-layer `FlashCrashStatusService` reading from
+  `JpaFlashCrashEventRepository.findFirstByInstrumentOrderByTimestampDesc`
+  (hexagonal rule: controller cannot import the JPA repo directly, hence the
+  service in between). `GET /api/order-flow/flash-crash/status` and
+  `GET /api/order-flow/flash-crash/status/{instrument}` are both wired. The
+  `LiveMonitorTab` in `FlashCrashPanel.tsx` seeds its state from REST on mount,
+  and `/topic/flash-crash` WebSocket pushes continue to overlay live updates.
+  Individual condition booleans are not persisted; the REST payload returns an
+  empty `conditions` array and the card renders the 5-dot row without filled
+  circles until a live WS push arrives.
+- **Rollover OI status (Slice D).** `api.getRolloverOiStatus()` wraps the
+  existing `GET /api/rollover/oi-status`. `RolloverBanner.tsx` now fetches OI
+  crossover every 5 min (matching `useRollover`'s cadence) and, when any
+  instrument's backend recommendation is `RECOMMEND_ROLL`, surfaces a red
+  "OI crossover" row with current → next month, both open-interest values, the
+  ratio, and a `SWITCH NOW` button that opens the existing confirm modal
+  pre-filled with the next month. The banner now stays visible when an OI
+  crossover is pending even if no contract is within the time-to-expiry window.
+
+Files touched:
+- Backend: `src/main/java/com/riskdesk/presentation/controller/FlashCrashController.java`,
+  `src/main/java/com/riskdesk/application/service/FlashCrashStatusService.java` (new),
+  `src/main/java/com/riskdesk/infrastructure/persistence/JpaFlashCrashEventRepository.java`.
+- Frontend: `frontend/app/lib/api.ts` (4 new wrappers + DTOs),
+  `frontend/app/components/MetricsBar.tsx`, `frontend/app/components/DxyPanel.tsx`,
+  `frontend/app/components/FlashCrashPanel.tsx`, `frontend/app/components/RolloverBanner.tsx`.
+
+Non-goals for this PR: no new business logic, no new FSM wiring (a live
+per-instrument `FlashCrashFSM` engine feeding real ticks is still future work),
+no changes to `useWebSocket` / `useOrderFlow` hook signatures, no Dashboard
+layout changes.
+
 ## Goal of this file
 
 This file captures the current engineering state so another agent can continue safely without rediscovering critical decisions.

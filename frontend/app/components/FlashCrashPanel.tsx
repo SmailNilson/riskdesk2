@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useOrderFlow, FlashCrashState } from '@/app/hooks/useOrderFlow';
+import { api } from '@/app/lib/api';
 import { API_BASE } from '@/app/lib/runtimeConfig';
 
 const BASE = API_BASE ?? '';
@@ -248,9 +249,45 @@ function ConfigSimulateTab() {
 
 function LiveMonitorTab() {
   const { flashCrashState, connected } = useOrderFlow();
-  const states = Array.from(flashCrashState.values());
+  // REST seed: the backend persists every FSM phase transition, but
+  // /topic/flash-crash only emits forward-going events. On a fresh page load
+  // the hook's Map is empty — this pulls the last known phase per instrument
+  // so the trader doesn't see "no data" when the FSM actually has state.
+  // WebSocket pushes take precedence the moment they arrive.
+  const [seed, setSeed] = useState<Record<string, FlashCrashState>>({});
 
-  if (!connected) {
+  useEffect(() => {
+    let cancelled = false;
+    api.getFlashCrashStatus()
+      .then(res => {
+        if (cancelled) return;
+        const next: Record<string, FlashCrashState> = {};
+        for (const [inst, entry] of Object.entries(res.instruments ?? {})) {
+          next[inst] = {
+            instrument: entry.instrument,
+            phase: entry.phase,
+            conditionsMet: entry.conditionsMet,
+            // REST payload has an empty conditions[] since individual booleans
+            // aren't persisted — FlashCrashCard renders 5 grey dots for this.
+            conditions: Array.isArray(entry.conditions) ? entry.conditions : [],
+            reversalScore: entry.reversalScore,
+          };
+        }
+        setSeed(next);
+      })
+      .catch(() => { /* 404 / unavailable → leave seed empty */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Merge seed with live WS state, WS wins on conflicts.
+  const states = useMemo(() => {
+    const merged = new Map<string, FlashCrashState>();
+    for (const [k, v] of Object.entries(seed)) merged.set(k, v);
+    flashCrashState.forEach((v, k) => merged.set(k, v));
+    return Array.from(merged.values());
+  }, [seed, flashCrashState]);
+
+  if (!connected && states.length === 0) {
     return <p className="text-xs text-zinc-500 italic">WebSocket disconnected</p>;
   }
 

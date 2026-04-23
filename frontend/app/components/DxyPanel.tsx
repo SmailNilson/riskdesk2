@@ -1,7 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api, DxyHealthView, DxySnapshotView } from '@/app/lib/api';
+import {
+  api,
+  DxyHealthView,
+  DxySnapshotView,
+  FxComponentContributionView,
+} from '@/app/lib/api';
 
 function formatTimestamp(value: string | null) {
   if (!value) {
@@ -30,6 +35,8 @@ export default function DxyPanel() {
   const [latest, setLatest] = useState<DxySnapshotView | null>(null);
   const [health, setHealth] = useState<DxyHealthView | null>(null);
   const [history, setHistory] = useState<DxySnapshotView[]>([]);
+  const [breakdown, setBreakdown] = useState<FxComponentContributionView[]>([]);
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,15 +73,34 @@ export default function DxyPanel() {
       }
     };
 
+    // DXY breakdown: which of the 6 FX pairs is actually driving the index
+    // today. 404 is expected when no session baseline exists yet (e.g. pre-
+    // open), so failures degrade silently to an empty table.
+    const loadBreakdown = async () => {
+      try {
+        const rows = await api.getDxyBreakdown();
+        if (!cancelled) {
+          setBreakdown(rows);
+        }
+      } catch {
+        if (!cancelled) {
+          setBreakdown([]);
+        }
+      }
+    };
+
     void loadLatest();
     void loadHistory();
+    void loadBreakdown();
     const latestTimer = setInterval(loadLatest, 5000);
     const historyTimer = setInterval(loadHistory, 60000);
+    const breakdownTimer = setInterval(loadBreakdown, 30000);
 
     return () => {
       cancelled = true;
       clearInterval(latestTimer);
       clearInterval(historyTimer);
+      clearInterval(breakdownTimer);
     };
   }, []);
 
@@ -186,6 +212,76 @@ export default function DxyPanel() {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* ── Per-pair contribution breakdown (collapsed by default) ───────────
+          Uses the backend-computed weighted impact vs today's session baseline.
+          Sorted by |weightedImpact| desc so the driver sits at the top. */}
+      <div className="mt-4">
+        <button
+          type="button"
+          onClick={() => setBreakdownOpen(open => !open)}
+          className="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 transition-colors"
+        >
+          <span className="font-medium uppercase tracking-wider text-[11px]">
+            Breakdown · which FX pair is moving DXY
+          </span>
+          <span className="text-zinc-500">{breakdownOpen ? '▾' : '▸'}</span>
+        </button>
+        {breakdownOpen && (
+          <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+            {breakdown.length === 0 ? (
+              <div className="text-[11px] text-zinc-600">
+                No breakdown available yet — waiting for a session baseline.
+              </div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wider text-zinc-500">
+                    <th className="pb-1 text-left font-medium">FX pair</th>
+                    <th className="pb-1 text-right font-medium">Price</th>
+                    <th className="pb-1 text-right font-medium">% chg</th>
+                    <th className="pb-1 text-right font-medium">Weight</th>
+                    <th className="pb-1 text-right font-medium">Impact</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {breakdown.map(row => {
+                    const impactColor = row.impactDirection === 'BULLISH_DXY'
+                      ? 'text-emerald-400'
+                      : row.impactDirection === 'BEARISH_DXY'
+                        ? 'text-red-400'
+                        : 'text-zinc-400';
+                    return (
+                      <tr key={row.pair} className="border-t border-zinc-900">
+                        <td className="py-1 text-zinc-300 font-mono">{row.pair}</td>
+                        <td className="py-1 text-right font-mono text-zinc-100">
+                          {row.currentRate != null ? Number(row.currentRate).toFixed(5) : '—'}
+                        </td>
+                        <td className={`py-1 text-right font-mono ${
+                          Number(row.pctChange) > 0 ? 'text-emerald-400' :
+                          Number(row.pctChange) < 0 ? 'text-red-400' : 'text-zinc-400'
+                        }`}>
+                          {row.pctChange != null
+                            ? `${Number(row.pctChange) >= 0 ? '+' : ''}${Number(row.pctChange).toFixed(3)}%`
+                            : '—'}
+                        </td>
+                        <td className="py-1 text-right font-mono text-zinc-500">
+                          {row.dxyWeight != null ? `${(Number(row.dxyWeight) * 100).toFixed(1)}%` : '—'}
+                        </td>
+                        <td className={`py-1 text-right font-mono ${impactColor}`}>
+                          {row.weightedImpact != null
+                            ? `${Number(row.weightedImpact) >= 0 ? '+' : ''}${Number(row.weightedImpact).toFixed(4)}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );
