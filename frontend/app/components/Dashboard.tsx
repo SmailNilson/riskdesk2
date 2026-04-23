@@ -17,7 +17,7 @@ import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
-import CollapsibleZone from './layout/CollapsibleZone';
+import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -63,6 +63,19 @@ export default function Dashboard() {
   }, [instrument, purging]);
 
   const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
+
+  // Zone collapse state is hoisted so the grid's track widths follow the
+  // actual zone state — without this, the `auto` tracks would shrink below
+  // the zone's min-width because the center column (Chart + OrderFlow) forces
+  // `1fr` to claim the remaining space and squeezes the sides.
+  const leftZone = useCollapsibleZoneState('left-context');
+  const rightZone = useCollapsibleZoneState('right-ai-desk');
+
+  // Track widths (lg and up). The right zone is wider than the left because
+  // AiMentorDesk renders a dense tab bar + verbose mentor review cards.
+  const leftTrack = leftZone.collapsed ? '2.5rem' : '320px';
+  const rightTrack = rightZone.collapsed ? '2.5rem' : '440px';
+  const gridTemplateColumns = `${leftTrack} minmax(0, 1fr) ${rightTrack}`;
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
@@ -194,10 +207,22 @@ export default function Dashboard() {
         })}
       </div>
 
-      {/* Trade Desk — 3-zone grid. Below lg breakpoint the grid collapses to a single column. */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[auto_1fr_auto] gap-3 p-3 pb-14">
+      {/* Trade Desk — 3-zone grid. The grid-template-columns is driven by the
+          actual collapsed state of each side zone (controlled mode) so the
+          track widths follow the UI instead of the other way around. Below
+          `lg` the grid collapses to a single column. */}
+      <div
+        className="flex-1 grid grid-cols-1 gap-3 p-3 pb-14 lg:[grid-template-columns:var(--rd-grid-cols)]"
+        style={{ ['--rd-grid-cols' as string]: gridTemplateColumns }}
+      >
         {/* Left zone — Context */}
-        <CollapsibleZone id="left-context" title="Context" side="left">
+        <CollapsibleZone
+          id="left-context"
+          title="Context"
+          side="left"
+          collapsed={leftZone.collapsed}
+          onCollapsedChange={leftZone.setCollapsed}
+        >
           <DxyPanel />
           <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
           <IbkrPortfolioPanel
@@ -209,7 +234,10 @@ export default function Dashboard() {
           <BacktestPanel />
         </CollapsibleZone>
 
-        {/* Center zone — Chart + Order Flow (always visible) */}
+        {/* Center zone — Chart + Order Flow (always visible). `min-w-0` is
+            essential: without it the Chart would force the grid's `1fr`
+            track to be at least as wide as its intrinsic content, and the
+            side zones would lose their requested widths. */}
         <section className="flex flex-col gap-3 min-w-0">
           <Chart
             instrument={instrument}
@@ -225,7 +253,13 @@ export default function Dashboard() {
         </section>
 
         {/* Right zone — AI Trade Desk */}
-        <CollapsibleZone id="right-ai-desk" title="AI Trade Desk" side="right">
+        <CollapsibleZone
+          id="right-ai-desk"
+          title="AI Trade Desk"
+          side="right"
+          collapsed={rightZone.collapsed}
+          onCollapsedChange={rightZone.setCollapsed}
+        >
           <AiMentorDesk
             instrument={instrument}
             timeframe={timeframe}
