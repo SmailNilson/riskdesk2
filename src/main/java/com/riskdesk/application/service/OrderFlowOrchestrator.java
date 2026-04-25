@@ -74,7 +74,10 @@ public class OrderFlowOrchestrator {
     private final ApplicationEventPublisher eventPublisher;
     private final CandleRepositoryPort candleRepository;
     private final AbsorptionDetector absorptionDetector = new AbsorptionDetector();
-    private final AggressiveMomentumDetector momentumDetector;
+
+    /** Per-instrument stateful momentum detectors (one per instrument for correct ATR-debounce). */
+    private final ConcurrentHashMap<Instrument, AggressiveMomentumDetector> momentumDetectors
+        = new ConcurrentHashMap<>();
 
     /** Per-instrument stateful distribution detectors (streak of same-side absorptions). */
     private final ConcurrentHashMap<Instrument, InstitutionalDistributionDetector> distributionDetectors
@@ -127,10 +130,7 @@ public class OrderFlowOrchestrator {
         this.footprintPortProvider = footprintPortProvider;
         this.eventPublisher = eventPublisher;
         this.candleRepository = candleRepository;
-        this.momentumDetector = new AggressiveMomentumDetector(
-            properties.getMomentum().getScoreThreshold(),
-            properties.getMomentum().getMinPriceMoveFractionOfAtr()
-        );
+        // momentumDetectors are created per-instrument in momentumDetectorFor()
     }
 
     private InstitutionalDistributionDetector distributionDetectorFor(Instrument instrument) {
@@ -140,7 +140,16 @@ public class OrderFlowOrchestrator {
                 properties.getDistribution().getMinConsecutiveCount(),
                 properties.getDistribution().getMinAvgScore(),
                 Duration.ofMinutes(properties.getDistribution().getWindowTtlMinutes()),
-                Duration.ofSeconds(properties.getDistribution().getMaxInterEventGapSeconds())
+                Duration.ofSeconds(properties.getDistribution().getMaxInterEventGapSeconds()),
+                Duration.ofMinutes(properties.getDistribution().getCooldownMinutes())
+            ));
+    }
+
+    private AggressiveMomentumDetector momentumDetectorFor(Instrument instrument) {
+        return momentumDetectors.computeIfAbsent(instrument, i ->
+            new AggressiveMomentumDetector(
+                properties.getMomentum().getScoreThreshold(),
+                properties.getMomentum().getMinPriceMoveFractionOfAtr()
             ));
     }
 
@@ -398,9 +407,10 @@ public class OrderFlowOrchestrator {
                 }
             } else if (properties.getMomentum().isEnabled()) {
                 // Complementary path: absorption silent → check momentum burst (Detector 2)
-                Optional<MomentumSignal> momentum = momentumDetector.evaluate(
+                double debouncePrice = Double.isNaN(midPrice) ? 0.0 : midPrice;
+                Optional<MomentumSignal> momentum = momentumDetectorFor(instrument).evaluate(
                     instrument, agg.delta(), priceMovePoints, priceMoveTicks,
-                    (long) totalVolume, atr, deltaThreshold, avgVolume, now);
+                    (long) totalVolume, atr, deltaThreshold, avgVolume, debouncePrice, now);
                 if (momentum.isPresent()) {
                     publishMomentumSignal(instrument, momentum.get(), atr, now);
 

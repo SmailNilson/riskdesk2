@@ -185,4 +185,104 @@ class InstitutionalDistributionDetectorTest {
         assertThat(fired).isPresent();
         assertThat(fired.get().confidenceScore()).isBetween(0, 100);
     }
+
+    // ---- MNQ-tuned default constructor tests --------------------------------
+
+    @Test
+    void mnqDefaultParams_threeConsecutiveAbsorptions_fire() {
+        // Default constructor: minCount=3, minAvg=2.5, TTL=10min, gap=20s, cooldown=8min
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        Optional<DistributionSignal> fired = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = mnqDetector.onAbsorption(
+                bear(i * 5, 3.5), 27100.0, null, t0.plusSeconds(i * 5));
+            if (out.isPresent()) fired = out;
+        }
+        assertThat(fired).isPresent();
+        assertThat(fired.get().type()).isEqualTo(DistributionType.DISTRIBUTION);
+        assertThat(fired.get().consecutiveCount()).isEqualTo(3);
+        assertThat(fired.get().avgScore()).isEqualTo(3.5);
+        assertThat(fired.get().confidenceScore()).isBetween(50, 100);
+    }
+
+    @Test
+    void mnqDefaultParams_twoConsecutive_doesNotFire() {
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        for (int i = 0; i < 2; i++) {
+            Optional<DistributionSignal> out = mnqDetector.onAbsorption(
+                bear(i * 5, 5.0), 27100.0, null, t0.plusSeconds(i * 5));
+            assertThat(out).isEmpty();
+        }
+    }
+
+    @Test
+    void separateCooldownShorterThanWindowTtl_allowsSecondWave() {
+        // TTL=10min, cooldown=8min — second wave at 9min should fire (past cooldown but within TTL)
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        // First wave fires at ~10s (3 events × 5s)
+        for (int i = 0; i < 3; i++) {
+            mnqDetector.onAbsorption(bear(i * 5, 3.5), 27100.0, null, t0.plusSeconds(i * 5));
+        }
+
+        // Second wave starts at 8min + 30s = 510s after t0 — past 8min cooldown
+        Instant waveStart = t0.plusSeconds(510);
+        Optional<DistributionSignal> secondWave = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = mnqDetector.onAbsorption(
+                new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
+                    3.5, 700, 2.0, 9000, waveStart.plusSeconds(i * 5)),
+                27050.0, null, waveStart.plusSeconds(i * 5));
+            if (out.isPresent()) secondWave = out;
+        }
+        assertThat(secondWave).isPresent();
+    }
+
+    @Test
+    void deltaIntensityBoostsConfidenceOverNeutralStreak() {
+        // High |cumDelta| / totalVolume → intensity bonus in confidence
+        // Signals with delta=5000 on volume=6000 → intensity ≈ 0.833 → bonus ≈ 12
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        AbsorptionSignal highIntensity = new AbsorptionSignal(
+            instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
+            3.5, 5000, 2.0, 6000, t0);
+        // Low-intensity signal: delta=100 on volume=6000 → intensity ≈ 0.017 → bonus ≈ 0
+        AbsorptionSignal lowIntensity = new AbsorptionSignal(
+            instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
+            3.5, 100, 2.0, 6000, t0);
+
+        // High-intensity streak
+        InstitutionalDistributionDetector highDet = new InstitutionalDistributionDetector(instrument);
+        Optional<DistributionSignal> highFired = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = highDet.onAbsorption(
+                new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
+                    3.5, 5000, 2.0, 6000, t0.plusSeconds(i * 5)),
+                27100.0, null, t0.plusSeconds(i * 5));
+            if (out.isPresent()) highFired = out;
+        }
+
+        // Low-intensity streak
+        InstitutionalDistributionDetector lowDet = new InstitutionalDistributionDetector(instrument);
+        Optional<DistributionSignal> lowFired = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = lowDet.onAbsorption(
+                new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
+                    3.5, 100, 2.0, 6000, t0.plusSeconds(i * 5)),
+                27100.0, null, t0.plusSeconds(i * 5));
+            if (out.isPresent()) lowFired = out;
+        }
+
+        assertThat(highFired).isPresent();
+        assertThat(lowFired).isPresent();
+        assertThat(highFired.get().confidenceScore())
+            .isGreaterThan(lowFired.get().confidenceScore());
+    }
 }

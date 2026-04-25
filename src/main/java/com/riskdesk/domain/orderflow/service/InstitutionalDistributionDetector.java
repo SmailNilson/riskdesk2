@@ -20,29 +20,39 @@ import java.util.Optional;
  * with an average score above threshold — smart money selling passively into
  * aggressive retail buying. The mirror (BULLISH_ABSORPTION streak) is accumulation.
  * <p>
+ * MNQ-tuned defaults (PR #264 follow-up): minCount 3, minAvgScore 2.5,
+ * windowTtl 10 min, maxInterEventGap 20s, cooldown 8 min.
+ * <p>
  * <b>Stateful — one instance per instrument.</b> Not thread-safe; expected to be
  * called from a single scheduler thread. No Spring, no I/O.
  */
 public final class InstitutionalDistributionDetector {
 
-    /** Default: 5 consecutive same-side absorption events required. */
-    public static final int DEFAULT_MIN_CONSECUTIVE_COUNT = 5;
-    /** Default: mean absorption score must exceed 3.0. */
-    public static final double DEFAULT_MIN_AVG_SCORE = 3.0;
-    /** Default: sliding window duration. Events older than this are evicted. */
-    public static final Duration DEFAULT_WINDOW_TTL = Duration.ofMinutes(15);
+    /** MNQ-tuned default: 3 consecutive same-side absorption events required. */
+    public static final int DEFAULT_MIN_CONSECUTIVE_COUNT = 3;
+    /** MNQ-tuned default: mean absorption score must exceed 2.5. */
+    public static final double DEFAULT_MIN_AVG_SCORE = 2.5;
+    /** MNQ-tuned default: sliding window duration. Events older than this are evicted. */
+    public static final Duration DEFAULT_WINDOW_TTL = Duration.ofMinutes(10);
     /**
-     * Maximum gap between two events in the same streak. A longer gap breaks the
-     * streak (one missed 5s tick cycle is fine; beyond 30s we consider the pattern
-     * interrupted).
+     * MNQ-tuned default: maximum gap between two events in the same streak.
+     * A longer gap breaks the streak — 20s is tight enough to keep HFT-driven clusters
+     * coherent while rejecting disconnected absorptions.
      */
-    public static final Duration DEFAULT_MAX_INTER_EVENT_GAP = Duration.ofSeconds(30);
+    public static final Duration DEFAULT_MAX_INTER_EVENT_GAP = Duration.ofSeconds(20);
+    /**
+     * MNQ-tuned default: cooldown after firing, independent of the window TTL.
+     * 8 min allows a second distribution wave (common on MNQ sell-offs) to be detected
+     * while still preventing immediate re-fire noise.
+     */
+    public static final Duration DEFAULT_COOLDOWN = Duration.ofMinutes(8);
 
     private final Instrument instrument;
     private final int minConsecutiveCount;
     private final double minAvgScore;
     private final Duration windowTtl;
     private final Duration maxInterEventGap;
+    private final Duration cooldown;
 
     private final Deque<AbsorptionSignal> bearishWindow = new ArrayDeque<>();
     private final Deque<AbsorptionSignal> bullishWindow = new ArrayDeque<>();
@@ -54,14 +64,24 @@ public final class InstitutionalDistributionDetector {
 
     public InstitutionalDistributionDetector(Instrument instrument) {
         this(instrument, DEFAULT_MIN_CONSECUTIVE_COUNT, DEFAULT_MIN_AVG_SCORE,
-             DEFAULT_WINDOW_TTL, DEFAULT_MAX_INTER_EVENT_GAP);
+             DEFAULT_WINDOW_TTL, DEFAULT_MAX_INTER_EVENT_GAP, DEFAULT_COOLDOWN);
+    }
+
+    /** Backward-compatible 5-param constructor: cooldown defaults to windowTtl. */
+    public InstitutionalDistributionDetector(Instrument instrument,
+                                              int minConsecutiveCount,
+                                              double minAvgScore,
+                                              Duration windowTtl,
+                                              Duration maxInterEventGap) {
+        this(instrument, minConsecutiveCount, minAvgScore, windowTtl, maxInterEventGap, windowTtl);
     }
 
     public InstitutionalDistributionDetector(Instrument instrument,
                                               int minConsecutiveCount,
                                               double minAvgScore,
                                               Duration windowTtl,
-                                              Duration maxInterEventGap) {
+                                              Duration maxInterEventGap,
+                                              Duration cooldown) {
         if (instrument == null) throw new IllegalArgumentException("instrument required");
         if (minConsecutiveCount < 2) throw new IllegalArgumentException("minConsecutiveCount >= 2");
         if (minAvgScore <= 0.0) throw new IllegalArgumentException("minAvgScore > 0");
@@ -70,15 +90,16 @@ public final class InstitutionalDistributionDetector {
         this.minAvgScore = minAvgScore;
         this.windowTtl = windowTtl;
         this.maxInterEventGap = maxInterEventGap;
+        this.cooldown = cooldown;
     }
 
     /**
      * Feed an absorption signal and evaluate whether a distribution setup fires.
      *
-     * @param signal         absorption signal observed
+     * @param signal          absorption signal observed
      * @param currentMidPrice current market mid-price (used as priceAtDetection)
      * @param resistanceLevel optional nearby resistance/support (nullable)
-     * @param now            current timestamp
+     * @param now             current timestamp
      * @return a distribution signal if threshold crossed, empty otherwise
      */
     public Optional<DistributionSignal> onAbsorption(AbsorptionSignal signal,
@@ -129,24 +150,26 @@ public final class InstitutionalDistributionDetector {
         if (window.size() < minConsecutiveCount) return Optional.empty();
 
         double sum = 0.0;
-        double max = 0.0;
+        long cumDelta = 0;
+        long totalVolume = 0;
         for (AbsorptionSignal s : window) {
             sum += s.absorptionScore();
-            if (s.absorptionScore() > max) max = s.absorptionScore();
+            cumDelta += s.aggressiveDelta();
+            totalVolume += s.totalVolume();
         }
         double avg = sum / window.size();
         if (avg < minAvgScore) return Optional.empty();
 
-        // Cooldown: don't re-fire for the same side inside the TTL window
+        // Cooldown: independent of window TTL — allows shorter re-fire window
         Instant lastFire = type == DistributionType.DISTRIBUTION ? lastBearishFireAt : lastBullishFireAt;
-        if (lastFire != null && Duration.between(lastFire, now).compareTo(windowTtl) < 0) {
+        if (lastFire != null && Duration.between(lastFire, now).compareTo(cooldown) < 0) {
             return Optional.empty();
         }
 
         AbsorptionSignal first = window.peekFirst();
         AbsorptionSignal last = window.peekLast();
         double durationSeconds = Duration.between(first.timestamp(), last.timestamp()).toMillis() / 1000.0;
-        int confidence = computeConfidence(window.size(), avg, durationSeconds);
+        int confidence = computeConfidence(window.size(), avg, durationSeconds, cumDelta, totalVolume);
 
         if (type == DistributionType.DISTRIBUTION) {
             lastBearishFireAt = now;
@@ -169,14 +192,17 @@ public final class InstitutionalDistributionDetector {
     }
 
     /**
-     * Confidence 0-100 based on count above threshold, average score, and duration.
+     * Confidence 0-100 based on count above threshold, average score, duration,
+     * and delta intensity (directional conviction of the streak).
      * <ul>
      *   <li>Base: 50 at threshold, climbs with extra consecutive events</li>
      *   <li>Score bonus: up to +20 for average score well above threshold</li>
      *   <li>Duration bonus: up to +30 for sustained patterns (10+ min)</li>
+     *   <li>Intensity bonus: up to +15 for high |cumDelta| / totalVolume ratio</li>
      * </ul>
      */
-    private int computeConfidence(int count, double avgScore, double durationSeconds) {
+    private int computeConfidence(int count, double avgScore, double durationSeconds,
+                                   long cumDelta, long totalVolume) {
         double base = 50.0 + ((double) (count - minConsecutiveCount) / minConsecutiveCount) * 30.0;
         base = Math.min(80.0, Math.max(50.0, base));
 
@@ -187,7 +213,10 @@ public final class InstitutionalDistributionDetector {
         double durationBonus = Math.min(30.0, (durationMinutes / 10.0) * 30.0);
         durationBonus = Math.max(0.0, durationBonus);
 
-        int confidence = (int) Math.round(base + scoreBonus + durationBonus);
+        double deltaIntensity = totalVolume > 0 ? Math.abs(cumDelta) / (double) totalVolume : 0.0;
+        double intensityBonus = Math.min(15.0, deltaIntensity * 15.0);
+
+        int confidence = (int) Math.round(base + scoreBonus + durationBonus + intensityBonus);
         return Math.max(0, Math.min(100, confidence));
     }
 
