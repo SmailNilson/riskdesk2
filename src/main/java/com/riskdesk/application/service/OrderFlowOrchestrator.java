@@ -149,7 +149,9 @@ public class OrderFlowOrchestrator {
         return momentumDetectors.computeIfAbsent(instrument, i ->
             new AggressiveMomentumDetector(
                 properties.getMomentum().getScoreThreshold(),
-                properties.getMomentum().getMinPriceMoveFractionOfAtr()
+                properties.getMomentum().getMinPriceMoveFractionOfAtr(),
+                properties.getMomentum().getAtrDistanceThreshold(),
+                properties.getMomentum().getMaxFiresPerMinute()
             ));
     }
 

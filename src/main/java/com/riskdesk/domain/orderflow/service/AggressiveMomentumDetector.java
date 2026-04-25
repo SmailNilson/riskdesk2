@@ -40,27 +40,41 @@ public final class AggressiveMomentumDetector {
     public static final double DEFAULT_SCORE_THRESHOLD = 0.55;
     /** MNQ-tuned: price must move at least 40% of ATR to qualify (filters 1-2 tick noise). */
     public static final double DEFAULT_MIN_PRICE_MOVE_FRACTION = 0.4;
-    /** Minimum ATR-distance from last fire in the same direction before re-firing. */
-    public static final double ATR_DISTANCE_THRESHOLD = 0.5;
-    /** Safety rate cap: at most this many fires per rolling 60-second window. */
-    public static final int MAX_FIRES_PER_MINUTE = 2;
+    /** Default minimum ATR-distance from last fire in the same direction before re-firing. */
+    public static final double DEFAULT_ATR_DISTANCE_THRESHOLD = 0.5;
+    /** Default safety rate cap: at most this many fires per rolling 60-second window. */
+    public static final int DEFAULT_MAX_FIRES_PER_MINUTE = 2;
 
     private final double scoreThreshold;
     private final double minPriceMoveFraction;
+    private final double atrDistanceThreshold;
+    private final int maxFiresPerMinute;
 
     // Debounce state — per side, so bearish and bullish momentum are tracked independently
     private Double lastBearishFirePrice = null;
     private Double lastBullishFirePrice = null;
-    /** Timestamps of recent fires (both sides) for the MAX_FIRES_PER_MINUTE rate cap. */
+    /** Timestamps of recent fires (both sides) for the maxFiresPerMinute rate cap. */
     private final Deque<Instant> recentFires = new ArrayDeque<>();
 
     public AggressiveMomentumDetector() {
-        this(DEFAULT_SCORE_THRESHOLD, DEFAULT_MIN_PRICE_MOVE_FRACTION);
+        this(DEFAULT_SCORE_THRESHOLD, DEFAULT_MIN_PRICE_MOVE_FRACTION,
+             DEFAULT_ATR_DISTANCE_THRESHOLD, DEFAULT_MAX_FIRES_PER_MINUTE);
     }
 
+    /** Backward-compat 2-arg constructor: defaults debounce/rate-cap. */
     public AggressiveMomentumDetector(double scoreThreshold, double minPriceMoveFraction) {
+        this(scoreThreshold, minPriceMoveFraction,
+             DEFAULT_ATR_DISTANCE_THRESHOLD, DEFAULT_MAX_FIRES_PER_MINUTE);
+    }
+
+    public AggressiveMomentumDetector(double scoreThreshold,
+                                       double minPriceMoveFraction,
+                                       double atrDistanceThreshold,
+                                       int maxFiresPerMinute) {
         this.scoreThreshold = scoreThreshold;
         this.minPriceMoveFraction = minPriceMoveFraction;
+        this.atrDistanceThreshold = atrDistanceThreshold;
+        this.maxFiresPerMinute = maxFiresPerMinute;
     }
 
     /**
@@ -118,24 +132,24 @@ public final class AggressiveMomentumDetector {
 
         MomentumSide side = delta < 0 ? MomentumSide.BEARISH_MOMENTUM : MomentumSide.BULLISH_MOMENTUM;
 
-        // Debounce: require ATR_DISTANCE of price movement since last fire in the same direction
+        // Debounce: require atrDistanceThreshold of price movement since last fire in the same direction
         if (!Double.isNaN(currentPrice)) {
             Double lastFirePrice = (side == MomentumSide.BEARISH_MOMENTUM)
                 ? lastBearishFirePrice : lastBullishFirePrice;
             if (lastFirePrice != null) {
                 double distanceATR = Math.abs(currentPrice - lastFirePrice) / atr;
-                if (distanceATR < ATR_DISTANCE_THRESHOLD) {
+                if (distanceATR < atrDistanceThreshold) {
                     return Optional.empty();
                 }
             }
         }
 
-        // Rate cap: at most MAX_FIRES_PER_MINUTE fires across both sides in any 60s window
+        // Rate cap: at most maxFiresPerMinute fires across both sides in any 60s window
         Instant oneMinuteAgo = timestamp.minusSeconds(60);
         while (!recentFires.isEmpty() && recentFires.peekFirst().isBefore(oneMinuteAgo)) {
             recentFires.pollFirst();
         }
-        if (recentFires.size() >= MAX_FIRES_PER_MINUTE) {
+        if (recentFires.size() >= maxFiresPerMinute) {
             return Optional.empty();
         }
 

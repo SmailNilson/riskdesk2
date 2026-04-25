@@ -181,6 +181,40 @@ class AggressiveMomentumDetectorTest {
     }
 
     @Test
+    void customConstructor_atrDistance_overridesDefault() {
+        // Custom detector with much larger ATR distance (2.0) — should suppress closer re-fires
+        AggressiveMomentumDetector strict = new AggressiveMomentumDetector(0.55, 0.4, 2.0, 2);
+        Optional<MomentumSignal> first = strict.evaluate(
+            instrument, -500, -10.0, 10.0, 1000, 20.0, 100.0, 400.0, 27100.0, now);
+        assertThat(first).isPresent();
+
+        // 25 pts away = 1.25 ATR — would fire under default 0.5, but suppressed under 2.0
+        Instant t1 = now.plusSeconds(5);
+        Optional<MomentumSignal> second = strict.evaluate(
+            instrument, -500, -10.0, 10.0, 1000, 20.0, 100.0, 400.0, 27075.0, t1);
+        assertThat(second).isEmpty();
+    }
+
+    @Test
+    void customConstructor_maxFiresPerMinute_overridesDefault() {
+        // Allow 5 fires/min instead of default 2
+        AggressiveMomentumDetector permissive = new AggressiveMomentumDetector(0.55, 0.4, 0.5, 5);
+        // Fire 4 times alternating side at large distance — all should pass
+        Optional<MomentumSignal> f1 = permissive.evaluate(
+            instrument, -500, -10.0, 10.0, 1000, 5.0, 100.0, 400.0, 27100.0, now);
+        Optional<MomentumSignal> f2 = permissive.evaluate(
+            instrument, 500, 10.0, 10.0, 1000, 5.0, 100.0, 400.0, 27200.0, now.plusSeconds(5));
+        Optional<MomentumSignal> f3 = permissive.evaluate(
+            instrument, -500, -10.0, 10.0, 1000, 5.0, 100.0, 400.0, 27000.0, now.plusSeconds(10));
+        Optional<MomentumSignal> f4 = permissive.evaluate(
+            instrument, 500, 10.0, 10.0, 1000, 5.0, 100.0, 400.0, 27300.0, now.plusSeconds(15));
+        assertThat(f1).isPresent();
+        assertThat(f2).isPresent();
+        assertThat(f3).isPresent();  // Would be blocked by default cap=2, allowed by custom cap=5
+        assertThat(f4).isPresent();
+    }
+
+    @Test
     void reset_clearsDebounceState() {
         // Fire, then reset, then fire again at the same price — should succeed after reset
         detector.evaluate(instrument, -500, -10.0, 10.0, 1000, 20.0, 100.0, 400.0, 27100.0, now);
