@@ -92,13 +92,15 @@ public class OrderFlowProperties {
         public void setIntervalMs(long intervalMs) { this.intervalMs = intervalMs; }
     }
 
-    /** Institutional distribution / accumulation detector. */
+    /** Institutional distribution / accumulation detector. MNQ-tuned defaults. */
     public static class Distribution {
         private boolean enabled = true;
-        private int minConsecutiveCount = 5;
-        private double minAvgScore = 3.0;
-        private int windowTtlMinutes = 15;
-        private int maxInterEventGapSeconds = 30;
+        private int minConsecutiveCount = 3;
+        private double minAvgScore = 2.5;
+        private int windowTtlMinutes = 10;
+        private int maxInterEventGapSeconds = 20;
+        /** Independent cooldown after firing — shorter than windowTtl allows second-wave detection. */
+        private int cooldownMinutes = 8;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -110,13 +112,21 @@ public class OrderFlowProperties {
         public void setWindowTtlMinutes(int v) { this.windowTtlMinutes = v; }
         public int getMaxInterEventGapSeconds() { return maxInterEventGapSeconds; }
         public void setMaxInterEventGapSeconds(int v) { this.maxInterEventGapSeconds = v; }
+        public int getCooldownMinutes() { return cooldownMinutes; }
+        public void setCooldownMinutes(int v) { this.cooldownMinutes = v; }
     }
 
-    /** Aggressive momentum burst detector (inverse of absorption). */
+    /** Aggressive momentum burst detector (inverse of absorption). MNQ-tuned defaults. */
     public static class Momentum {
         private boolean enabled = true;
-        private double scoreThreshold = 2.0;
-        private double minPriceMoveFractionOfAtr = 0.3;
+        /** Sigmoid-scale threshold: score ∈ [0,1]. 0.55 ≈ "two factors above baseline". */
+        private double scoreThreshold = 0.55;
+        /** MNQ: 40% ATR minimum filters 1-2 tick noise on a 15-25 pt ATR. */
+        private double minPriceMoveFractionOfAtr = 0.4;
+        /** Minimum ATR-distance from last same-direction fire before re-firing. */
+        private double atrDistanceThreshold = 0.5;
+        /** Safety rate cap: max fires per rolling 60-second window (both sides combined). */
+        private int maxFiresPerMinute = 2;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -124,13 +134,17 @@ public class OrderFlowProperties {
         public void setScoreThreshold(double v) { this.scoreThreshold = v; }
         public double getMinPriceMoveFractionOfAtr() { return minPriceMoveFractionOfAtr; }
         public void setMinPriceMoveFractionOfAtr(double v) { this.minPriceMoveFractionOfAtr = v; }
+        public double getAtrDistanceThreshold() { return atrDistanceThreshold; }
+        public void setAtrDistanceThreshold(double v) { this.atrDistanceThreshold = v; }
+        public int getMaxFiresPerMinute() { return maxFiresPerMinute; }
+        public void setMaxFiresPerMinute(int v) { this.maxFiresPerMinute = v; }
     }
 
-    /** Smart-money cycle meta-detector (chains distribution → momentum → accumulation). */
+    /** Smart-money cycle meta-detector (chains distribution → momentum → accumulation). MNQ-tuned. */
     public static class Cycle {
         private boolean enabled = true;
-        private int momentumWindowMinutes = 15;
-        private int mirrorWindowMinutes = 30;
+        private int momentumWindowMinutes = 10;
+        private int mirrorWindowMinutes = 20;
         private int cooldownMinutes = 5;
 
         public boolean isEnabled() { return enabled; }

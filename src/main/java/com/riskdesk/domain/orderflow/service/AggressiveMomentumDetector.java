@@ -5,6 +5,8 @@ import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.MomentumSignal.MomentumSide;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Optional;
 
 /**
@@ -15,29 +17,64 @@ import java.util.Optional;
  * This fills the detection gap during active trend phases that absorption
  * (which requires price stability) cannot catch.
  * <p>
- * Score formula (mirror of absorption with price factor inverted):
+ * <b>Score formula — sigmoid additive (bounded [0,1]):</b>
  * <pre>
- *   score = (|delta| / deltaThreshold) * (priceMoveTicks / atr) * (volume / avgVolume)
+ *   scoreDelta  = sigmoid(|delta| / deltaThreshold,  k=2)
+ *   scorePrice  = sigmoid(priceMoveTicks / atr,      k=3)
+ *   scoreVolume = sigmoid(volume / avgVolume,         k=2)
+ *   score = 0.40 × scoreDelta + 0.35 × scorePrice + 0.25 × scoreVolume
  * </pre>
+ * Where {@code sigmoid(x, k) = 1 / (1 + exp(-k × (x − 1)))}, centered at x=1 (= the
+ * per-instrument baseline). This replaces the previous multiplicative formula that
+ * exploded on MNQ during high-volatility events, causing per-bar spam.
  * <p>
- * Stateless — each call is independent. No Spring, no I/O.
+ * <b>Anti-spam debounce:</b> requires at least 0.5 ATR of price movement since the last
+ * fire in the same direction, plus a global rate cap of 2 fires per minute.
+ * <p>
+ * <b>Stateful — one instance per instrument.</b> Not thread-safe; expected to be called
+ * from a single scheduler thread. No Spring, no I/O.
  */
 public final class AggressiveMomentumDetector {
 
-    public static final double DEFAULT_SCORE_THRESHOLD = 2.0;
-    /** Price must move at least this fraction of ATR to qualify. */
-    public static final double DEFAULT_MIN_PRICE_MOVE_FRACTION = 0.3;
+    /** New sigmoid-scale threshold: score ∈ [0,1], fires above 0.55. */
+    public static final double DEFAULT_SCORE_THRESHOLD = 0.55;
+    /** MNQ-tuned: price must move at least 40% of ATR to qualify (filters 1-2 tick noise). */
+    public static final double DEFAULT_MIN_PRICE_MOVE_FRACTION = 0.4;
+    /** Default minimum ATR-distance from last fire in the same direction before re-firing. */
+    public static final double DEFAULT_ATR_DISTANCE_THRESHOLD = 0.5;
+    /** Default safety rate cap: at most this many fires per rolling 60-second window. */
+    public static final int DEFAULT_MAX_FIRES_PER_MINUTE = 2;
 
     private final double scoreThreshold;
     private final double minPriceMoveFraction;
+    private final double atrDistanceThreshold;
+    private final int maxFiresPerMinute;
+
+    // Debounce state — per side, so bearish and bullish momentum are tracked independently
+    private Double lastBearishFirePrice = null;
+    private Double lastBullishFirePrice = null;
+    /** Timestamps of recent fires (both sides) for the maxFiresPerMinute rate cap. */
+    private final Deque<Instant> recentFires = new ArrayDeque<>();
 
     public AggressiveMomentumDetector() {
-        this(DEFAULT_SCORE_THRESHOLD, DEFAULT_MIN_PRICE_MOVE_FRACTION);
+        this(DEFAULT_SCORE_THRESHOLD, DEFAULT_MIN_PRICE_MOVE_FRACTION,
+             DEFAULT_ATR_DISTANCE_THRESHOLD, DEFAULT_MAX_FIRES_PER_MINUTE);
     }
 
+    /** Backward-compat 2-arg constructor: defaults debounce/rate-cap. */
     public AggressiveMomentumDetector(double scoreThreshold, double minPriceMoveFraction) {
+        this(scoreThreshold, minPriceMoveFraction,
+             DEFAULT_ATR_DISTANCE_THRESHOLD, DEFAULT_MAX_FIRES_PER_MINUTE);
+    }
+
+    public AggressiveMomentumDetector(double scoreThreshold,
+                                       double minPriceMoveFraction,
+                                       double atrDistanceThreshold,
+                                       int maxFiresPerMinute) {
         this.scoreThreshold = scoreThreshold;
         this.minPriceMoveFraction = minPriceMoveFraction;
+        this.atrDistanceThreshold = atrDistanceThreshold;
+        this.maxFiresPerMinute = maxFiresPerMinute;
     }
 
     /**
@@ -49,8 +86,9 @@ public final class AggressiveMomentumDetector {
      * @param priceMoveTicks  absolute price move in ticks (normalizer = ATR ticks)
      * @param volume          total volume during the window
      * @param atr             current ATR (same units as priceMoveTicks — ticks)
-     * @param deltaThreshold  baseline delta normalizer (e.g. 50)
+     * @param deltaThreshold  baseline delta normalizer (e.g. 100 RTH, 40 ETH)
      * @param avgVolume       average volume per window
+     * @param currentPrice    current mid-price — used for ATR-distance debounce
      * @param timestamp       window end timestamp
      * @return momentum signal when score &gt; threshold AND directionally aligned
      */
@@ -63,6 +101,7 @@ public final class AggressiveMomentumDetector {
             double atr,
             double deltaThreshold,
             double avgVolume,
+            double currentPrice,
             Instant timestamp) {
 
         if (deltaThreshold <= 0.0 || atr <= 0.0 || avgVolume <= 0.0) {
@@ -83,14 +122,44 @@ public final class AggressiveMomentumDetector {
             return Optional.empty();
         }
 
-        double deltaFactor = Math.abs(delta) / deltaThreshold;
-        double priceFactor = absMoveTicks / atr;          // INVERTED vs absorption
-        double volumeFactor = volume / avgVolume;
-        double score = deltaFactor * priceFactor * volumeFactor;
+        // Sigmoid additive score — bounded [0, 1], no explosion on extreme values
+        double scoreDelta  = sigmoid(Math.abs(delta) / deltaThreshold, 2.0);
+        double scorePrice  = sigmoid(absMoveTicks / atr, 3.0);
+        double scoreVolume = sigmoid(volume / avgVolume, 2.0);
+        double score = 0.40 * scoreDelta + 0.35 * scorePrice + 0.25 * scoreVolume;
 
         if (score <= scoreThreshold) return Optional.empty();
 
         MomentumSide side = delta < 0 ? MomentumSide.BEARISH_MOMENTUM : MomentumSide.BULLISH_MOMENTUM;
+
+        // Debounce: require atrDistanceThreshold of price movement since last fire in the same direction
+        if (!Double.isNaN(currentPrice)) {
+            Double lastFirePrice = (side == MomentumSide.BEARISH_MOMENTUM)
+                ? lastBearishFirePrice : lastBullishFirePrice;
+            if (lastFirePrice != null) {
+                double distanceATR = Math.abs(currentPrice - lastFirePrice) / atr;
+                if (distanceATR < atrDistanceThreshold) {
+                    return Optional.empty();
+                }
+            }
+        }
+
+        // Rate cap: at most maxFiresPerMinute fires across both sides in any 60s window
+        Instant oneMinuteAgo = timestamp.minusSeconds(60);
+        while (!recentFires.isEmpty() && recentFires.peekFirst().isBefore(oneMinuteAgo)) {
+            recentFires.pollFirst();
+        }
+        if (recentFires.size() >= maxFiresPerMinute) {
+            return Optional.empty();
+        }
+
+        // Update debounce state before emitting
+        if (side == MomentumSide.BEARISH_MOMENTUM) {
+            lastBearishFirePrice = currentPrice;
+        } else {
+            lastBullishFirePrice = currentPrice;
+        }
+        recentFires.addLast(timestamp);
 
         return Optional.of(new MomentumSignal(
             instrument,
@@ -102,5 +171,20 @@ public final class AggressiveMomentumDetector {
             volume,
             timestamp
         ));
+    }
+
+    /**
+     * Logistic function centered at x=1 with steepness k.
+     * Returns 0.5 when x=1 (= baseline), approaches 1 for large x, 0 for small x.
+     */
+    private static double sigmoid(double x, double k) {
+        return 1.0 / (1.0 + Math.exp(-k * (x - 1.0)));
+    }
+
+    /** Reset debounce state (e.g. after session boundary). */
+    public void reset() {
+        lastBearishFirePrice = null;
+        lastBullishFirePrice = null;
+        recentFires.clear();
     }
 }

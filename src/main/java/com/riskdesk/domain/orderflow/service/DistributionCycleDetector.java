@@ -30,10 +30,10 @@ import java.util.Optional;
  */
 public final class DistributionCycleDetector {
 
-    /** Max gap between phase 1 and phase 2. */
-    public static final Duration DEFAULT_MOMENTUM_WINDOW = Duration.ofMinutes(15);
-    /** Max gap between phase 2 and phase 3. */
-    public static final Duration DEFAULT_MIRROR_WINDOW = Duration.ofMinutes(30);
+    /** MNQ-tuned default: distributions on MNQ are followed quickly by momentum. */
+    public static final Duration DEFAULT_MOMENTUM_WINDOW = Duration.ofMinutes(10);
+    /** MNQ-tuned default: mirror accumulation/distribution completes within 20 min. */
+    public static final Duration DEFAULT_MIRROR_WINDOW = Duration.ofMinutes(20);
     /** Cooldown after a complete cycle. */
     public static final Duration DEFAULT_COOLDOWN = Duration.ofMinutes(5);
 
