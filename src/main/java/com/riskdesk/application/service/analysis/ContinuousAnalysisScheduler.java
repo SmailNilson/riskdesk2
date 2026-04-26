@@ -1,9 +1,9 @@
 package com.riskdesk.application.service.analysis;
 
+import com.riskdesk.domain.analysis.port.AnalysisConfigPort;
 import com.riskdesk.domain.analysis.port.VerdictRecordRepositoryPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.vo.Timeframe;
-import com.riskdesk.infrastructure.config.LiveAnalysisProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -31,22 +31,22 @@ public class ContinuousAnalysisScheduler {
 
     private final LiveVerdictService verdictService;
     private final VerdictRecordRepositoryPort verdictRepository;
-    private final LiveAnalysisProperties properties;
+    private final AnalysisConfigPort config;
 
     public ContinuousAnalysisScheduler(LiveVerdictService verdictService,
                                          VerdictRecordRepositoryPort verdictRepository,
-                                         LiveAnalysisProperties properties) {
+                                         AnalysisConfigPort config) {
         this.verdictService = verdictService;
         this.verdictRepository = verdictRepository;
-        this.properties = properties;
+        this.config = config;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.analysis.poll-interval-ms:15000}",
                 initialDelayString = "${riskdesk.analysis.initial-delay-ms:60000}")
     public void scanAll() {
-        if (!properties.isSchedulerEnabled()) return;
+        if (!config.isSchedulerEnabled()) return;
 
-        for (String instrumentName : properties.getInstruments()) {
+        for (String instrumentName : config.getInstruments()) {
             Instrument instrument;
             try {
                 instrument = Instrument.valueOf(instrumentName);
@@ -54,7 +54,7 @@ public class ContinuousAnalysisScheduler {
                 log.warn("Unknown instrument in analysis config: {}", instrumentName);
                 continue;
             }
-            for (String tfLabel : properties.getTimeframes()) {
+            for (String tfLabel : config.getTimeframes()) {
                 Timeframe tf;
                 try {
                     tf = Timeframe.fromLabel(tfLabel);
@@ -88,16 +88,16 @@ public class ContinuousAnalysisScheduler {
      */
     @Scheduled(cron = "0 17 3 * * *")
     public void purgeStaleVerdicts() {
-        if (!properties.isSchedulerEnabled()) {
+        if (!config.isSchedulerEnabled()) {
             log.debug("Verdict purge skipped — scheduler is disabled");
             return;
         }
-        Instant cutoff = Instant.now().minus(properties.getRetentionDays(), ChronoUnit.DAYS);
+        Instant cutoff = Instant.now().minus(config.getRetentionDays(), ChronoUnit.DAYS);
         try {
             int deleted = verdictRepository.deleteByDecisionTimestampBefore(cutoff);
             if (deleted > 0) {
                 log.info("Purged {} verdict records older than {} ({} days)",
-                    deleted, cutoff, properties.getRetentionDays());
+                    deleted, cutoff, config.getRetentionDays());
             }
         } catch (Exception e) {
             log.warn("Verdict purge failed: {}", e.getMessage());

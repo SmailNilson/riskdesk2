@@ -1,5 +1,6 @@
 package com.riskdesk.infrastructure.config;
 
+import com.riskdesk.domain.analysis.port.AnalysisConfigPort;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
@@ -8,10 +9,14 @@ import java.util.List;
 /**
  * Live tri-layer analysis scheduler config. Bound from
  * {@code riskdesk.analysis.*} in application.properties.
+ * <p>
+ * Implements {@link AnalysisConfigPort} so application services depend on the
+ * domain port rather than this infrastructure-side class — preserves the
+ * hexagonal boundary documented in AGENTS.md (PR #270 round-3 review).
  */
 @Component
 @ConfigurationProperties(prefix = "riskdesk.analysis")
-public class LiveAnalysisProperties {
+public class LiveAnalysisProperties implements AnalysisConfigPort {
 
     /** Master switch — when false the scheduler does not run at all. */
     private boolean schedulerEnabled = true;

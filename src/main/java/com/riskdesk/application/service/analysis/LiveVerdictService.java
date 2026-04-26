@@ -9,8 +9,8 @@ import com.riskdesk.domain.analysis.port.VerdictRecordRepositoryPort;
 import com.riskdesk.domain.analysis.service.ScenarioGenerator;
 import com.riskdesk.domain.analysis.service.TriLayerScoringEngine;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.analysis.port.AnalysisConfigPort;
 import com.riskdesk.domain.shared.vo.Timeframe;
-import com.riskdesk.infrastructure.config.LiveAnalysisProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -38,18 +38,18 @@ public class LiveVerdictService {
     private final ScenarioGenerator scenarioGenerator;
     private final VerdictRecordRepositoryPort verdictRepository;
     private final SimpMessagingTemplate messagingTemplate;
-    private final LiveAnalysisProperties analysisProperties;
+    private final AnalysisConfigPort analysisConfig;
 
     public LiveVerdictService(AnalysisSnapshotAggregator aggregator,
                                VerdictRecordRepositoryPort verdictRepository,
                                SimpMessagingTemplate messagingTemplate,
-                               LiveAnalysisProperties analysisProperties) {
+                               AnalysisConfigPort analysisConfig) {
         this.aggregator = aggregator;
         this.scoringEngine = new TriLayerScoringEngine(ScoringWeights.defaults());
         this.scenarioGenerator = new ScenarioGenerator();
         this.verdictRepository = verdictRepository;
         this.messagingTemplate = messagingTemplate;
-        this.analysisProperties = analysisProperties;
+        this.analysisConfig = analysisConfig;
     }
 
     /**
@@ -60,10 +60,10 @@ public class LiveVerdictService {
      */
     public ScanConfigView getScanConfig() {
         return new ScanConfigView(
-            analysisProperties.isSchedulerEnabled(),
-            List.copyOf(analysisProperties.getInstruments()),
-            List.copyOf(analysisProperties.getTimeframes()),
-            analysisProperties.getPollIntervalMs()
+            analysisConfig.isSchedulerEnabled(),
+            List.copyOf(analysisConfig.getInstruments()),
+            List.copyOf(analysisConfig.getTimeframes()),
+            analysisConfig.getPollIntervalMs()
         );
     }
 
