@@ -122,12 +122,29 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
           ⏸ Scheduler paused — showing latest persisted verdict; data is not being refreshed.
         </div>
       )}
+      {!schedulerPaused && verdict.expired && (
+        // PR #270 round-6: scheduler is supposed to be running yet validUntil
+        // already lapsed — almost certainly a stall (ingestion outage, IBKR
+        // disconnect, scheduler exception loop). Make it loud so operators
+        // don't trade off a frozen verdict.
+        <div className="text-[11px] text-red-300 bg-red-900/20 border border-red-900/40 rounded px-2 py-1">
+          ⚠ Verdict expired {formatExpiredAge(verdict.expiredForSeconds)} ago —
+          scheduler may be stalled. Do not act on this signal.
+        </div>
+      )}
       <Header verdict={verdict} loading={loading} />
       <ScoreBars verdict={verdict} />
       <FactorLists verdict={verdict} />
       <Scenarios verdict={verdict} />
     </div>
   );
+}
+
+function formatExpiredAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }
 
 function Header({ verdict, loading }: { verdict: LiveVerdictView; loading: boolean }) {

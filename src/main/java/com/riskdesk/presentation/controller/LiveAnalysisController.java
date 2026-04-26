@@ -90,8 +90,14 @@ public class LiveAnalysisController {
      * authoritative producer of new verdict rows, so multi-viewer scenarios
      * cannot inflate {@code live_verdict_records} by sheer dashboard count.
      * <p>
-     * Returns 404 if no verdict has been persisted yet for the pair (typical
-     * during cold start before the scheduler has had time to fire).
+     * <b>Freshness (PR #270 round-6 review):</b> the response carries an
+     * {@code expired} boolean computed from {@code validUntil < now()}. The
+     * endpoint always returns 200 with the row — the client must check the
+     * flag and surface a banner / refuse to act on expired data. Returning
+     * an HTTP error would blank the panel during scheduler stalls and lose
+     * the "last-known verdict" visibility round-4 explicitly preserved.
+     * Returns 404 only when no verdict has ever been persisted for the pair
+     * (typical cold start before the scheduler's first tick).
      */
     @GetMapping("/latest/{instrument}/{timeframe}")
     public ResponseEntity<LiveVerdictResponse> latest(@PathVariable String instrument,

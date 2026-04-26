@@ -978,6 +978,10 @@ export interface LiveVerdictView {
   bias: LiveBiasView;
   scenarios: LiveTradeScenario[];
   validUntil: string;
+  /** True when validUntil < server now() — surfaced as a banner in the panel. */
+  expired: boolean;
+  /** Seconds since validUntil; 0 when not expired. */
+  expiredForSeconds: number;
 }
 
 export interface ReplayReport {

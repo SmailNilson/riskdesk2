@@ -16,11 +16,29 @@ public record LiveVerdictResponse(
     BigDecimal currentPrice,
     BiasView bias,
     List<TradeScenario> scenarios,
-    Instant validUntil
+    Instant validUntil,
+    /**
+     * True when {@code validUntil < server now()} at response time. PR #270
+     * round-6 review fix: the dashboard polls /latest and would otherwise
+     * render a scheduler-stalled, hours-old verdict as if it were current.
+     * Frontend banners on this flag; downstream automation can skip armed
+     * decisions when expired.
+     */
+    boolean expired,
+    /** Seconds since this verdict's validity window ended; 0 when not expired. */
+    long expiredForSeconds
 ) {
 
     public static LiveVerdictResponse from(LiveVerdict v) {
+        return from(v, Instant.now());
+    }
+
+    public static LiveVerdictResponse from(LiveVerdict v, Instant now) {
         DirectionalBias b = v.bias();
+        boolean expired = v.validUntil() != null && v.validUntil().isBefore(now);
+        long expiredForSec = expired
+            ? java.time.Duration.between(v.validUntil(), now).toSeconds()
+            : 0L;
         return new LiveVerdictResponse(
             v.instrument().name(),
             v.timeframe().label(),
@@ -39,7 +57,9 @@ public record LiveVerdictResponse(
                 b.standAsideReason()
             ),
             v.scenarios(),
-            v.validUntil()
+            v.validUntil(),
+            expired,
+            expiredForSec
         );
     }
 

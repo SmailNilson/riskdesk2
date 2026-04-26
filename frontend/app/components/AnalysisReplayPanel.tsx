@@ -29,22 +29,29 @@ export function AnalysisReplayPanel({ instrument, timeframe }: Props) {
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Round-4 review fix: a request token guards against stale responses.
-  // If the user changes instrument/timeframe (or fires a second replay) while
-  // an earlier request is in flight, its setReport call is dropped because the
-  // token no longer matches.
-  //
-  // Round-5 review fix: the context-change effect must ALSO reset {@code loading}.
-  // Otherwise the in-flight request's finally{} guard skips setLoading(false)
-  // (token mismatch) and the panel stays stuck with loading=true / Run button
-  // disabled until remount. Resetting here is safe because no request is in
-  // flight for the NEW context; the next runReplay will set loading=true again.
+  // Round-4: request token drops stale responses if context changes.
+  // Round-5: also reset loading so the spinner doesn't stick when guard skips finally.
+  // Round-6: tokens must ALSO bump on weights/window changes — otherwise the
+  // response for the OLD weights still passes the token check and renders under
+  // the new sliders, mislabeling tuning results. We bump on every param change
+  // and reset loading (same fix as round-5 for stuck spinner). Report is only
+  // cleared on instrument/timeframe changes (context change = different market);
+  // tweaking weights/days keeps the previous report visible until the user Runs
+  // again — that's intentional, otherwise the panel flickers on every slider tick.
   const requestTokenRef = useRef(0);
+
+  // Any input that affects the replay request → invalidate in-flight responses
+  // and unstick the spinner. Cheap (token is a number, not state).
   useEffect(() => {
     requestTokenRef.current += 1;
+    setLoading(false);
+  }, [instrument, timeframe, structure, orderFlow, momentum, days]);
+
+  // Context change (different market) → also clear last shown report/error so
+  // we don't display previous-instrument metrics under the new header.
+  useEffect(() => {
     setReport(null);
     setError(null);
-    setLoading(false);
   }, [instrument, timeframe]);
 
   const total = structure + orderFlow + momentum;
