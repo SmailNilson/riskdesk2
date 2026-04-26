@@ -46,6 +46,17 @@ public class LiveAnalysisController {
         this.replayService = replayService;
     }
 
+    /**
+     * GET /api/analysis/scan-config
+     * Surfaces which (instrument, timeframe) pairs the scheduler currently scans
+     * so the dashboard can grey out tabs that won't ever produce a verdict
+     * instead of polling /latest forever (PR #270 review).
+     */
+    @GetMapping("/scan-config")
+    public LiveVerdictService.ScanConfigView scanConfig() {
+        return verdictService.getScanConfig();
+    }
+
     @GetMapping("/live/{instrument}/{timeframe}")
     public ResponseEntity<LiveVerdictResponse> live(@PathVariable String instrument,
                                                       @PathVariable String timeframe) {

@@ -1011,6 +1011,11 @@ export const api = {
   // only, regardless of how many viewers are open.
   getLatestAnalysis: (instrument: string, timeframe: string) =>
     get<LiveVerdictView>(`/api/analysis/latest/${instrument}/${timeframe}`),
+  // What the scheduler actually scans — used to flag tabs that will never
+  // produce a verdict instead of polling /latest forever (PR #270 review).
+  getAnalysisScanConfig: () =>
+    get<{ schedulerEnabled: boolean; instruments: string[]; timeframes: string[]; pollIntervalMs: number }>(
+      '/api/analysis/scan-config'),
   // On-demand fresh compute — call sparingly, this writes a verdict row.
   getLiveAnalysis: (instrument: string, timeframe: string) =>
     get<LiveVerdictView>(`/api/analysis/live/${instrument}/${timeframe}`),

@@ -10,6 +10,7 @@ import com.riskdesk.domain.analysis.service.ScenarioGenerator;
 import com.riskdesk.domain.analysis.service.TriLayerScoringEngine;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.vo.Timeframe;
+import com.riskdesk.infrastructure.config.LiveAnalysisProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -37,16 +38,41 @@ public class LiveVerdictService {
     private final ScenarioGenerator scenarioGenerator;
     private final VerdictRecordRepositoryPort verdictRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final LiveAnalysisProperties analysisProperties;
 
     public LiveVerdictService(AnalysisSnapshotAggregator aggregator,
                                VerdictRecordRepositoryPort verdictRepository,
-                               SimpMessagingTemplate messagingTemplate) {
+                               SimpMessagingTemplate messagingTemplate,
+                               LiveAnalysisProperties analysisProperties) {
         this.aggregator = aggregator;
         this.scoringEngine = new TriLayerScoringEngine(ScoringWeights.defaults());
         this.scenarioGenerator = new ScenarioGenerator();
         this.verdictRepository = verdictRepository;
         this.messagingTemplate = messagingTemplate;
+        this.analysisProperties = analysisProperties;
     }
+
+    /**
+     * Snapshot of which (instrument, timeframe) pairs the scheduler is currently
+     * scanning. Surfaced to the dashboard so the panel can short-circuit with a
+     * clear "not scanned" message instead of polling /latest forever for tabs
+     * that will never produce verdicts (PR #270 review).
+     */
+    public ScanConfigView getScanConfig() {
+        return new ScanConfigView(
+            analysisProperties.isSchedulerEnabled(),
+            List.copyOf(analysisProperties.getInstruments()),
+            List.copyOf(analysisProperties.getTimeframes()),
+            analysisProperties.getPollIntervalMs()
+        );
+    }
+
+    public record ScanConfigView(
+        boolean schedulerEnabled,
+        List<String> instruments,
+        List<String> timeframes,
+        long pollIntervalMs
+    ) {}
 
     public LiveVerdict computeAndPublish(Instrument instrument, Timeframe timeframe) {
         LiveAnalysisSnapshot snap = aggregator.capture(instrument, timeframe);

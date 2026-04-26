@@ -19,8 +19,13 @@ public class LiveAnalysisProperties {
     /** Instrument symbols to scan. Must match {@code Instrument} enum names. */
     private List<String> instruments = List.of("MNQ", "MCL", "MGC", "E6");
 
-    /** Timeframes to scan per instrument. Must match {@code Timeframe.label()}. */
-    private List<String> timeframes = List.of("5m", "10m");
+    /**
+     * Timeframes to scan per instrument. Must match {@code Timeframe.label()}.
+     * Default covers every timeframe the dashboard exposes so the read-only
+     * {@code GET /api/analysis/latest} endpoint never returns 404 indefinitely
+     * for a tab the user can select (PR #270 review).
+     */
+    private List<String> timeframes = List.of("5m", "10m", "1h", "1d");
 
     /** Polling interval in milliseconds. Default 15s. */
     private long pollIntervalMs = 15_000L;

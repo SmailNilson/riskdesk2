@@ -24,10 +24,32 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
   const [verdict, setVerdict] = useState<LiveVerdictView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // PR #270 review fix: pull scheduler config once so we can short-circuit with
+  // a clear "not scanned" message for timeframes the scheduler is not configured
+  // to cover, instead of polling /latest forever.
+  const [scanConfig, setScanConfig] = useState<{
+    schedulerEnabled: boolean;
+    instruments: string[];
+    timeframes: string[];
+  } | null>(null);
 
-  // PR #270 review fix: poll the read-only /latest endpoint so verdict_records
-  // does not grow with the number of open dashboards. The scheduler is the
-  // single authoritative writer of new verdict rows.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAnalysisScanConfig()
+      .then(c => { if (!cancelled) setScanConfig(c); })
+      .catch(() => { /* leave null — fall back to "loading" rather than wrong info */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const isScanned: boolean | null = scanConfig === null
+    ? null
+    : (scanConfig.schedulerEnabled
+        && scanConfig.instruments.includes(instrument)
+        && scanConfig.timeframes.includes(timeframe));
+
+  // Poll the read-only /latest endpoint so verdict_records does not grow with
+  // the number of open dashboards. The scheduler is the single authoritative
+  // writer of new verdict rows.
   const fetchVerdict = useCallback(async () => {
     setLoading(true);
     try {
@@ -51,11 +73,25 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
   }, [instrument, timeframe]);
 
   useEffect(() => {
+    if (isScanned === false) return; // skip polling when this pair is excluded
     fetchVerdict();
     const id = setInterval(fetchVerdict, refreshInterval);
     return () => clearInterval(id);
-  }, [fetchVerdict, refreshInterval]);
+  }, [fetchVerdict, refreshInterval, isScanned]);
 
+  if (isScanned === false) {
+    return (
+      <div className="bg-zinc-900 border border-amber-900/50 rounded-lg p-4">
+        <div className="text-amber-300 text-sm">
+          Live analysis is not configured to scan {instrument} · {timeframe}.
+        </div>
+        <div className="text-zinc-500 text-xs mt-1">
+          Add this pair to <code className="text-zinc-400">riskdesk.analysis.instruments</code>
+          {' / '}<code className="text-zinc-400">timeframes</code> to enable.
+        </div>
+      </div>
+    );
+  }
   if (!verdict && error) {
     return (
       <div className="bg-zinc-900 border border-red-900 rounded-lg p-4">
