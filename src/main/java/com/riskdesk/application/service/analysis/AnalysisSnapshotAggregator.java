@@ -86,14 +86,29 @@ public class AnalysisSnapshotAggregator {
         try {
             CompletableFuture.allOf(all.toArray(new CompletableFuture<?>[0]))
                 .get(FAN_OUT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            // Free executor threads by cancelling outstanding work. Tasks that
-            // already completed are no-ops; in-flight tasks are interrupted
-            // (mayInterruptIfRunning=true) so blocking I/O can unwind.
-            for (CompletableFuture<?> f : all) {
-                if (!f.isDone()) f.cancel(true);
-            }
-            throw new StaleSnapshotException("Fan-out timeout or failure: " + e.getMessage());
+        } catch (java.util.concurrent.TimeoutException e) {
+            cancelOutstanding(all);
+            // Genuine staleness — caller retries (controller maps to HTTP 503).
+            throw new StaleSnapshotException(
+                "Fan-out timeout after " + FAN_OUT_TIMEOUT_SECONDS + "s");
+        } catch (InterruptedException e) {
+            cancelOutstanding(all);
+            Thread.currentThread().interrupt();
+            // Treat interrupt as transient staleness — same retry semantics.
+            throw new StaleSnapshotException("Fan-out interrupted");
+        } catch (java.util.concurrent.ExecutionException e) {
+            // PR #269 round-5 review fix: a real adapter failure (DB down,
+            // NPE, IBKR client error, ...) must NOT be silenced as "stale" —
+            // that masks production faults and triggers pointless retry loops
+            // on broken infrastructure. Surface the original cause so the
+            // controller maps it to HTTP 500 with the real stack/message.
+            cancelOutstanding(all);
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            log.warn("Fan-out adapter failure for {} {} — {}",
+                instrument, timeframe, cause.toString());
+            if (cause instanceof RuntimeException re) throw re;
+            if (cause instanceof Error err) throw err;
+            throw new RuntimeException("Fan-out adapter failure: " + cause.getMessage(), cause);
         }
 
         Instant captureT = Instant.now();
@@ -127,6 +142,18 @@ public class AnalysisSnapshotAggregator {
             momentum, absorption, dist, cycle,
             macro.macro()
         );
+    }
+
+    /**
+     * Cancels every still-running future. Tasks that already completed are
+     * no-ops; in-flight tasks get an interrupt so blocking I/O can unwind
+     * (mayInterruptIfRunning=true). Without this, hung tasks keep occupying
+     * the fixed-size analysisExecutor pool.
+     */
+    private static void cancelOutstanding(java.util.List<CompletableFuture<?>> futures) {
+        for (CompletableFuture<?> f : futures) {
+            if (!f.isDone()) f.cancel(true);
+        }
     }
 
     private static void rejectStaleness(String source, Instant asOf, Instant captureT, Duration budget) {
