@@ -1,0 +1,173 @@
+/* ──────────────────────────────────────────────────────────────
+   RiskDesk redesign — design tokens, scoped to .rd-root.
+   Tokens are driven by the tweaks panel via data-* attributes.
+   ────────────────────────────────────────────────────────────── */
+
+.rd-root {
+  /* Surface tone — "zinc" default; alternates: slate, true, warm */
+  --bg-0: oklch(0.16 0.005 260);
+  --bg-1: oklch(0.20 0.005 260);
+  --bg-2: oklch(0.24 0.006 260);
+  --bg-3: oklch(0.28 0.007 260);
+  --hair: oklch(0.30 0.006 260);
+  --hair-soft: oklch(0.26 0.006 260);
+
+  --fg-0: oklch(0.97 0.005 260);
+  --fg-1: oklch(0.85 0.005 260);
+  --fg-2: oklch(0.62 0.008 260);
+  --fg-3: oklch(0.45 0.008 260);
+
+  /* Accent — single accent that rotates hue via tweak */
+  --accent-h: 155;
+  --accent: oklch(0.78 0.16 var(--accent-h));
+  --accent-dim: oklch(0.55 0.14 var(--accent-h));
+  --accent-bg: oklch(0.30 0.08 var(--accent-h) / 0.35);
+  --accent-bg-soft: oklch(0.30 0.08 var(--accent-h) / 0.18);
+
+  /* Semantic — fixed, do not rotate */
+  --pos: oklch(0.78 0.16 155);
+  --pos-bg: oklch(0.30 0.08 155 / 0.30);
+  --neg: oklch(0.70 0.18 25);
+  --neg-bg: oklch(0.30 0.10 25 / 0.30);
+  --warn: oklch(0.80 0.14 75);
+  --warn-bg: oklch(0.30 0.08 75 / 0.30);
+  --info: oklch(0.78 0.13 220);
+  --info-bg: oklch(0.30 0.07 220 / 0.30);
+  --vio: oklch(0.74 0.14 295);
+  --vio-bg: oklch(0.30 0.08 295 / 0.30);
+
+  /* Density */
+  --pad-x: 14px;
+  --pad-y: 10px;
+  --gap: 10px;
+  --row-h: 30px;
+  --radius: 8px;
+  --radius-sm: 4px;
+
+  /* Type — falls back to plain names when next/font vars aren't set */
+  --font-sans: var(--rd-font-inter, "Inter"), -apple-system, system-ui, Helvetica, Arial, sans-serif;
+  --font-mono: var(--rd-font-jetbrains, "JetBrains Mono"), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  color-scheme: dark;
+
+  background: var(--bg-0);
+  color: var(--fg-0);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11";
+
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Surface tone variants */
+.rd-root[data-tone="slate"] {
+  --bg-0: oklch(0.17 0.012 245);
+  --bg-1: oklch(0.21 0.013 245);
+  --bg-2: oklch(0.25 0.014 245);
+  --bg-3: oklch(0.29 0.015 245);
+  --hair: oklch(0.31 0.014 245);
+  --hair-soft: oklch(0.27 0.013 245);
+}
+.rd-root[data-tone="true"] {
+  --bg-0: #050608;
+  --bg-1: #0c0d10;
+  --bg-2: #14161a;
+  --bg-3: #1c1f24;
+  --hair: #24272d;
+  --hair-soft: #1a1c20;
+}
+.rd-root[data-tone="warm"] {
+  --bg-0: oklch(0.18 0.008 50);
+  --bg-1: oklch(0.22 0.009 50);
+  --bg-2: oklch(0.26 0.010 50);
+  --bg-3: oklch(0.30 0.011 50);
+  --hair: oklch(0.32 0.011 50);
+  --hair-soft: oklch(0.28 0.010 50);
+}
+
+/* Theme: light */
+.rd-root[data-theme="light"] {
+  --bg-0: oklch(0.985 0.002 260);
+  --bg-1: oklch(1.00 0 0);
+  --bg-2: oklch(0.965 0.003 260);
+  --bg-3: oklch(0.94 0.005 260);
+  --hair: oklch(0.91 0.005 260);
+  --hair-soft: oklch(0.94 0.004 260);
+  --fg-0: oklch(0.20 0.010 260);
+  --fg-1: oklch(0.32 0.010 260);
+  --fg-2: oklch(0.50 0.010 260);
+  --fg-3: oklch(0.65 0.010 260);
+  color-scheme: light;
+}
+
+/* Density: compact */
+.rd-root[data-density="compact"] {
+  --pad-x: 10px;
+  --pad-y: 7px;
+  --gap: 7px;
+  --row-h: 26px;
+}
+
+.rd-root *, .rd-root *::before, .rd-root *::after { box-sizing: border-box; }
+
+.rd-root .mono,
+.rd-root .num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.rd-root .num { font-feature-settings: "tnum"; }
+
+.rd-root .label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+}
+
+.rd-root ::-webkit-scrollbar { width: 8px; height: 8px; }
+.rd-root ::-webkit-scrollbar-track { background: transparent; }
+.rd-root ::-webkit-scrollbar-thumb { background: var(--hair); border-radius: 4px; }
+.rd-root ::-webkit-scrollbar-thumb:hover { background: var(--bg-3); }
+
+.rd-root button,
+.rd-root select,
+.rd-root input { font-family: inherit; color: inherit; }
+.rd-root button:focus-visible,
+.rd-root select:focus-visible,
+.rd-root input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Animations */
+@keyframes rd-pulse {
+  0%   { box-shadow: 0 0 0 0 currentColor; }
+  70%  { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes rd-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+@keyframes rd-flash-pos {
+  0%   { background: color-mix(in oklab, var(--pos) 35%, transparent); }
+  100% { background: transparent; }
+}
+@keyframes rd-flash-neg {
+  0%   { background: color-mix(in oklab, var(--neg) 35%, transparent); }
+  100% { background: transparent; }
+}
+@keyframes rd-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes rd-flash {
+  0%   { background: color-mix(in oklab, var(--accent) 25%, transparent); }
+  100% { background: transparent; }
+}
