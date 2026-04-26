@@ -6,8 +6,6 @@ import com.riskdesk.domain.analysis.model.SmcContext;
 import com.riskdesk.domain.analysis.port.IndicatorSnapshotPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.vo.Timeframe;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -42,8 +40,6 @@ import java.util.Map;
 @Component
 public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
 
-    private static final Logger log = LoggerFactory.getLogger(IndicatorSnapshotAdapter.class);
-
     private final IndicatorService indicatorService;
 
     public IndicatorSnapshotAdapter(IndicatorService indicatorService) {
@@ -52,8 +48,14 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
 
     @Override
     public TimedIndicators indicatorsAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
-        IndicatorSnapshot src = indicatorService.computeSnapshot(instrument, timeframe.label());
-        Instant asOf = resolveAsOf(instrument, timeframe);
+        // PR #269 review fix: single atomic call returns both snapshot AND its
+        // real computedAt from the same cache entry. The previous two-step
+        // approach (computeSnapshot then snapshotComputedAt) could interleave
+        // with a concurrent cache refresh, producing values from different
+        // generations.
+        var pair = indicatorService.computeSnapshotWithComputedAt(instrument, timeframe.label());
+        IndicatorSnapshot src = pair.snapshot();
+        Instant asOf = pair.computedAt();
 
         var domain = new com.riskdesk.domain.analysis.model.IndicatorSnapshot(
             src.lastPrice(),
@@ -76,8 +78,10 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
 
     @Override
     public TimedSmc smcAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
-        IndicatorSnapshot src = indicatorService.computeSnapshot(instrument, timeframe.label());
-        Instant asOf = resolveAsOf(instrument, timeframe);
+        // Same atomic-pair contract as indicatorsAsOf — see comment above.
+        var pair = indicatorService.computeSnapshotWithComputedAt(instrument, timeframe.label());
+        IndicatorSnapshot src = pair.snapshot();
+        Instant asOf = pair.computedAt();
 
         Map<String, String> mr = new HashMap<>();
         if (src.multiResolutionBias() != null) {
@@ -141,22 +145,6 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
             breaks
         );
         return new TimedSmc(smc, asOf);
-    }
-
-    /**
-     * Resolves the truthful {@code asOf} timestamp for an indicator/SMC snapshot:
-     * the actual compute instant from the cache. Falls back to {@code Instant.EPOCH}
-     * (the "infinitely stale" sentinel) when the cache is empty — this ensures the
-     * aggregator's staleness budget rejects rather than silently accepting a fresh
-     * computation we cannot date precisely.
-     */
-    private Instant resolveAsOf(Instrument instrument, Timeframe timeframe) {
-        return indicatorService.snapshotComputedAt(instrument, timeframe.label())
-            .orElseGet(() -> {
-                log.warn("No cached computedAt for {} {} — flagging snapshot as stale to be safe",
-                    instrument, timeframe.label());
-                return Instant.EPOCH;
-            });
     }
 
     private static Double doubleOf(BigDecimal v) {

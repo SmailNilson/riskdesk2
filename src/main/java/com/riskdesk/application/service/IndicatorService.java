@@ -98,13 +98,54 @@ public class IndicatorService {
      * {@code (instrument, timeframe)} was last computed. Empty when no cache
      * entry exists yet.
      * <p>
-     * Consumers (e.g. the live-analysis aggregator) use this as the {@code asOf}
-     * timestamp for staleness budgets — without it, callers cannot tell a
-     * fresh computation from a 5-minute-old daily-timeframe cached value.
+     * Consumers should prefer {@link #computeSnapshotWithComputedAt} when they
+     * need <i>both</i> the snapshot and its compute time — that path returns
+     * both atomically and avoids the race where another thread refreshes the
+     * cache between two separate calls.
      */
     public java.util.Optional<java.time.Instant> snapshotComputedAt(Instrument instrument, String timeframe) {
         CachedSnapshot cached = snapshotCache.get(instrument.name() + ":" + timeframe);
         return cached == null ? java.util.Optional.empty() : java.util.Optional.of(cached.computedAt());
+    }
+
+    /**
+     * Snapshot + its real {@code computedAt}, guaranteed to come from the same
+     * cache entry. Use this in adapters that need both for staleness checks.
+     */
+    public record SnapshotWithComputedAt(IndicatorSnapshot snapshot, java.time.Instant computedAt) {}
+
+    /**
+     * Atomic version of {@link #computeSnapshot} that also returns the
+     * {@code computedAt} of the cache entry the snapshot came from. Solves the
+     * non-atomic race flagged in PR #269 review: when {@code AnalysisSnapshotAggregator}
+     * calls indicator and SMC adapters in parallel, separate {@code computeSnapshot}
+     * + {@code snapshotComputedAt} calls could return values from different
+     * cache generations, mixing inconsistent data into a single verdict.
+     * <p>
+     * Single cache lookup → if hit, return both fields directly. If miss, run
+     * the full compute (which atomically populates the cache) and read both
+     * fields back from the freshly-written entry under the same key — by
+     * construction these two reads must return our just-computed snapshot
+     * because the cache entry will not have been overwritten in the same nano.
+     */
+    public SnapshotWithComputedAt computeSnapshotWithComputedAt(Instrument instrument, String timeframe) {
+        String cacheKey = instrument.name() + ":" + timeframe;
+        long now = System.nanoTime();
+        CachedSnapshot cached = snapshotCache.get(cacheKey);
+        if (cached != null && now < cached.expiresAtNanos()) {
+            return new SnapshotWithComputedAt(cached.snapshot(), cached.computedAt());
+        }
+        // Miss path: run the canonical compute (which writes to cache) and read
+        // back atomically. computeSnapshot can re-cache, so we read after.
+        IndicatorSnapshot computed = computeSnapshot(instrument, timeframe);
+        CachedSnapshot fresh = snapshotCache.get(cacheKey);
+        // The cache entry we just wrote may have already expired in pathological
+        // cases (TTL=0); fall back to the snapshot we just got + now() to avoid
+        // returning a mismatched older entry from a concurrent overwrite.
+        java.time.Instant ts = (fresh != null && fresh.snapshot() == computed)
+            ? fresh.computedAt()
+            : java.time.Instant.now();
+        return new SnapshotWithComputedAt(computed, ts);
     }
 
     private static long cacheTtlNanos(String timeframe) {
