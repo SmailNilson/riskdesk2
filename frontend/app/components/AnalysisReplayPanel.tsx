@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, ReplayReport } from '@/app/lib/api';
 
 interface Props {
@@ -29,10 +29,15 @@ export function AnalysisReplayPanel({ instrument, timeframe }: Props) {
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // PR #270 review fix: clear last result when the analysed (instrument, timeframe)
-  // pair changes so users don't read stale metrics under a new header. Weights and
-  // window are preserved so the user can simply re-run with the same parameters.
+  // PR #270 round-4 review fix: a request token guards against stale responses.
+  // If the user changes instrument/timeframe (or fires a second replay) while
+  // an earlier request is in flight, its setReport call is dropped because the
+  // token no longer matches. The reset useEffect bumps the token on context
+  // change AND clears the displayed report so the panel starts blank under the
+  // new header; weights / window are preserved.
+  const requestTokenRef = useRef(0);
   useEffect(() => {
+    requestTokenRef.current += 1;
     setReport(null);
     setError(null);
   }, [instrument, timeframe]);
@@ -45,25 +50,32 @@ export function AnalysisReplayPanel({ instrument, timeframe }: Props) {
       setError(`Weights must sum to 1.0 (currently ${total.toFixed(2)})`);
       return;
     }
+    const myToken = ++requestTokenRef.current;
+    const myInstrument = instrument;
+    const myTimeframe = timeframe;
     setLoading(true);
     setError(null);
     try {
       const to = new Date();
       const from = new Date(to.getTime() - days * DAY_MS);
       const res = await api.replayAnalysis({
-        instrument,
-        timeframe,
+        instrument: myInstrument,
+        timeframe: myTimeframe,
         from: from.toISOString(),
         to: to.toISOString(),
         structure,
         orderFlow,
         momentum,
       });
+      // Drop the response if a newer request started OR if context changed
+      // mid-flight — the user is no longer looking at this combination.
+      if (myToken !== requestTokenRef.current) return;
       setReport(res);
     } catch (e) {
+      if (myToken !== requestTokenRef.current) return;
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (myToken === requestTokenRef.current) setLoading(false);
     }
   };
 

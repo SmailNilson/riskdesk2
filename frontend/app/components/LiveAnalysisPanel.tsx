@@ -41,11 +41,16 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
     return () => { cancelled = true; };
   }, []);
 
+  // PR #270 round-4 review fix: schedulerEnabled gates only background WRITES.
+  // /api/analysis/latest still serves persisted verdicts when the scheduler is
+  // paused (troubleshooting / data freeze), and operators must keep visibility
+  // on what was already captured. So isScanned only checks pair coverage; the
+  // schedulerEnabled flag drives a separate banner below.
   const isScanned: boolean | null = scanConfig === null
     ? null
-    : (scanConfig.schedulerEnabled
-        && scanConfig.instruments.includes(instrument)
+    : (scanConfig.instruments.includes(instrument)
         && scanConfig.timeframes.includes(timeframe));
+  const schedulerPaused = scanConfig !== null && !scanConfig.schedulerEnabled;
 
   // Poll the read-only /latest endpoint so verdict_records does not grow with
   // the number of open dashboards. The scheduler is the single authoritative
@@ -59,7 +64,10 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
     } catch (e) {
       const msg = (e as Error).message;
       // 404 during cold start is expected — surface a friendlier hint.
-      setError(msg.includes('404') ? 'Waiting for scheduler — first verdict not yet persisted.' : msg);
+      // (When schedulerPaused is true and we get 404, it really means
+      // "no historical verdicts exist yet" rather than "warming up", so the
+      // banner above clarifies the actual situation.)
+      setError(msg.includes('404') ? 'No verdict persisted yet for this pair.' : msg);
     } finally {
       setLoading(false);
     }
@@ -109,6 +117,11 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex flex-col gap-3">
+      {schedulerPaused && (
+        <div className="text-[11px] text-amber-400 bg-amber-900/20 border border-amber-900/40 rounded px-2 py-1">
+          ⏸ Scheduler paused — showing latest persisted verdict; data is not being refreshed.
+        </div>
+      )}
       <Header verdict={verdict} loading={loading} />
       <ScoreBars verdict={verdict} />
       <FactorLists verdict={verdict} />
