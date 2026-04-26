@@ -125,8 +125,28 @@ public class OrderFlowReadAdapter implements OrderFlowReadPort {
         OrderFlowContext ctx = new OrderFlowContext(delta, buyRatio, trend, div, divType,
             source, bidSize, askSize, imbalance, bestBid, bestAsk, spread);
 
-        Instant asOf = aggOpt.map(TickAggregation::windowEnd).orElse(Instant.now());
+        // PR #269 review fix: asOf must reflect the OLDEST of the live inputs
+        // composed into this context — if depth freezes while ticks continue,
+        // stale depth fields (imbalance, bestBid/Ask, spread) still flow in
+        // and the aggregator must catch that via the staleness budget.
+        Instant aggAsOf = aggOpt.map(TickAggregation::windowEnd).orElse(null);
+        Instant depthAsOf = depthOpt.map(DepthMetrics::timestamp).orElse(null);
+        Instant asOf = oldestNonNull(aggAsOf, depthAsOf);
         return new TimedOrderFlow(ctx, asOf);
+    }
+
+    /**
+     * Returns the oldest of the two timestamps (so the aggregator's staleness
+     * check gates on whichever input is most behind). When both are null the
+     * adapter has no live data to age — fall back to {@link Instant#EPOCH} so
+     * the budget always rejects rather than silently accepting an empty
+     * context as fresh.
+     */
+    private static Instant oldestNonNull(Instant a, Instant b) {
+        if (a == null && b == null) return Instant.EPOCH;
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.isBefore(b) ? a : b;
     }
 
     @Override

@@ -135,16 +135,20 @@ public class IndicatorService {
         if (cached != null && now < cached.expiresAtNanos()) {
             return new SnapshotWithComputedAt(cached.snapshot(), cached.computedAt());
         }
-        // Miss path: run the canonical compute (which writes to cache) and read
-        // back atomically. computeSnapshot can re-cache, so we read after.
+        // Miss path. Capture an upper-bound timestamp BEFORE running the
+        // computation so we never mint a fresh "now" for an existing snapshot
+        // (PR #269 round-3 review fix). The actual snapshot represents data
+        // up to its lastCandleTimestamp, which is necessarily ≤ this instant.
+        java.time.Instant beforeCompute = java.time.Instant.now();
         IndicatorSnapshot computed = computeSnapshot(instrument, timeframe);
         CachedSnapshot fresh = snapshotCache.get(cacheKey);
-        // The cache entry we just wrote may have already expired in pathological
-        // cases (TTL=0); fall back to the snapshot we just got + now() to avoid
-        // returning a mismatched older entry from a concurrent overwrite.
+        // If our snapshot landed in the cache, use its precise computedAt.
+        // Otherwise (a concurrent refresh overwrote, or pathological TTL=0),
+        // anchor on beforeCompute — that's a strict lower bound on the time
+        // our snapshot was produced, never an inflated post-hoc instant.
         java.time.Instant ts = (fresh != null && fresh.snapshot() == computed)
             ? fresh.computedAt()
-            : java.time.Instant.now();
+            : beforeCompute;
         return new SnapshotWithComputedAt(computed, ts);
     }
 
