@@ -29,17 +29,22 @@ export function AnalysisReplayPanel({ instrument, timeframe }: Props) {
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // PR #270 round-4 review fix: a request token guards against stale responses.
+  // Round-4 review fix: a request token guards against stale responses.
   // If the user changes instrument/timeframe (or fires a second replay) while
   // an earlier request is in flight, its setReport call is dropped because the
-  // token no longer matches. The reset useEffect bumps the token on context
-  // change AND clears the displayed report so the panel starts blank under the
-  // new header; weights / window are preserved.
+  // token no longer matches.
+  //
+  // Round-5 review fix: the context-change effect must ALSO reset {@code loading}.
+  // Otherwise the in-flight request's finally{} guard skips setLoading(false)
+  // (token mismatch) and the panel stays stuck with loading=true / Run button
+  // disabled until remount. Resetting here is safe because no request is in
+  // flight for the NEW context; the next runReplay will set loading=true again.
   const requestTokenRef = useRef(0);
   useEffect(() => {
     requestTokenRef.current += 1;
     setReport(null);
     setError(null);
+    setLoading(false);
   }, [instrument, timeframe]);
 
   const total = structure + orderFlow + momentum;
