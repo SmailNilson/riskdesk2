@@ -127,10 +127,19 @@ public class AnalysisSnapshotAggregator {
         Duration indicatorBudget = indicatorStalenessBudget(timeframe);
         rejectStaleness("indicators", indicators.asOf(), captureT, indicatorBudget);
         rejectStaleness("smc", smc.asOf(), captureT, indicatorBudget);
-        // Order-flow + macro must be near-real-time regardless of the analysis timeframe
-        // — they reflect the live tick stream, not closed bars.
+        // Order-flow must be near-real-time regardless of the analysis timeframe —
+        // it reflects the live tick stream, not closed bars.
         rejectStaleness("orderFlow", orderFlow.asOf(), captureT, ORDER_FLOW_MAX_STALENESS);
-        rejectStaleness("macro", macro.asOf(), captureT, ORDER_FLOW_MAX_STALENESS);
+
+        // Macro is a soft-fail (PR #269 round-7 review): the rule-based scoring
+        // engine doesn't currently consume DXY at all (the layer hooks are
+        // there but no contribution is wired). When DxyMarketService falls back
+        // to a persisted snapshot during a quote outage, the timestamp is old
+        // and the 5s budget would reject the entire capture — turning a macro-
+        // feed outage into a full /api/analysis/live 503 over scoring inputs
+        // that aren't even read. Log loudly and pass null context instead.
+        var effectiveMacro = checkMacroSoftFail(macro.asOf(), macro.macro(), captureT,
+            instrument, timeframe);
 
         return new LiveAnalysisSnapshot(
             instrument, timeframe, decisionT, captureT,
@@ -140,8 +149,29 @@ public class AnalysisSnapshotAggregator {
             smc.smc(),
             orderFlow.context(),
             momentum, absorption, dist, cycle,
-            macro.macro()
+            effectiveMacro
         );
+    }
+
+    /**
+     * Macro staleness is non-fatal — when the DXY feed degrades to a fallback
+     * snapshot, we keep the capture going with neutral macro context rather
+     * than 503-ing the whole {@code /api/analysis/live} flow. Returns the
+     * provided macro when fresh, a null-valued macro otherwise.
+     */
+    private static com.riskdesk.domain.analysis.model.MacroContext checkMacroSoftFail(
+            Instant asOf, com.riskdesk.domain.analysis.model.MacroContext macro,
+            Instant captureT,
+            com.riskdesk.domain.model.Instrument instrument,
+            com.riskdesk.domain.shared.vo.Timeframe timeframe) {
+        if (asOf == null) return macro;
+        Duration age = Duration.between(asOf, captureT);
+        if (age.compareTo(ORDER_FLOW_MAX_STALENESS) > 0) {
+            log.warn("Macro stale by {}s for {} {} — using neutral context (soft-fail)",
+                age.toSeconds(), instrument, timeframe);
+            return new com.riskdesk.domain.analysis.model.MacroContext(null, null, "FLAT");
+        }
+        return macro;
     }
 
     /**

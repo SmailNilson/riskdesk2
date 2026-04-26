@@ -110,6 +110,12 @@ public class LiveAnalysisController {
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         }
-        return ResponseEntity.ok(replayService.replay(inst, tf, req.from(), req.to(), weights));
+        try {
+            return ResponseEntity.ok(replayService.replay(inst, tf, req.from(), req.to(), weights));
+        } catch (IllegalArgumentException e) {
+            // Out-of-range window or invalid bounds — surfaced as 400 so the
+            // client can correct the request rather than retrying blindly.
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
     }
 }
