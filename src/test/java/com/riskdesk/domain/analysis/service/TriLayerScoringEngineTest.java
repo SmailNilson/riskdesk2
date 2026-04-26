@@ -172,6 +172,36 @@ class TriLayerScoringEngineTest {
     }
 
     @Test
+    void smcContext_acceptsNullMultiResolutionEntries() {
+        // PR #269 review fix — IndicatorService can legitimately produce null biases
+        // before structure is established (fresh contract, warm-up). The map copy
+        // must drop those rather than NPE.
+        var mr = new java.util.HashMap<String, String>();
+        mr.put("swing50", "BULLISH");
+        mr.put("swing25", null);          // ← legitimate null
+        mr.put("swing9", "BULLISH");
+        mr.put("internal5", null);        // ← legitimate null
+        mr.put("micro1", "BULLISH");
+
+        // Construction must not throw
+        var smc = new SmcContext("BULLISH", "BULLISH", "DISCOUNT", null, null, null,
+            mr, null, null, null, null, null, List.of(), List.of(), List.of());
+
+        // Null entries are dropped, valid ones kept
+        assertThat(smc.multiResolutionBias()).hasSize(3);
+        assertThat(smc.multiResolutionBias()).containsKeys("swing50", "swing9", "micro1");
+        assertThat(smc.multiResolutionBias()).doesNotContainKey("swing25");
+        assertThat(smc.multiResolutionBias()).doesNotContainKey("internal5");
+
+        // Engine handles the partial map without crashing
+        var ind = new IndicatorSnapshot(BigDecimal.valueOf(100), 50.0, "NEUTRAL",
+            0.0, null, null, 0.0, 0.5, false, 50.0, 50.0, null, 0.0, 0.0);
+        var snap = snapshot(ind, smc, flatOrderFlow(), List.of(), List.of(), List.of(), List.of());
+        DirectionalBias bias = engine.score(snap);
+        assertThat(bias).isNotNull();
+    }
+
+    @Test
     void internalVsSwingConflict_pullsScoreBackTowardNeutral() {
         // multiRes is fully bullish (max +30 from that contribution alone), but internal vs
         // swing disagree → the alignment branch must pull back ~-10 toward neutral.

@@ -75,11 +75,24 @@ public class AnalysisSnapshotAggregator {
         var macroFut = CompletableFuture.supplyAsync(
             () -> macroPort.contextAsOf(decisionT), executor);
 
+        // Keep the list around so we can cancel them all if any slow dependency
+        // hangs the fan-out — without this, hung tasks keep occupying the
+        // fixed-size analysisExecutor pool and starve subsequent captures
+        // (PR #269 review fix).
+        java.util.List<CompletableFuture<?>> all = java.util.List.of(
+            indicatorsFut, smcFut, orderFlowFut, momentumFut,
+            absorptionFut, distFut, cycleFut, macroFut);
+
         try {
-            CompletableFuture.allOf(indicatorsFut, smcFut, orderFlowFut, momentumFut,
-                                    absorptionFut, distFut, cycleFut, macroFut)
+            CompletableFuture.allOf(all.toArray(new CompletableFuture<?>[0]))
                 .get(FAN_OUT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
+            // Free executor threads by cancelling outstanding work. Tasks that
+            // already completed are no-ops; in-flight tasks are interrupted
+            // (mayInterruptIfRunning=true) so blocking I/O can unwind.
+            for (CompletableFuture<?> f : all) {
+                if (!f.isDone()) f.cancel(true);
+            }
             throw new StaleSnapshotException("Fan-out timeout or failure: " + e.getMessage());
         }
 
