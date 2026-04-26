@@ -52,7 +52,14 @@ public class VerdictRecordEntity {
     @Column(nullable = false)
     private int scoringEngineVersion;
 
-    @Column(nullable = false, precision = 18, scale = 6)
+    /**
+     * Last observed price at decision time. Nullable: during warm-up / no-candle
+     * windows {@code IndicatorService.emptySnapshot(...)} returns null, which the
+     * aggregator legitimately forwards. PR #269 round-6 review fix — previously
+     * non-null, so warm-up inserts threw silently inside {@code LiveVerdictService}
+     * and {@code /recent} / replay skipped entire startup periods.
+     */
+    @Column(nullable = true, precision = 18, scale = 6)
     private BigDecimal currentPrice;
 
     @Column(nullable = false, length = 8)
