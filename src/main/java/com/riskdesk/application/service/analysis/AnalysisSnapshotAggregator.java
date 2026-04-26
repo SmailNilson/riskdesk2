@@ -32,7 +32,8 @@ import java.util.concurrent.TimeUnit;
 public class AnalysisSnapshotAggregator {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisSnapshotAggregator.class);
-    private static final Duration MAX_STALENESS = Duration.ofSeconds(5);
+    /** Order-flow + macro must be near-real-time. Indicators allowed to scale with TF. */
+    private static final Duration ORDER_FLOW_MAX_STALENESS = Duration.ofSeconds(5);
     private static final long FAN_OUT_TIMEOUT_SECONDS = 3;
     private static final int MOMENTUM_WINDOW = 15;
     private static final int ABSORPTION_WINDOW = 10;
@@ -93,10 +94,15 @@ public class AnalysisSnapshotAggregator {
         var cycle = cycleFut.join();
         var macro = macroFut.join();
 
-        rejectStaleness("indicators", indicators.asOf(), captureT);
-        rejectStaleness("smc", smc.asOf(), captureT);
-        rejectStaleness("orderFlow", orderFlow.asOf(), captureT);
-        rejectStaleness("macro", macro.asOf(), captureT);
+        // Indicator + SMC staleness scales with the timeframe (HTF caches refresh slowly
+        // — a 30s-old 1h indicator is still meaningful, the candle hasn't closed yet).
+        Duration indicatorBudget = indicatorStalenessBudget(timeframe);
+        rejectStaleness("indicators", indicators.asOf(), captureT, indicatorBudget);
+        rejectStaleness("smc", smc.asOf(), captureT, indicatorBudget);
+        // Order-flow + macro must be near-real-time regardless of the analysis timeframe
+        // — they reflect the live tick stream, not closed bars.
+        rejectStaleness("orderFlow", orderFlow.asOf(), captureT, ORDER_FLOW_MAX_STALENESS);
+        rejectStaleness("macro", macro.asOf(), captureT, ORDER_FLOW_MAX_STALENESS);
 
         return new LiveAnalysisSnapshot(
             instrument, timeframe, decisionT, captureT,
@@ -110,12 +116,24 @@ public class AnalysisSnapshotAggregator {
         );
     }
 
-    private static void rejectStaleness(String source, Instant asOf, Instant captureT) {
+    private static void rejectStaleness(String source, Instant asOf, Instant captureT, Duration budget) {
         if (asOf == null) return;
         Duration age = Duration.between(asOf, captureT);
-        if (age.compareTo(MAX_STALENESS) > 0) {
-            log.warn("Snapshot rejected — {} stale by {}s", source, age.toSeconds());
-            throw new StaleSnapshotException(source + " stale by " + age.toSeconds() + "s");
+        if (age.compareTo(budget) > 0) {
+            log.warn("Snapshot rejected — {} stale by {}s (budget {}s)",
+                source, age.toSeconds(), budget.toSeconds());
+            throw new StaleSnapshotException(
+                source + " stale by " + age.toSeconds() + "s (budget " + budget.toSeconds() + "s)");
         }
+    }
+
+    /**
+     * Indicator/SMC staleness budget scales with the analysis timeframe so that
+     * HTF analyses don't reject every cached read. Rule of thumb: ½ of the
+     * timeframe period, capped at 5 minutes (the daily-cache TTL).
+     */
+    private static Duration indicatorStalenessBudget(Timeframe tf) {
+        int halfPeriodSeconds = Math.max(5, tf.periodSeconds() / 2);
+        return Duration.ofSeconds(Math.min(halfPeriodSeconds, 300));
     }
 }

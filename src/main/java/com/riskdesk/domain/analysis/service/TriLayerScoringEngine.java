@@ -122,7 +122,11 @@ public final class TriLayerScoringEngine {
                 bullish + " bullish vs " + bearish + " bearish across " + total + " horizons"));
         }
 
-        // Internal vs swing alignment — up to ±10 for confluence, -10 if conflict
+        // Internal vs swing alignment — up to ±10 for confluence, real penalty when in conflict.
+        // PR #269 review fix: previously the conflict branch contributed 0, leaving the structure
+        // layer overly directional when lower vs higher structure disagreed. Now the conflict
+        // pulls the running score back toward neutral (counter the prevailing direction so far),
+        // capped at ±10 magnitude — the same headroom alignment grants in the friendly case.
         if (smc.internalBias() != null && smc.swingBias() != null) {
             double contribution;
             String rationale;
@@ -131,8 +135,12 @@ public final class TriLayerScoringEngine {
                                "BEARISH".equals(smc.internalBias()) ? -10.0 : 0.0;
                 rationale = "Internal and swing aligned " + smc.internalBias();
             } else {
-                contribution = 0.0;
-                rationale = "Internal " + smc.internalBias() + " vs swing " + smc.swingBias();
+                // Pull-back toward zero — magnitude up to 10 against current direction.
+                // sign(score)=0 produces a 0 pull-back, which is correct: nothing to penalize.
+                double sign = Math.signum(score);
+                contribution = -sign * 10.0;
+                rationale = "Internal " + smc.internalBias() + " vs swing " + smc.swingBias()
+                    + " (pull-back " + (contribution >= 0 ? "+" : "") + (int) contribution + ")";
             }
             score += contribution;
             if (contribution != 0.0) {

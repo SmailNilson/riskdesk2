@@ -172,6 +172,28 @@ class TriLayerScoringEngineTest {
     }
 
     @Test
+    void internalVsSwingConflict_pullsScoreBackTowardNeutral() {
+        // multiRes is fully bullish (max +30 from that contribution alone), but internal vs
+        // swing disagree → the alignment branch must pull back ~-10 toward neutral.
+        var smcAligned = new SmcContext("BULLISH", "BULLISH", null, null, null, null,
+            Map.of("swing50", "BULLISH", "swing25", "BULLISH",
+                   "swing9", "BULLISH", "internal5", "BULLISH", "micro1", "BULLISH"),
+            null, null, null, null, null, List.of(), List.of(), List.of());
+        var smcConflict = new SmcContext("BULLISH", "BEARISH", null, null, null, null,
+            Map.of("swing50", "BULLISH", "swing25", "BULLISH",
+                   "swing9", "BULLISH", "internal5", "BULLISH", "micro1", "BULLISH"),
+            null, null, null, null, null, List.of(), List.of(), List.of());
+        double aligned  = engine.scoreStructure(smcAligned).value();
+        double conflict = engine.scoreStructure(smcConflict).value();
+
+        // Conflict score must be strictly less bullish than aligned (penalty applied)
+        assertThat(conflict).isLessThan(aligned);
+        // Alignment branch contributes +10 when aligned, conflict contributes -10 against
+        // the prevailing direction → expected gap is ~20 points.
+        assertThat(aligned - conflict).isGreaterThan(15.0);
+    }
+
+    @Test
     void multiResolutionSplitFlaggedAsContradiction() {
         var smc = new SmcContext("BULLISH", "BEARISH", "DISCOUNT", 27190.0, 27360.0, 27000.0,
             Map.of("swing50", "BEARISH", "swing25", "BEARISH",

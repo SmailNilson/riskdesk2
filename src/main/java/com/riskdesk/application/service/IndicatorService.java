@@ -90,8 +90,22 @@ public class IndicatorService {
     );
 
     // OPT-1: TTL-based snapshot cache — tiered by timeframe to avoid recomputing slow-changing HTF
-    private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos) {}
+    private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos, java.time.Instant computedAt) {}
     private final ConcurrentHashMap<String, CachedSnapshot> snapshotCache = new ConcurrentHashMap<>();
+
+    /**
+     * Returns the wall-clock instant when the cached indicator snapshot for
+     * {@code (instrument, timeframe)} was last computed. Empty when no cache
+     * entry exists yet.
+     * <p>
+     * Consumers (e.g. the live-analysis aggregator) use this as the {@code asOf}
+     * timestamp for staleness budgets — without it, callers cannot tell a
+     * fresh computation from a 5-minute-old daily-timeframe cached value.
+     */
+    public java.util.Optional<java.time.Instant> snapshotComputedAt(Instrument instrument, String timeframe) {
+        CachedSnapshot cached = snapshotCache.get(instrument.name() + ":" + timeframe);
+        return cached == null ? java.util.Optional.empty() : java.util.Optional.of(cached.computedAt());
+    }
 
     private static long cacheTtlNanos(String timeframe) {
         return switch (timeframe) {
@@ -401,7 +415,7 @@ public class IndicatorService {
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
-        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe)));
+        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe), java.time.Instant.now()));
         return result;
     }
 

@@ -6,6 +6,8 @@ import com.riskdesk.domain.analysis.model.SmcContext;
 import com.riskdesk.domain.analysis.port.IndicatorSnapshotPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.vo.Timeframe;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -20,14 +22,27 @@ import java.util.Map;
  * domain-side {@link IndicatorSnapshotPort}. Converts the wide DTO into the
  * two narrow domain models the scoring engine consumes.
  * <p>
- * The {@code IndicatorService} is already cached internally (see
- * {@code snapshotCache}) — we trust its as-of timestamp by stamping the result
- * with {@code Instant.now()} just after the call returns. If we add an
- * explicit {@code computedAt} field to {@code IndicatorSnapshot} later, we
- * should plumb it through here.
+ * <b>Staleness contract (PR #269 review fix):</b>
+ * {@code IndicatorService} caches snapshots with a TTL up to 5 minutes on
+ * daily timeframes. Stamping {@code Instant.now()} blindly here would let a
+ * 4-minute-old daily snapshot pass the aggregator's 5-second staleness
+ * budget. Instead we read the cache's real {@code computedAt} via
+ * {@link IndicatorService#snapshotComputedAt(Instrument, String)}.
+ * <p>
+ * The {@code lastCandleTimestamp} is also a candidate for {@code asOf} but
+ * it represents the data window's right edge (always older than compute time
+ * on closed-bar timeframes); the cache compute instant is the tighter, more
+ * honest signal of "when was this answer produced".
+ * <p>
+ * The {@code decisionAt} parameter is honoured implicitly — indicator inputs
+ * are bar-aligned and the cache TTL guarantees the snapshot reflects state
+ * at-or-before {@code computedAt}, which the aggregator then compares to its
+ * own staleness budget.
  */
 @Component
 public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
+
+    private static final Logger log = LoggerFactory.getLogger(IndicatorSnapshotAdapter.class);
 
     private final IndicatorService indicatorService;
 
@@ -38,7 +53,7 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
     @Override
     public TimedIndicators indicatorsAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
         IndicatorSnapshot src = indicatorService.computeSnapshot(instrument, timeframe.label());
-        Instant asOf = Instant.now();
+        Instant asOf = resolveAsOf(instrument, timeframe);
 
         var domain = new com.riskdesk.domain.analysis.model.IndicatorSnapshot(
             src.lastPrice(),
@@ -62,7 +77,7 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
     @Override
     public TimedSmc smcAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
         IndicatorSnapshot src = indicatorService.computeSnapshot(instrument, timeframe.label());
-        Instant asOf = Instant.now();
+        Instant asOf = resolveAsOf(instrument, timeframe);
 
         Map<String, String> mr = new HashMap<>();
         if (src.multiResolutionBias() != null) {
@@ -126,6 +141,22 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
             breaks
         );
         return new TimedSmc(smc, asOf);
+    }
+
+    /**
+     * Resolves the truthful {@code asOf} timestamp for an indicator/SMC snapshot:
+     * the actual compute instant from the cache. Falls back to {@code Instant.EPOCH}
+     * (the "infinitely stale" sentinel) when the cache is empty — this ensures the
+     * aggregator's staleness budget rejects rather than silently accepting a fresh
+     * computation we cannot date precisely.
+     */
+    private Instant resolveAsOf(Instrument instrument, Timeframe timeframe) {
+        return indicatorService.snapshotComputedAt(instrument, timeframe.label())
+            .orElseGet(() -> {
+                log.warn("No cached computedAt for {} {} — flagging snapshot as stale to be safe",
+                    instrument, timeframe.label());
+                return Instant.EPOCH;
+            });
     }
 
     private static Double doubleOf(BigDecimal v) {
