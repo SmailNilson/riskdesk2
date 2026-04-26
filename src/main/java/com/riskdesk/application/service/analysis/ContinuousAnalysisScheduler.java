@@ -78,9 +78,20 @@ public class ContinuousAnalysisScheduler {
         }
     }
 
-    /** Daily purge of verdict history — prevents unbounded growth of the snapshot JSON column. */
+    /**
+     * Daily purge of verdict history — prevents unbounded growth of the snapshot
+     * JSON column. Gated by the same {@code schedulerEnabled} flag as {@link #scanAll}:
+     * disabling the feature for troubleshooting / data freeze must NOT silently
+     * delete historical verdicts the next morning. Operators who want to keep
+     * deleting old data while pausing scanning should use a future dedicated
+     * {@code purgeEnabled} flag (not yet introduced — PR #270 review).
+     */
     @Scheduled(cron = "0 17 3 * * *")
     public void purgeStaleVerdicts() {
+        if (!properties.isSchedulerEnabled()) {
+            log.debug("Verdict purge skipped — scheduler is disabled");
+            return;
+        }
         Instant cutoff = Instant.now().minus(properties.getRetentionDays(), ChronoUnit.DAYS);
         try {
             int deleted = verdictRepository.deleteByDecisionTimestampBefore(cutoff);

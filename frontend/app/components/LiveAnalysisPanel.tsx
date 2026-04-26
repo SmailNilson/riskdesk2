@@ -25,17 +25,29 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // PR #270 review fix: poll the read-only /latest endpoint so verdict_records
+  // does not grow with the number of open dashboards. The scheduler is the
+  // single authoritative writer of new verdict rows.
   const fetchVerdict = useCallback(async () => {
     setLoading(true);
     try {
-      const v = await api.getLiveAnalysis(instrument, timeframe);
+      const v = await api.getLatestAnalysis(instrument, timeframe);
       setVerdict(v);
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      // 404 during cold start is expected — surface a friendlier hint.
+      setError(msg.includes('404') ? 'Waiting for scheduler — first verdict not yet persisted.' : msg);
     } finally {
       setLoading(false);
     }
+  }, [instrument, timeframe]);
+
+  // Reset displayed verdict when instrument/timeframe changes so we don't
+  // briefly show stale data from the previous context under a new header.
+  useEffect(() => {
+    setVerdict(null);
+    setError(null);
   }, [instrument, timeframe]);
 
   useEffect(() => {

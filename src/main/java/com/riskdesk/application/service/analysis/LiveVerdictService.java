@@ -75,6 +75,10 @@ public class LiveVerdictService {
         return verdictRepository.findRecent(instrument, timeframe, limit);
     }
 
+    public java.util.Optional<LiveVerdict> findLatest(Instrument instrument, Timeframe timeframe) {
+        return verdictRepository.findLatest(instrument, timeframe);
+    }
+
     /** Pure score — no persistence, no publish. Used by replay/backtest. */
     public LiveVerdict scoreOnly(LiveAnalysisSnapshot snap, ScoringWeights weights) {
         TriLayerScoringEngine engine = new TriLayerScoringEngine(weights);

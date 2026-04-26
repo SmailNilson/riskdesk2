@@ -73,6 +73,34 @@ public class LiveAnalysisController {
     }
 
     /**
+     * GET /api/analysis/latest/{instrument}/{timeframe}
+     * Returns the most recent persisted verdict <i>without</i> triggering a
+     * fresh compute. Suitable for dashboard polling — the scheduler is the
+     * authoritative producer of new verdict rows, so multi-viewer scenarios
+     * cannot inflate {@code live_verdict_records} by sheer dashboard count.
+     * <p>
+     * Returns 404 if no verdict has been persisted yet for the pair (typical
+     * during cold start before the scheduler has had time to fire).
+     */
+    @GetMapping("/latest/{instrument}/{timeframe}")
+    public ResponseEntity<LiveVerdictResponse> latest(@PathVariable String instrument,
+                                                        @PathVariable String timeframe) {
+        Instrument inst;
+        Timeframe tf;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+            tf = Timeframe.fromLabel(timeframe);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+        return verdictService.findLatest(inst, tf)
+            .map(v -> ResponseEntity.ok(LiveVerdictResponse.from(v)))
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                "No verdict persisted yet for " + inst + " " + tf
+                + ". The scheduler may still be warming up."));
+    }
+
+    /**
      * GET /api/analysis/recent/{instrument}/{timeframe}?limit=20 — last N verdicts.
      */
     @GetMapping("/recent/{instrument}/{timeframe}")

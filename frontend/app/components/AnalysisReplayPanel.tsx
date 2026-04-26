@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, ReplayReport } from '@/app/lib/api';
 
 interface Props {
@@ -28,6 +28,14 @@ export function AnalysisReplayPanel({ instrument, timeframe }: Props) {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // PR #270 review fix: clear last result when the analysed (instrument, timeframe)
+  // pair changes so users don't read stale metrics under a new header. Weights and
+  // window are preserved so the user can simply re-run with the same parameters.
+  useEffect(() => {
+    setReport(null);
+    setError(null);
+  }, [instrument, timeframe]);
 
   const total = structure + orderFlow + momentum;
   const balanced = Math.abs(total - 1.0) < 0.01;

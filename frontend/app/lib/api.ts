@@ -1006,6 +1006,12 @@ export interface ReplayReport {
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
+  // Read-only — returns the latest persisted verdict (no compute, no DB write).
+  // Use this for dashboard polling so verdict_records grows at scheduler cadence
+  // only, regardless of how many viewers are open.
+  getLatestAnalysis: (instrument: string, timeframe: string) =>
+    get<LiveVerdictView>(`/api/analysis/latest/${instrument}/${timeframe}`),
+  // On-demand fresh compute — call sparingly, this writes a verdict row.
   getLiveAnalysis: (instrument: string, timeframe: string) =>
     get<LiveVerdictView>(`/api/analysis/live/${instrument}/${timeframe}`),
   getRecentVerdicts: (instrument: string, timeframe: string, limit = 20) =>
