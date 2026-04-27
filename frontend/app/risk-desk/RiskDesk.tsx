@@ -10,7 +10,7 @@ import { MetricsBar, RolloverBanner } from './components/Metrics';
 import { ReviewView } from './components/ReviewView';
 import { RiskAlertsBar } from './components/RiskAlertsBar';
 import { SetupView } from './components/SetupView';
-import { TopBar, ViewMode } from './components/TopBar';
+import { TopBar, TZ_OPTIONS, TzEntry, ViewMode } from './components/TopBar';
 import { TweakRadio, TweakSection, TweakSlider, TweakToggle, TweaksPanel } from './components/TweaksPanel';
 import { RiskDeskProvider, useRiskDesk } from './lib/RiskDeskContext';
 
@@ -64,6 +64,7 @@ function RiskDeskShell() {
   const tf = D.tf;
   const setTf = D.setTf;
   const [showRollover, setShowRollover] = useState(true);
+  const [timezone, setTimezone] = useState<TzEntry>(TZ_OPTIONS[0]);
 
   // Resizable chart height as a *percentage* of the workspace column so the
   // chart adapts to viewport changes (Tailscale, projector, fullscreen demo).
@@ -137,12 +138,20 @@ function RiskDeskShell() {
         onTf={setTf}
         connected={D.wsConnected || D.backendReachable}
         latencyMs={D.latencyMs}
+        timezone={timezone}
+        onTimezone={setTimezone}
+        onPurge={D.purgeInstrument}
       />
 
       {tweaks.showTicker ? <MetricsBar portfolio={D.portfolio} watchlist={D.watchlist} /> : <div />}
 
       {tweaks.showRolloverBanner && showRollover ? (
-        <RolloverBanner rollover={D.rollover} onDismiss={() => setShowRollover(false)} />
+        <RolloverBanner
+          rollover={D.rollover}
+          rolloverDetails={D.rolloverDetails}
+          onDismiss={() => setShowRollover(false)}
+          onConfirm={D.confirmRollover}
+        />
       ) : (
         <div />
       )}
@@ -220,9 +229,14 @@ function RiskDeskShell() {
             {tweaks.view === 'setup' && (
               <SetupView
                 strategy={D.strategy}
+                strategyVotes={D.strategyVotes}
+                strategyLayerScores={D.strategyLayerScores}
+                strategyFinalScore={D.strategyFinalScore}
+                strategyVetoReasons={D.strategyVetoReasons}
                 indicators={D.indicators}
                 positions={D.positions}
                 playbook={D.playbook}
+                playbookLive={D.playbookLive}
                 dxy={D.dxy}
                 correlations={D.correlations}
                 orderflowProd={D.orderflowProd}
@@ -243,7 +257,16 @@ function RiskDeskShell() {
                 instrument={instrument}
               />
             )}
-            {tweaks.view === 'review' && <ReviewView backtest={D.backtest} trailing={D.trailing} />}
+            {tweaks.view === 'review' && (
+              <ReviewView
+                backtest={D.backtest}
+                trailing={D.trailing}
+                decisions={D.decisions}
+                simulations={D.simulations}
+                simulationStats={D.simulationStats}
+                instrument={instrument}
+              />
+            )}
           </div>
         </div>
 

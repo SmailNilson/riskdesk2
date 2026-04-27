@@ -601,6 +601,204 @@ export function mapStrategy(d: StrategyDecisionView, fallback: Strategy): Strate
   };
 }
 
+// ─── Playbook (live evaluation: 7/7 checklist) ───────────────────
+import type {
+  PlaybookEvaluation,
+  TradeSimulationView,
+  TradeDecision,
+  RolloverStatusResponse,
+  RolloverOiStatus,
+} from '../../lib/api';
+import type {
+  PlaybookLive,
+  StrategyAgentVoteView,
+  StrategyLayerScore,
+  TradeDecisionView,
+  SimulationView,
+  SimulationStats,
+  RolloverInstrument,
+} from './data';
+
+export function mapPlaybookLive(p: PlaybookEvaluation | null): PlaybookLive {
+  if (!p) {
+    return {
+      available: false,
+      verdict: '—',
+      checklistScore: 0,
+      checklistMax: 7,
+      tradeDirection: null,
+      bestSetup: null,
+      checklist: [],
+      evaluatedAt: null,
+    };
+  }
+  const checklist = (p.checklist ?? []).map((c) => ({
+    step: c.step,
+    label: c.label,
+    status: c.status,
+    detail: c.detail,
+  }));
+  return {
+    available: true,
+    verdict: p.verdict ?? '—',
+    checklistScore: p.checklistScore ?? 0,
+    checklistMax: Math.max(checklist.length, 7),
+    tradeDirection: p.filters?.tradeDirection ?? null,
+    bestSetup: p.bestSetup
+      ? {
+          type: p.bestSetup.type,
+          zoneName: p.bestSetup.zoneName,
+          rrRatio: p.bestSetup.rrRatio,
+        }
+      : null,
+    checklist,
+    evaluatedAt: p.evaluatedAt ?? null,
+  };
+}
+
+// ─── Strategy votes / layer scores (rich view) ───────────────────
+const LAYER_WEIGHTS: Record<'CONTEXT' | 'ZONE' | 'TRIGGER', number> = {
+  CONTEXT: 0.5,
+  ZONE: 0.3,
+  TRIGGER: 0.2,
+};
+
+export function mapStrategyVotes(
+  votes: import('../../lib/api').StrategyAgentVote[] | undefined
+): StrategyAgentVoteView[] {
+  if (!votes?.length) return [];
+  return votes.map((v) => ({
+    agentId: v.agentId,
+    layer: v.layer,
+    vote: v.directionalVote,
+    confidence: v.confidence,
+    abstain: v.abstain,
+    vetoReason: v.vetoReason,
+    evidence: v.evidence ?? [],
+  }));
+}
+
+export function mapStrategyLayerScores(
+  layerScores: Partial<Record<'CONTEXT' | 'ZONE' | 'TRIGGER', number>> | undefined
+): StrategyLayerScore[] {
+  const layers: Array<'CONTEXT' | 'ZONE' | 'TRIGGER'> = ['CONTEXT', 'ZONE', 'TRIGGER'];
+  return layers.map((l) => ({
+    layer: l,
+    weight: LAYER_WEIGHTS[l],
+    score: layerScores?.[l] ?? 0,
+  }));
+}
+
+// ─── Trade decisions (orchestrator history) ──────────────────────
+export function mapDecisions(rows: TradeDecision[] | null | undefined): TradeDecisionView[] {
+  if (!rows?.length) return [];
+  return rows.map((d) => ({
+    id: d.id,
+    createdAt: d.createdAt,
+    instrument: d.instrument,
+    timeframe: d.timeframe,
+    direction: d.direction,
+    setupType: d.setupType,
+    zoneName: d.zoneName,
+    eligibility: d.eligibility,
+    verdict: d.verdict,
+    sizePercent: d.sizePercent,
+    entry: d.entryPrice,
+    stop: d.stopLoss,
+    tp1: d.takeProfit1,
+    tp2: d.takeProfit2,
+    rrRatio: d.rrRatio,
+    status: d.status,
+  }));
+}
+
+// ─── Simulations (Phase 2 read model) ────────────────────────────
+export function mapSimulations(rows: TradeSimulationView[] | null | undefined): SimulationView[] {
+  if (!rows?.length) return [];
+  return rows.map((s) => ({
+    id: s.id,
+    reviewId: s.reviewId,
+    reviewType: s.reviewType,
+    instrument: s.instrument,
+    action: s.action,
+    status: s.simulationStatus,
+    activationTime: s.activationTime,
+    resolutionTime: s.resolutionTime,
+    maxDrawdownPoints: s.maxDrawdownPoints,
+    trailingStopResult: s.trailingStopResult,
+    trailingExitPrice: s.trailingExitPrice,
+    bestFavorablePrice: s.bestFavorablePrice,
+    createdAt: s.createdAt,
+  }));
+}
+
+export function buildSimStats(rows: SimulationView[]): SimulationStats {
+  const stats: SimulationStats = {
+    total: rows.length,
+    win: 0,
+    loss: 0,
+    missed: 0,
+    cancelled: 0,
+    pending: 0,
+    active: 0,
+    winRatePct: null,
+    avgMfe: null,
+  };
+  if (!rows.length) return stats;
+  let mfeSum = 0;
+  let mfeCount = 0;
+  for (const r of rows) {
+    const s = r.status?.toUpperCase?.() ?? '';
+    if (s === 'WIN') stats.win++;
+    else if (s === 'LOSS') stats.loss++;
+    else if (s === 'MISSED') stats.missed++;
+    else if (s === 'CANCELLED') stats.cancelled++;
+    else if (s === 'PENDING_ENTRY') stats.pending++;
+    else if (s === 'ACTIVE') stats.active++;
+    if (r.bestFavorablePrice != null && r.activationTime) {
+      mfeSum += r.bestFavorablePrice;
+      mfeCount++;
+    }
+  }
+  const resolved = stats.win + stats.loss;
+  stats.winRatePct = resolved > 0 ? (stats.win / resolved) * 100 : null;
+  stats.avgMfe = mfeCount > 0 ? mfeSum / mfeCount : null;
+  return stats;
+}
+
+// ─── Rollover (status + OI merged per instrument) ────────────────
+export function mapRollover(
+  status: RolloverStatusResponse | null,
+  oi: RolloverOiStatus | null
+): RolloverInstrument[] {
+  if (!status?.rolloverStatus) return [];
+  const out: RolloverInstrument[] = [];
+  for (const [instr, info] of Object.entries(status.rolloverStatus)) {
+    const oiEntry = oi?.[instr] ?? {};
+    const oiAction =
+      oiEntry.action === 'RECOMMEND_ROLL'
+        ? 'RECOMMEND_ROLL'
+        : oiEntry.action === 'NO_ACTION'
+        ? 'NO_ACTION'
+        : oiEntry.status === 'UNAVAILABLE' || oiEntry.status === 'ERROR'
+        ? 'UNAVAILABLE'
+        : null;
+    out.push({
+      instrument: instr,
+      contractMonth: info.contractMonth ?? null,
+      expiryDate: info.expiryDate ?? null,
+      daysToExpiry: info.daysToExpiry ?? 999,
+      status: info.status ?? 'STABLE',
+      oiAction: oiAction as RolloverInstrument['oiAction'],
+      currentMonth: oiEntry.currentMonth ?? null,
+      nextMonth: oiEntry.nextMonth ?? null,
+      currentOI: oiEntry.currentOI ?? null,
+      nextOI: oiEntry.nextOI ?? null,
+    });
+  }
+  return out;
+}
+
 // ─── Correlations (subset — backend exposes oil-nasdaq only) ─────
 export function mapCorrelations(history: CorrelationSignal[], fallback: Correlations): Correlations {
   // Backend's CorrelationStatus is oil/nasdaq only. The redesign's matrix is broader,

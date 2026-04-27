@@ -223,6 +223,102 @@ export interface PlaybookEntry {
   active: boolean;
 }
 
+// Live playbook eval (mirror of backend PlaybookEvaluation, trimmed for the panel).
+export interface PlaybookLiveChecklist {
+  step: number;
+  label: string;
+  status: 'PASS' | 'FAIL' | 'WAITING';
+  detail: string;
+}
+export interface PlaybookLive {
+  available: boolean;
+  verdict: string;
+  checklistScore: number;
+  checklistMax: number;
+  tradeDirection: 'LONG' | 'SHORT' | null;
+  bestSetup: { type: string; zoneName: string; rrRatio: number } | null;
+  checklist: PlaybookLiveChecklist[];
+  evaluatedAt: string | null;
+}
+
+// Strategy votes layer (CONTEXT 50 / ZONE 30 / TRIGGER 20)
+export interface StrategyAgentVoteView {
+  agentId: string;
+  layer: 'CONTEXT' | 'ZONE' | 'TRIGGER';
+  vote: number; // -100..+100
+  confidence: number; // 0..1
+  abstain: boolean;
+  vetoReason: string | null;
+  evidence: string[];
+}
+export interface StrategyLayerScore {
+  layer: 'CONTEXT' | 'ZONE' | 'TRIGGER';
+  weight: number; // 0..1
+  score: number; // -100..+100
+}
+
+// Trade decisions (agent orchestrator history)
+export interface TradeDecisionView {
+  id: number | null;
+  createdAt: string;
+  instrument: string;
+  timeframe: string;
+  direction: string;
+  setupType: string | null;
+  zoneName: string | null;
+  eligibility: string;
+  verdict: string;
+  sizePercent: number;
+  entry: number | null;
+  stop: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  rrRatio: number | null;
+  status: 'NARRATING' | 'DONE' | 'ERROR';
+}
+
+// Simulation aggregate row (Phase 2 read model)
+export interface SimulationView {
+  id: number;
+  reviewId: number;
+  reviewType: 'SIGNAL' | 'AUDIT';
+  instrument: string;
+  action: string;
+  status: string;
+  activationTime: string | null;
+  resolutionTime: string | null;
+  maxDrawdownPoints: number | null;
+  trailingStopResult: string | null;
+  trailingExitPrice: number | null;
+  bestFavorablePrice: number | null;
+  createdAt: string;
+}
+export interface SimulationStats {
+  total: number;
+  win: number;
+  loss: number;
+  missed: number;
+  cancelled: number;
+  pending: number;
+  active: number;
+  winRatePct: number | null;
+  avgMfe: number | null;
+}
+
+// Rollover OI rich status (per instrument)
+export interface RolloverInstrument {
+  instrument: string;
+  contractMonth: string | null;
+  expiryDate: string | null;
+  daysToExpiry: number;
+  status: 'STABLE' | 'WARNING' | 'CRITICAL';
+  oiAction: 'NO_ACTION' | 'RECOMMEND_ROLL' | 'UNAVAILABLE' | null;
+  currentMonth: string | null;
+  nextMonth: string | null;
+  currentOI: number | null;
+  nextOI: number | null;
+}
+
 export interface StrategyPlan {
   direction: 'LONG' | 'SHORT';
   entry: number;
@@ -725,6 +821,16 @@ export interface RiskDeskMock {
   riskAlerts: RiskAlert[];
   alerts: AlertItem[];
   rollover: Rollover;
+  // Live wires — populated by RiskDeskContext when backend reachable.
+  playbookLive: PlaybookLive;
+  strategyVotes: StrategyAgentVoteView[];
+  strategyLayerScores: StrategyLayerScore[];
+  strategyFinalScore: number;
+  strategyVetoReasons: string[];
+  decisions: TradeDecisionView[];
+  simulations: SimulationView[];
+  simulationStats: SimulationStats;
+  rolloverDetails: RolloverInstrument[];
 }
 
 function bbSeries(closes: number[], period = 20, mult = 2) {
@@ -779,6 +885,34 @@ export function buildMock(seed = 42): RiskDeskMock {
     riskAlerts: RISK_ALERTS,
     alerts: ALERTS,
     rollover: ROLLOVER,
+    playbookLive: {
+      available: false,
+      verdict: '—',
+      checklistScore: 0,
+      checklistMax: 7,
+      tradeDirection: null,
+      bestSetup: null,
+      checklist: [],
+      evaluatedAt: null,
+    },
+    strategyVotes: [],
+    strategyLayerScores: [],
+    strategyFinalScore: 0,
+    strategyVetoReasons: [],
+    decisions: [],
+    simulations: [],
+    simulationStats: {
+      total: 0,
+      win: 0,
+      loss: 0,
+      missed: 0,
+      cancelled: 0,
+      pending: 0,
+      active: 0,
+      winRatePct: null,
+      avgMfe: null,
+    },
+    rolloverDetails: [],
   };
 }
 

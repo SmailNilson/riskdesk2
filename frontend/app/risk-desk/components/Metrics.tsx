@@ -1,8 +1,8 @@
 'use client';
 
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { BarGauge, StatusDot } from '../lib/atoms';
-import { Portfolio, Rollover, WatchItem } from '../lib/data';
+import { Portfolio, Rollover, RolloverInstrument, WatchItem } from '../lib/data';
 import { fmt } from '../lib/format';
 
 function MetricCell({
@@ -97,43 +97,211 @@ export function MetricsBar({ portfolio, watchlist }: { portfolio: Portfolio; wat
   );
 }
 
-export function RolloverBanner({ rollover, onDismiss }: { rollover: Rollover; onDismiss: () => void }) {
+// Pick the instrument with the highest urgency: prefer CRITICAL > WARNING > STABLE,
+// then the smallest daysToExpiry. Falls back to the mock Rollover when no live data.
+function pickPrimaryRollover(details: RolloverInstrument[]): RolloverInstrument | null {
+  if (!details.length) return null;
+  const sev = (s: string) => (s === 'CRITICAL' ? 2 : s === 'WARNING' ? 1 : 0);
+  return [...details].sort((a, b) => {
+    const d = sev(b.status) - sev(a.status);
+    if (d !== 0) return d;
+    return a.daysToExpiry - b.daysToExpiry;
+  })[0];
+}
+
+export function RolloverBanner({
+  rollover,
+  rolloverDetails,
+  onDismiss,
+  onConfirm,
+}: {
+  rollover: Rollover;
+  rolloverDetails: RolloverInstrument[];
+  onDismiss: () => void;
+  onConfirm: (instrument: string, contractMonth: string) => Promise<boolean>;
+}) {
+  const live = pickPrimaryRollover(rolloverDetails);
+  const [planTarget, setPlanTarget] = useState<RolloverInstrument | null>(null);
+  const [newMonth, setNewMonth] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
+
+  const symbol = live?.instrument ?? rollover.symbol;
+  const front = live?.contractMonth ?? rollover.front;
+  const daysToExpiry = live?.daysToExpiry ?? rollover.daysToExpiry;
+  const oiAction = live?.oiAction;
+  const recommended =
+    oiAction === 'RECOMMEND_ROLL'
+      ? `OI crossover — roll ${live?.currentMonth ?? front} → ${live?.nextMonth ?? ''}`
+      : oiAction === 'NO_ACTION'
+      ? 'OI stable — no roll yet'
+      : rollover.recommended;
+  const tone =
+    live?.status === 'CRITICAL'
+      ? 'var(--down)'
+      : live?.status === 'WARNING' || daysToExpiry <= 7
+      ? 'var(--warn)'
+      : 'var(--ink-2)';
+
+  const startConfirm = () => {
+    if (!live) return;
+    setPlanTarget(live);
+    setNewMonth(live.nextMonth ?? '');
+    setConfirmMsg(null);
+  };
+  const submitConfirm = async () => {
+    if (!planTarget || !newMonth) return;
+    setConfirming(true);
+    setConfirmMsg(null);
+    const ok = await onConfirm(planTarget.instrument, newMonth);
+    setConfirming(false);
+    if (ok) {
+      setConfirmMsg(`✓ ${planTarget.instrument} → ${newMonth}`);
+      setTimeout(() => {
+        setPlanTarget(null);
+        setConfirmMsg(null);
+      }, 1500);
+    } else {
+      setConfirmMsg('error');
+    }
+  };
+
   return (
     <div className="rollover-banner">
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
         <svg width="14" height="14" viewBox="0 0 14 14">
-          <path d="M7 1 L13 12 L1 12 Z" stroke="var(--warn)" strokeWidth="1.4" fill="none" />
-          <circle cx="7" cy="9.5" r="0.8" fill="var(--warn)" />
-          <line x1="7" y1="5" x2="7" y2="8" stroke="var(--warn)" strokeWidth="1.4" strokeLinecap="round" />
+          <path d="M7 1 L13 12 L1 12 Z" stroke={tone} strokeWidth="1.4" fill="none" />
+          <circle cx="7" cy="9.5" r="0.8" fill={tone} />
+          <line x1="7" y1="5" x2="7" y2="8" stroke={tone} strokeWidth="1.4" strokeLinecap="round" />
         </svg>
         <span
           style={{
-            color: 'var(--warn)',
+            color: tone,
             fontWeight: 600,
             letterSpacing: '0.04em',
             textTransform: 'uppercase',
             fontSize: 10,
           }}
         >
-          Rollover
+          Rollover {live?.status === 'CRITICAL' ? '· CRITICAL' : live?.status === 'WARNING' ? '· WARNING' : ''}
         </span>
       </span>
-      <span style={{ color: 'var(--ink-1)' }}>
-        <strong>{rollover.symbol}</strong> · front {rollover.front} expires in <strong>{rollover.daysToExpiry} days</strong> ·
-        OI shift to {rollover.next} at <strong>{Math.round(rollover.openInterestShift * 100)}%</strong> · basis{' '}
-        <span className="mono">
-          {rollover.basis >= 0 ? '+' : ''}
-          {rollover.basis.toFixed(2)}
-        </span>
-      </span>
-      <span style={{ flex: 1 }} />
-      <span style={{ color: 'var(--ink-2)' }}>{rollover.recommended}</span>
-      <button type="button" className="btn btn-sm">
-        Plan roll
-      </button>
-      <button type="button" className="btn btn-sm btn-ghost" onClick={onDismiss}>
-        Dismiss
-      </button>
+
+      {planTarget ? (
+        <>
+          <span style={{ color: 'var(--ink-1)' }}>
+            Confirm rollover <strong>{planTarget.instrument}</strong> · current{' '}
+            <span className="mono">{planTarget.contractMonth ?? '—'}</span> → new month
+          </span>
+          <input
+            value={newMonth}
+            onChange={(e) => setNewMonth(e.target.value.toUpperCase())}
+            placeholder="e.g. JUN26"
+            disabled={confirming}
+            style={{
+              width: 90,
+              height: 24,
+              padding: '0 8px',
+              background: 'var(--s2)',
+              border: '1px solid var(--line)',
+              borderRadius: 4,
+              color: 'var(--ink-1)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={submitConfirm}
+            disabled={confirming || !newMonth}
+            style={{ background: 'var(--accent)', color: 'var(--accent-deep, #022)' }}
+          >
+            {confirming ? '…' : 'Confirm'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() => setPlanTarget(null)}
+            disabled={confirming}
+          >
+            Cancel
+          </button>
+          {confirmMsg && (
+            <span className="mono" style={{ fontSize: 10, color: confirmMsg.startsWith('✓') ? 'var(--up)' : 'var(--down)' }}>
+              {confirmMsg}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <span style={{ color: 'var(--ink-1)' }}>
+            <strong>{symbol}</strong> · front {front} expires in{' '}
+            <strong>{daysToExpiry} days</strong>
+            {live?.currentOI != null && live?.nextOI != null && (
+              <>
+                {' '}
+                · OI{' '}
+                <span className="mono">
+                  {live.currentOI.toLocaleString('en-US')} → {live.nextOI.toLocaleString('en-US')}
+                </span>
+              </>
+            )}
+            {!live && (
+              <>
+                {' '}
+                · OI shift {Math.round(rollover.openInterestShift * 100)}% · basis{' '}
+                <span className="mono">
+                  {rollover.basis >= 0 ? '+' : ''}
+                  {rollover.basis.toFixed(2)}
+                </span>
+              </>
+            )}
+          </span>
+          {/* All instrument statuses, condensed pills. */}
+          {rolloverDetails.length > 1 && (
+            <div style={{ display: 'flex', gap: 4 }}>
+              {rolloverDetails.map((r) => {
+                const c =
+                  r.status === 'CRITICAL'
+                    ? 'var(--down)'
+                    : r.status === 'WARNING'
+                    ? 'var(--warn)'
+                    : 'var(--ink-3)';
+                return (
+                  <span
+                    key={r.instrument}
+                    title={`${r.instrument} · ${r.contractMonth ?? '—'} · ${r.daysToExpiry}d · ${r.status}`}
+                    style={{
+                      fontSize: 9,
+                      fontFamily: 'var(--font-mono)',
+                      padding: '1px 5px',
+                      borderRadius: 3,
+                      border: `1px solid ${c}`,
+                      color: c,
+                    }}
+                  >
+                    {r.instrument} {r.daysToExpiry}d
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          <span style={{ flex: 1 }} />
+          <span style={{ color: 'var(--ink-2)', fontSize: 11 }}>{recommended}</span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={startConfirm}
+            disabled={!live}
+          >
+            Plan roll
+          </button>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onDismiss}>
+            Dismiss
+          </button>
+        </>
+      )}
     </div>
   );
 }
