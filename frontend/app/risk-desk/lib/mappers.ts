@@ -780,10 +780,14 @@ export function mapRollover(
   const out: RolloverInstrument[] = [];
   for (const [instr, info] of Object.entries(status.rolloverStatus)) {
     const oiEntry = oi?.[instr] ?? {};
+    // Backend RolloverRecommendation.Action enum: RECOMMEND_ROLL | HOLD | NO_ACTION.
+    // HOLD and NO_ACTION are both "don't roll yet" — collapse to NO_ACTION here so
+    // the banner doesn't fall through to the mock recommendation when the engine
+    // says HOLD (was returning null → mock fallback before).
     const oiAction =
       oiEntry.action === 'RECOMMEND_ROLL'
         ? 'RECOMMEND_ROLL'
-        : oiEntry.action === 'NO_ACTION'
+        : oiEntry.action === 'NO_ACTION' || oiEntry.action === 'HOLD'
         ? 'NO_ACTION'
         : oiEntry.status === 'UNAVAILABLE' || oiEntry.status === 'ERROR'
         ? 'UNAVAILABLE'

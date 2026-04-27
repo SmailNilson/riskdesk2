@@ -244,11 +244,14 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
 
     // Rollover status + OI (per-instrument). Combined into rolloverDetails so
     // the UI can show both time-to-expiry and OI crossover signals side by side.
+    // anyOk only flips when at least one of the two fetches actually returned
+    // data — otherwise the TopBar connection pill would show "connected"
+    // even with the backend fully down.
     const rolloverP = Promise.all([
       api.getRolloverStatus().catch(() => null as RolloverStatusResponse | null),
       api.getRolloverOiStatus().catch(() => null as RolloverOiStatus | null),
     ]).then(([status, oi]) => {
-      anyOk = true;
+      if (status || oi) anyOk = true;
       if (cancelled) return;
       setData((prev) => ({ ...prev, rolloverDetails: mapRollover(status, oi) }));
     });
@@ -439,9 +442,13 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         const strategyFinalScore = strat?.finalScore ?? prev.strategyFinalScore;
         const strategyVetoReasons = strat?.vetoReasons ?? prev.strategyVetoReasons;
         const playbookLive = mapPlaybookLive(playbook);
-        const decisionsMapped = decisions.length ? mapDecisions(decisions) : prev.decisions;
-        const sims = simsByInstr.length ? mapSimulations(simsByInstr) : prev.simulations;
-        const simStats = simsByInstr.length ? buildSimStats(sims) : prev.simulationStats;
+        // Always overwrite per-instrument arrays — falling back to prev would
+        // leak the previous instrument's decisions/sims when switching to one
+        // with no history yet (e.g. MCL → newly-added contract). On transient
+        // fetch errors the next polling cycle / switch will rehydrate.
+        const decisionsMapped = mapDecisions(decisions);
+        const sims = mapSimulations(simsByInstr);
+        const simStats = buildSimStats(sims);
         return {
           ...prev,
           candles,
