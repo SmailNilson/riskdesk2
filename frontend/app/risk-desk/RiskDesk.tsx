@@ -247,19 +247,30 @@ function RiskDeskShell() {
               flexDirection: 'column',
               minHeight: 0,
               borderLeft: '1px solid var(--line)',
+              overflow: 'hidden',
             }}
           >
-            <MentorDesk
-              reviews={D.reviews}
-              onArm={(r) => {
-                void D.armReview(r, r.plan?.qty ?? 1);
-              }}
-              onSkip={() => {
-                /* skip is local-only — no backend action needed */
-              }}
-            />
+            {/* Mentor desk takes remaining space; alerts rail is fixed-height. */}
+            <div style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden' }}>
+              <MentorDesk
+                reviews={D.reviews}
+                onArm={(r) => {
+                  void D.armReview(r, r.plan?.qty ?? 1);
+                }}
+                onSkip={() => {
+                  /* skip is local-only — no backend action needed */
+                }}
+              />
+            </div>
             {tweaks.showAlertsRail && (
-              <div style={{ borderTop: '1px solid var(--line)', height: 220, overflow: 'hidden' }}>
+              <div
+                style={{
+                  borderTop: '1px solid var(--line)',
+                  flex: '0 0 220px',
+                  minHeight: 0,
+                  overflow: 'hidden',
+                }}
+              >
                 <AlertsRail alerts={D.alerts} />
               </div>
             )}
