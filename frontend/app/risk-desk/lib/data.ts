@@ -66,8 +66,8 @@ export interface Smc {
 
 export interface Indicators {
   ema9: { v: number; vs: string; strength: number };
-  ema20: { v: number; vs: string; strength: number };
   ema50: { v: number; vs: string; strength: number };
+  ema200: { v: number; vs: string; strength: number };
   vwap: { v: number; vs: string; strength: number; dev: number };
   supertrend: { dir: string; flipped: number; strength: number };
   cmf: { v: number; label: string };
@@ -401,8 +401,8 @@ function genSMC(candles: Candle[]): Smc {
 
 export const INDICATORS: Indicators = {
   ema9: { v: 78.39, vs: 'above', strength: 0.62 },
-  ema20: { v: 78.31, vs: 'above', strength: 0.74 },
   ema50: { v: 78.18, vs: 'above', strength: 0.81 },
+  ema200: { v: 77.92, vs: 'above', strength: 0.55 },
   vwap: { v: 78.34, vs: 'above', strength: 0.55, dev: +0.08 },
   supertrend: { dir: 'up', flipped: 12, strength: 0.78 },
   cmf: { v: 0.18, label: 'buying pressure' },
@@ -683,8 +683,8 @@ export const ROLLOVER: Rollover = {
 export interface RiskDeskMock {
   candles: Candle[];
   ema9: number[];
-  ema20: number[];
   ema50: number[];
+  ema200: number[];
   smc: Smc;
   instruments: Instrument[];
   watchlist: WatchItem[];
@@ -717,8 +717,8 @@ export function buildMock(seed = 42): RiskDeskMock {
   return {
     candles,
     ema9: ema(closes, 9),
-    ema20: ema(closes, 20),
     ema50: ema(closes, 50),
+    ema200: ema(closes, 200),
     smc: genSMC(candles),
     instruments: INSTRUMENTS,
     watchlist: WATCHLIST,

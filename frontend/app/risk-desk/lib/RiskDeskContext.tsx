@@ -288,8 +288,8 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         const candles = bars.length ? mapCandles(bars) : prev.candles;
         const indicators = ind ? mapIndicators(ind, prev.indicators) : prev.indicators;
         const ema9 = mapEmaSeries(series?.ema9, candles, prev.ema9);
-        const ema20 = prev.ema20.slice(0, candles.length); // backend doesn't expose ema20 series
         const ema50 = mapEmaSeries(series?.ema50, candles, prev.ema50);
+        const ema200 = mapEmaSeries(series?.ema200, candles, prev.ema200);
         const smc = ind ? mapSmc(ind, candles, prev.smc) : prev.smc;
         const mappedFp = fp && isFootprintBar(fp) ? mapFootprint(fp) : null;
         const footprint = mappedFp && mappedFp.length ? mappedFp : prev.footprint;
@@ -312,8 +312,8 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           candles,
           indicators,
           ema9,
-          ema20,
           ema50,
+          ema200,
           smc,
           footprint,
           dom,

@@ -20,8 +20,9 @@ interface ChartProps {
   tf: string;
   candles: Candle[];
   ema9: number[];
-  ema20: number[];
   ema50: number[];
+  ema200: number[];
+  vwap: number | null;
   smc: Smc;
   activePosition: Position | null;
 }
@@ -56,14 +57,24 @@ function readVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
-export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, activePosition }: ChartProps) {
+export function LiveChart({
+  symbol,
+  tf,
+  candles,
+  ema9,
+  ema50,
+  ema200,
+  vwap,
+  smc,
+  activePosition,
+}: ChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const ema9SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const ema20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const ema50SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const ema200SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
 
@@ -79,10 +90,15 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
 
   const last = candles[candles.length - 1];
 
+  const [initError, setInitError] = useState<string | null>(null);
+
   // ── Mount / unmount the chart ─────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    // Bail if the container hasn't been measured yet — createChart with a
+    // 0×0 size can blow up internal divide-by-zero paths in lightweight-charts.
+    if (container.clientWidth === 0 || container.clientHeight === 0) return;
 
     const upColor = readVar('--up', '#34d399');
     const downColor = readVar('--down', '#f87171');
@@ -90,7 +106,9 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
     const lineColor = readVar('--line', '#26262c');
     const s0 = readVar('--s0', '#09090b');
 
-    const chart = createChart(container, {
+    let chart: IChartApi;
+    try {
+      chart = createChart(container, {
       width: container.clientWidth,
       height: container.clientHeight,
       layout: {
@@ -109,6 +127,14 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
       handleScroll: true,
       handleScale: true,
     });
+    } catch (err) {
+      // Surface the error in dev console + render a fallback panel instead of
+      // crashing the whole shell. This is what bit prod earlier when the
+      // container was 0×0 at first measure.
+      console.error('[RiskDesk] lightweight-charts init failed:', err);
+      setInitError(String((err as Error)?.message || err));
+      return;
+    }
     chartRef.current = chart;
 
     const candleSeries = chart.addCandlestickSeries({
@@ -121,23 +147,30 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
     });
     candleSeriesRef.current = candleSeries;
 
+    // EMA color scheme matches the trader's TradingView template:
+    //   EMA 9   = green (#34d399)
+    //   EMA 50  = red   (#f87171)
+    //   EMA 200 = blue  (#60a5fa)
     ema9SeriesRef.current = chart.addLineSeries({
-      color: '#22d3ee',
+      color: '#34d399',
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
-    });
-    ema20SeriesRef.current = chart.addLineSeries({
-      color: '#fbbf24',
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
+      title: 'EMA 9',
     });
     ema50SeriesRef.current = chart.addLineSeries({
-      color: '#a78bfa',
+      color: '#f87171',
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
+      title: 'EMA 50',
+    });
+    ema200SeriesRef.current = chart.addLineSeries({
+      color: '#60a5fa',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: 'EMA 200',
     });
 
     volSeriesRef.current = chart.addHistogramSeries({
@@ -175,8 +208,8 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
       chartRef.current = null;
       candleSeriesRef.current = null;
       ema9SeriesRef.current = null;
-      ema20SeriesRef.current = null;
       ema50SeriesRef.current = null;
+      ema200SeriesRef.current = null;
       volSeriesRef.current = null;
       priceLinesRef.current = [];
     };
@@ -187,10 +220,10 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
   useEffect(() => {
     const cs = candleSeriesRef.current;
     const e9 = ema9SeriesRef.current;
-    const e20 = ema20SeriesRef.current;
     const e50 = ema50SeriesRef.current;
+    const e200 = ema200SeriesRef.current;
     const vol = volSeriesRef.current;
-    if (!cs || !e9 || !e20 || !e50 || !vol) return;
+    if (!cs || !e9 || !e50 || !e200 || !vol) return;
     if (!candles.length) return;
 
     const candleData: CandlestickData<UTCTimestamp>[] = candles.map((c) => ({
@@ -209,8 +242,8 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
         .filter((d) => Number.isFinite(d.value));
 
     e9.setData(toggles.ema ? lineData(ema9) : []);
-    e20.setData(toggles.ema ? lineData(ema20) : []);
     e50.setData(toggles.ema ? lineData(ema50) : []);
+    e200.setData(toggles.ema ? lineData(ema200) : []);
 
     const upCol = readVar('--up', '#34d399');
     const dnCol = readVar('--down', '#f87171');
@@ -239,7 +272,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [candles, ema9, ema20, ema50, toggles.ema, toggles.volume]);
+  }, [candles, ema9, ema50, ema200, toggles.ema, toggles.volume]);
 
   // ── Price lines (entry / SL / TP / BSL / SSL / VWAP) ─────────
   useEffect(() => {
@@ -282,7 +315,20 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
         add({ price: l.px, title: l.label, color: cyan, lineStyle: LineStyle.LargeDashed });
       }
     }
-  }, [activePosition, smc.liquidity, toggles.position, toggles.liquidity]);
+
+    // VWAP — backend exposes a single scalar (current session VWAP) so we
+    // render it as a horizontal price line. Color matches TradingView's
+    // default (orange/yellow).
+    if (toggles.vwap && vwap != null && Number.isFinite(vwap)) {
+      add({
+        price: vwap,
+        title: 'VWAP',
+        color: '#fbbf24',
+        lineStyle: LineStyle.Dotted,
+        lineWidth: 2,
+      });
+    }
+  }, [activePosition, smc.liquidity, toggles.position, toggles.liquidity, toggles.vwap, vwap]);
 
   // ── Canvas overlay: order blocks, FVGs, structure markers ────
   // The overlay reads coordinates from the chart's time + price scales so it
@@ -408,6 +454,23 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
           overflow: 'hidden',
         }}
       >
+        {initError && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'grid',
+              placeItems: 'center',
+              fontSize: 12,
+              color: 'var(--down)',
+              fontFamily: 'var(--font-mono)',
+              padding: 16,
+              textAlign: 'center',
+            }}
+          >
+            Chart unavailable — {initError}
+          </div>
+        )}
         <canvas
           ref={overlayRef}
           style={{
