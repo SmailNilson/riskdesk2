@@ -46,6 +46,17 @@ public class LiveAnalysisController {
         this.replayService = replayService;
     }
 
+    /**
+     * GET /api/analysis/scan-config
+     * Surfaces which (instrument, timeframe) pairs the scheduler currently scans
+     * so the dashboard can grey out tabs that won't ever produce a verdict
+     * instead of polling /latest forever (PR #270 review).
+     */
+    @GetMapping("/scan-config")
+    public LiveVerdictService.ScanConfigView scanConfig() {
+        return verdictService.getScanConfig();
+    }
+
     @GetMapping("/live/{instrument}/{timeframe}")
     public ResponseEntity<LiveVerdictResponse> live(@PathVariable String instrument,
                                                       @PathVariable String timeframe) {
@@ -70,6 +81,40 @@ public class LiveAnalysisController {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
                 "Live analysis failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * GET /api/analysis/latest/{instrument}/{timeframe}
+     * Returns the most recent persisted verdict <i>without</i> triggering a
+     * fresh compute. Suitable for dashboard polling — the scheduler is the
+     * authoritative producer of new verdict rows, so multi-viewer scenarios
+     * cannot inflate {@code live_verdict_records} by sheer dashboard count.
+     * <p>
+     * <b>Freshness (PR #270 round-6 review):</b> the response carries an
+     * {@code expired} boolean computed from {@code validUntil < now()}. The
+     * endpoint always returns 200 with the row — the client must check the
+     * flag and surface a banner / refuse to act on expired data. Returning
+     * an HTTP error would blank the panel during scheduler stalls and lose
+     * the "last-known verdict" visibility round-4 explicitly preserved.
+     * Returns 404 only when no verdict has ever been persisted for the pair
+     * (typical cold start before the scheduler's first tick).
+     */
+    @GetMapping("/latest/{instrument}/{timeframe}")
+    public ResponseEntity<LiveVerdictResponse> latest(@PathVariable String instrument,
+                                                        @PathVariable String timeframe) {
+        Instrument inst;
+        Timeframe tf;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+            tf = Timeframe.fromLabel(timeframe);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+        return verdictService.findLatest(inst, tf)
+            .map(v -> ResponseEntity.ok(LiveVerdictResponse.from(v)))
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                "No verdict persisted yet for " + inst + " " + tf
+                + ". The scheduler may still be warming up."));
     }
 
     /**

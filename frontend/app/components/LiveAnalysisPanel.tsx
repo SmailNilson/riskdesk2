@@ -24,26 +24,82 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
   const [verdict, setVerdict] = useState<LiveVerdictView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // PR #270 review fix: pull scheduler config once so we can short-circuit with
+  // a clear "not scanned" message for timeframes the scheduler is not configured
+  // to cover, instead of polling /latest forever.
+  const [scanConfig, setScanConfig] = useState<{
+    schedulerEnabled: boolean;
+    instruments: string[];
+    timeframes: string[];
+  } | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.getAnalysisScanConfig()
+      .then(c => { if (!cancelled) setScanConfig(c); })
+      .catch(() => { /* leave null — fall back to "loading" rather than wrong info */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // PR #270 round-4 review fix: schedulerEnabled gates only background WRITES.
+  // /api/analysis/latest still serves persisted verdicts when the scheduler is
+  // paused (troubleshooting / data freeze), and operators must keep visibility
+  // on what was already captured. So isScanned only checks pair coverage; the
+  // schedulerEnabled flag drives a separate banner below.
+  const isScanned: boolean | null = scanConfig === null
+    ? null
+    : (scanConfig.instruments.includes(instrument)
+        && scanConfig.timeframes.includes(timeframe));
+  const schedulerPaused = scanConfig !== null && !scanConfig.schedulerEnabled;
+
+  // Poll the read-only /latest endpoint so verdict_records does not grow with
+  // the number of open dashboards. The scheduler is the single authoritative
+  // writer of new verdict rows.
   const fetchVerdict = useCallback(async () => {
     setLoading(true);
     try {
-      const v = await api.getLiveAnalysis(instrument, timeframe);
+      const v = await api.getLatestAnalysis(instrument, timeframe);
       setVerdict(v);
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      // 404 during cold start is expected — surface a friendlier hint.
+      // (When schedulerPaused is true and we get 404, it really means
+      // "no historical verdicts exist yet" rather than "warming up", so the
+      // banner above clarifies the actual situation.)
+      setError(msg.includes('404') ? 'No verdict persisted yet for this pair.' : msg);
     } finally {
       setLoading(false);
     }
   }, [instrument, timeframe]);
 
+  // Reset displayed verdict when instrument/timeframe changes so we don't
+  // briefly show stale data from the previous context under a new header.
   useEffect(() => {
+    setVerdict(null);
+    setError(null);
+  }, [instrument, timeframe]);
+
+  useEffect(() => {
+    if (isScanned === false) return; // skip polling when this pair is excluded
     fetchVerdict();
     const id = setInterval(fetchVerdict, refreshInterval);
     return () => clearInterval(id);
-  }, [fetchVerdict, refreshInterval]);
+  }, [fetchVerdict, refreshInterval, isScanned]);
 
+  if (isScanned === false) {
+    return (
+      <div className="bg-zinc-900 border border-amber-900/50 rounded-lg p-4">
+        <div className="text-amber-300 text-sm">
+          Live analysis is not configured to scan {instrument} · {timeframe}.
+        </div>
+        <div className="text-zinc-500 text-xs mt-1">
+          Add this pair to <code className="text-zinc-400">riskdesk.analysis.instruments</code>
+          {' / '}<code className="text-zinc-400">timeframes</code> to enable.
+        </div>
+      </div>
+    );
+  }
   if (!verdict && error) {
     return (
       <div className="bg-zinc-900 border border-red-900 rounded-lg p-4">
@@ -61,12 +117,45 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex flex-col gap-3">
+      {schedulerPaused && (
+        <div className="text-[11px] text-amber-400 bg-amber-900/20 border border-amber-900/40 rounded px-2 py-1">
+          ⏸ Scheduler paused — showing latest persisted verdict; data is not being refreshed.
+        </div>
+      )}
+      {!schedulerPaused && verdict.expired && (
+        // PR #270 round-6: scheduler is supposed to be running yet validUntil
+        // already lapsed — almost certainly a stall (ingestion outage, IBKR
+        // disconnect, scheduler exception loop). Make it loud so operators
+        // don't trade off a frozen verdict.
+        <div className="text-[11px] text-red-300 bg-red-900/20 border border-red-900/40 rounded px-2 py-1">
+          ⚠ Verdict expired {formatExpiredAge(verdict.expiredForSeconds)} ago —
+          scheduler may be stalled. Do not act on this signal.
+        </div>
+      )}
+      {error && (
+        // PR #270 round-9 review fix: previously we only showed the error
+        // state when there was no prior verdict, so once the first poll
+        // succeeded any later 503/network failures were silently hidden
+        // while stale data stayed on screen. Operators in live trading
+        // could believe the panel was current. Now: any active fetch
+        // failure surfaces here, even with cached data behind it.
+        <div className="text-[11px] text-orange-300 bg-orange-900/20 border border-orange-900/40 rounded px-2 py-1">
+          ⚠ Last poll failed: {error}. Showing previous verdict.
+        </div>
+      )}
       <Header verdict={verdict} loading={loading} />
       <ScoreBars verdict={verdict} />
       <FactorLists verdict={verdict} />
       <Scenarios verdict={verdict} />
     </div>
   );
+}
+
+function formatExpiredAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }
 
 function Header({ verdict, loading }: { verdict: LiveVerdictView; loading: boolean }) {

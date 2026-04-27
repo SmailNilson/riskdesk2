@@ -978,6 +978,10 @@ export interface LiveVerdictView {
   bias: LiveBiasView;
   scenarios: LiveTradeScenario[];
   validUntil: string;
+  /** True when validUntil < server now() — surfaced as a banner in the panel. */
+  expired: boolean;
+  /** Seconds since validUntil; 0 when not expired. */
+  expiredForSeconds: number;
 }
 
 export interface ReplayReport {
@@ -1006,6 +1010,17 @@ export interface ReplayReport {
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
+  // Read-only — returns the latest persisted verdict (no compute, no DB write).
+  // Use this for dashboard polling so verdict_records grows at scheduler cadence
+  // only, regardless of how many viewers are open.
+  getLatestAnalysis: (instrument: string, timeframe: string) =>
+    get<LiveVerdictView>(`/api/analysis/latest/${instrument}/${timeframe}`),
+  // What the scheduler actually scans — used to flag tabs that will never
+  // produce a verdict instead of polling /latest forever (PR #270 review).
+  getAnalysisScanConfig: () =>
+    get<{ schedulerEnabled: boolean; instruments: string[]; timeframes: string[]; pollIntervalMs: number }>(
+      '/api/analysis/scan-config'),
+  // On-demand fresh compute — call sparingly, this writes a verdict row.
   getLiveAnalysis: (instrument: string, timeframe: string) =>
     get<LiveVerdictView>(`/api/analysis/live/${instrument}/${timeframe}`),
   getRecentVerdicts: (instrument: string, timeframe: string, limit = 20) =>

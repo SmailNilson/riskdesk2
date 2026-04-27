@@ -9,6 +9,7 @@ import com.riskdesk.domain.analysis.port.VerdictRecordRepositoryPort;
 import com.riskdesk.domain.analysis.service.ScenarioGenerator;
 import com.riskdesk.domain.analysis.service.TriLayerScoringEngine;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.analysis.port.AnalysisConfigPort;
 import com.riskdesk.domain.shared.vo.Timeframe;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,16 +38,41 @@ public class LiveVerdictService {
     private final ScenarioGenerator scenarioGenerator;
     private final VerdictRecordRepositoryPort verdictRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AnalysisConfigPort analysisConfig;
 
     public LiveVerdictService(AnalysisSnapshotAggregator aggregator,
                                VerdictRecordRepositoryPort verdictRepository,
-                               SimpMessagingTemplate messagingTemplate) {
+                               SimpMessagingTemplate messagingTemplate,
+                               AnalysisConfigPort analysisConfig) {
         this.aggregator = aggregator;
         this.scoringEngine = new TriLayerScoringEngine(ScoringWeights.defaults());
         this.scenarioGenerator = new ScenarioGenerator();
         this.verdictRepository = verdictRepository;
         this.messagingTemplate = messagingTemplate;
+        this.analysisConfig = analysisConfig;
     }
+
+    /**
+     * Snapshot of which (instrument, timeframe) pairs the scheduler is currently
+     * scanning. Surfaced to the dashboard so the panel can short-circuit with a
+     * clear "not scanned" message instead of polling /latest forever for tabs
+     * that will never produce verdicts (PR #270 review).
+     */
+    public ScanConfigView getScanConfig() {
+        return new ScanConfigView(
+            analysisConfig.isSchedulerEnabled(),
+            List.copyOf(analysisConfig.getInstruments()),
+            List.copyOf(analysisConfig.getTimeframes()),
+            analysisConfig.getPollIntervalMs()
+        );
+    }
+
+    public record ScanConfigView(
+        boolean schedulerEnabled,
+        List<String> instruments,
+        List<String> timeframes,
+        long pollIntervalMs
+    ) {}
 
     public LiveVerdict computeAndPublish(Instrument instrument, Timeframe timeframe) {
         LiveAnalysisSnapshot snap = aggregator.capture(instrument, timeframe);
@@ -73,6 +99,10 @@ public class LiveVerdictService {
 
     public List<LiveVerdict> findRecent(Instrument instrument, Timeframe timeframe, int limit) {
         return verdictRepository.findRecent(instrument, timeframe, limit);
+    }
+
+    public java.util.Optional<LiveVerdict> findLatest(Instrument instrument, Timeframe timeframe) {
+        return verdictRepository.findLatest(instrument, timeframe);
     }
 
     /** Pure score — no persistence, no publish. Used by replay/backtest. */
