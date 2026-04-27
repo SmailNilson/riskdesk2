@@ -167,7 +167,6 @@ export function mapEmaSeries(
   fallback: number[]
 ): number[] {
   if (!points || !points.length || !candles.length) return fallback.slice(0, candles.length);
-  // Map ema points to nearest candle by epoch-second time
   const out: number[] = [];
   let pi = 0;
   for (const c of candles) {
@@ -177,6 +176,29 @@ export function mapEmaSeries(
     out.push(points[pi].value);
   }
   return out;
+}
+
+/** Project Bollinger Band series onto the candle index space. Returns { upper, lower, basis } arrays. */
+export function mapBbSeries(
+  points: IndicatorSeriesSnapshot['bollingerBands'] | undefined,
+  candles: Candle[],
+  fallback: { upper: number[]; lower: number[]; basis: number[] }
+): { upper: number[]; lower: number[]; basis: number[] } {
+  if (!points || !points.length || !candles.length) return fallback;
+  const upper: number[] = [];
+  const lower: number[] = [];
+  const basis: number[] = [];
+  let pi = 0;
+  for (const c of candles) {
+    while (pi < points.length - 1 && Math.abs(points[pi + 1].time - c.time) < Math.abs(points[pi].time - c.time)) {
+      pi++;
+    }
+    upper.push(points[pi].upper);
+    lower.push(points[pi].lower);
+    // backend BollingerPoint doesn't include basis — derive as midpoint
+    basis.push((points[pi].upper + points[pi].lower) / 2);
+  }
+  return { upper, lower, basis };
 }
 
 // ─── SMC overlays ────────────────────────────────────────────────

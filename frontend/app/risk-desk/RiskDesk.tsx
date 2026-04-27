@@ -178,7 +178,9 @@ function RiskDeskShell() {
               ema9={D.ema9}
               ema50={D.ema50}
               ema200={D.ema200}
-              vwap={D.indicators?.vwap?.v ?? null}
+              bbUpper={D.bbUpper}
+              bbLower={D.bbLower}
+              bbBasis={D.bbBasis}
               smc={D.smc}
               activePosition={activePos}
             />

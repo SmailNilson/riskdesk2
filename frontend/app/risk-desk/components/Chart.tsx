@@ -22,15 +22,18 @@ interface ChartProps {
   ema9: number[];
   ema50: number[];
   ema200: number[];
-  vwap: number | null;
+  bbUpper: number[];
+  bbLower: number[];
+  bbBasis: number[];
   smc: Smc;
   activePosition: Position | null;
 }
 
 interface ChartToggles {
   ema: boolean;
-  fvg: boolean;
   vwap: boolean;
+  bb: boolean;
+  fvg: boolean;
   volume: boolean;
   ob: boolean;
   structure: boolean;
@@ -40,8 +43,9 @@ interface ChartToggles {
 
 const DEFAULT_TOGGLES: ChartToggles = {
   ema: true,
-  fvg: true,
   vwap: true,
+  bb: false,
+  fvg: true,
   volume: true,
   ob: true,
   structure: true,
@@ -57,6 +61,29 @@ function readVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
+// Compute cumulative session VWAP from candles, resetting at ET midnight.
+// ET ≈ UTC−5 (we use a fixed offset — good enough for chart display).
+function computeVwap(candles: Candle[]): { time: UTCTimestamp; value: number }[] {
+  const ET_OFFSET_S = 5 * 3600;
+  const out: { time: UTCTimestamp; value: number }[] = [];
+  let cumTpV = 0;
+  let cumV = 0;
+  let curDay = -1;
+  for (const c of candles) {
+    const etDay = Math.floor((c.time - ET_OFFSET_S) / 86400);
+    if (etDay !== curDay) {
+      cumTpV = 0;
+      cumV = 0;
+      curDay = etDay;
+    }
+    const tp = (c.high + c.low + c.close) / 3;
+    cumTpV += tp * c.volume;
+    cumV += c.volume;
+    out.push({ time: c.time as UTCTimestamp, value: cumV > 0 ? cumTpV / cumV : c.close });
+  }
+  return out;
+}
+
 export function LiveChart({
   symbol,
   tf,
@@ -64,7 +91,9 @@ export function LiveChart({
   ema9,
   ema50,
   ema200,
-  vwap,
+  bbUpper,
+  bbLower,
+  bbBasis,
   smc,
   activePosition,
 }: ChartProps) {
@@ -75,6 +104,10 @@ export function LiveChart({
   const ema9SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const ema50SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const ema200SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const bbUpperSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const bbLowerSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const bbBasisSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
 
@@ -83,9 +116,6 @@ export function LiveChart({
   togglesRef.current = toggles;
   const toggle = (k: keyof ChartToggles) => setToggles((t) => ({ ...t, [k]: !t[k] }));
 
-  // Subscribers registered at mount close over the FIRST render's drawOverlay
-  // by default; we keep the latest reference in a ref so they always call the
-  // up-to-date version (which sees the latest smc / activePosition props).
   const drawOverlayRef = useRef<() => void>(() => undefined);
 
   const last = candles[candles.length - 1];
@@ -96,8 +126,6 @@ export function LiveChart({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    // Bail if the container hasn't been measured yet — createChart with a
-    // 0×0 size can blow up internal divide-by-zero paths in lightweight-charts.
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
 
     const upColor = readVar('--up', '#34d399');
@@ -109,28 +137,25 @@ export function LiveChart({
     let chart: IChartApi;
     try {
       chart = createChart(container, {
-      width: container.clientWidth,
-      height: container.clientHeight,
-      layout: {
-        background: { type: ColorType.Solid, color: s0 },
-        textColor: ink2,
-        fontFamily: 'var(--font-mono), ui-monospace, monospace',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: lineColor, style: LineStyle.Dashed },
-        horzLines: { color: lineColor, style: LineStyle.Dashed },
-      },
-      rightPriceScale: { borderColor: lineColor, scaleMargins: { top: 0.06, bottom: 0.28 } },
-      timeScale: { borderColor: lineColor, timeVisible: true, secondsVisible: false },
-      crosshair: { mode: CrosshairMode.Normal },
-      handleScroll: true,
-      handleScale: true,
-    });
+        width: container.clientWidth,
+        height: container.clientHeight,
+        layout: {
+          background: { type: ColorType.Solid, color: s0 },
+          textColor: ink2,
+          fontFamily: 'var(--font-mono), ui-monospace, monospace',
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: lineColor, style: LineStyle.Dashed },
+          horzLines: { color: lineColor, style: LineStyle.Dashed },
+        },
+        rightPriceScale: { borderColor: lineColor, scaleMargins: { top: 0.06, bottom: 0.28 } },
+        timeScale: { borderColor: lineColor, timeVisible: true, secondsVisible: false },
+        crosshair: { mode: CrosshairMode.Normal },
+        handleScroll: true,
+        handleScale: true,
+      });
     } catch (err) {
-      // Surface the error in dev console + render a fallback panel instead of
-      // crashing the whole shell. This is what bit prod earlier when the
-      // container was 0×0 at first measure.
       console.error('[RiskDesk] lightweight-charts init failed:', err);
       setInitError(String((err as Error)?.message || err));
       return;
@@ -147,10 +172,7 @@ export function LiveChart({
     });
     candleSeriesRef.current = candleSeries;
 
-    // EMA color scheme matches the trader's TradingView template:
-    //   EMA 9   = green (#34d399)
-    //   EMA 50  = red   (#f87171)
-    //   EMA 200 = blue  (#60a5fa)
+    // EMA color scheme: EMA9=green, EMA50=red, EMA200=blue
     ema9SeriesRef.current = chart.addLineSeries({
       color: '#34d399',
       lineWidth: 1,
@@ -173,6 +195,41 @@ export function LiveChart({
       title: 'EMA 200',
     });
 
+    // VWAP — yellow dotted line, same style as TradingView default
+    vwapSeriesRef.current = chart.addLineSeries({
+      color: '#fbbf24',
+      lineWidth: 2,
+      lineStyle: LineStyle.Dotted,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: 'VWAP',
+    });
+
+    // Bollinger Bands — upper/lower dashed, basis solid (all purple-ish)
+    bbUpperSeriesRef.current = chart.addLineSeries({
+      color: '#a78bfa',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: 'BB Upper',
+    });
+    bbLowerSeriesRef.current = chart.addLineSeries({
+      color: '#a78bfa',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: 'BB Lower',
+    });
+    bbBasisSeriesRef.current = chart.addLineSeries({
+      color: '#a78bfa55',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: 'BB Basis',
+    });
+
     volSeriesRef.current = chart.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: '',
@@ -183,8 +240,6 @@ export function LiveChart({
       .priceScale('')
       .applyOptions({ scaleMargins: { top: 0.78, bottom: 0 }, borderVisible: false });
 
-    // ResizeObserver keeps the chart and the overlay canvas in sync with the
-    // container as the user drags the splitter or resizes the window.
     const ro = new ResizeObserver(() => {
       const w = container.clientWidth;
       const h = container.clientHeight;
@@ -210,20 +265,28 @@ export function LiveChart({
       ema9SeriesRef.current = null;
       ema50SeriesRef.current = null;
       ema200SeriesRef.current = null;
+      vwapSeriesRef.current = null;
+      bbUpperSeriesRef.current = null;
+      bbLowerSeriesRef.current = null;
+      bbBasisSeriesRef.current = null;
       volSeriesRef.current = null;
       priceLinesRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Push candle / EMA / volume data ───────────────────────────
+  // ── Push candle / EMA / VWAP / BB / volume data ───────────────
   useEffect(() => {
     const cs = candleSeriesRef.current;
     const e9 = ema9SeriesRef.current;
     const e50 = ema50SeriesRef.current;
     const e200 = ema200SeriesRef.current;
+    const vwap = vwapSeriesRef.current;
+    const bbU = bbUpperSeriesRef.current;
+    const bbL = bbLowerSeriesRef.current;
+    const bbM = bbBasisSeriesRef.current;
     const vol = volSeriesRef.current;
-    if (!cs || !e9 || !e50 || !e200 || !vol) return;
+    if (!cs || !e9 || !e50 || !e200 || !vwap || !bbU || !bbL || !bbM || !vol) return;
     if (!candles.length) return;
 
     const candleData: CandlestickData<UTCTimestamp>[] = candles.map((c) => ({
@@ -245,6 +308,14 @@ export function LiveChart({
     e50.setData(toggles.ema ? lineData(ema50) : []);
     e200.setData(toggles.ema ? lineData(ema200) : []);
 
+    // VWAP computed client-side from candles; resets at ET midnight
+    vwap.setData(toggles.vwap ? computeVwap(candles) : []);
+
+    // Bollinger Bands from backend series
+    bbU.setData(toggles.bb ? lineData(bbUpper) : []);
+    bbL.setData(toggles.bb ? lineData(bbLower) : []);
+    bbM.setData(toggles.bb ? lineData(bbBasis) : []);
+
     const upCol = readVar('--up', '#34d399');
     const dnCol = readVar('--down', '#f87171');
     vol.setData(
@@ -257,12 +328,6 @@ export function LiveChart({
         : []
     );
 
-    // Auto-fit so the visible range is set before we ask the time scale for
-    // coordinates, then defer the overlay redraw until the chart has had a
-    // chance to lay out (lightweight-charts otherwise returns null from
-    // timeToCoordinate / priceToCoordinate on the same tick as setData).
-    // Two animation frames so the auto-fit transition settles before we read
-    // coordinates — one is not enough on cold mount.
     chartRef.current?.timeScale().fitContent();
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
@@ -272,18 +337,18 @@ export function LiveChart({
       cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [candles, ema9, ema50, ema200, toggles.ema, toggles.volume]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, ema9, ema50, ema200, bbUpper, bbLower, bbBasis, toggles.ema, toggles.vwap, toggles.bb, toggles.volume]);
 
-  // ── Price lines (entry / SL / TP / BSL / SSL / VWAP) ─────────
+  // ── Price lines (entry / SL / TP / liquidity) ─────────────────
   useEffect(() => {
     const cs = candleSeriesRef.current;
     if (!cs) return;
-    // Remove any prior price lines
     for (const pl of priceLinesRef.current) {
       try {
         cs.removePriceLine(pl);
       } catch {
-        /* ignore — series may have been re-created */
+        /* ignore */
       }
     }
     priceLinesRef.current = [];
@@ -315,25 +380,9 @@ export function LiveChart({
         add({ price: l.px, title: l.label, color: cyan, lineStyle: LineStyle.LargeDashed });
       }
     }
+  }, [activePosition, smc.liquidity, toggles.position, toggles.liquidity]);
 
-    // VWAP — backend exposes a single scalar (current session VWAP) so we
-    // render it as a horizontal price line. Color matches TradingView's
-    // default (orange/yellow).
-    if (toggles.vwap && vwap != null && Number.isFinite(vwap)) {
-      add({
-        price: vwap,
-        title: 'VWAP',
-        color: '#fbbf24',
-        lineStyle: LineStyle.Dotted,
-        lineWidth: 2,
-      });
-    }
-  }, [activePosition, smc.liquidity, toggles.position, toggles.liquidity, toggles.vwap, vwap]);
-
-  // ── Canvas overlay: order blocks, FVGs, structure markers ────
-  // The overlay reads coordinates from the chart's time + price scales so it
-  // stays in sync with pan / zoom / resize. Redrawn on
-  // subscribeVisibleLogicalRangeChange + ResizeObserver (see mount effect).
+  // ── Canvas overlay: order blocks, FVGs, structure markers ─────
   const drawOverlay = () => {
     const chart = chartRef.current;
     const cs = candleSeriesRef.current;
@@ -372,7 +421,7 @@ export function LiveChart({
         if (x1 == null || yh == null || yl == null) continue;
         const right = Math.max(x1, x2 ?? xRight ?? w);
         const fill = ob.type === 'bull' ? upCol : dnCol;
-        ctx.fillStyle = fill + (ob.mit ? '0d' : '20'); // hex alpha (0d=5%, 20=12%)
+        ctx.fillStyle = fill + (ob.mit ? '0d' : '20');
         ctx.fillRect(x1, yh, right - x1, yl - yh);
         ctx.strokeStyle = fill + '66';
         ctx.lineWidth = 0.7;
@@ -427,12 +476,8 @@ export function LiveChart({
     }
   };
 
-  // Keep the ref pointed at the latest drawOverlay so subscribers (registered
-  // once at mount) always read the current props closure.
   drawOverlayRef.current = drawOverlay;
 
-  // Redraw overlay whenever toggles or smc data change. Defer to next frame so
-  // the chart has had time to recompute coordinates after the React commit.
   useEffect(() => {
     const id = requestAnimationFrame(() => drawOverlayRef.current());
     return () => cancelAnimationFrame(id);
@@ -493,7 +538,7 @@ function ChartToggleBtn({
 }: {
   on: boolean;
   label: string;
-  kind: 'accent' | 'violet' | 'info' | 'warn' | 'ghost';
+  kind: 'accent' | 'violet' | 'info' | 'warn' | 'ghost' | 'yellow';
   onClick: () => void;
 }) {
   const colorMap: Record<typeof kind, string> = {
@@ -502,6 +547,7 @@ function ChartToggleBtn({
     info: 'var(--info)',
     warn: 'var(--warn)',
     ghost: 'var(--ink-3)',
+    yellow: '#fbbf24',
   };
   const bgMap: Record<typeof kind, string> = {
     accent: 'var(--accent-glow)',
@@ -509,6 +555,7 @@ function ChartToggleBtn({
     info: 'color-mix(in oklch, var(--info) 16%, transparent)',
     warn: 'color-mix(in oklch, var(--warn) 16%, transparent)',
     ghost: 'var(--s2)',
+    yellow: 'color-mix(in oklch, #fbbf24 16%, transparent)',
   };
   const offBg = 'transparent';
   const offFg = 'var(--ink-3)';
@@ -599,6 +646,8 @@ function ChartHeader({
       <div style={{ flex: 1 }} />
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <ChartToggleBtn on={toggles.ema} label="EMAs" kind="accent" onClick={() => onToggle('ema')} />
+        <ChartToggleBtn on={toggles.vwap} label="VWAP" kind="yellow" onClick={() => onToggle('vwap')} />
+        <ChartToggleBtn on={toggles.bb} label="BB" kind="violet" onClick={() => onToggle('bb')} />
         <ChartToggleBtn on={toggles.fvg} label="FVG" kind="violet" onClick={() => onToggle('fvg')} />
         <ChartToggleBtn on={toggles.ob} label="OB" kind="warn" onClick={() => onToggle('ob')} />
         <ChartToggleBtn
@@ -624,4 +673,3 @@ function ChartHeader({
     </div>
   );
 }
-
