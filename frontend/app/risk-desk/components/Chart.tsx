@@ -1,7 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { Chip } from '../lib/atoms';
+import { CSSProperties, useState } from 'react';
 import { Candle, Position, Smc } from '../lib/data';
 
 interface ChartProps {
@@ -15,7 +14,30 @@ interface ChartProps {
   activePosition: Position | null;
 }
 
+interface ChartToggles {
+  ema: boolean;
+  fvg: boolean;
+  vwap: boolean;
+  volume: boolean;
+  ob: boolean;
+  structure: boolean;
+  liquidity: boolean;
+}
+
+const DEFAULT_TOGGLES: ChartToggles = {
+  ema: true,
+  fvg: true,
+  vwap: true,
+  volume: true,
+  ob: true,
+  structure: true,
+  liquidity: true,
+};
+
 export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, activePosition }: ChartProps) {
+  const [toggles, setToggles] = useState<ChartToggles>(DEFAULT_TOGGLES);
+  const toggle = (k: keyof ChartToggles) => setToggles((t) => ({ ...t, [k]: !t[k] }));
+
   const lastN = 120;
   const view = candles.slice(-lastN);
   const e9 = ema9.slice(-lastN);
@@ -31,9 +53,14 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
   const chartW = W - padL - padR;
   const chartH = H - padT - padB - 90;
 
-  const prices = view.flatMap((c) => [c.high, c.low]);
-  const min = (prices.length ? Math.min(...prices) : 0) - 0.05;
-  const max = (prices.length ? Math.max(...prices) : 0) + 0.05;
+  // Defensive against empty / non-finite candle arrays — Math.min/max with
+  // an empty spread gives ±Infinity, which propagates NaN into every SVG
+  // attribute and crashes some browsers' SVG parser.
+  const finitePrices = view
+    .flatMap((c) => [c.high, c.low])
+    .filter((p): p is number => Number.isFinite(p));
+  const min = (finitePrices.length ? Math.min(...finitePrices) : 0) - 0.05;
+  const max = (finitePrices.length ? Math.max(...finitePrices) : 1) + 0.05;
   const range = max - min || 1;
 
   const xOf = (i: number) => padL + (i / Math.max(1, view.length - 1)) * chartW;
@@ -67,7 +94,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
       className="panel-flat"
       style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}
     >
-      <ChartHeader symbol={symbol} tf={tf} last={last} />
+      <ChartHeader symbol={symbol} tf={tf} last={last} toggles={toggles} onToggle={toggle} />
       <div
         style={{
           flex: 1,
@@ -123,7 +150,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             ))}
 
             {/* Order blocks */}
-            {smc.orderBlocks.map((ob, idx) => {
+            {toggles.ob && smc.orderBlocks.map((ob, idx) => {
               const i1 = tIdx(ob.t1);
               if (i1 === -1) return null;
               const x1 = xOf(i1);
@@ -160,7 +187,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             })}
 
             {/* FVGs */}
-            {smc.fvgs.map((f, idx) => {
+            {toggles.fvg && smc.fvgs.map((f, idx) => {
               const i1 = tIdx(f.t1);
               if (i1 === -1) return null;
               const x1 = xOf(i1);
@@ -195,7 +222,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             })}
 
             {/* Liquidity */}
-            {smc.liquidity.map((l, idx) => (
+            {toggles.liquidity && smc.liquidity.map((l, idx) => (
               <g key={'liq' + idx}>
                 <line
                   x1={padL}
@@ -220,7 +247,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             ))}
 
             {/* Volume bars */}
-            {view.map((c, i) => {
+            {toggles.volume && view.map((c, i) => {
               const h = (c.volume / volMax) * volH;
               return (
                 <rect
@@ -260,7 +287,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             })}
 
             {/* EMA lines */}
-            {[
+            {toggles.ema && [
               { vals: e50, col: '#a78bfa', lbl: 'EMA50' },
               { vals: e20, col: '#fbbf24', lbl: 'EMA20' },
               { vals: e9, col: '#22d3ee', lbl: 'EMA9' },
@@ -287,7 +314,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
             })}
 
             {/* Structure markers */}
-            {smc.structure.map((s, idx) => {
+            {toggles.structure && smc.structure.map((s, idx) => {
               const i1 = tIdx(s.t);
               if (i1 === -1) return null;
               return (
@@ -412,7 +439,73 @@ function PositionMarkers({
   );
 }
 
-function ChartHeader({ symbol, tf, last }: { symbol: string; tf: string; last: Candle | undefined }) {
+function ChartToggleBtn({
+  on,
+  label,
+  kind,
+  onClick,
+}: {
+  on: boolean;
+  label: string;
+  kind: 'accent' | 'violet' | 'info' | 'warn' | 'ghost';
+  onClick: () => void;
+}) {
+  // Toggle button styled like a Chip but actually clickable.
+  const colorMap: Record<typeof kind, string> = {
+    accent: 'var(--accent)',
+    violet: 'var(--violet)',
+    info: 'var(--info)',
+    warn: 'var(--warn)',
+    ghost: 'var(--ink-3)',
+  };
+  const bgMap: Record<typeof kind, string> = {
+    accent: 'var(--accent-glow)',
+    violet: 'color-mix(in oklch, var(--violet) 18%, transparent)',
+    info: 'color-mix(in oklch, var(--info) 16%, transparent)',
+    warn: 'color-mix(in oklch, var(--warn) 16%, transparent)',
+    ghost: 'var(--s2)',
+  };
+  const offBg = 'transparent';
+  const offFg = 'var(--ink-3)';
+  const offBorder = 'var(--line)';
+  const style: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    height: 18,
+    padding: '0 6px',
+    borderRadius: 3,
+    fontSize: 10,
+    fontWeight: 600,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    background: on ? bgMap[kind] : offBg,
+    color: on ? colorMap[kind] : offFg,
+    border: `1px solid ${on ? `color-mix(in oklch, ${colorMap[kind]} 30%, transparent)` : offBorder}`,
+    fontFamily: 'var(--font-mono)',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  };
+  return (
+    <button type="button" onClick={onClick} aria-pressed={on} style={style}>
+      {label} · {on ? 'ON' : 'OFF'}
+    </button>
+  );
+}
+
+function ChartHeader({
+  symbol,
+  tf,
+  last,
+  toggles,
+  onToggle,
+}: {
+  symbol: string;
+  tf: string;
+  last: Candle | undefined;
+  toggles: ChartToggles;
+  onToggle: (k: keyof ChartToggles) => void;
+}) {
   return (
     <div
       style={{
@@ -459,18 +552,25 @@ function ChartHeader({ symbol, tf, last }: { symbol: string; tf: string; last: C
         </div>
       )}
       <div style={{ flex: 1 }} />
-      <div style={{ display: 'flex', gap: 6 }}>
-        <Chip kind="accent">EMAs · ON</Chip>
-        <Chip kind="violet">FVG · ON</Chip>
-        <Chip kind="info">VWAP · ON</Chip>
-        <Chip kind="ghost">Volume profile</Chip>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <ChartToggleBtn on={toggles.ema} label="EMAs" kind="accent" onClick={() => onToggle('ema')} />
+        <ChartToggleBtn on={toggles.fvg} label="FVG" kind="violet" onClick={() => onToggle('fvg')} />
+        <ChartToggleBtn on={toggles.ob} label="OB" kind="warn" onClick={() => onToggle('ob')} />
+        <ChartToggleBtn
+          on={toggles.structure}
+          label="STRUCT"
+          kind="info"
+          onClick={() => onToggle('structure')}
+        />
+        <ChartToggleBtn
+          on={toggles.liquidity}
+          label="LIQ"
+          kind="info"
+          onClick={() => onToggle('liquidity')}
+        />
+        <ChartToggleBtn on={toggles.volume} label="VOL" kind="ghost" onClick={() => onToggle('volume')} />
+        <ChartToggleBtn on={toggles.vwap} label="VWAP" kind="info" onClick={() => onToggle('vwap')} />
       </div>
-      <button type="button" className="btn btn-sm">
-        Indicators
-      </button>
-      <button type="button" className="btn btn-sm btn-ghost">
-        ⛶
-      </button>
     </div>
   );
 }
