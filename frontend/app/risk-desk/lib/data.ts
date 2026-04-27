@@ -223,11 +223,22 @@ export interface PlaybookEntry {
   active: boolean;
 }
 
+export interface StrategyPlan {
+  direction: 'LONG' | 'SHORT';
+  entry: number;
+  stop: number;
+  tp1: number;
+  tp2: number;
+  rrRatio: number;
+}
+
 export interface Strategy {
   regime: string;
   confidence: number;
   factors: Array<{ name: string; v: number; label: string }>;
   recommendation: string;
+  plan: StrategyPlan | null;
+  eligible: boolean;
 }
 
 export interface DxyData {
@@ -580,6 +591,8 @@ export const STRATEGY: Strategy = {
     { name: 'Session bias', v: 0.71, label: 'RTH am — 71% bull on MCL' },
   ],
   recommendation: 'Lean long, take pullbacks to VWAP/OB. Avoid fading.',
+  plan: null,
+  eligible: false,
 };
 
 export const DXY_DATA: DxyData = {

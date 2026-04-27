@@ -580,11 +580,24 @@ export function mapStrategy(d: StrategyDecisionView, fallback: Strategy): Strate
       : d.direction === 'SHORT'
       ? 'Trend (bearish)'
       : 'Mixed';
+  const plan = d.plan
+    ? {
+        direction: d.plan.direction,
+        entry: d.plan.entry,
+        stop: d.plan.stopLoss,
+        tp1: d.plan.takeProfit1,
+        tp2: d.plan.takeProfit2,
+        rrRatio: d.plan.rrRatio,
+      }
+    : null;
+  const eligible = d.decision !== 'NO_TRADE' && d.decision !== 'MONITORING' && plan != null;
   return {
     regime: regimeLabel,
     confidence: conf,
     factors: factors.length ? factors : fallback.factors,
     recommendation: d.vetoReasons?.[0] ?? fallback.recommendation,
+    plan,
+    eligible,
   };
 }
 

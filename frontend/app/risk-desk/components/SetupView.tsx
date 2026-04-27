@@ -364,61 +364,107 @@ function PositionsPanel({ positions }: { positions: Position[] }) {
   );
 }
 
-function TradeDecisionPanel({ tf, instrument }: { tf: string; instrument: string }) {
+function TradeDecisionPanel({
+  tf,
+  instrument,
+  strategy,
+}: {
+  tf: string;
+  instrument: string;
+  strategy: Strategy;
+}) {
+  const plan = strategy.plan;
+  const isLong = plan?.direction === 'LONG';
+  const fmtPx = (n: number) => n.toFixed(Math.abs(n) >= 100 ? 2 : 4);
   return (
     <Panel
       title={`Trade Decision · ${instrument} ${tf}`}
-      right={<Chip kind="up">eligible</Chip>}
+      right={
+        <Chip kind={strategy.eligible ? 'up' : 'ghost'}>
+          {strategy.eligible ? 'eligible' : 'no trade'}
+        </Chip>
+      }
     >
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
         <div>
           <div style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 4 }}>Bias</div>
-          <Chip kind="up">LONG</Chip>
+          {plan ? (
+            <Chip kind={isLong ? 'up' : 'down'}>{plan.direction}</Chip>
+          ) : (
+            <Chip kind="ghost">—</Chip>
+          )}
         </div>
         <div>
           <div style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 4 }}>Setup score</div>
-          <BarGauge value={0.78} />
+          <BarGauge value={strategy.confidence} />
         </div>
         <div>
           <div style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 4 }}>RR target</div>
-          <span className="mono" style={{ fontSize: 12, color: 'var(--up)', fontWeight: 600 }}>
-            2.11R
+          <span
+            className="mono"
+            style={{
+              fontSize: 12,
+              color: plan ? 'var(--up)' : 'var(--ink-3)',
+              fontWeight: 600,
+            }}
+          >
+            {plan ? `${plan.rrRatio.toFixed(2)}R` : '—'}
           </span>
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 4 }}>
-        <div className="kv">
-          <div className="k">Entry trigger</div>
-          <div className="v">break 78.40</div>
-          <div className="k">Stop</div>
-          <div className="v down">78.18 (−22t)</div>
-          <div className="k">Target 1</div>
-          <div className="v up">78.58 (+22t)</div>
-          <div className="k">Target 2</div>
-          <div className="v up">78.74 (+38t)</div>
+      {plan ? (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 4 }}>
+            <div className="kv">
+              <div className="k">Entry trigger</div>
+              <div className="v">{fmtPx(plan.entry)}</div>
+              <div className="k">Stop</div>
+              <div className="v down">{fmtPx(plan.stop)}</div>
+              <div className="k">Target 1</div>
+              <div className="v up">{fmtPx(plan.tp1)}</div>
+              <div className="k">Target 2</div>
+              <div className="v up">{fmtPx(plan.tp2)}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Direction</div>
+              <div className="v">{plan.direction}</div>
+              <div className="k">RR (T2)</div>
+              <div className="v">{plan.rrRatio.toFixed(2)}R</div>
+              <div className="k">Recommendation</div>
+              <div className="v" style={{ fontSize: 10 }}>
+                {strategy.recommendation}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              className={isLong ? 'btn btn-up' : 'btn btn-down'}
+              style={{ flex: 1 }}
+              disabled={!strategy.eligible}
+            >
+              Arm {plan.direction.charAt(0) + plan.direction.slice(1).toLowerCase()}
+            </button>
+            <button type="button" className="btn">
+              Edit
+            </button>
+            <button type="button" className="btn btn-ghost">
+              Pass
+            </button>
+          </div>
+        </>
+      ) : (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--ink-3)',
+            fontStyle: 'italic',
+            padding: '12px 0',
+          }}
+        >
+          No mechanical plan for {instrument} {tf} — {strategy.regime.toLowerCase()}.
         </div>
-        <div className="kv">
-          <div className="k">Risk $</div>
-          <div className="v">$66</div>
-          <div className="k">Reward $ (T2)</div>
-          <div className="v">$152</div>
-          <div className="k">Position size</div>
-          <div className="v">3 contracts</div>
-          <div className="k">Cool-down</div>
-          <div className="v">4m if invalid</div>
-        </div>
-      </div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <button type="button" className="btn btn-up" style={{ flex: 1 }}>
-          Arm Long ×3
-        </button>
-        <button type="button" className="btn">
-          Edit
-        </button>
-        <button type="button" className="btn btn-ghost">
-          Pass
-        </button>
-      </div>
+      )}
     </Panel>
   );
 }
@@ -451,7 +497,7 @@ export function SetupView({
       <StrategyPanel s={strategy} />
       <IndicatorsPanel i={indicators} tf={tf} instrument={instrument} />
       <PositionsPanel positions={positions} />
-      <TradeDecisionPanel tf={tf} instrument={instrument} />
+      <TradeDecisionPanel tf={tf} instrument={instrument} strategy={strategy} />
       <div style={{ gridColumn: '1 / -1' }}>
         <OrderFlowProdPanel data={orderflowProd} />
       </div>

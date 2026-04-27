@@ -67,17 +67,44 @@ function DepthBookPanel({ dom, instrument }: { dom: Dom; instrument: string }) {
   );
 }
 
-function OrderFlowTapePanel({ events, cvd }: { events: OrderFlowEvent[]; cvd: number[] }) {
+function OrderFlowTapePanel({
+  events,
+  cvd,
+  instrument,
+}: {
+  events: OrderFlowEvent[];
+  cvd: number[];
+  instrument: string;
+}) {
+  const hasData = events.length > 0;
+  const lastCvd = cvd[cvd.length - 1] ?? 0;
   return (
     <Panel
-      title="Order Flow · Tape"
+      title={`Order Flow · ${instrument} Tape`}
       right={
-        <span className="mono" style={{ fontSize: 10, color: 'var(--up)' }}>
-          CVD {cvd[cvd.length - 1] >= 0 ? '+' : ''}
-          {cvd[cvd.length - 1]} ↑
-        </span>
+        hasData ? (
+          <span className="mono" style={{ fontSize: 10, color: 'var(--up)' }}>
+            CVD {lastCvd >= 0 ? '+' : ''}
+            {lastCvd} ↑
+          </span>
+        ) : (
+          <Chip kind="ghost">no feed</Chip>
+        )
       }
     >
+      {!hasData && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--ink-3)',
+            fontStyle: 'italic',
+            padding: '24px 0',
+            textAlign: 'center',
+          }}
+        >
+          No tick-by-tick tape for {instrument} yet.
+        </div>
+      )}
       <Sparkline values={cvd} color="var(--up)" w={340} h={36} />
       <div style={{ maxHeight: 260, overflowY: 'auto' }}>
         <div
@@ -430,7 +457,7 @@ export function ExecuteView({
       }}
     >
       <DepthBookPanel dom={dom} instrument={instrument} />
-      <OrderFlowTapePanel events={orderFlow} cvd={cvd} />
+      <OrderFlowTapePanel events={orderFlow} cvd={cvd} instrument={instrument} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <FlashCrashPanel f={flashCrash} />
         <IBKRPanel ib={ibkr} />
