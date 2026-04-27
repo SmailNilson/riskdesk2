@@ -685,6 +685,9 @@ export interface RiskDeskMock {
   ema9: number[];
   ema50: number[];
   ema200: number[];
+  bbUpper: number[];
+  bbLower: number[];
+  bbBasis: number[];
   smc: Smc;
   instruments: Instrument[];
   watchlist: WatchItem[];
@@ -711,14 +714,34 @@ export interface RiskDeskMock {
   rollover: Rollover;
 }
 
+function bbSeries(closes: number[], period = 20, mult = 2) {
+  const upper: number[] = [];
+  const lower: number[] = [];
+  const basis: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    const slice = closes.slice(Math.max(0, i - period + 1), i + 1);
+    const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+    const variance = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / slice.length;
+    const sd = Math.sqrt(variance);
+    basis.push(mean);
+    upper.push(mean + mult * sd);
+    lower.push(mean - mult * sd);
+  }
+  return { upper, lower, basis };
+}
+
 export function buildMock(seed = 42): RiskDeskMock {
   const candles = genCandles(seed);
   const closes = candles.map((c) => c.close);
+  const bb = bbSeries(closes);
   return {
     candles,
     ema9: ema(closes, 9),
     ema50: ema(closes, 50),
     ema200: ema(closes, 200),
+    bbUpper: bb.upper,
+    bbLower: bb.lower,
+    bbBasis: bb.basis,
     smc: genSMC(candles),
     instruments: INSTRUMENTS,
     watchlist: WATCHLIST,

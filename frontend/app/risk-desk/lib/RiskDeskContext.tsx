@@ -28,6 +28,7 @@ import { API_BASE, WS_BASE } from '../../lib/runtimeConfig';
 import { RD_MOCK, RiskDeskMock, Review } from './data';
 import {
   mapAlert,
+  mapBbSeries,
   mapCandles,
   mapCorrelations,
   mapDom,
@@ -290,6 +291,11 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         const ema9 = mapEmaSeries(series?.ema9, candles, prev.ema9);
         const ema50 = mapEmaSeries(series?.ema50, candles, prev.ema50);
         const ema200 = mapEmaSeries(series?.ema200, candles, prev.ema200);
+        const bb = mapBbSeries(series?.bollingerBands, candles, {
+          upper: prev.bbUpper,
+          lower: prev.bbLower,
+          basis: prev.bbBasis,
+        });
         const smc = ind ? mapSmc(ind, candles, prev.smc) : prev.smc;
         const mappedFp = fp && isFootprintBar(fp) ? mapFootprint(fp) : null;
         const footprint = mappedFp && mappedFp.length ? mappedFp : prev.footprint;
@@ -314,6 +320,9 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           ema9,
           ema50,
           ema200,
+          bbUpper: bb.upper,
+          bbLower: bb.lower,
+          bbBasis: bb.basis,
           smc,
           footprint,
           dom,
