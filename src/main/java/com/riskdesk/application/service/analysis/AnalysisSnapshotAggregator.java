@@ -58,10 +58,13 @@ public class AnalysisSnapshotAggregator {
     public LiveAnalysisSnapshot capture(Instrument instrument, Timeframe timeframe) {
         Instant decisionT = Instant.now();
 
-        var indicatorsFut = CompletableFuture.supplyAsync(
-            () -> indicatorPort.indicatorsAsOf(instrument, timeframe, decisionT), executor);
-        var smcFut = CompletableFuture.supplyAsync(
-            () -> indicatorPort.smcAsOf(instrument, timeframe, decisionT), executor);
+        // PR #269 round-8 review fix: indicators and SMC must come from a
+        // single computation pass to preserve coherence. Previously they were
+        // two parallel futures that on cache miss could observe different
+        // candle states. One combined call uses the cache once and returns
+        // both views with a shared asOf.
+        var indicatorAndSmcFut = CompletableFuture.supplyAsync(
+            () -> indicatorPort.combinedAsOf(instrument, timeframe, decisionT), executor);
         var orderFlowFut = CompletableFuture.supplyAsync(
             () -> orderFlowPort.contextAsOf(instrument, decisionT), executor);
         var momentumFut = CompletableFuture.supplyAsync(
@@ -77,10 +80,9 @@ public class AnalysisSnapshotAggregator {
 
         // Keep the list around so we can cancel them all if any slow dependency
         // hangs the fan-out — without this, hung tasks keep occupying the
-        // fixed-size analysisExecutor pool and starve subsequent captures
-        // (PR #269 review fix).
+        // fixed-size analysisExecutor pool and starve subsequent captures.
         java.util.List<CompletableFuture<?>> all = java.util.List.of(
-            indicatorsFut, smcFut, orderFlowFut, momentumFut,
+            indicatorAndSmcFut, orderFlowFut, momentumFut,
             absorptionFut, distFut, cycleFut, macroFut);
 
         try {
@@ -113,8 +115,7 @@ public class AnalysisSnapshotAggregator {
 
         Instant captureT = Instant.now();
 
-        var indicators = indicatorsFut.join();
-        var smc = smcFut.join();
+        var combined = indicatorAndSmcFut.join();
         var orderFlow = orderFlowFut.join();
         var momentum = momentumFut.join();
         var absorption = absorptionFut.join();
@@ -124,9 +125,9 @@ public class AnalysisSnapshotAggregator {
 
         // Indicator + SMC staleness scales with the timeframe (HTF caches refresh slowly
         // — a 30s-old 1h indicator is still meaningful, the candle hasn't closed yet).
+        // Both layers share a single asOf since they came from one computation.
         Duration indicatorBudget = indicatorStalenessBudget(timeframe);
-        rejectStaleness("indicators", indicators.asOf(), captureT, indicatorBudget);
-        rejectStaleness("smc", smc.asOf(), captureT, indicatorBudget);
+        rejectStaleness("indicators+smc", combined.asOf(), captureT, indicatorBudget);
         // Order-flow must be near-real-time regardless of the analysis timeframe —
         // it reflects the live tick stream, not closed bars.
         rejectStaleness("orderFlow", orderFlow.asOf(), captureT, ORDER_FLOW_MAX_STALENESS);
@@ -144,9 +145,9 @@ public class AnalysisSnapshotAggregator {
         return new LiveAnalysisSnapshot(
             instrument, timeframe, decisionT, captureT,
             TriLayerScoringEngine.CURRENT_VERSION,
-            indicators.indicators().lastPrice(),
-            indicators.indicators(),
-            smc.smc(),
+            combined.indicators().lastPrice(),
+            combined.indicators(),
+            combined.smc(),
             orderFlow.context(),
             momentum, absorption, dist, cycle,
             effectiveMacro

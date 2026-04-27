@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 @Component
 public class VerdictRecordRepositoryAdapter implements VerdictRecordRepositoryPort {
@@ -71,6 +72,7 @@ public class VerdictRecordRepositoryAdapter implements VerdictRecordRepositoryPo
     }
 
     @Override
+    @Deprecated
     @Transactional(readOnly = true)
     public List<RecordedAnalysis> findBetween(Instrument instrument, Timeframe timeframe,
                                                 Instant from, Instant to) {
@@ -78,16 +80,54 @@ public class VerdictRecordRepositoryAdapter implements VerdictRecordRepositoryPo
             instrument, timeframe.label(), from, to);
         List<RecordedAnalysis> out = new ArrayList<>(entities.size());
         for (var e : entities) {
-            try {
-                LiveAnalysisSnapshot snap = objectMapper.readValue(e.getSnapshotJson(),
-                    LiveAnalysisSnapshot.class);
-                LiveVerdict verdict = objectMapper.readValue(e.getVerdictJson(), LiveVerdict.class);
-                out.add(new RecordedAnalysis(snap, verdict));
-            } catch (Exception ex) {
-                // Skip rows that fail to deserialise — schema drift across versions is allowed
-            }
+            tryDeserialise(e).ifPresent(out::add);
         }
         return out;
+    }
+
+    @Override
+    public void streamBetween(Instrument instrument, Timeframe timeframe,
+                                Instant from, Instant to,
+                                int pageSize, Consumer<RecordedAnalysis> consumer) {
+        if (pageSize <= 0) {
+            throw new IllegalArgumentException("pageSize must be > 0");
+        }
+        // Iterates pages until the underlying query returns fewer rows than
+        // requested (final page) or returns nothing. Each page is held only for
+        // the duration of the inner loop, so heap usage stays bounded by
+        // pageSize × (snapshotJson + verdictJson size) regardless of total rows.
+        // Per-page transactions keep the read connection short-lived.
+        int pageIndex = 0;
+        while (true) {
+            List<VerdictRecordEntity> page = fetchPage(instrument, timeframe, from, to, pageIndex, pageSize);
+            if (page.isEmpty()) return;
+            for (var entity : page) {
+                tryDeserialise(entity).ifPresent(consumer);
+            }
+            if (page.size() < pageSize) return;
+            pageIndex++;
+        }
+    }
+
+    @Transactional(readOnly = true)
+    protected List<VerdictRecordEntity> fetchPage(Instrument instrument, Timeframe timeframe,
+                                                    Instant from, Instant to,
+                                                    int pageIndex, int pageSize) {
+        return repo.findByInstrumentAndTimeframeAndDecisionTimestampBetweenOrderByDecisionTimestampAsc(
+            instrument, timeframe.label(), from, to,
+            org.springframework.data.domain.PageRequest.of(pageIndex, pageSize));
+    }
+
+    private Optional<RecordedAnalysis> tryDeserialise(VerdictRecordEntity e) {
+        try {
+            LiveAnalysisSnapshot snap = objectMapper.readValue(e.getSnapshotJson(),
+                LiveAnalysisSnapshot.class);
+            LiveVerdict verdict = objectMapper.readValue(e.getVerdictJson(), LiveVerdict.class);
+            return Optional.of(new RecordedAnalysis(snap, verdict));
+        } catch (Exception ex) {
+            // Skip rows that fail to deserialise — schema drift across versions is allowed
+            return Optional.empty();
+        }
     }
 
     @Override

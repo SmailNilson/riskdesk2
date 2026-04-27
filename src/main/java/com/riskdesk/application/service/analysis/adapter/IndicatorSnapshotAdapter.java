@@ -47,17 +47,33 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
     }
 
     @Override
-    public TimedIndicators indicatorsAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
-        // PR #269 review fix: single atomic call returns both snapshot AND its
-        // real computedAt from the same cache entry. The previous two-step
-        // approach (computeSnapshot then snapshotComputedAt) could interleave
-        // with a concurrent cache refresh, producing values from different
-        // generations.
+    public TimedCombined combinedAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
+        // PR #269 round-8 review fix: derive BOTH domain views from a single
+        // cache entry so the aggregator can no longer observe indicator values
+        // from one generation and SMC values from another (which can happen
+        // when the two parallel adapter calls hit concurrent cache misses).
         var pair = indicatorService.computeSnapshotWithComputedAt(instrument, timeframe.label());
         IndicatorSnapshot src = pair.snapshot();
         Instant asOf = pair.computedAt();
+        return new TimedCombined(buildIndicators(src), buildSmc(src), asOf);
+    }
 
-        var domain = new com.riskdesk.domain.analysis.model.IndicatorSnapshot(
+    @Override
+    @Deprecated
+    public TimedIndicators indicatorsAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
+        var c = combinedAsOf(instrument, timeframe, decisionAt);
+        return new TimedIndicators(c.indicators(), c.asOf());
+    }
+
+    @Override
+    @Deprecated
+    public TimedSmc smcAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
+        var c = combinedAsOf(instrument, timeframe, decisionAt);
+        return new TimedSmc(c.smc(), c.asOf());
+    }
+
+    private com.riskdesk.domain.analysis.model.IndicatorSnapshot buildIndicators(IndicatorSnapshot src) {
+        return new com.riskdesk.domain.analysis.model.IndicatorSnapshot(
             src.lastPrice(),
             doubleOf(src.rsi()),
             src.rsiSignal(),
@@ -73,15 +89,9 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
             doubleOf(src.wtWt1()),
             doubleOf(src.wtWt2())
         );
-        return new TimedIndicators(domain, asOf);
     }
 
-    @Override
-    public TimedSmc smcAsOf(Instrument instrument, Timeframe timeframe, Instant decisionAt) {
-        // Same atomic-pair contract as indicatorsAsOf — see comment above.
-        var pair = indicatorService.computeSnapshotWithComputedAt(instrument, timeframe.label());
-        IndicatorSnapshot src = pair.snapshot();
-        Instant asOf = pair.computedAt();
+    private com.riskdesk.domain.analysis.model.SmcContext buildSmc(IndicatorSnapshot src) {
 
         Map<String, String> mr = new HashMap<>();
         if (src.multiResolutionBias() != null) {
@@ -127,7 +137,7 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
             }
         }
 
-        SmcContext smc = new SmcContext(
+        return new SmcContext(
             src.internalBias(),
             src.swingBias(),
             src.currentZone(),
@@ -144,7 +154,6 @@ public class IndicatorSnapshotAdapter implements IndicatorSnapshotPort {
             activeFvgs,
             breaks
         );
-        return new TimedSmc(smc, asOf);
     }
 
     private static Double doubleOf(BigDecimal v) {

@@ -45,6 +45,14 @@ public class ScoringReplayService {
      */
     public static final int MAX_SAMPLES_RETURNED = 5_000;
 
+    /**
+     * Page size for the streaming repository read. Each page is fully
+     * deserialised in memory before being processed and discarded; sized so
+     * one page is comfortable on the heap (~1 MB at average JSON sizes) while
+     * keeping DB round-trips reasonable.
+     */
+    public static final int STREAM_PAGE_SIZE = 500;
+
     private final VerdictRecordRepositoryPort verdictRepository;
     private final LiveVerdictService liveVerdictService;
 
@@ -68,20 +76,42 @@ public class ScoringReplayService {
                 + "Narrow the [from, to] range or run multiple replays.");
         }
 
-        var recorded = verdictRepository.findBetween(instrument, timeframe, from, to);
-        log.info("Replay {} snapshots for {} {} {} → {}",
-            recorded.size(), instrument, timeframe, from, to);
+        log.info("Replay streaming for {} {} {} → {} (max {} samples)",
+            instrument, timeframe, from, to, MAX_SAMPLES_RETURNED);
 
-        Map<String, Integer> directionDistribution = new HashMap<>();
-        // Bounded buffer — once we have MAX_SAMPLES_RETURNED, we stop collecting
-        // per-row entries but keep computing aggregates over the full set.
-        List<ReplaySample> samples = new ArrayList<>(Math.min(recorded.size(), MAX_SAMPLES_RETURNED));
+        // PR #269 round-8 review fix: stream pages instead of loading the
+        // full row set. The pagination keeps STREAM_PAGE_SIZE rows of
+        // snapshot/verdict JSON in memory at most regardless of window size.
+        Aggregator agg = new Aggregator();
+        verdictRepository.streamBetween(instrument, timeframe, from, to, STREAM_PAGE_SIZE,
+            rec -> agg.consume(rec, weights));
+
+        double agreementRatio = agg.total == 0 ? 0.0 : (double) agg.agreements / agg.total;
+        if (agg.truncated) {
+            log.info("Replay sample list truncated from {} to {} for {} {} (aggregates remain accurate)",
+                agg.total, MAX_SAMPLES_RETURNED, instrument, timeframe);
+        }
+
+        return new ReplayReport(
+            instrument.name(), timeframe.label(), from, to,
+            weights, agg.total, agg.agreements, agreementRatio, agg.actionable,
+            agg.directionDistribution, agg.samples, agg.truncated, MAX_SAMPLES_RETURNED);
+    }
+
+    /**
+     * Mutable aggregator scoped to a single replay request. Holds the bounded
+     * sample buffer and running aggregates so the streaming consumer stays
+     * stateless from the caller's view.
+     */
+    private final class Aggregator {
+        final Map<String, Integer> directionDistribution = new HashMap<>();
+        final List<ReplaySample> samples = new ArrayList<>(MAX_SAMPLES_RETURNED);
         int agreements = 0;
         int total = 0;
         long actionable = 0L;
         boolean truncated = false;
 
-        for (var rec : recorded) {
+        void consume(VerdictRecordRepositoryPort.RecordedAnalysis rec, ScoringWeights weights) {
             LiveVerdict replayed = liveVerdictService.scoreOnly(rec.snapshot(), weights);
             String direction = replayed.bias().primary().name();
             directionDistribution.merge(direction, 1, Integer::sum);
@@ -90,7 +120,6 @@ public class ScoringReplayService {
             if (!"NEUTRAL".equals(direction)) actionable++;
             total++;
 
-            // Per-row capture only while under the cap; aggregates stay accurate.
             if (samples.size() < MAX_SAMPLES_RETURNED) {
                 samples.add(new ReplaySample(
                     rec.snapshot().decisionTimestamp(),
@@ -104,17 +133,6 @@ public class ScoringReplayService {
                 truncated = true;
             }
         }
-
-        double agreementRatio = total == 0 ? 0.0 : (double) agreements / total;
-        if (truncated) {
-            log.info("Replay sample list truncated from {} to {} for {} {} (aggregates remain accurate)",
-                total, MAX_SAMPLES_RETURNED, instrument, timeframe);
-        }
-
-        return new ReplayReport(
-            instrument.name(), timeframe.label(), from, to,
-            weights, total, agreements, agreementRatio, actionable,
-            directionDistribution, samples, truncated, MAX_SAMPLES_RETURNED);
     }
 
     public record ReplaySample(

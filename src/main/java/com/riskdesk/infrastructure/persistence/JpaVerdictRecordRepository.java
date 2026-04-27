@@ -25,6 +25,14 @@ public interface JpaVerdictRecordRepository extends JpaRepository<VerdictRecordE
     List<VerdictRecordEntity> findByInstrumentAndTimeframeAndDecisionTimestampBetweenOrderByDecisionTimestampAsc(
         Instrument instrument, String timeframe, Instant from, Instant to);
 
+    /**
+     * Paginated variant — used by the streaming replay path to keep a single
+     * page in memory at a time (PR #269 round-8 fix). Pageable defines both
+     * the page index and page size; sorting is enforced by the method name.
+     */
+    List<VerdictRecordEntity> findByInstrumentAndTimeframeAndDecisionTimestampBetweenOrderByDecisionTimestampAsc(
+        Instrument instrument, String timeframe, Instant from, Instant to, Pageable pageable);
+
     @Modifying
     @Transactional
     @Query("DELETE FROM VerdictRecordEntity v WHERE v.decisionTimestamp < :cutoff")
