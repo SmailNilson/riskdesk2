@@ -476,21 +476,6 @@ export interface RolloverOiEntry {
 
 export type RolloverOiStatus = Record<string, RolloverOiEntry>;
 
-export type RolloverStatusLevel = 'STABLE' | 'WARNING' | 'CRITICAL';
-
-export interface RolloverInfo {
-  instrument: string;
-  contractMonth: string | null;
-  expiryDate: string | null;
-  daysToExpiry: number;
-  status: RolloverStatusLevel;
-}
-
-export interface RolloverStatusResponse {
-  activeContracts: Record<string, string>;
-  rolloverStatus: Record<string, RolloverInfo>;
-}
-
 export interface BacktestTrade {
   tradeNo: number;
   side: 'LONG' | 'SHORT';
@@ -981,13 +966,6 @@ export const api = {
   // time-to-expiry data exposed by useRollover with a liquidity-based signal.
   getRolloverOiStatus: () =>
     get<RolloverOiStatus>('/api/rollover/oi-status'),
-  getRolloverStatus: () =>
-    get<RolloverStatusResponse>('/api/rollover/status'),
-  confirmRollover: (instrument: string, contractMonth: string) =>
-    post<{ status?: string }>(
-      `/api/rollover/confirm?instrument=${encodeURIComponent(instrument)}&contractMonth=${encodeURIComponent(contractMonth)}`,
-      {}
-    ),
   analyzeMentor: (payload: unknown) =>
     post<MentorAnalyzeResponse>('/api/mentor/analyze', { payload }),
   refreshMentorContext: (instrument: string, timeframe: string) =>
