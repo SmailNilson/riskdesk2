@@ -381,8 +381,10 @@ function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
   const [error, setError] = useState<string | null>(null);
 
   const ask = async (q: string) => {
-    const text = q.trim();
-    if (!text || loading) return;
+    if (loading) return;
+    // Empty input → ask Gemini for a generic context summary so the button is
+    // always actionable. The user can refine afterwards by typing.
+    const text = q.trim() || `Analyze the current ${instrument} ${tf} setup right now.`;
     setLoading(true);
     setError(null);
     try {
@@ -479,7 +481,8 @@ function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
           type="button"
           className="btn btn-accent btn-sm"
           onClick={() => void ask(question)}
-          disabled={loading || !question.trim()}
+          disabled={loading}
+          style={{ minWidth: 56 }}
         >
           {loading ? '…' : 'Ask'}
         </button>
