@@ -110,8 +110,8 @@ function IndicatorsPanel({ i, tf }: { i: Indicators; tf: string }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
         <div>
           <Row k="EMA 9" v={i.ema9.v} sub="↑ above" tone="var(--up)" />
-          <Row k="EMA 20" v={i.ema20.v} sub="↑ above" tone="var(--up)" />
           <Row k="EMA 50" v={i.ema50.v} sub="↑ above" tone="var(--up)" />
+          <Row k="EMA 200" v={i.ema200.v} sub="↑ above" tone="var(--up)" />
           <Row k="VWAP" v={i.vwap.v} sub={`+${i.vwap.dev.toFixed(2)}`} tone="var(--up)" />
           <Row k="SuperT" v="↑" sub={`flip ${i.supertrend.flipped} bars`} tone="var(--up)" />
           <Row

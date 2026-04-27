@@ -115,8 +115,8 @@ export function mapDxy(latest: DxySnapshotView, history: DxySnapshotView[], fall
 export function mapIndicators(s: IndicatorSnapshot, fallback: Indicators): Indicators {
   return {
     ema9: { v: s.ema9 ?? fallback.ema9.v, vs: s.emaCrossover ?? fallback.ema9.vs, strength: 0.7 },
-    ema20: { v: fallback.ema20.v, vs: fallback.ema20.vs, strength: 0.7 },
     ema50: { v: s.ema50 ?? fallback.ema50.v, vs: fallback.ema50.vs, strength: 0.7 },
+    ema200: { v: s.ema200 ?? fallback.ema200.v, vs: fallback.ema200.vs, strength: 0.7 },
     vwap: {
       v: s.vwap ?? fallback.vwap.v,
       vs: fallback.vwap.vs,

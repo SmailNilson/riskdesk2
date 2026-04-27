@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertsRail } from './components/Alerts';
 import { LiveChart } from './components/Chart';
+import { RiskDeskErrorBoundary } from './components/ErrorBoundary';
 import { ExecuteView } from './components/ExecuteView';
 import { MentorDesk } from './components/Mentor';
 import { MetricsBar, RolloverBanner } from './components/Metrics';
@@ -41,9 +42,11 @@ const TWEAK_DEFAULTS: Tweaks = {
 
 export function RiskDesk() {
   return (
-    <RiskDeskProvider>
-      <RiskDeskShell />
-    </RiskDeskProvider>
+    <RiskDeskErrorBoundary label="root">
+      <RiskDeskProvider>
+        <RiskDeskShell />
+      </RiskDeskProvider>
+    </RiskDeskErrorBoundary>
   );
 }
 
@@ -173,8 +176,9 @@ function RiskDeskShell() {
               tf={tf}
               candles={D.candles}
               ema9={D.ema9}
-              ema20={D.ema20}
               ema50={D.ema50}
+              ema200={D.ema200}
+              vwap={D.indicators?.vwap?.v ?? null}
               smc={D.smc}
               activePosition={activePos}
             />
