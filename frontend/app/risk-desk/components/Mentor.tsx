@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BarGauge, Chip, RRLadder, SectionLabel } from '../lib/atoms';
 import { Review } from '../lib/data';
+import { api, MentorAnalyzeResponse } from '../../lib/api';
 
 const PAGE_SIZE = 10;
 
@@ -178,11 +179,12 @@ function ReviewDetail({
 interface MentorDeskProps {
   reviews: Review[];
   instrument: string;
+  tf: string;
   onArm?: (r: Review) => void;
   onSkip?: (r: Review) => void;
 }
 
-export function MentorDesk({ reviews, instrument, onArm, onSkip }: MentorDeskProps) {
+export function MentorDesk({ reviews, instrument, tf, onArm, onSkip }: MentorDeskProps) {
   const [activeId, setActiveId] = useState<string>(reviews[0]?.id ?? '');
   const [filter, setFilter] = useState<'all' | 'eligible' | 'take'>('all');
   const [page, setPage] = useState(0);
@@ -367,40 +369,94 @@ export function MentorDesk({ reviews, instrument, onArm, onSkip }: MentorDeskPro
         />
       </div>
 
-      <ManualAsk instrument={instrument} />
+      <ManualAsk instrument={instrument} tf={tf} />
     </div>
   );
 }
 
-function ManualAsk({ instrument }: { instrument: string }) {
+function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
+  const [question, setQuestion] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [response, setResponse] = useState<MentorAnalyzeResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const ask = async (q: string) => {
+    const text = q.trim();
+    if (!text || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.analyzeMentor({
+        instrument,
+        timeframe: tf,
+        question: text,
+        source: 'manual-mentor:dashboard',
+      });
+      setResponse(res);
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const quickPrompts = [
+    "What's the bias?",
+    'Should I trail tighter?',
+    'Risk in next 30m?',
+    `News check ${instrument}`,
+  ];
+
+  const a = response?.analysis ?? null;
+
   return (
     <div
       style={{
         borderTop: '1px solid var(--line)',
         padding: 12,
         background: 'var(--s2)',
+        maxHeight: 360,
+        overflowY: 'auto',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <span className="section-label">Ask Mentor</span>
-        <Chip kind="ghost">claude-haiku</Chip>
+        <Chip kind="ghost">{response?.model || 'gemini'}</Chip>
+        {loading && <Chip kind="warn">analyzing…</Chip>}
       </div>
-      <div
-        style={{
-          display: 'flex',
-          gap: 6,
-          flexWrap: 'wrap',
-          marginBottom: 8,
-        }}
-      >
-        <Chip>What&apos;s the bias?</Chip>
-        <Chip>Should I trail tighter?</Chip>
-        <Chip>Risk in next 30m?</Chip>
-        <Chip>News check {instrument}</Chip>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        {quickPrompts.map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => {
+              setQuestion(p);
+              void ask(p);
+            }}
+            disabled={loading}
+            style={{
+              fontSize: 10,
+              padding: '2px 8px',
+              borderRadius: 3,
+              background: 'var(--s1)',
+              border: '1px solid var(--line)',
+              color: 'var(--ink-2)',
+              cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {p}
+          </button>
+        ))}
       </div>
       <div style={{ display: 'flex', gap: 6 }}>
         <input
-          placeholder={`Ask about ${instrument} setup, position, or context…`}
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void ask(question);
+          }}
+          disabled={loading}
+          placeholder={`Ask about ${instrument} ${tf} setup, position, or context…`}
           style={{
             flex: 1,
             height: 30,
@@ -409,12 +465,83 @@ function ManualAsk({ instrument }: { instrument: string }) {
             border: '1px solid var(--line)',
             borderRadius: 4,
             fontSize: 12,
+            color: 'var(--ink-1)',
           }}
         />
-        <button type="button" className="btn btn-accent btn-sm">
-          Send
+        <button
+          type="button"
+          className="btn btn-accent btn-sm"
+          onClick={() => void ask(question)}
+          disabled={loading || !question.trim()}
+        >
+          {loading ? '…' : 'Ask'}
         </button>
       </div>
+      {error && (
+        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--down)' }}>
+          Error: {error}
+        </div>
+      )}
+      {a && (
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="section-label">Verdict</span>
+            <Chip
+              kind={
+                /TAKE|LONG|SHORT/i.test(a.verdict)
+                  ? 'up'
+                  : /SKIP|NO_TRADE|AVOID/i.test(a.verdict)
+                  ? 'down'
+                  : 'warn'
+              }
+            >
+              {a.verdict}
+            </Chip>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--ink-1)', lineHeight: 1.4 }}>
+            {a.technicalQuickAnalysis}
+          </div>
+          {a.proposedTradePlan &&
+            (a.proposedTradePlan.entryPrice != null || a.proposedTradePlan.rationale) && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11 }}>
+                {a.proposedTradePlan.entryPrice != null && (
+                  <>
+                    <span className="muted">Entry</span>
+                    <span className="mono">{a.proposedTradePlan.entryPrice.toFixed(2)}</span>
+                  </>
+                )}
+                {a.proposedTradePlan.stopLoss != null && (
+                  <>
+                    <span className="muted">Stop</span>
+                    <span className="mono down">{a.proposedTradePlan.stopLoss.toFixed(2)}</span>
+                  </>
+                )}
+                {a.proposedTradePlan.takeProfit != null && (
+                  <>
+                    <span className="muted">Target</span>
+                    <span className="mono up">{a.proposedTradePlan.takeProfit.toFixed(2)}</span>
+                  </>
+                )}
+                {a.proposedTradePlan.rewardToRiskRatio != null && (
+                  <>
+                    <span className="muted">RR</span>
+                    <span className="mono">{a.proposedTradePlan.rewardToRiskRatio.toFixed(2)}R</span>
+                  </>
+                )}
+              </div>
+            )}
+          {a.errors.length > 0 && (
+            <div style={{ fontSize: 10, color: 'var(--down)' }}>
+              ⚠ {a.errors.slice(0, 2).join(' · ')}
+            </div>
+          )}
+          {a.improvementTip && (
+            <div style={{ fontSize: 10, color: 'var(--ink-3)', fontStyle: 'italic' }}>
+              💡 {a.improvementTip}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
