@@ -415,6 +415,13 @@ function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
         borderTop: '1px solid var(--line)',
         padding: 12,
         background: 'var(--s2)',
+        // flexShrink: 0 stops the parent flex column (MentorDesk) from
+        // squashing this panel down to its absolute minimum (which made it
+        // 25px tall on prod and pushed the input off-screen below the
+        // overflow:hidden boundary). 220 keeps the form visible without a
+        // response; if a response arrives it scrolls inside, capped at 360.
+        flexShrink: 0,
+        minHeight: 220,
         maxHeight: 360,
         overflowY: 'auto',
       }}
