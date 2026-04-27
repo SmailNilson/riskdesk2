@@ -178,13 +178,11 @@ function ReviewDetail({
 
 interface MentorDeskProps {
   reviews: Review[];
-  instrument: string;
-  tf: string;
   onArm?: (r: Review) => void;
   onSkip?: (r: Review) => void;
 }
 
-export function MentorDesk({ reviews, instrument, tf, onArm, onSkip }: MentorDeskProps) {
+export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
   const [activeId, setActiveId] = useState<string>(reviews[0]?.id ?? '');
   const [filter, setFilter] = useState<'all' | 'eligible' | 'take'>('all');
   const [page, setPage] = useState(0);
@@ -277,7 +275,7 @@ export function MentorDesk({ reviews, instrument, tf, onArm, onSkip }: MentorDes
           // overflow-x: hidden + min-width: 0 prevent the long confluence
           // chips from triggering a stray horizontal scrollbar.
           flex: '1.4 1 0',
-          minHeight: 120,
+          minHeight: 80,
           overflowY: 'auto',
           overflowX: 'hidden',
           padding: 10,
@@ -355,7 +353,7 @@ export function MentorDesk({ reviews, instrument, tf, onArm, onSkip }: MentorDes
           borderTop: '1px solid var(--line)',
           padding: 14,
           flex: '1 1 0',
-          minHeight: 180,
+          minHeight: 100,
           overflowY: 'auto',
           overflowX: 'hidden',
           background: 'var(--s1)',
@@ -369,12 +367,11 @@ export function MentorDesk({ reviews, instrument, tf, onArm, onSkip }: MentorDes
         />
       </div>
 
-      <ManualAsk instrument={instrument} tf={tf} />
     </div>
   );
 }
 
-function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
+export function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<MentorAnalyzeResponse | null>(null);
@@ -414,17 +411,14 @@ function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
   return (
     <div
       style={{
-        borderTop: '1px solid var(--line)',
         padding: 12,
         background: 'var(--s2)',
-        // flexShrink: 0 stops the parent flex column (MentorDesk) from
-        // squashing this panel down to its absolute minimum (which made it
-        // 25px tall on prod and pushed the input off-screen below the
-        // overflow:hidden boundary). 220 keeps the form visible without a
-        // response; if a response arrives it scrolls inside, capped at 360.
-        flexShrink: 0,
-        minHeight: 160,
-        maxHeight: 320,
+        // ManualAsk now lives in its own slot in the right column (next to
+        // MentorDesk + AlertsRail) instead of being a child of MentorDesk —
+        // that previously meant it got squashed below the overflow:hidden
+        // boundary on shorter viewports. Height is driven by content; the
+        // parent slot caps it.
+        height: '100%',
         overflowY: 'auto',
       }}
     >

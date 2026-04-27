@@ -5,7 +5,7 @@ import { AlertsRail } from './components/Alerts';
 import { LiveChart } from './components/Chart';
 import { RiskDeskErrorBoundary } from './components/ErrorBoundary';
 import { ExecuteView } from './components/ExecuteView';
-import { MentorDesk } from './components/Mentor';
+import { ManualAsk, MentorDesk } from './components/Mentor';
 import { MetricsBar, RolloverBanner } from './components/Metrics';
 import { ReviewView } from './components/ReviewView';
 import { RiskAlertsBar } from './components/RiskAlertsBar';
@@ -257,12 +257,11 @@ function RiskDeskShell() {
               overflow: 'hidden',
             }}
           >
-            {/* Mentor desk takes remaining space; alerts rail is fixed-height. */}
+            {/* MentorDesk takes flexible space, ManualAsk + AlertsRail are
+                fixed-height slots so they're never clipped on short viewports. */}
             <div style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden' }}>
               <MentorDesk
                 reviews={D.reviews}
-                instrument={instrument}
-                tf={tf}
                 onArm={(r) => {
                   void D.armReview(r, r.plan?.qty ?? 1);
                 }}
@@ -270,6 +269,17 @@ function RiskDeskShell() {
                   /* skip is local-only — no backend action needed */
                 }}
               />
+            </div>
+            <div
+              style={{
+                borderTop: '1px solid var(--line)',
+                flex: '0 0 180px',
+                minHeight: 0,
+                overflow: 'hidden',
+                background: 'var(--s2)',
+              }}
+            >
+              <ManualAsk instrument={instrument} tf={tf} />
             </div>
             {tweaks.showAlertsRail && (
               <div
