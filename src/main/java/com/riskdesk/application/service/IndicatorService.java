@@ -90,8 +90,67 @@ public class IndicatorService {
     );
 
     // OPT-1: TTL-based snapshot cache — tiered by timeframe to avoid recomputing slow-changing HTF
-    private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos) {}
+    private record CachedSnapshot(IndicatorSnapshot snapshot, long expiresAtNanos, java.time.Instant computedAt) {}
     private final ConcurrentHashMap<String, CachedSnapshot> snapshotCache = new ConcurrentHashMap<>();
+
+    /**
+     * Returns the wall-clock instant when the cached indicator snapshot for
+     * {@code (instrument, timeframe)} was last computed. Empty when no cache
+     * entry exists yet.
+     * <p>
+     * Consumers should prefer {@link #computeSnapshotWithComputedAt} when they
+     * need <i>both</i> the snapshot and its compute time — that path returns
+     * both atomically and avoids the race where another thread refreshes the
+     * cache between two separate calls.
+     */
+    public java.util.Optional<java.time.Instant> snapshotComputedAt(Instrument instrument, String timeframe) {
+        CachedSnapshot cached = snapshotCache.get(instrument.name() + ":" + timeframe);
+        return cached == null ? java.util.Optional.empty() : java.util.Optional.of(cached.computedAt());
+    }
+
+    /**
+     * Snapshot + its real {@code computedAt}, guaranteed to come from the same
+     * cache entry. Use this in adapters that need both for staleness checks.
+     */
+    public record SnapshotWithComputedAt(IndicatorSnapshot snapshot, java.time.Instant computedAt) {}
+
+    /**
+     * Atomic version of {@link #computeSnapshot} that also returns the
+     * {@code computedAt} of the cache entry the snapshot came from. Solves the
+     * non-atomic race flagged in PR #269 review: when {@code AnalysisSnapshotAggregator}
+     * calls indicator and SMC adapters in parallel, separate {@code computeSnapshot}
+     * + {@code snapshotComputedAt} calls could return values from different
+     * cache generations, mixing inconsistent data into a single verdict.
+     * <p>
+     * Single cache lookup → if hit, return both fields directly. If miss, run
+     * the full compute (which atomically populates the cache) and read both
+     * fields back from the freshly-written entry under the same key — by
+     * construction these two reads must return our just-computed snapshot
+     * because the cache entry will not have been overwritten in the same nano.
+     */
+    public SnapshotWithComputedAt computeSnapshotWithComputedAt(Instrument instrument, String timeframe) {
+        String cacheKey = instrument.name() + ":" + timeframe;
+        long now = System.nanoTime();
+        CachedSnapshot cached = snapshotCache.get(cacheKey);
+        if (cached != null && now < cached.expiresAtNanos()) {
+            return new SnapshotWithComputedAt(cached.snapshot(), cached.computedAt());
+        }
+        // Miss path. Capture an upper-bound timestamp BEFORE running the
+        // computation so we never mint a fresh "now" for an existing snapshot
+        // (PR #269 round-3 review fix). The actual snapshot represents data
+        // up to its lastCandleTimestamp, which is necessarily ≤ this instant.
+        java.time.Instant beforeCompute = java.time.Instant.now();
+        IndicatorSnapshot computed = computeSnapshot(instrument, timeframe);
+        CachedSnapshot fresh = snapshotCache.get(cacheKey);
+        // If our snapshot landed in the cache, use its precise computedAt.
+        // Otherwise (a concurrent refresh overwrote, or pathological TTL=0),
+        // anchor on beforeCompute — that's a strict lower bound on the time
+        // our snapshot was produced, never an inflated post-hoc instant.
+        java.time.Instant ts = (fresh != null && fresh.snapshot() == computed)
+            ? fresh.computedAt()
+            : beforeCompute;
+        return new SnapshotWithComputedAt(computed, ts);
+    }
 
     private static long cacheTtlNanos(String timeframe) {
         return switch (timeframe) {
@@ -401,7 +460,7 @@ public class IndicatorService {
                 lastCandleTimestamp,
                 candles.get(candles.size() - 1).getClose()
         );
-        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe)));
+        snapshotCache.put(cacheKey, new CachedSnapshot(result, now + cacheTtlNanos(timeframe), java.time.Instant.now()));
         return result;
     }
 
