@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertsRail } from './components/Alerts';
 import { LiveChart } from './components/Chart';
 import { ExecuteView } from './components/ExecuteView';
@@ -62,28 +62,37 @@ function RiskDeskShell() {
   const setTf = D.setTf;
   const [showRollover, setShowRollover] = useState(true);
 
-  // Resizable chart height — TradingView-style drag handle below the chart.
-  // 460px default; clamp [240..900] so the bottom view always has room.
-  const [chartHeight, setChartHeight] = useState(460);
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = chartHeight;
-    const onMove = (ev: MouseEvent) => {
-      const next = Math.max(240, Math.min(900, startH + (ev.clientY - startY)));
-      setChartHeight(next);
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, [chartHeight]);
+  // Resizable chart height as a *percentage* of the workspace column so the
+  // chart adapts to viewport changes (Tailscale, projector, fullscreen demo).
+  // 50% default, clamp [25%..80%] so the panels below always have room.
+  const [chartPct, setChartPct] = useState(50);
+  const workspaceColRef = useRef<HTMLDivElement | null>(null);
+  const startResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const col = workspaceColRef.current;
+      if (!col) return;
+      const startY = e.clientY;
+      const startPct = chartPct;
+      const colHeight = col.clientHeight;
+      const onMove = (ev: MouseEvent) => {
+        const dy = ev.clientY - startY;
+        const dPct = (dy / colHeight) * 100;
+        setChartPct(Math.max(25, Math.min(80, startPct + dPct)));
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [chartPct]
+  );
 
   // ⌘1/2/3 view switching — only registered on the client to avoid SSR drift.
   useEffect(() => {
@@ -142,6 +151,7 @@ function RiskDeskShell() {
         }}
       >
         <div
+          ref={workspaceColRef}
           style={{
             display: 'flex',
             flexDirection: 'column',
@@ -150,7 +160,14 @@ function RiskDeskShell() {
             overflow: 'hidden',
           }}
         >
-          <div style={{ height: chartHeight, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div
+            style={{
+              flex: `0 0 ${chartPct}%`,
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
             <LiveChart
               symbol={instrument}
               tf={tf}
@@ -162,12 +179,13 @@ function RiskDeskShell() {
               activePosition={activePos}
             />
           </div>
-          {/* Drag handle — TradingView-style horizontal splitter. Hover lights
-              up an accent strip; drag to resize the chart vs. the panels below. */}
+          {/* Drag handle — TradingView-style horizontal splitter. Drag to
+              resize the chart between 25–80% of the column height. */}
           <div
             role="separator"
             aria-orientation="horizontal"
             aria-label="Resize chart"
+            aria-valuenow={chartPct}
             onMouseDown={startResize}
             style={{
               height: 6,
