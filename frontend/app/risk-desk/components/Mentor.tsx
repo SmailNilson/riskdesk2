@@ -177,11 +177,12 @@ function ReviewDetail({
 
 interface MentorDeskProps {
   reviews: Review[];
+  instrument: string;
   onArm?: (r: Review) => void;
   onSkip?: (r: Review) => void;
 }
 
-export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
+export function MentorDesk({ reviews, instrument, onArm, onSkip }: MentorDeskProps) {
   const [activeId, setActiveId] = useState<string>(reviews[0]?.id ?? '');
   const [filter, setFilter] = useState<'all' | 'eligible' | 'take'>('all');
   const [page, setPage] = useState(0);
@@ -366,12 +367,12 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
         />
       </div>
 
-      <ManualAsk />
+      <ManualAsk instrument={instrument} />
     </div>
   );
 }
 
-function ManualAsk() {
+function ManualAsk({ instrument }: { instrument: string }) {
   return (
     <div
       style={{
@@ -395,11 +396,11 @@ function ManualAsk() {
         <Chip>What&apos;s the bias?</Chip>
         <Chip>Should I trail tighter?</Chip>
         <Chip>Risk in next 30m?</Chip>
-        <Chip>News check MCL</Chip>
+        <Chip>News check {instrument}</Chip>
       </div>
       <div style={{ display: 'flex', gap: 6 }}>
         <input
-          placeholder="Ask about MCL setup, position, or context…"
+          placeholder={`Ask about ${instrument} setup, position, or context…`}
           style={{
             flex: 1,
             height: 30,

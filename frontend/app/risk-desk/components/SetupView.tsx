@@ -73,7 +73,7 @@ function StrategyPanel({ s }: { s: Strategy }) {
   );
 }
 
-function IndicatorsPanel({ i, tf }: { i: Indicators; tf: string }) {
+function IndicatorsPanel({ i, tf, instrument }: { i: Indicators; tf: string; instrument: string }) {
   const Row = ({
     k,
     v,
@@ -106,7 +106,7 @@ function IndicatorsPanel({ i, tf }: { i: Indicators; tf: string }) {
     </div>
   );
   return (
-    <Panel title={`Indicators · MCL ${tf}`}>
+    <Panel title={`Indicators · ${instrument} ${tf}`}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
         <div>
           <Row k="EMA 9" v={i.ema9.v} sub="↑ above" tone="var(--up)" />
@@ -364,10 +364,10 @@ function PositionsPanel({ positions }: { positions: Position[] }) {
   );
 }
 
-function TradeDecisionPanel({ tf }: { tf: string }) {
+function TradeDecisionPanel({ tf, instrument }: { tf: string; instrument: string }) {
   return (
     <Panel
-      title={`Trade Decision · MCL ${tf}`}
+      title={`Trade Decision · ${instrument} ${tf}`}
       right={<Chip kind="up">eligible</Chip>}
     >
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
@@ -432,6 +432,7 @@ interface SetupViewProps {
   correlations: Correlations;
   orderflowProd: OrderFlowProd;
   tf: string;
+  instrument: string;
 }
 
 export function SetupView({
@@ -443,13 +444,14 @@ export function SetupView({
   correlations,
   orderflowProd,
   tf,
+  instrument,
 }: SetupViewProps) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: 12 }}>
       <StrategyPanel s={strategy} />
-      <IndicatorsPanel i={indicators} tf={tf} />
+      <IndicatorsPanel i={indicators} tf={tf} instrument={instrument} />
       <PositionsPanel positions={positions} />
-      <TradeDecisionPanel tf={tf} />
+      <TradeDecisionPanel tf={tf} instrument={instrument} />
       <div style={{ gridColumn: '1 / -1' }}>
         <OrderFlowProdPanel data={orderflowProd} />
       </div>
