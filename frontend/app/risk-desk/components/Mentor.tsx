@@ -421,8 +421,8 @@ function ManualAsk({ instrument, tf }: { instrument: string; tf: string }) {
         // overflow:hidden boundary). 220 keeps the form visible without a
         // response; if a response arrives it scrolls inside, capped at 360.
         flexShrink: 0,
-        minHeight: 220,
-        maxHeight: 360,
+        minHeight: 160,
+        maxHeight: 320,
         overflowY: 'auto',
       }}
     >
