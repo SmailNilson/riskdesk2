@@ -228,6 +228,35 @@ export function mapSmc(snapshot: IndicatorSnapshot, candles: Candle[], fallback:
 }
 
 // ─── Reviews ──────────────────────────────────────────────────────
+function computeConfidence(r: ApiMentorSignalReview): number {
+  // Derived from the same signals the backend uses for eligibility:
+  //   - eligibility verdict (anchor +/-)
+  //   - strengths vs errors count from the structured Gemini reply
+  //   - RR ratio when a trade plan exists (better RR = higher confidence)
+  //   - severity of the original alert
+  // Result clamped to [0.10, 0.95] so the meter is always informative.
+  const elig = r.executionEligibilityStatus;
+  const strengths = r.analysis?.analysis?.strengths?.length ?? 0;
+  const errors = r.analysis?.analysis?.errors?.length ?? 0;
+  const rr = r.analysis?.analysis?.proposedTradePlan?.rewardToRiskRatio ?? null;
+
+  let score = 0.5;
+  if (elig === 'ELIGIBLE') score += 0.25;
+  else if (elig === 'INELIGIBLE') score -= 0.2;
+  else if (elig === 'MENTOR_UNAVAILABLE') score -= 0.3;
+  // Strengths and errors push opposite directions, capped so a wall of
+  // strengths doesn't max out instantly.
+  score += Math.min(0.20, strengths * 0.04);
+  score -= Math.min(0.20, errors * 0.05);
+  if (rr != null) {
+    if (rr >= 2.5) score += 0.10;
+    else if (rr >= 1.8) score += 0.05;
+    else if (rr < 1) score -= 0.10;
+  }
+  if (r.severity === 'DANGER') score += 0.05;
+  return Math.max(0.10, Math.min(0.95, score));
+}
+
 export function mapReview(r: ApiMentorSignalReview): Review {
   const elig = r.executionEligibilityStatus;
   const verdict: Review['verdict'] =
@@ -253,7 +282,7 @@ export function mapReview(r: ApiMentorSignalReview): Review {
     tf: r.timeframe,
     at,
     verdict,
-    confidence: 0.7,
+    confidence: computeConfidence(r),
     eligible: elig === 'ELIGIBLE',
     confluence: confluence.length ? confluence : [r.category],
     plan:
@@ -319,19 +348,21 @@ export function mapIbkr(s: IbkrPortfolioSnapshot, fallback: Ibkr): Ibkr {
 // ─── Footprint ───────────────────────────────────────────────────
 export function mapFootprint(bar: ApiFootprintBar): FootprintCol[] {
   // The backend returns a single bar; the design expects multi-bar grid.
-  // Show that single bar as one column.
-  const rows: FootprintRow[] = Object.values(bar.levels)
-    .map((l) => ({ px: l.price, b: l.sellVolume, a: l.buyVolume }))
+  // Show that single bar as one column. Defensive against null `levels`.
+  const levelsObj = (bar.levels ?? {}) as Record<string, { price: number; buyVolume: number; sellVolume: number }>;
+  const rows: FootprintRow[] = Object.values(levelsObj)
+    .filter((l): l is { price: number; buyVolume: number; sellVolume: number } => l != null && typeof l.price === 'number')
+    .map((l) => ({ px: l.price, b: l.sellVolume ?? 0, a: l.buyVolume ?? 0 }))
     .sort((a, b) => b.px - a.px);
-  if (rows.length) {
-    // Mark POC by bar.pocPrice
+  if (rows.length && bar.pocPrice != null) {
     const pocIdx = rows.findIndex((r) => Math.abs(r.px - bar.pocPrice) < 0.001);
     if (pocIdx >= 0) rows[pocIdx].poc = true;
   }
+  if (!rows.length) return []; // signal "no data" so the panel shows fallback
   return [
     {
       rows,
-      dir: bar.totalDelta >= 0 ? 'up' : 'down',
+      dir: (bar.totalDelta ?? 0) >= 0 ? 'up' : 'down',
       delta: bar.totalDelta ?? 0,
     },
   ];
@@ -344,9 +375,11 @@ export function mapDom(snap: OrderFlowDepthSnapshot, fallback: Dom): Dom {
   // using the totalBid/totalAsk averages for display continuity.
   const bestBid = snap.bestBid;
   const bestAsk = snap.bestAsk;
-  const tick = snap.spread && snap.spreadTicks ? snap.spread / snap.spreadTicks : 0.01;
-  const bidAvg = snap.totalBidSize ? Math.floor(snap.totalBidSize / 12) : 80;
-  const askAvg = snap.totalAskSize ? Math.floor(snap.totalAskSize / 12) : 80;
+  // Guard against zero/negative spreadTicks producing Infinity tick size.
+  const safeSpreadTicks = snap.spreadTicks && snap.spreadTicks > 0 ? snap.spreadTicks : 1;
+  const tick = snap.spread && snap.spread > 0 ? snap.spread / safeSpreadTicks : 0.01;
+  const bidAvg = snap.totalBidSize && snap.totalBidSize > 0 ? Math.floor(snap.totalBidSize / 12) : 80;
+  const askAvg = snap.totalAskSize && snap.totalAskSize > 0 ? Math.floor(snap.totalAskSize / 12) : 80;
   const asks: DomLevel[] = Array.from({ length: 12 }, (_, i) => ({
     px: +(bestAsk + i * tick).toFixed(2),
     sz: askAvg + ((i * 13) % 60),
@@ -355,8 +388,8 @@ export function mapDom(snap: OrderFlowDepthSnapshot, fallback: Dom): Dom {
     px: +(bestBid - i * tick).toFixed(2),
     sz: bidAvg + ((i * 17) % 80),
   }));
-  if (snap.bidWall) bids[2] = { px: snap.bidWall.price, sz: snap.bidWall.size };
-  if (snap.askWall) asks[2] = { px: snap.askWall.price, sz: snap.askWall.size };
+  if (snap.bidWall && snap.bidWall.price != null) bids[2] = { px: snap.bidWall.price, sz: snap.bidWall.size ?? 0 };
+  if (snap.askWall && snap.askWall.price != null) asks[2] = { px: snap.askWall.price, sz: snap.askWall.size ?? 0 };
   return { bids, asks, last: (bestBid + bestAsk) / 2, spread: snap.spread ?? 0.01 };
 }
 

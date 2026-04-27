@@ -62,6 +62,29 @@ function RiskDeskShell() {
   const setTf = D.setTf;
   const [showRollover, setShowRollover] = useState(true);
 
+  // Resizable chart height — TradingView-style drag handle below the chart.
+  // 460px default; clamp [240..900] so the bottom view always has room.
+  const [chartHeight, setChartHeight] = useState(460);
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = chartHeight;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.max(240, Math.min(900, startH + (ev.clientY - startY)));
+      setChartHeight(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [chartHeight]);
+
   // ⌘1/2/3 view switching — only registered on the client to avoid SSR drift.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -127,7 +150,7 @@ function RiskDeskShell() {
             overflow: 'hidden',
           }}
         >
-          <div style={{ height: 460, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ height: chartHeight, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
             <LiveChart
               symbol={instrument}
               tf={tf}
@@ -137,6 +160,36 @@ function RiskDeskShell() {
               ema50={D.ema50}
               smc={D.smc}
               activePosition={activePos}
+            />
+          </div>
+          {/* Drag handle — TradingView-style horizontal splitter. Hover lights
+              up an accent strip; drag to resize the chart vs. the panels below. */}
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize chart"
+            onMouseDown={startResize}
+            style={{
+              height: 6,
+              flexShrink: 0,
+              cursor: 'row-resize',
+              background: 'var(--s0)',
+              borderTop: '1px solid var(--line)',
+              borderBottom: '1px solid var(--line)',
+              position: 'relative',
+            }}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                left: '50%',
+                top: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: 32,
+                height: 2,
+                background: 'var(--line-strong)',
+                borderRadius: 1,
+              }}
             />
           </div>
           <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>

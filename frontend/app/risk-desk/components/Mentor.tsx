@@ -258,6 +258,11 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
 
       <div
         style={{
+          // Cap to ~50% of available space so the pager and the detail
+          // pane below stay in view. Without this the list grows to fit all
+          // 10 cards and pushes the pager off screen on smaller displays.
+          flex: '0 1 auto',
+          maxHeight: '46vh',
           overflowY: 'auto',
           padding: 10,
           display: 'flex',
@@ -294,17 +299,25 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
           >
             ‹
           </button>
-          <div className="pager-dots">
-            {Array.from({ length: pageCount }).map((_, i) => (
-              <button
-                key={i}
-                type="button"
-                className={'pager-dot' + (i === safePage ? ' is-active' : '')}
-                onClick={() => setPage(i)}
-                aria-label={'Page ' + (i + 1)}
-              />
-            ))}
-          </div>
+          {/* Up to 7 dots — beyond that the dot strip is unreadable, so we
+              fall back to a numeric "n / m" indicator only. */}
+          {pageCount <= 7 ? (
+            <div className="pager-dots">
+              {Array.from({ length: pageCount }).map((_, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={'pager-dot' + (i === safePage ? ' is-active' : '')}
+                  onClick={() => setPage(i)}
+                  aria-label={'Page ' + (i + 1)}
+                />
+              ))}
+            </div>
+          ) : (
+            <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)', fontWeight: 600 }}>
+              {safePage + 1} / {pageCount}
+            </span>
+          )}
           <span className="pager-meta mono">
             {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} / {filtered.length}
           </span>

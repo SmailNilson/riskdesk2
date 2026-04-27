@@ -291,8 +291,8 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         const ema20 = prev.ema20.slice(0, candles.length); // backend doesn't expose ema20 series
         const ema50 = mapEmaSeries(series?.ema50, candles, prev.ema50);
         const smc = ind ? mapSmc(ind, candles, prev.smc) : prev.smc;
-        const footprint =
-          fp && isFootprintBar(fp) ? mapFootprint(fp) : prev.footprint;
+        const mappedFp = fp && isFootprintBar(fp) ? mapFootprint(fp) : null;
+        const footprint = mappedFp && mappedFp.length ? mappedFp : prev.footprint;
         const dom = depth ? mapDom(depth, prev.dom) : prev.dom;
         const flashCrash = flash ? mapFlashCrash(flash, prev.flashCrash) : prev.flashCrash;
         const microEvents = mapMicroEvents({
