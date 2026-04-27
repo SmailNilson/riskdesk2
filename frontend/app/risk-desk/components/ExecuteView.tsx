@@ -13,11 +13,11 @@ import {
 import { fmt } from '../lib/format';
 import { MicrostructurePanel } from './Microstructure';
 
-function DepthBookPanel({ dom }: { dom: Dom }) {
+function DepthBookPanel({ dom, instrument }: { dom: Dom; instrument: string }) {
   const maxSz = Math.max(...dom.bids.map((b) => b.sz), ...dom.asks.map((a) => a.sz), 1);
   return (
     <Panel
-      title="Depth · MCL"
+      title={`Depth · ${instrument}`}
       right={<Chip kind="ghost">spread {dom.spread.toFixed(2)}</Chip>}
       dense
     >
@@ -134,7 +134,7 @@ function OrderFlowTapePanel({ events, cvd }: { events: OrderFlowEvent[]; cvd: nu
   );
 }
 
-function FootprintPanel({ cols, tf }: { cols: FootprintCol[]; tf: string }) {
+function FootprintPanel({ cols, tf, instrument }: { cols: FootprintCol[]; tf: string; instrument: string }) {
   const maxV = Math.max(
     ...cols.flatMap((c) => c.rows.flatMap((r) => [r.b, r.a])),
     1
@@ -155,7 +155,7 @@ function FootprintPanel({ cols, tf }: { cols: FootprintCol[]; tf: string }) {
   };
   if (!cols.length) {
     return (
-      <Panel title={`Footprint · MCL ${tf}`}>
+      <Panel title={`Footprint · ${instrument} ${tf}`}>
         <div style={{ fontSize: 11, color: 'var(--ink-3)', fontStyle: 'italic' }}>
           No footprint data available.
         </div>
@@ -164,7 +164,7 @@ function FootprintPanel({ cols, tf }: { cols: FootprintCol[]; tf: string }) {
   }
   return (
     <Panel
-      title={`Footprint · MCL ${tf}`}
+      title={`Footprint · ${instrument} ${tf}`}
       right={<Chip kind="ghost">{cols.length} bars · POC ●</Chip>}
     >
       <div
@@ -429,7 +429,7 @@ export function ExecuteView({
         padding: 12,
       }}
     >
-      <DepthBookPanel dom={dom} />
+      <DepthBookPanel dom={dom} instrument={instrument} />
       <OrderFlowTapePanel events={orderFlow} cvd={cvd} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <FlashCrashPanel f={flashCrash} />
@@ -439,7 +439,7 @@ export function ExecuteView({
         <MicrostructurePanel instrument={instrument} events={microEvents} />
       </div>
       <div style={{ gridColumn: '1 / -1' }}>
-        <FootprintPanel cols={footprint} tf={tf} />
+        <FootprintPanel cols={footprint} tf={tf} instrument={instrument} />
       </div>
     </div>
   );

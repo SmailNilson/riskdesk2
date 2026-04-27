@@ -227,6 +227,7 @@ function RiskDeskShell() {
                 correlations={D.correlations}
                 orderflowProd={D.orderflowProd}
                 tf={tf}
+                instrument={instrument}
               />
             )}
             {tweaks.view === 'execute' && (
@@ -260,6 +261,7 @@ function RiskDeskShell() {
             <div style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden' }}>
               <MentorDesk
                 reviews={D.reviews}
+                instrument={instrument}
                 onArm={(r) => {
                   void D.armReview(r, r.plan?.qty ?? 1);
                 }}
