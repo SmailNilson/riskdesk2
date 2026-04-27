@@ -1,6 +1,18 @@
 'use client';
 
-import { CSSProperties, useState } from 'react';
+import {
+  CandlestickData,
+  ColorType,
+  CrosshairMode,
+  IChartApi,
+  ISeriesApi,
+  IPriceLine,
+  LineStyle,
+  PriceLineOptions,
+  UTCTimestamp,
+  createChart,
+} from 'lightweight-charts';
+import { CSSProperties, useEffect, useRef, useState } from 'react';
 import { Candle, Position, Smc } from '../lib/data';
 
 interface ChartProps {
@@ -22,6 +34,7 @@ interface ChartToggles {
   ob: boolean;
   structure: boolean;
   liquidity: boolean;
+  position: boolean;
 }
 
 const DEFAULT_TOGGLES: ChartToggles = {
@@ -32,62 +45,352 @@ const DEFAULT_TOGGLES: ChartToggles = {
   ob: true,
   structure: true,
   liquidity: true,
+  position: true,
 };
 
+// Resolve a CSS custom property at runtime so we can pass real colors to
+// lightweight-charts (which doesn't accept var(--…) strings).
+function readVar(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
 export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, activePosition }: ChartProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const ema9SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const ema20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const ema50SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+
   const [toggles, setToggles] = useState<ChartToggles>(DEFAULT_TOGGLES);
+  const togglesRef = useRef(toggles);
+  togglesRef.current = toggles;
   const toggle = (k: keyof ChartToggles) => setToggles((t) => ({ ...t, [k]: !t[k] }));
 
-  const lastN = 120;
-  const view = candles.slice(-lastN);
-  const e9 = ema9.slice(-lastN);
-  const e20 = ema20.slice(-lastN);
-  const e50 = ema50.slice(-lastN);
+  // Subscribers registered at mount close over the FIRST render's drawOverlay
+  // by default; we keep the latest reference in a ref so they always call the
+  // up-to-date version (which sees the latest smc / activePosition props).
+  const drawOverlayRef = useRef<() => void>(() => undefined);
 
-  const W = 1100;
-  const H = 460;
-  const padL = 0;
-  const padR = 70;
-  const padT = 16;
-  const padB = 28;
-  const chartW = W - padL - padR;
-  const chartH = H - padT - padB - 90;
+  const last = candles[candles.length - 1];
 
-  // Defensive against empty / non-finite candle arrays — Math.min/max with
-  // an empty spread gives ±Infinity, which propagates NaN into every SVG
-  // attribute and crashes some browsers' SVG parser.
-  const finitePrices = view
-    .flatMap((c) => [c.high, c.low])
-    .filter((p): p is number => Number.isFinite(p));
-  const min = (finitePrices.length ? Math.min(...finitePrices) : 0) - 0.05;
-  const max = (finitePrices.length ? Math.max(...finitePrices) : 1) + 0.05;
-  const range = max - min || 1;
+  // ── Mount / unmount the chart ─────────────────────────────────
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-  const xOf = (i: number) => padL + (i / Math.max(1, view.length - 1)) * chartW;
-  const yOf = (p: number) => padT + (1 - (p - min) / range) * chartH;
-  const cw = (chartW / Math.max(1, view.length)) * 0.7;
+    const upColor = readVar('--up', '#34d399');
+    const downColor = readVar('--down', '#f87171');
+    const ink2 = readVar('--ink-2', '#a1a1aa');
+    const lineColor = readVar('--line', '#26262c');
+    const s0 = readVar('--s0', '#09090b');
 
-  const last = view[view.length - 1];
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: container.clientHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: s0 },
+        textColor: ink2,
+        fontFamily: 'var(--font-mono), ui-monospace, monospace',
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: lineColor, style: LineStyle.Dashed },
+        horzLines: { color: lineColor, style: LineStyle.Dashed },
+      },
+      rightPriceScale: { borderColor: lineColor, scaleMargins: { top: 0.06, bottom: 0.28 } },
+      timeScale: { borderColor: lineColor, timeVisible: true, secondsVisible: false },
+      crosshair: { mode: CrosshairMode.Normal },
+      handleScroll: true,
+      handleScale: true,
+    });
+    chartRef.current = chart;
 
-  const [hover, setHover] = useState<{ i: number; px: number } | null>(
-    last ? { i: view.length - 1, px: last.close } : null
-  );
-  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
-    const ratio = (px - padL) / chartW;
-    let i = Math.round(ratio * (view.length - 1));
-    i = Math.max(0, Math.min(view.length - 1, i));
-    const priceAt = max - ((py - padT) / chartH) * range;
-    setHover({ i, px: priceAt });
+    const candleSeries = chart.addCandlestickSeries({
+      upColor,
+      downColor,
+      borderUpColor: upColor,
+      borderDownColor: downColor,
+      wickUpColor: upColor,
+      wickDownColor: downColor,
+    });
+    candleSeriesRef.current = candleSeries;
+
+    ema9SeriesRef.current = chart.addLineSeries({
+      color: '#22d3ee',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    ema20SeriesRef.current = chart.addLineSeries({
+      color: '#fbbf24',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    ema50SeriesRef.current = chart.addLineSeries({
+      color: '#a78bfa',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    volSeriesRef.current = chart.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: '',
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    chart
+      .priceScale('')
+      .applyOptions({ scaleMargins: { top: 0.78, bottom: 0 }, borderVisible: false });
+
+    // ResizeObserver keeps the chart and the overlay canvas in sync with the
+    // container as the user drags the splitter or resizes the window.
+    const ro = new ResizeObserver(() => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      chart.applyOptions({ width: w, height: h });
+      const cv = overlayRef.current;
+      if (cv) {
+        cv.width = w * window.devicePixelRatio;
+        cv.height = h * window.devicePixelRatio;
+        cv.style.width = `${w}px`;
+        cv.style.height = `${h}px`;
+        drawOverlayRef.current();
+      }
+    });
+    ro.observe(container);
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => drawOverlayRef.current());
+
+    return () => {
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      ema9SeriesRef.current = null;
+      ema20SeriesRef.current = null;
+      ema50SeriesRef.current = null;
+      volSeriesRef.current = null;
+      priceLinesRef.current = [];
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Push candle / EMA / volume data ───────────────────────────
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    const e9 = ema9SeriesRef.current;
+    const e20 = ema20SeriesRef.current;
+    const e50 = ema50SeriesRef.current;
+    const vol = volSeriesRef.current;
+    if (!cs || !e9 || !e20 || !e50 || !vol) return;
+    if (!candles.length) return;
+
+    const candleData: CandlestickData<UTCTimestamp>[] = candles.map((c) => ({
+      time: c.time as UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+    cs.setData(candleData);
+
+    const lineData = (vals: number[]) =>
+      vals
+        .slice(0, candles.length)
+        .map((v, i) => ({ time: candles[i].time as UTCTimestamp, value: v }))
+        .filter((d) => Number.isFinite(d.value));
+
+    e9.setData(toggles.ema ? lineData(ema9) : []);
+    e20.setData(toggles.ema ? lineData(ema20) : []);
+    e50.setData(toggles.ema ? lineData(ema50) : []);
+
+    const upCol = readVar('--up', '#34d399');
+    const dnCol = readVar('--down', '#f87171');
+    vol.setData(
+      toggles.volume
+        ? candles.map((c) => ({
+            time: c.time as UTCTimestamp,
+            value: c.volume,
+            color: c.close >= c.open ? upCol + '55' : dnCol + '55',
+          }))
+        : []
+    );
+
+    // Auto-fit so the visible range is set before we ask the time scale for
+    // coordinates, then defer the overlay redraw until the chart has had a
+    // chance to lay out (lightweight-charts otherwise returns null from
+    // timeToCoordinate / priceToCoordinate on the same tick as setData).
+    // Two animation frames so the auto-fit transition settles before we read
+    // coordinates — one is not enough on cold mount.
+    chartRef.current?.timeScale().fitContent();
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => drawOverlay());
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [candles, ema9, ema20, ema50, toggles.ema, toggles.volume]);
+
+  // ── Price lines (entry / SL / TP / BSL / SSL / VWAP) ─────────
+  useEffect(() => {
+    const cs = candleSeriesRef.current;
+    if (!cs) return;
+    // Remove any prior price lines
+    for (const pl of priceLinesRef.current) {
+      try {
+        cs.removePriceLine(pl);
+      } catch {
+        /* ignore — series may have been re-created */
+      }
+    }
+    priceLinesRef.current = [];
+
+    const add = (opts: Partial<PriceLineOptions> & { price: number; title: string; color: string }) => {
+      const line = cs.createPriceLine({
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        ...opts,
+      });
+      priceLinesRef.current.push(line);
+    };
+
+    if (toggles.position && activePosition) {
+      const p = activePosition;
+      const ink1 = readVar('--ink-1', '#d4d4d8');
+      const upCol = readVar('--up', '#34d399');
+      const dnCol = readVar('--down', '#f87171');
+      add({ price: p.entry, title: `ENTRY ×${p.qty}`, color: ink1, lineStyle: LineStyle.Solid });
+      add({ price: p.sl, title: 'SL', color: dnCol });
+      add({ price: p.tp1, title: 'TP1', color: upCol });
+      add({ price: p.tp2, title: 'TP2', color: upCol });
+    }
+
+    if (toggles.liquidity) {
+      const cyan = readVar('--cyan', '#22d3ee');
+      for (const l of smc.liquidity) {
+        add({ price: l.px, title: l.label, color: cyan, lineStyle: LineStyle.LargeDashed });
+      }
+    }
+  }, [activePosition, smc.liquidity, toggles.position, toggles.liquidity]);
+
+  // ── Canvas overlay: order blocks, FVGs, structure markers ────
+  // The overlay reads coordinates from the chart's time + price scales so it
+  // stays in sync with pan / zoom / resize. Redrawn on
+  // subscribeVisibleLogicalRangeChange + ResizeObserver (see mount effect).
+  const drawOverlay = () => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    const cv = overlayRef.current;
+    const container = containerRef.current;
+    if (!chart || !cs || !cv || !container) return;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (cv.width !== w * dpr || cv.height !== h * dpr) {
+      cv.width = w * dpr;
+      cv.height = h * dpr;
+      cv.style.width = `${w}px`;
+      cv.style.height = `${h}px`;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const t = togglesRef.current;
+    const ts = chart.timeScale();
+    const lastTime = (candles[candles.length - 1]?.time ?? 0) as UTCTimestamp;
+    const xRight = ts.timeToCoordinate(lastTime);
+    const upCol = readVar('--up', '#34d399');
+    const dnCol = readVar('--down', '#f87171');
+    const violet = readVar('--violet', '#a78bfa');
+
+    // Order blocks
+    if (t.ob) {
+      for (const ob of smc.orderBlocks) {
+        const x1 = ts.timeToCoordinate(ob.t1 as UTCTimestamp);
+        const x2 = ob.t2 ? ts.timeToCoordinate(ob.t2 as UTCTimestamp) : xRight;
+        const yh = cs.priceToCoordinate(ob.hi);
+        const yl = cs.priceToCoordinate(ob.lo);
+        if (x1 == null || yh == null || yl == null) continue;
+        const right = Math.max(x1, x2 ?? xRight ?? w);
+        const fill = ob.type === 'bull' ? upCol : dnCol;
+        ctx.fillStyle = fill + (ob.mit ? '0d' : '20'); // hex alpha (0d=5%, 20=12%)
+        ctx.fillRect(x1, yh, right - x1, yl - yh);
+        ctx.strokeStyle = fill + '66';
+        ctx.lineWidth = 0.7;
+        ctx.setLineDash(ob.mit ? [3, 3] : []);
+        ctx.strokeRect(x1, yh, right - x1, yl - yh);
+        ctx.setLineDash([]);
+        ctx.fillStyle = fill;
+        ctx.font = '600 9px var(--font-mono)';
+        ctx.fillText(ob.label + (ob.mit ? ' · mit' : ''), x1 + 4, yh - 3);
+      }
+    }
+
+    // FVGs
+    if (t.fvg) {
+      for (const f of smc.fvgs) {
+        const x1 = ts.timeToCoordinate(f.t1 as UTCTimestamp);
+        const x2 = ts.timeToCoordinate(f.t2 as UTCTimestamp) ?? xRight;
+        const yh = cs.priceToCoordinate(f.hi);
+        const yl = cs.priceToCoordinate(f.lo);
+        if (x1 == null || x2 == null || yh == null || yl == null) continue;
+        ctx.fillStyle = violet + (f.filled ? '0a' : '1a');
+        ctx.fillRect(x1, yh, x2 - x1, yl - yh);
+        ctx.strokeStyle = violet + '73';
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(x1, yh, x2 - x1, yl - yh);
+        ctx.setLineDash([]);
+        ctx.fillStyle = violet;
+        ctx.font = '600 9px var(--font-mono)';
+        ctx.fillText(f.label + (f.filled ? ' · filled' : ''), x1 + 4, yl + 10);
+      }
+    }
+
+    // Structure markers (BOS / CHoCH)
+    if (t.structure) {
+      for (const s of smc.structure) {
+        const x1 = ts.timeToCoordinate(s.t as UTCTimestamp);
+        const y = cs.priceToCoordinate(s.px);
+        if (x1 == null || y == null) continue;
+        const col = s.dir === 'up' ? upCol : dnCol;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(Math.min(w, x1 + 240), y);
+        ctx.stroke();
+        ctx.fillStyle = col;
+        ctx.font = '700 9px var(--font-mono)';
+        ctx.fillText(s.kind, x1 + 6, y - 4);
+      }
+    }
   };
 
-  const volMax = view.length ? Math.max(...view.map((c) => c.volume)) : 1;
-  const volBaseY = H - padB;
-  const volH = 70;
+  // Keep the ref pointed at the latest drawOverlay so subscribers (registered
+  // once at mount) always read the current props closure.
+  drawOverlayRef.current = drawOverlay;
 
-  const tIdx = (t: number) => view.findIndex((c) => c.time === t);
+  // Redraw overlay whenever toggles or smc data change. Defer to next frame so
+  // the chart has had time to recompute coordinates after the React commit.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => drawOverlayRef.current());
+    return () => cancelAnimationFrame(id);
+  }, [toggles, smc, activePosition]);
 
   return (
     <div
@@ -96,6 +399,7 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
     >
       <ChartHeader symbol={symbol} tf={tf} last={last} toggles={toggles} onToggle={toggle} />
       <div
+        ref={containerRef}
         style={{
           flex: 1,
           position: 'relative',
@@ -104,338 +408,17 @@ export function LiveChart({ symbol, tf, candles, ema9, ema20, ema50, smc, active
           overflow: 'hidden',
         }}
       >
-        {!last ? (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 11,
-              color: 'var(--ink-3)',
-            }}
-          >
-            Loading candles…
-          </div>
-        ) : (
-          <svg
-            width="100%"
-            height="100%"
-            viewBox={`0 0 ${W} ${H}`}
-            preserveAspectRatio="none"
-            style={{ display: 'block', position: 'absolute', inset: 0 }}
-            onMouseMove={onMove}
-          >
-            {[0, 0.25, 0.5, 0.75, 1].map((p, i) => (
-              <g key={i}>
-                <line
-                  x1={padL}
-                  y1={padT + p * chartH}
-                  x2={W - padR}
-                  y2={padT + p * chartH}
-                  stroke="var(--line)"
-                  strokeDasharray="1 3"
-                  opacity="0.6"
-                />
-                <text
-                  x={W - padR + 6}
-                  y={padT + p * chartH + 3}
-                  fill="var(--ink-3)"
-                  fontSize="9"
-                  fontFamily="var(--font-mono)"
-                >
-                  {(min + (1 - p) * range).toFixed(2)}
-                </text>
-              </g>
-            ))}
-
-            {/* Order blocks */}
-            {toggles.ob && smc.orderBlocks.map((ob, idx) => {
-              const i1 = tIdx(ob.t1);
-              if (i1 === -1) return null;
-              const x1 = xOf(i1);
-              const x2 = W - padR;
-              const yh = yOf(ob.hi);
-              const yl = yOf(ob.lo);
-              const c = ob.type === 'bull' ? 'var(--up)' : 'var(--down)';
-              return (
-                <g key={'ob' + idx}>
-                  <rect
-                    x={x1}
-                    y={yh}
-                    width={x2 - x1}
-                    height={yl - yh}
-                    fill={c}
-                    fillOpacity={ob.mit ? '0.05' : '0.12'}
-                    stroke={c}
-                    strokeOpacity="0.4"
-                    strokeDasharray={ob.mit ? '3 3' : '0'}
-                  />
-                  <text
-                    x={x1 + 4}
-                    y={yh - 3}
-                    fontSize="9"
-                    fontFamily="var(--font-mono)"
-                    fill={c}
-                    opacity="0.85"
-                  >
-                    {ob.label}
-                    {ob.mit ? ' · mit' : ''}
-                  </text>
-                </g>
-              );
-            })}
-
-            {/* FVGs */}
-            {toggles.fvg && smc.fvgs.map((f, idx) => {
-              const i1 = tIdx(f.t1);
-              if (i1 === -1) return null;
-              const x1 = xOf(i1);
-              const x2 = W - padR;
-              const yh = yOf(f.hi);
-              const yl = yOf(f.lo);
-              return (
-                <g key={'fvg' + idx}>
-                  <rect
-                    x={x1}
-                    y={yh}
-                    width={x2 - x1}
-                    height={yl - yh}
-                    fill="var(--violet)"
-                    fillOpacity={f.filled ? '0.04' : '0.10'}
-                    stroke="var(--violet)"
-                    strokeOpacity="0.45"
-                    strokeDasharray="4 3"
-                  />
-                  <text
-                    x={x1 + 4}
-                    y={yl + 10}
-                    fontSize="9"
-                    fontFamily="var(--font-mono)"
-                    fill="var(--violet)"
-                  >
-                    {f.label}
-                    {f.filled ? ' · filled' : ''}
-                  </text>
-                </g>
-              );
-            })}
-
-            {/* Liquidity */}
-            {toggles.liquidity && smc.liquidity.map((l, idx) => (
-              <g key={'liq' + idx}>
-                <line
-                  x1={padL}
-                  y1={yOf(l.px)}
-                  x2={W - padR}
-                  y2={yOf(l.px)}
-                  stroke="var(--cyan)"
-                  strokeWidth="1"
-                  strokeDasharray="6 4"
-                  opacity="0.55"
-                />
-                <text
-                  x={padL + 6}
-                  y={yOf(l.px) - 3}
-                  fontSize="9"
-                  fontFamily="var(--font-mono)"
-                  fill="var(--cyan)"
-                >
-                  {l.label} {l.px.toFixed(2)}
-                </text>
-              </g>
-            ))}
-
-            {/* Volume bars */}
-            {toggles.volume && view.map((c, i) => {
-              const h = (c.volume / volMax) * volH;
-              return (
-                <rect
-                  key={'v' + i}
-                  x={xOf(i) - cw / 2}
-                  y={volBaseY - h}
-                  width={cw}
-                  height={h}
-                  fill={c.close >= c.open ? 'var(--up)' : 'var(--down)'}
-                  opacity="0.32"
-                />
-              );
-            })}
-            <line x1={padL} y1={volBaseY} x2={W - padR} y2={volBaseY} stroke="var(--line)" />
-
-            {/* Candles */}
-            {view.map((c, i) => {
-              const isUp = c.close >= c.open;
-              const col = isUp ? 'var(--up)' : 'var(--down)';
-              const yo = yOf(c.open);
-              const yc = yOf(c.close);
-              const yhc = yOf(c.high);
-              const ylc = yOf(c.low);
-              return (
-                <g key={i}>
-                  <line x1={xOf(i)} y1={yhc} x2={xOf(i)} y2={ylc} stroke={col} strokeWidth="1" />
-                  <rect
-                    x={xOf(i) - cw / 2}
-                    y={Math.min(yo, yc)}
-                    width={cw}
-                    height={Math.max(1, Math.abs(yc - yo))}
-                    fill={col}
-                    stroke={col}
-                  />
-                </g>
-              );
-            })}
-
-            {/* EMA lines */}
-            {toggles.ema && [
-              { vals: e50, col: '#a78bfa', lbl: 'EMA50' },
-              { vals: e20, col: '#fbbf24', lbl: 'EMA20' },
-              { vals: e9, col: '#22d3ee', lbl: 'EMA9' },
-            ].map((line, idx) => {
-              if (line.vals.length === 0) return null;
-              const d = line.vals
-                .map((v, i) => `${i ? 'L' : 'M'}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`)
-                .join(' ');
-              const lastY = yOf(line.vals[line.vals.length - 1]);
-              return (
-                <g key={idx}>
-                  <path d={d} fill="none" stroke={line.col} strokeWidth="1.25" />
-                  <text
-                    x={W - padR + 6}
-                    y={lastY + 3}
-                    fill={line.col}
-                    fontSize="9"
-                    fontFamily="var(--font-mono)"
-                  >
-                    {line.lbl}
-                  </text>
-                </g>
-              );
-            })}
-
-            {/* Structure markers */}
-            {toggles.structure && smc.structure.map((s, idx) => {
-              const i1 = tIdx(s.t);
-              if (i1 === -1) return null;
-              return (
-                <g key={'st' + idx}>
-                  <line
-                    x1={xOf(i1)}
-                    y1={yOf(s.px)}
-                    x2={xOf(Math.min(view.length - 1, i1 + 30))}
-                    y2={yOf(s.px)}
-                    stroke={s.dir === 'up' ? 'var(--up)' : 'var(--down)'}
-                    strokeWidth="1.2"
-                    strokeDasharray="0"
-                    opacity="0.7"
-                  />
-                  <text
-                    x={xOf(i1) + 4}
-                    y={yOf(s.px) - 4}
-                    fill={s.dir === 'up' ? 'var(--up)' : 'var(--down)'}
-                    fontSize="9"
-                    fontWeight="700"
-                    fontFamily="var(--font-mono)"
-                  >
-                    {s.kind}
-                  </text>
-                </g>
-              );
-            })}
-
-            {/* Position markers */}
-            {activePosition && <PositionMarkers pos={activePosition} W={W} padR={padR} yOf={yOf} />}
-
-            {/* Crosshair */}
-            {hover && (
-              <g pointerEvents="none">
-                <line
-                  x1={xOf(hover.i)}
-                  y1={padT}
-                  x2={xOf(hover.i)}
-                  y2={H - padB}
-                  stroke="var(--ink-3)"
-                  strokeDasharray="2 2"
-                  opacity="0.5"
-                />
-                <line
-                  x1={padL}
-                  y1={yOf(hover.px)}
-                  x2={W - padR}
-                  y2={yOf(hover.px)}
-                  stroke="var(--ink-3)"
-                  strokeDasharray="2 2"
-                  opacity="0.5"
-                />
-                <rect x={W - padR} y={yOf(hover.px) - 8} width={padR} height={16} fill="var(--accent)" />
-                <text
-                  x={W - padR + 6}
-                  y={yOf(hover.px) + 3}
-                  fill="var(--accent-ink)"
-                  fontSize="10"
-                  fontFamily="var(--font-mono)"
-                  fontWeight="700"
-                >
-                  {hover.px.toFixed(2)}
-                </text>
-              </g>
-            )}
-
-            {/* Last price */}
-            {last && (
-              <line
-                x1={padL}
-                y1={yOf(last.close)}
-                x2={W - padR}
-                y2={yOf(last.close)}
-                stroke="var(--accent)"
-                strokeDasharray="2 4"
-                opacity="0.7"
-              />
-            )}
-          </svg>
-        )}
-        {hover && view[hover.i] && <ChartLegend hover={hover} c={view[hover.i]} />}
+        <canvas
+          ref={overlayRef}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            pointerEvents: 'none',
+            zIndex: 2,
+          }}
+        />
       </div>
     </div>
-  );
-}
-
-function PositionMarkers({
-  pos,
-  W,
-  padR,
-  yOf,
-}: {
-  pos: Position;
-  W: number;
-  padR: number;
-  yOf: (p: number) => number;
-}) {
-  const mk = (px: number, label: string, col: string, dash: string) => (
-    <g>
-      <line x1={0} y1={yOf(px)} x2={W - padR} y2={yOf(px)} stroke={col} strokeDasharray={dash} strokeWidth="1" opacity="0.6" />
-      <rect x={6} y={yOf(px) - 8} width={62} height={14} fill={col} opacity="0.92" rx="2" />
-      <text
-        x={37}
-        y={yOf(px) + 3}
-        fontSize="9"
-        fontFamily="var(--font-mono)"
-        fontWeight="700"
-        textAnchor="middle"
-        fill={col === 'var(--up)' ? 'var(--up-deep)' : col === 'var(--down)' ? 'var(--down-deep)' : 'white'}
-      >
-        {label} {px.toFixed(2)}
-      </text>
-    </g>
-  );
-  return (
-    <g>
-      {mk(pos.entry, `ENTRY ×${pos.qty}`, 'var(--ink-1)', '0')}
-      {mk(pos.sl, 'SL', 'var(--down)', '4 3')}
-      {mk(pos.tp1, 'TP1', 'var(--up)', '4 3')}
-      {mk(pos.tp2, 'TP2', 'var(--up)', '4 3')}
-    </g>
   );
 }
 
@@ -450,7 +433,6 @@ function ChartToggleBtn({
   kind: 'accent' | 'violet' | 'info' | 'warn' | 'ghost';
   onClick: () => void;
 }) {
-  // Toggle button styled like a Chip but actually clickable.
   const colorMap: Record<typeof kind, string> = {
     accent: 'var(--accent)',
     violet: 'var(--violet)',
@@ -569,49 +551,14 @@ function ChartHeader({
           onClick={() => onToggle('liquidity')}
         />
         <ChartToggleBtn on={toggles.volume} label="VOL" kind="ghost" onClick={() => onToggle('volume')} />
-        <ChartToggleBtn on={toggles.vwap} label="VWAP" kind="info" onClick={() => onToggle('vwap')} />
+        <ChartToggleBtn
+          on={toggles.position}
+          label="POS"
+          kind="accent"
+          onClick={() => onToggle('position')}
+        />
       </div>
     </div>
   );
 }
 
-function ChartLegend({ hover, c }: { hover: { i: number; px: number }; c: Candle }) {
-  void hover;
-  const t = new Date(c.time * 1000);
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        top: 12,
-        left: 12,
-        background: 'color-mix(in oklch, var(--s1) 92%, transparent)',
-        border: '1px solid var(--line)',
-        borderRadius: 4,
-        padding: '6px 10px',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 10,
-        lineHeight: 1.5,
-        backdropFilter: 'blur(6px)',
-      }}
-    >
-      <div className="muted">
-        {t.toLocaleString('en-US', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-      </div>
-      <div>
-        O <span style={{ color: 'var(--ink-1)' }}>{c.open.toFixed(2)}</span> · H{' '}
-        <span style={{ color: 'var(--ink-1)' }}>{c.high.toFixed(2)}</span>
-      </div>
-      <div>
-        L <span style={{ color: 'var(--ink-1)' }}>{c.low.toFixed(2)}</span> · C{' '}
-        <span className={c.close >= c.open ? 'up' : 'down'}>{c.close.toFixed(2)}</span>
-      </div>
-      <div>
-        Δ <span className={c.delta >= 0 ? 'up' : 'down'}>
-          {c.delta >= 0 ? '+' : ''}
-          {c.delta}
-        </span>{' '}
-        · V {c.volume}
-      </div>
-    </div>
-  );
-}

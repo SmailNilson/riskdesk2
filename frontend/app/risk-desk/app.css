@@ -35,7 +35,11 @@
      over reflowing the dense data layout. */
   min-width: 1280px;
   width: 100%;
-  min-height: 100vh;
+  /* Fixed height (not min-height) so the `1fr` workspace row is bounded and
+     the inner panels' overflow: auto kicks in. With `min-height: 100vh` the
+     row would grow to absorb intrinsic panel content, breaking the chart's
+     percentage-based resize. */
+  height: 100vh;
   background: var(--s0);
   display: grid;
   grid-template-columns: 1fr;
