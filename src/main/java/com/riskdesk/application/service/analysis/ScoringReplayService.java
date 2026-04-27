@@ -11,7 +11,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -95,17 +97,28 @@ public class ScoringReplayService {
         return new ReplayReport(
             instrument.name(), timeframe.label(), from, to,
             weights, agg.total, agg.agreements, agreementRatio, agg.actionable,
-            agg.directionDistribution, agg.samples, agg.truncated, MAX_SAMPLES_RETURNED);
+            agg.directionDistribution, agg.snapshot(), agg.truncated, MAX_SAMPLES_RETURNED);
     }
 
     /**
      * Mutable aggregator scoped to a single replay request. Holds the bounded
      * sample buffer and running aggregates so the streaming consumer stays
      * stateless from the caller's view.
+     * <p>
+     * <b>Sample retention (PR #269 round-9 review):</b> {@code streamBetween}
+     * yields rows in ascending decision time, but the API contract is
+     * "newest first". A simple "stop appending past the cap" policy would
+     * truncate the most recent rows on long windows — exactly the period
+     * operators care about for tuning/debug. We use a sliding-window deque
+     * instead: once the cap is reached, each newer row evicts the oldest,
+     * so when the stream completes the buffer holds the {@link
+     * #MAX_SAMPLES_RETURNED} most recent samples in oldest→newest order.
+     * The final reverse on snapshot() puts them newest-first for the API.
      */
     private final class Aggregator {
         final Map<String, Integer> directionDistribution = new HashMap<>();
-        final List<ReplaySample> samples = new ArrayList<>(MAX_SAMPLES_RETURNED);
+        // Deque used as a sliding window: append-tail / drop-head when full.
+        final Deque<ReplaySample> samplesWindow = new ArrayDeque<>(MAX_SAMPLES_RETURNED);
         int agreements = 0;
         int total = 0;
         long actionable = 0L;
@@ -120,18 +133,26 @@ public class ScoringReplayService {
             if (!"NEUTRAL".equals(direction)) actionable++;
             total++;
 
-            if (samples.size() < MAX_SAMPLES_RETURNED) {
-                samples.add(new ReplaySample(
-                    rec.snapshot().decisionTimestamp(),
-                    rec.verdict().bias().primary().name(), rec.verdict().bias().confidence(),
-                    replayed.bias().primary().name(), replayed.bias().confidence(),
-                    replayed.bias().structure().value(),
-                    replayed.bias().orderFlow().value(),
-                    replayed.bias().momentum().value()
-                ));
-            } else {
+            ReplaySample sample = new ReplaySample(
+                rec.snapshot().decisionTimestamp(),
+                rec.verdict().bias().primary().name(), rec.verdict().bias().confidence(),
+                replayed.bias().primary().name(), replayed.bias().confidence(),
+                replayed.bias().structure().value(),
+                replayed.bias().orderFlow().value(),
+                replayed.bias().momentum().value()
+            );
+            if (samplesWindow.size() == MAX_SAMPLES_RETURNED) {
+                samplesWindow.pollFirst(); // drop oldest
                 truncated = true;
             }
+            samplesWindow.addLast(sample);
+        }
+
+        /** Materialises the buffer newest-first for the API response. */
+        List<ReplaySample> snapshot() {
+            List<ReplaySample> out = new ArrayList<>(samplesWindow);
+            java.util.Collections.reverse(out);
+            return out;
         }
     }
 
