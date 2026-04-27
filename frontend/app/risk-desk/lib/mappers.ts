@@ -268,23 +268,24 @@ export function mapReview(r: ApiMentorSignalReview): Review {
       ? 'SKIP'
       : 'WATCH';
   const plan = r.analysis?.analysis?.proposedTradePlan;
-  const at = new Date(r.createdAt).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+  const created = r?.createdAt ? new Date(r.createdAt) : new Date();
+  const at = isNaN(created.getTime())
+    ? '—:—'
+    : created.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const confluence = r.analysis?.analysis?.strengths ?? [];
   const risks = r.analysis?.analysis?.errors ?? [];
+  const category = typeof r.category === 'string' ? r.category : '—';
+  const message = typeof r.message === 'string' ? r.message : '';
 
   return {
-    id: String(r.id),
-    sym: r.instrument,
-    tf: r.timeframe,
+    id: String(r?.id ?? ''),
+    sym: typeof r.instrument === 'string' ? r.instrument : '—',
+    tf: typeof r.timeframe === 'string' ? r.timeframe : '—',
     at,
     verdict,
     confidence: computeConfidence(r),
     eligible: elig === 'ELIGIBLE',
-    confluence: confluence.length ? confluence : [r.category],
+    confluence: confluence.length ? confluence : [category],
     plan:
       plan && plan.entryPrice != null && plan.stopLoss != null && plan.takeProfit != null
         ? {
@@ -298,7 +299,7 @@ export function mapReview(r: ApiMentorSignalReview): Review {
             qty: 1,
           }
         : null,
-    rationale: r.analysis?.analysis?.technicalQuickAnalysis ?? r.message,
+    rationale: r.analysis?.analysis?.technicalQuickAnalysis ?? message,
     risks,
     grouped: 1,
     reasonHold: r.executionEligibilityReason ?? undefined,
@@ -307,24 +308,39 @@ export function mapReview(r: ApiMentorSignalReview): Review {
 
 // ─── Alerts feed ─────────────────────────────────────────────────
 export function mapAlert(a: AlertPayload): AlertItem {
-  const t = new Date(a.timestamp).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+  // Defensive against partial backend payloads — types claim every field is
+  // populated but live data ships with category/message/timestamp null on
+  // some legacy rows. Falling back keeps the alerts rail rendering instead
+  // of crashing the whole page.
+  const ts = a?.timestamp ? new Date(a.timestamp) : new Date();
+  const t = isNaN(ts.getTime())
+    ? '—:—'
+    : ts.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   const sev: AlertItem['sev'] =
-    a.severity === 'DANGER' ? 'alert' : a.severity === 'WARNING' ? 'warn' : 'info';
-  return { t, sev, src: a.category, msg: a.message };
+    a?.severity === 'DANGER' ? 'alert' : a?.severity === 'WARNING' ? 'warn' : 'info';
+  return {
+    t,
+    sev,
+    src: typeof a?.category === 'string' ? a.category : '—',
+    msg: typeof a?.message === 'string' ? a.message : '',
+  };
 }
 
 // ─── Risk alerts (filtered) ──────────────────────────────────────
 export function mapRiskAlerts(alerts: AlertPayload[]): RiskAlert[] {
   return alerts
-    .filter((a) => a.severity !== 'INFO' && a.category.toLowerCase().includes('risk'))
+    .filter((a) => {
+      // Defensive — backend has shipped alerts with `category: null` and the
+      // type narrows it to string, which crashed prod with
+      // `undefined is not an object (evaluating 'e.category.toLowerCase')`.
+      if (!a || a.severity === 'INFO') return false;
+      const cat = typeof a.category === 'string' ? a.category : '';
+      return cat.toLowerCase().includes('risk');
+    })
     .slice(0, 3)
     .map((a) => ({
       sym: a.instrument,
-      text: a.message,
+      text: a.message ?? '',
       level: a.severity === 'DANGER' ? 'high' : 'warn',
     }));
 }
