@@ -24,13 +24,16 @@ import {
   api,
   isFootprintBar,
 } from '../../lib/api';
+import type { RolloverStatusResponse, RolloverOiStatus, TradeDecision, TradeSimulationView, PlaybookEvaluation } from '../../lib/api';
 import { API_BASE, WS_BASE } from '../../lib/runtimeConfig';
 import { RD_MOCK, RiskDeskMock, Review } from './data';
 import {
+  buildSimStats,
   mapAlert,
   mapBbSeries,
   mapCandles,
   mapCorrelations,
+  mapDecisions,
   mapDom,
   mapDxy,
   mapEmaSeries,
@@ -40,12 +43,17 @@ import {
   mapIndicators,
   mapMicroEvents,
   mapOrderFlowProd,
+  mapPlaybookLive,
   mapPortfolio,
   mapPositions,
   mapReview,
   mapRiskAlerts,
+  mapRollover,
+  mapSimulations,
   mapSmc,
   mapStrategy,
+  mapStrategyLayerScores,
+  mapStrategyVotes,
 } from './mappers';
 
 export interface RiskDeskState extends RiskDeskMock {
@@ -60,6 +68,22 @@ export interface RiskDeskState extends RiskDeskMock {
   armReview: (r: Review, qty: number) => Promise<TradeExecutionView | null>;
   submitExecution: (executionId: number) => Promise<TradeExecutionView | null>;
   liveExecutions: Record<string, TradeExecutionView>;
+  // Operator actions
+  purgeInstrument: (sym: string) => Promise<{ purged?: number; error?: string }>;
+  confirmRollover: (instrument: string, contractMonth: string) => Promise<boolean>;
+  refreshSnapshots: () => void;
+  // IBKR multi-account
+  ibkrAccounts: Array<{ accountId: string; selected: boolean }>;
+  selectedAccountId: string | null;
+  setSelectedAccountId: (id: string | null) => void;
+  // Mentor desk actions
+  reanalyzeReview: (
+    review: Review,
+    overrides: { entry?: number; sl?: number; tp?: number }
+  ) => Promise<boolean>;
+  snoozeAlert: (key: string, durationSec: number) => Promise<boolean>;
+  mutedTimeframes: string[];
+  setTimeframeMuted: (tf: string, muted: boolean) => Promise<boolean>;
 }
 
 const RiskDeskContext = createContext<RiskDeskState | null>(null);
@@ -87,6 +111,12 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
   const [instrumentSym, setInstrumentSym] = useState('MCL');
   const [tf, setTf] = useState('10m');
   const [liveExecutions, setLiveExecutions] = useState<Record<string, TradeExecutionView>>({});
+  // Bumping this nonce re-triggers the per-instrument fetch effect on demand
+  // (used after a Purge so the dashboard reloads from the freshly backfilled DB).
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [ibkrAccounts, setIbkrAccounts] = useState<Array<{ accountId: string; selected: boolean }>>([]);
+  const [mutedTimeframes, setMutedTimeframes] = useState<string[]>([]);
 
   // Stable refs for handlers that close over mutable state
   const dataRef = useRef(data);
@@ -181,6 +211,22 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           anyOk = true;
           if (cancelled) return;
           setData((prev) => ({ ...prev, ibkr: mapIbkr(s, prev.ibkr) }));
+          setIbkrAccounts(
+            (s.accounts ?? []).map((a) => ({ accountId: a.id, selected: a.selected }))
+          );
+          if (s.selectedAccountId) setSelectedAccountId(s.selectedAccountId);
+        })
+        .catch(() => {})
+    );
+
+    // Muted timeframes — let MentorDesk reflect server state on mount.
+    tasks.push(
+      api
+        .getMutedTimeframes()
+        .then((tfs) => {
+          anyOk = true;
+          if (cancelled) return;
+          setMutedTimeframes(tfs);
         })
         .catch(() => {})
     );
@@ -192,6 +238,46 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           anyOk = true;
           if (cancelled) return;
           setData((prev) => ({ ...prev, correlations: mapCorrelations(history, prev.correlations) }));
+        })
+        .catch(() => {})
+    );
+
+    // Rollover status + OI (per-instrument). Combined into rolloverDetails so
+    // the UI can show both time-to-expiry and OI crossover signals side by side.
+    // anyOk only flips when at least one of the two fetches actually returned
+    // data — otherwise the TopBar connection pill would show "connected"
+    // even with the backend fully down.
+    const rolloverP = Promise.all([
+      api.getRolloverStatus().catch(() => null as RolloverStatusResponse | null),
+      api.getRolloverOiStatus().catch(() => null as RolloverOiStatus | null),
+    ]).then(([status, oi]) => {
+      if (status || oi) anyOk = true;
+      if (cancelled) return;
+      setData((prev) => ({ ...prev, rolloverDetails: mapRollover(status, oi) }));
+    });
+    tasks.push(rolloverP);
+
+    // Recent decisions (last 30) — used by the Review view.
+    tasks.push(
+      api
+        .getRecentDecisions(30)
+        .then((rows) => {
+          anyOk = true;
+          if (cancelled) return;
+          setData((prev) => ({ ...prev, decisions: mapDecisions(rows) }));
+        })
+        .catch(() => {})
+    );
+
+    // Recent simulations (last 50) — Phase 2 read model.
+    tasks.push(
+      api
+        .getRecentSimulations(50)
+        .then((rows) => {
+          anyOk = true;
+          if (cancelled) return;
+          const sims = mapSimulations(rows);
+          setData((prev) => ({ ...prev, simulations: sims, simulationStats: buildSimStats(sims) }));
         })
         .catch(() => {})
     );
@@ -256,6 +342,27 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // ─── Refetch portfolio when the trader switches IBKR account ──
+  useEffect(() => {
+    if (!selectedAccountId) return;
+    let cancelled = false;
+    Promise.all([
+      api.getPortfolioSummary(selectedAccountId).catch(() => null),
+      api.getIbkrPortfolio(selectedAccountId).catch(() => null),
+    ]).then(([summary, snap]) => {
+      if (cancelled) return;
+      setData((prev) => ({
+        ...prev,
+        portfolio: summary ? mapPortfolio(summary, prev.portfolio) : prev.portfolio,
+        positions: summary ? mapPositions(summary.openPositions) : prev.positions,
+        ibkr: snap ? mapIbkr(snap, prev.ibkr) : prev.ibkr,
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAccountId]);
+
   // ─── Per-instrument / per-tf fetches ──────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -283,9 +390,18 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
       const stratP = api
         .getStrategyDecision(instrumentSym, tf)
         .catch(() => null as Awaited<ReturnType<typeof api.getStrategyDecision>> | null);
+      const playbookP = api
+        .getPlaybook(instrumentSym, tf)
+        .catch(() => null as PlaybookEvaluation | null);
+      const decisionsP = api
+        .getDecisionsByInstrument(instrumentSym, 30)
+        .catch(() => [] as TradeDecision[]);
+      const simsByInstrP = api
+        .getSimulationsByInstrument(instrumentSym, 30)
+        .catch(() => [] as TradeSimulationView[]);
 
-      const [bars, ind, series, fp, depth, flash, mom, ice, abs, spf, dist, cyc, strat] = await Promise.all([
-        candlesP, indP, seriesP, fpP, depthP, flashP, momP, iceP, absP, spfP, distP, cycP, stratP,
+      const [bars, ind, series, fp, depth, flash, mom, ice, abs, spf, dist, cyc, strat, playbook, decisions, simsByInstr] = await Promise.all([
+        candlesP, indP, seriesP, fpP, depthP, flashP, momP, iceP, absP, spfP, distP, cycP, stratP, playbookP, decisionsP, simsByInstrP,
       ]);
       if (cancelled) return;
 
@@ -319,6 +435,20 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           ? mapOrderFlowProd(depth, cyc, dist, prev.orderflowProd)
           : prev.orderflowProd;
         const strategy = strat ? mapStrategy(strat, prev.strategy) : prev.strategy;
+        const strategyVotes = strat ? mapStrategyVotes(strat.votes) : prev.strategyVotes;
+        const strategyLayerScores = strat
+          ? mapStrategyLayerScores(strat.layerScores)
+          : prev.strategyLayerScores;
+        const strategyFinalScore = strat?.finalScore ?? prev.strategyFinalScore;
+        const strategyVetoReasons = strat?.vetoReasons ?? prev.strategyVetoReasons;
+        const playbookLive = mapPlaybookLive(playbook);
+        // Always overwrite per-instrument arrays — falling back to prev would
+        // leak the previous instrument's decisions/sims when switching to one
+        // with no history yet (e.g. MCL → newly-added contract). On transient
+        // fetch errors the next polling cycle / switch will rehydrate.
+        const decisionsMapped = mapDecisions(decisions);
+        const sims = mapSimulations(simsByInstr);
+        const simStats = buildSimStats(sims);
         return {
           ...prev,
           candles,
@@ -340,6 +470,14 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           microEvents,
           orderflowProd,
           strategy,
+          strategyVotes,
+          strategyLayerScores,
+          strategyFinalScore,
+          strategyVetoReasons,
+          playbookLive,
+          decisions: decisionsMapped,
+          simulations: sims,
+          simulationStats: simStats,
         };
       });
     })();
@@ -347,7 +485,7 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [instrumentSym, tf]);
+  }, [instrumentSym, tf, refreshNonce]);
 
   // ─── WebSocket subscriptions ──────────────────────────────────
   useEffect(() => {
@@ -459,6 +597,108 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Purge all candles for an instrument across timeframes and trigger backfill.
+  // The backend will re-pull from IBKR; the dashboard refreshes the per-instrument
+  // slice once we bump the nonce.
+  const purgeInstrument = useCallback(
+    async (sym: string): Promise<{ purged?: number; error?: string }> => {
+      try {
+        const purgeRes = await api.purgeInstrument(sym);
+        if (purgeRes.error) return { error: purgeRes.error };
+        await api.refreshDb().catch(() => {});
+        // Bump after a short delay so the backend has time to start backfill.
+        setTimeout(() => setRefreshNonce((n) => n + 1), 1500);
+        return { purged: purgeRes.purged ?? 0 };
+      } catch (e) {
+        return { error: String((e as Error)?.message || e) };
+      }
+    },
+    []
+  );
+
+  const confirmRolloverAction = useCallback(
+    async (instrument: string, contractMonth: string): Promise<boolean> => {
+      try {
+        await api.confirmRollover(instrument, contractMonth);
+        // Refresh rollover details after confirm.
+        const [status, oi] = await Promise.all([
+          api.getRolloverStatus().catch(() => null),
+          api.getRolloverOiStatus().catch(() => null),
+        ]);
+        setData((prev) => ({ ...prev, rolloverDetails: mapRollover(status, oi) }));
+        return true;
+      } catch (e) {
+        console.error('confirmRollover failed', e);
+        return false;
+      }
+    },
+    []
+  );
+
+  const refreshSnapshots = useCallback(() => {
+    setRefreshNonce((n) => n + 1);
+  }, []);
+
+  // Reanalyze a Mentor review with optional entry/SL/TP overrides. The backend
+  // creates a new revision keyed by alertKey + revision; we let the WS push the
+  // updated review row instead of mutating local state here.
+  const reanalyzeReview = useCallback(
+    async (
+      review: Review,
+      overrides: { entry?: number; sl?: number; tp?: number }
+    ): Promise<boolean> => {
+      try {
+        await api.reanalyzeMentorAlert({
+          severity: review.severity ?? 'INFO',
+          category: review.category ?? review.confluence?.[0] ?? 'MANUAL_REANALYSIS',
+          message: review.message ?? review.rationale ?? '',
+          instrument: review.sym,
+          timestamp: review.triggeredAt ?? new Date().toISOString(),
+          entryPrice: overrides.entry,
+          stopLoss: overrides.sl,
+          takeProfit: overrides.tp,
+        });
+        return true;
+      } catch (err) {
+        console.error('reanalyzeReview failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
+  const snoozeAlertAction = useCallback(
+    async (key: string, durationSec: number): Promise<boolean> => {
+      try {
+        await api.snoozeAlert({ key, durationSeconds: durationSec });
+        return true;
+      } catch (err) {
+        console.error('snoozeAlert failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
+  const setTimeframeMutedAction = useCallback(
+    async (tfKey: string, muted: boolean): Promise<boolean> => {
+      try {
+        await api.setTimeframeMuted(tfKey, muted);
+        setMutedTimeframes((prev) => {
+          const has = prev.includes(tfKey);
+          if (muted && !has) return [...prev, tfKey];
+          if (!muted && has) return prev.filter((t) => t !== tfKey);
+          return prev;
+        });
+        return true;
+      } catch (err) {
+        console.error('setTimeframeMuted failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
   // The 10m indicator snapshot is already used as the global indicator panel
   // when on the watchlist's default timeframe. Mark it as referenced so eslint
   // doesn't flag the constant as unused — it's there to document intent.
@@ -478,8 +718,37 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
       armReview,
       submitExecution,
       liveExecutions,
+      purgeInstrument,
+      confirmRollover: confirmRolloverAction,
+      refreshSnapshots,
+      ibkrAccounts,
+      selectedAccountId,
+      setSelectedAccountId,
+      reanalyzeReview,
+      snoozeAlert: snoozeAlertAction,
+      mutedTimeframes,
+      setTimeframeMuted: setTimeframeMutedAction,
     }),
-    [data, ready, backendReachable, wsConnected, instrumentSym, tf, armReview, submitExecution, liveExecutions]
+    [
+      data,
+      ready,
+      backendReachable,
+      wsConnected,
+      instrumentSym,
+      tf,
+      armReview,
+      submitExecution,
+      liveExecutions,
+      purgeInstrument,
+      confirmRolloverAction,
+      refreshSnapshots,
+      ibkrAccounts,
+      selectedAccountId,
+      reanalyzeReview,
+      snoozeAlertAction,
+      mutedTimeframes,
+      setTimeframeMutedAction,
+    ]
   );
 
   return <RiskDeskContext.Provider value={value}>{children}</RiskDeskContext.Provider>;

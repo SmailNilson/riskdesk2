@@ -1,8 +1,9 @@
 'use client';
 
-import { Fragment } from 'react';
-import { Chip, Panel, SectionLabel, Sparkline, StatusDot } from '../lib/atoms';
-import { Backtest, Trailing } from '../lib/data';
+import { Fragment, useState } from 'react';
+import { api, BacktestResult } from '../../lib/api';
+import { BarGauge, Chip, Panel, SectionLabel, Sparkline, StatusDot } from '../lib/atoms';
+import { Backtest, SimulationStats, SimulationView, TradeDecisionView, Trailing } from '../lib/data';
 
 function BacktestPanel({ b }: { b: Backtest }) {
   return (
@@ -185,61 +186,458 @@ function TrailingPanel({ t }: { t: Trailing }) {
   );
 }
 
-function SimulationPanel() {
-  const sims = [
-    { name: 'Current plan', rr: 2.11, prob: 0.62, ev: 0.65, action: 'active' as const },
-    { name: 'Tighter SL (10t)', rr: 3.02, prob: 0.48, ev: 0.46, action: 'alt' as const },
-    { name: 'Wider TP (50t)', rr: 2.78, prob: 0.41, ev: 0.34, action: 'alt' as const },
-    { name: 'Half size', rr: 2.11, prob: 0.62, ev: 0.32, action: 'alt' as const },
-    { name: 'Skip + watch', rr: 0.0, prob: 0.5, ev: 0.0, action: 'alt' as const },
-  ];
+function fmtTime(ts: string): string {
+  try {
+    return new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return ts;
+  }
+}
+
+function fmtDate(ts: string): string {
+  try {
+    return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+  } catch {
+    return ts;
+  }
+}
+
+function statusTone(s: string): 'up' | 'down' | 'warn' | 'ghost' {
+  const u = s.toUpperCase();
+  if (u === 'WIN' || u === 'TP_HIT') return 'up';
+  if (u === 'LOSS' || u === 'SL_HIT' || u === 'ERROR') return 'down';
+  if (u === 'PENDING_ENTRY' || u === 'ACTIVE') return 'warn';
+  return 'ghost';
+}
+
+function SimulationsStatsPanel({
+  stats,
+  rows,
+  instrument,
+}: {
+  stats: SimulationStats;
+  rows: SimulationView[];
+  instrument: string;
+}) {
+  const resolved = stats.win + stats.loss;
   return (
-    <Panel title="Simulation · What-If" subtitle="based on 30d distribution">
-      {sims.map((s, i) => (
-        <div
-          key={i}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 60px 60px 80px',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 8px',
-            borderBottom: '1px solid var(--line)',
-            background: s.action === 'active' ? 'var(--accent-glow)' : 'transparent',
-          }}
-        >
-          <div
-            style={{
-              fontSize: 12,
-              color: s.action === 'active' ? 'var(--accent)' : 'var(--ink-1)',
-              fontWeight: s.action === 'active' ? 600 : 400,
-            }}
-          >
-            {s.name}
+    <Panel
+      title={`Simulations · ${instrument}`}
+      right={
+        <Chip kind={stats.winRatePct != null && stats.winRatePct >= 50 ? 'up' : 'ghost'}>
+          {stats.winRatePct != null ? `${stats.winRatePct.toFixed(0)}% wr` : 'no data'}
+        </Chip>
+      }
+    >
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 8 }}>
+        {(
+          [
+            ['Total', stats.total, 'var(--ink-1)'],
+            ['WIN', stats.win, 'var(--up)'],
+            ['LOSS', stats.loss, 'var(--down)'],
+            ['MISSED', stats.missed, 'var(--ink-2)'],
+            ['CANCELLED', stats.cancelled, 'var(--ink-3)'],
+            ['PENDING', stats.pending, 'var(--warn)'],
+            ['ACTIVE', stats.active, 'var(--accent)'],
+          ] as Array<[string, number, string]>
+        ).map(([label, value, color]) => (
+          <div key={label}>
+            <div
+              style={{
+                fontSize: 9,
+                color: 'var(--ink-3)',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}
+            >
+              {label}
+            </div>
+            <div className="mono" style={{ fontSize: 16, color, fontWeight: 600 }}>
+              {value}
+            </div>
           </div>
-          <div className="mono" style={{ fontSize: 11, textAlign: 'right' }}>
-            {s.rr.toFixed(2)}R
-          </div>
-          <div className="mono" style={{ fontSize: 11, textAlign: 'right' }}>
-            {Math.round(s.prob * 100)}%
-          </div>
-          <div
-            className="mono"
-            style={{
-              fontSize: 11,
-              textAlign: 'right',
-              color: s.ev > 0.5 ? 'var(--up)' : s.ev > 0 ? 'var(--ink-1)' : 'var(--ink-3)',
-            }}
-          >
-            EV {s.ev.toFixed(2)}R
-          </div>
+        ))}
+      </div>
+      {resolved > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+          <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>Win rate</span>
+          <BarGauge
+            value={stats.winRatePct != null ? stats.winRatePct / 100 : 0}
+            color={
+              stats.winRatePct != null && stats.winRatePct >= 60
+                ? 'var(--up)'
+                : stats.winRatePct != null && stats.winRatePct >= 45
+                ? 'var(--warn)'
+                : 'var(--down)'
+            }
+          />
+          {stats.avgMfe != null && (
+            <span className="mono muted" style={{ fontSize: 10 }}>
+              MFE avg {stats.avgMfe.toFixed(2)}
+            </span>
+          )}
         </div>
-      ))}
+      )}
+      <SectionLabel>Last simulations</SectionLabel>
+      <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+        {rows.length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--ink-3)', fontStyle: 'italic', padding: '12px 4px' }}>
+            No simulations yet for {instrument}.
+          </div>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '60px 50px 80px 1fr 60px 60px',
+              gap: 4,
+              fontSize: 11,
+              padding: '4px 0',
+              fontFamily: 'var(--font-mono)',
+            }}
+          >
+            <div className="muted" style={{ fontSize: 9, letterSpacing: '0.06em' }}>
+              TIME
+            </div>
+            <div className="muted" style={{ fontSize: 9 }}>
+              SIDE
+            </div>
+            <div className="muted" style={{ fontSize: 9 }}>
+              STATUS
+            </div>
+            <div className="muted" style={{ fontSize: 9 }}>
+              TRAIL
+            </div>
+            <div className="muted" style={{ fontSize: 9, textAlign: 'right' }}>
+              MFE
+            </div>
+            <div className="muted" style={{ fontSize: 9, textAlign: 'right' }}>
+              DD
+            </div>
+            {rows.slice(0, 12).map((r) => (
+              <Fragment key={r.id}>
+                <span className="muted">{fmtTime(r.createdAt)}</span>
+                <span style={{ color: r.action === 'LONG' ? 'var(--up)' : 'var(--down)' }}>{r.action}</span>
+                <span>
+                  <Chip kind={statusTone(r.status)}>{r.status}</Chip>
+                </span>
+                <span style={{ color: 'var(--ink-2)' }}>
+                  {r.trailingStopResult ?? '—'}
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--up)' }}>
+                  {r.bestFavorablePrice != null ? r.bestFavorablePrice.toFixed(2) : '—'}
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--down)' }}>
+                  {r.maxDrawdownPoints != null ? r.maxDrawdownPoints.toFixed(2) : '—'}
+                </span>
+              </Fragment>
+            ))}
+          </div>
+        )}
+      </div>
     </Panel>
   );
 }
 
-export function ReviewView({ backtest, trailing }: { backtest: Backtest; trailing: Trailing }) {
+function TradeDecisionsPanel({
+  decisions,
+  instrument,
+}: {
+  decisions: TradeDecisionView[];
+  instrument: string;
+}) {
+  return (
+    <Panel
+      title={`Trade Decisions · ${instrument}`}
+      right={<Chip kind="ghost">{decisions.length} recent</Chip>}
+    >
+      {decisions.length === 0 ? (
+        <div style={{ fontSize: 11, color: 'var(--ink-3)', fontStyle: 'italic' }}>
+          No persisted decisions for {instrument} yet.
+        </div>
+      ) : (
+        <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+          {decisions.slice(0, 20).map((d) => {
+            const dirColor =
+              d.direction === 'LONG'
+                ? 'var(--up)'
+                : d.direction === 'SHORT'
+                ? 'var(--down)'
+                : 'var(--ink-3)';
+            const eligOk = d.eligibility === 'ELIGIBLE';
+            return (
+              <div
+                key={`${d.id ?? d.createdAt}-${d.timeframe}`}
+                style={{
+                  borderBottom: '1px solid var(--line)',
+                  padding: '6px 4px',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto',
+                  gap: 6,
+                  alignItems: 'start',
+                }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span
+                      className="mono"
+                      style={{ fontSize: 10, color: 'var(--ink-3)' }}
+                    >
+                      {fmtDate(d.createdAt)} {fmtTime(d.createdAt)}
+                    </span>
+                    <Chip kind="ghost">{d.timeframe}</Chip>
+                    <span style={{ color: dirColor, fontWeight: 700, fontSize: 11 }}>{d.direction}</span>
+                    {d.setupType && <Chip kind="ghost">{d.setupType}</Chip>}
+                    {d.zoneName && (
+                      <span className="muted" style={{ fontSize: 10 }}>
+                        {d.zoneName}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, fontSize: 10, color: 'var(--ink-2)' }}>
+                    <span>
+                      verdict:{' '}
+                      <span style={{ color: 'var(--ink-1)', fontWeight: 500 }}>{d.verdict}</span>
+                    </span>
+                    {d.entry != null && (
+                      <span className="mono">
+                        E {d.entry.toFixed(2)}
+                        {d.stop != null ? ` · SL ${d.stop.toFixed(2)}` : ''}
+                        {d.tp1 != null ? ` · TP ${d.tp1.toFixed(2)}` : ''}
+                        {d.rrRatio != null ? ` · ${d.rrRatio.toFixed(2)}R` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                  <Chip kind={eligOk ? 'up' : 'ghost'}>{d.eligibility}</Chip>
+                  <Chip kind={d.status === 'DONE' ? 'up' : d.status === 'ERROR' ? 'down' : 'warn'}>
+                    {d.status}
+                  </Chip>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+// Configurable backtest runner — restores the legacy parameter controls so the
+// trader can sweep stop-loss / BB length / quantity etc. against live IBKR data.
+// Collapsed by default (advanced toggle) so it doesn't bloat the Review view.
+function BacktestRunnerPanel({ instrument, tf }: { instrument: string; tf: string }) {
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<BacktestResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [qty, setQty] = useState('2');
+  const [stopLoss, setStopLoss] = useState('300');
+  const [useAtr, setUseAtr] = useState(false);
+  const [emaPeriod, setEmaPeriod] = useState('0');
+  const [bbLength, setBbLength] = useState('20');
+  const [useBbTp, setUseBbTp] = useState(true);
+  const [closeEod, setCloseEod] = useState(false);
+  const [closeEow, setCloseEow] = useState(false);
+  const [pyramiding, setPyramiding] = useState('0');
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await api.runBacktest({
+        instrument,
+        timeframe: tf,
+        qty: Number(qty) || 1,
+        stopLossPoints: Number(stopLoss) || 0,
+        atrTrailingStop: useAtr,
+        emaFilterPeriod: Number(emaPeriod) || 0,
+        bollingerLength: Number(bbLength) || 20,
+        bollingerTakeProfit: useBbTp,
+        closeEndOfDay: closeEod,
+        closeEndOfWeek: closeEow,
+        pyramiding: Number(pyramiding) || 0,
+      });
+      setResult(res);
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Panel
+      title={`Backtest runner · ${instrument} ${tf}`}
+      right={
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? 'Hide params' : 'Show params'}
+        </button>
+      }
+    >
+      {open && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 6,
+            background: 'var(--s2)',
+            border: '1px solid var(--line)',
+            borderRadius: 4,
+            padding: 8,
+          }}
+        >
+          <ParamField label="Qty" value={qty} onChange={setQty} />
+          <ParamField label="SL pts" value={stopLoss} onChange={setStopLoss} />
+          <ParamField label="EMA filter" value={emaPeriod} onChange={setEmaPeriod} />
+          <ParamField label="BB length" value={bbLength} onChange={setBbLength} />
+          <ParamField label="Pyramiding" value={pyramiding} onChange={setPyramiding} />
+          <ParamCheckbox label="ATR trail" value={useAtr} onChange={setUseAtr} />
+          <ParamCheckbox label="BB TP" value={useBbTp} onChange={setUseBbTp} />
+          <ParamCheckbox label="Close EOD" value={closeEod} onChange={setCloseEod} />
+          <ParamCheckbox label="Close EOW" value={closeEow} onChange={setCloseEow} />
+          <button
+            type="button"
+            className="btn btn-accent btn-sm"
+            onClick={() => void run()}
+            disabled={running}
+            style={{ gridColumn: 'span 3' }}
+          >
+            {running ? 'Running…' : 'Run backtest'}
+          </button>
+        </div>
+      )}
+      {error && (
+        <div style={{ fontSize: 11, color: 'var(--down)', marginTop: 4 }}>
+          Error: {error}
+        </div>
+      )}
+      {result && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
+            {(
+              [
+                ['Trades', result.totalTrades.toString(), 'var(--ink-1)'],
+                ['Win %', `${(result.winRate * 100).toFixed(1)}%`, 'var(--up)'],
+                ['PF', result.profitFactor.toFixed(2), 'var(--ink-1)'],
+                ['Sharpe', result.sharpeRatio.toFixed(2), 'var(--ink-1)'],
+                ['PnL', `${result.totalPnl >= 0 ? '+' : ''}${result.totalPnl.toFixed(0)}`, result.totalPnl >= 0 ? 'var(--up)' : 'var(--down)'],
+                ['MaxDD %', `${(result.maxDrawdownPct * 100).toFixed(1)}%`, 'var(--down)'],
+              ] as Array<[string, string, string]>
+            ).map(([label, value, color]) => (
+              <div key={label}>
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--ink-3)',
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {label}
+                </div>
+                <div className="mono" style={{ fontSize: 14, color, fontWeight: 600 }}>
+                  {value}
+                </div>
+              </div>
+            ))}
+          </div>
+          {result.equityCurve.length > 0 && (
+            <Sparkline values={result.equityCurve} color="var(--accent)" w={420} h={48} fill />
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function ParamField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <span
+        style={{
+          fontSize: 9,
+          color: 'var(--ink-3)',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        {label}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode="decimal"
+        style={{
+          height: 22,
+          padding: '0 6px',
+          background: 'var(--s1)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          color: 'var(--ink-1)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+        }}
+      />
+    </label>
+  );
+}
+
+function ParamCheckbox({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 11,
+        color: 'var(--ink-2)',
+        height: '100%',
+      }}
+    >
+      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
+      {label}
+    </label>
+  );
+}
+
+export function ReviewView({
+  backtest,
+  trailing,
+  decisions,
+  simulations,
+  simulationStats,
+  instrument,
+  tf,
+}: {
+  backtest: Backtest;
+  trailing: Trailing;
+  decisions: TradeDecisionView[];
+  simulations: SimulationView[];
+  simulationStats: SimulationStats;
+  instrument: string;
+  tf: string;
+}) {
   return (
     <div
       style={{
@@ -250,7 +648,13 @@ export function ReviewView({ backtest, trailing }: { backtest: Backtest; trailin
       }}
     >
       <BacktestPanel b={backtest} />
-      <SimulationPanel />
+      <SimulationsStatsPanel stats={simulationStats} rows={simulations} instrument={instrument} />
+      <div style={{ gridColumn: '1 / -1' }}>
+        <BacktestRunnerPanel instrument={instrument} tf={tf} />
+      </div>
+      <div style={{ gridColumn: '1 / -1' }}>
+        <TradeDecisionsPanel decisions={decisions} instrument={instrument} />
+      </div>
       <div style={{ gridColumn: '1 / -1' }}>
         <TrailingPanel t={trailing} />
       </div>

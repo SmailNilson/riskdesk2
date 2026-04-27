@@ -5,6 +5,21 @@ import { Segmented, StatusDot } from '../lib/atoms';
 import { Instrument } from '../lib/data';
 import { fmt } from '../lib/format';
 
+// Timezone options offered in the TopBar selector. The selected zone drives
+// the Clock display so traders outside ET get a wall-clock that matches their
+// physical location while the rest of the app keeps using ET for session math.
+export interface TzEntry {
+  tz: string;
+  label: string;
+}
+export const TZ_OPTIONS: TzEntry[] = [
+  { tz: 'America/New_York', label: 'NY' },
+  { tz: 'UTC', label: 'UTC' },
+  { tz: 'Europe/Paris', label: 'Paris' },
+  { tz: 'Europe/London', label: 'London' },
+  { tz: 'Asia/Tokyo', label: 'Tokyo' },
+];
+
 function Logo() {
   return (
     <div
@@ -47,7 +62,7 @@ function Logo() {
   );
 }
 
-function Clock() {
+function Clock({ tz }: { tz: TzEntry }) {
   const [t, setT] = useState<Date | null>(null);
   // Defer to mount so SSR/CSR don't drift
   useEffect(() => {
@@ -55,15 +70,111 @@ function Clock() {
     const i = setInterval(() => setT(new Date()), 1000);
     return () => clearInterval(i);
   }, []);
-  const time = t ? t.toLocaleTimeString('en-US', { hour12: false }) : '— —:—';
-  const date = t ? t.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) : '—';
+  const time = t ? t.toLocaleTimeString('en-US', { hour12: false, timeZone: tz.tz }) : '— —:—';
+  const date = t
+    ? t.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: tz.tz })
+    : '—';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.1 }}>
       <span className="mono" style={{ fontSize: 12, color: 'var(--ink-0)', fontWeight: 600 }}>
         {time}
       </span>
-      <span style={{ fontSize: 10, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)' }}>{date} · NY</span>
+      <span style={{ fontSize: 10, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)' }}>
+        {date} · {tz.label}
+      </span>
     </div>
+  );
+}
+
+function TimezoneSelector({
+  value,
+  onChange,
+}: {
+  value: TzEntry;
+  onChange: (tz: TzEntry) => void;
+}) {
+  return (
+    <select
+      value={value.tz}
+      onChange={(e) => {
+        const next = TZ_OPTIONS.find((z) => z.tz === e.target.value) ?? TZ_OPTIONS[0];
+        onChange(next);
+      }}
+      title="Timezone for the clock display"
+      style={{
+        height: 24,
+        padding: '0 6px',
+        background: 'var(--s2)',
+        border: '1px solid var(--line)',
+        borderRadius: 4,
+        color: 'var(--ink-2)',
+        fontSize: 10,
+        fontFamily: 'var(--font-mono)',
+        cursor: 'pointer',
+      }}
+    >
+      {TZ_OPTIONS.map((z) => (
+        <option key={z.tz} value={z.tz}>
+          {z.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function PurgeButton({
+  instrument,
+  onPurge,
+}: {
+  instrument: string;
+  onPurge: (sym: string) => Promise<{ purged?: number; error?: string }>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const handle = async () => {
+    if (busy) return;
+    if (
+      !window.confirm(
+        `Purge all ${instrument} candles (all timeframes) and trigger IBKR re-backfill?\n\nThis is destructive — existing DB history for ${instrument} will be wiped.`
+      )
+    )
+      return;
+    setBusy(true);
+    setMsg(null);
+    const res = await onPurge(instrument);
+    setBusy(false);
+    if (res.error) {
+      setMsg(`Error`);
+    } else {
+      setMsg(`Purged ${res.purged ?? 0}`);
+    }
+    setTimeout(() => setMsg(null), 6000);
+  };
+  return (
+    <button
+      type="button"
+      onClick={handle}
+      disabled={busy}
+      title={`Wipe all ${instrument} candles and re-backfill from IBKR`}
+      style={{
+        height: 24,
+        padding: '0 8px',
+        background: 'var(--s2)',
+        border: '1px solid var(--line)',
+        borderRadius: 4,
+        color: msg
+          ? 'var(--up)'
+          : busy
+          ? 'var(--ink-3)'
+          : 'var(--ink-2)',
+        fontSize: 10,
+        fontFamily: 'var(--font-mono)',
+        cursor: busy ? 'wait' : 'pointer',
+        letterSpacing: '0.04em',
+      }}
+    >
+      {busy ? 'PURGING…' : msg ?? `PURGE ${instrument}`}
+    </button>
   );
 }
 
@@ -193,6 +304,9 @@ interface TopBarProps {
   onTf: (tf: string) => void;
   connected: boolean;
   latencyMs: number;
+  timezone: TzEntry;
+  onTimezone: (tz: TzEntry) => void;
+  onPurge: (sym: string) => Promise<{ purged?: number; error?: string }>;
 }
 
 export function TopBar({
@@ -205,6 +319,9 @@ export function TopBar({
   onTf,
   connected,
   latencyMs,
+  timezone,
+  onTimezone,
+  onPurge,
 }: TopBarProps) {
   return (
     <div className="topbar">
@@ -217,10 +334,14 @@ export function TopBar({
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px', borderRight: '1px solid var(--line)' }}>
         <ViewSwitcher value={view} onChange={onView} />
       </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px', borderRight: '1px solid var(--line)' }}>
+        <PurgeButton instrument={instrument} onPurge={onPurge} />
+        <TimezoneSelector value={timezone} onChange={onTimezone} />
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px' }}>
         <SearchBar />
         <ConnectionPill connected={connected} latencyMs={latencyMs} />
-        <Clock />
+        <Clock tz={timezone} />
       </div>
     </div>
   );

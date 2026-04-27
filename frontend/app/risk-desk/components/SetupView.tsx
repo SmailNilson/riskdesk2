@@ -16,47 +16,195 @@ import {
   DxyData,
   Indicators,
   PlaybookEntry,
+  PlaybookLive,
   Position,
   Strategy,
+  StrategyAgentVoteView,
+  StrategyLayerScore,
 } from '../lib/data';
 import { OrderFlowProdPanel } from './OrderFlowProd';
 import { OrderFlowProd } from '../lib/data';
 
-function StrategyPanel({ s }: { s: Strategy }) {
+function StrategyPanel({
+  s,
+  votes,
+  layerScores,
+  finalScore,
+  vetoReasons,
+}: {
+  s: Strategy;
+  votes: StrategyAgentVoteView[];
+  layerScores: StrategyLayerScore[];
+  finalScore: number;
+  vetoReasons: string[];
+}) {
+  // No real votes → fall back to the simple regime gauge view (mock).
+  const hasLive = votes.length > 0 || layerScores.some((l) => l.score !== 0);
+  const finalScoreNorm = Math.max(0, Math.min(1, (finalScore + 100) / 200));
   return (
-    <Panel title="Strategy · Regime" right={<Chip kind="accent">{s.regime}</Chip>}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>Confidence</span>
-        <BarGauge value={s.confidence} />
-        <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)' }}>
-          {Math.round(s.confidence * 100)}%
-        </span>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 6 }}>
-        {s.factors.map((f, i) => (
-          <div
-            key={i}
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '120px 1fr 100px',
-              alignItems: 'center',
-              gap: 8,
-            }}
-          >
-            <span style={{ fontSize: 11, color: 'var(--ink-2)' }}>{f.name}</span>
-            <BarGauge
-              value={f.v}
-              color={f.v >= 0.6 ? 'var(--up)' : f.v >= 0.4 ? 'var(--warn)' : 'var(--down)'}
-            />
+    <Panel
+      title="Strategy · Regime"
+      right={
+        <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {hasLive && (
             <span
               className="mono"
-              style={{ fontSize: 10, color: 'var(--ink-3)', textAlign: 'right' }}
+              style={{
+                fontSize: 10,
+                color: finalScore >= 0 ? 'var(--up)' : 'var(--down)',
+                fontWeight: 600,
+              }}
             >
-              {f.label}
+              score {finalScore >= 0 ? '+' : ''}
+              {finalScore.toFixed(0)}
             </span>
-          </div>
-        ))}
+          )}
+          <Chip kind="accent">{s.regime}</Chip>
+        </span>
+      }
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>Confidence</span>
+        <BarGauge
+          value={hasLive ? finalScoreNorm : s.confidence}
+          color={
+            hasLive
+              ? finalScore >= 30
+                ? 'var(--up)'
+                : finalScore <= -30
+                ? 'var(--down)'
+                : 'var(--warn)'
+              : undefined
+          }
+        />
+        <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)' }}>
+          {Math.round((hasLive ? finalScoreNorm : s.confidence) * 100)}%
+        </span>
       </div>
+      {hasLive && layerScores.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 6 }}>
+          {layerScores.map((l) => {
+            // -100..+100 → 0..1 for the gauge
+            const norm = Math.max(0, Math.min(1, (l.score + 100) / 200));
+            return (
+              <div
+                key={l.layer}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '120px 1fr 60px',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontSize: 11, color: 'var(--ink-2)' }}>
+                  {l.layer}{' '}
+                  <span className="muted" style={{ fontSize: 9 }}>
+                    {Math.round(l.weight * 100)}%
+                  </span>
+                </span>
+                <BarGauge
+                  value={norm}
+                  color={
+                    l.score >= 30 ? 'var(--up)' : l.score <= -30 ? 'var(--down)' : 'var(--warn)'
+                  }
+                />
+                <span
+                  className="mono"
+                  style={{ fontSize: 10, color: 'var(--ink-2)', textAlign: 'right' }}
+                >
+                  {l.score >= 0 ? '+' : ''}
+                  {l.score.toFixed(0)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 6 }}>
+          {s.factors.map((f, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '120px 1fr 100px',
+                alignItems: 'center',
+                gap: 8,
+              }}
+            >
+              <span style={{ fontSize: 11, color: 'var(--ink-2)' }}>{f.name}</span>
+              <BarGauge
+                value={f.v}
+                color={f.v >= 0.6 ? 'var(--up)' : f.v >= 0.4 ? 'var(--warn)' : 'var(--down)'}
+              />
+              <span
+                className="mono"
+                style={{ fontSize: 10, color: 'var(--ink-3)', textAlign: 'right' }}
+              >
+                {f.label}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {hasLive && votes.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 }}>
+          <span
+            style={{
+              fontSize: 9,
+              color: 'var(--ink-3)',
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              fontWeight: 600,
+            }}
+          >
+            Agent votes
+          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {votes.slice(0, 6).map((v) => (
+              <div
+                key={v.agentId + v.layer}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '110px 50px 1fr 60px',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 10,
+                }}
+              >
+                <span style={{ color: 'var(--ink-1)', fontWeight: 500 }}>{v.agentId}</span>
+                <Chip kind="ghost">{v.layer}</Chip>
+                <span
+                  className="muted"
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {v.abstain ? 'abstain' : v.vetoReason ? `veto · ${v.vetoReason}` : v.evidence[0] ?? ''}
+                </span>
+                <span
+                  className="mono"
+                  style={{
+                    textAlign: 'right',
+                    color:
+                      v.abstain
+                        ? 'var(--ink-3)'
+                        : v.vote >= 30
+                        ? 'var(--up)'
+                        : v.vote <= -30
+                        ? 'var(--down)'
+                        : 'var(--ink-2)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {v.abstain ? '—' : `${v.vote >= 0 ? '+' : ''}${v.vote.toFixed(0)}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div
         style={{
           padding: 8,
@@ -67,7 +215,8 @@ function StrategyPanel({ s }: { s: Strategy }) {
           color: 'var(--ink-1)',
         }}
       >
-        <strong style={{ color: 'var(--accent)' }}>→</strong> {s.recommendation}
+        <strong style={{ color: 'var(--accent)' }}>→</strong>{' '}
+        {vetoReasons.length > 0 ? vetoReasons[0] : s.recommendation}
       </div>
     </Panel>
   );
@@ -197,9 +346,112 @@ function DXYPanel({ d }: { d: DxyData }) {
   );
 }
 
-function PlaybookPanel({ entries }: { entries: PlaybookEntry[] }) {
+function PlaybookLivePanel({
+  live,
+  instrument,
+  tf,
+}: {
+  live: PlaybookLive;
+  instrument: string;
+  tf: string;
+}) {
+  const score = live.checklistScore;
+  const max = live.checklistMax || 7;
+  const ratio = max > 0 ? score / max : 0;
   return (
-    <Panel title="Playbook" right={<button type="button" className="btn btn-sm btn-ghost">+ New</button>}>
+    <Panel
+      title={`Playbook · ${instrument} ${tf}`}
+      right={
+        live.available ? (
+          <Chip
+            kind={
+              ratio >= 0.7
+                ? 'up'
+                : ratio >= 0.5
+                ? 'warn'
+                : 'ghost'
+            }
+          >
+            {score}/{max} · {live.verdict}
+          </Chip>
+        ) : (
+          <Chip kind="ghost">no eval</Chip>
+        )
+      }
+    >
+      {!live.available ? (
+        <div style={{ fontSize: 11, color: 'var(--ink-3)', fontStyle: 'italic' }}>
+          No playbook evaluation yet for this contract / timeframe.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <BarGauge
+              value={ratio}
+              color={ratio >= 0.7 ? 'var(--up)' : ratio >= 0.5 ? 'var(--warn)' : 'var(--down)'}
+            />
+            {live.tradeDirection && (
+              <Chip kind={live.tradeDirection === 'LONG' ? 'up' : 'down'}>
+                {live.tradeDirection}
+              </Chip>
+            )}
+            {live.bestSetup && (
+              <span className="mono muted" style={{ fontSize: 10 }}>
+                {live.bestSetup.zoneName} · RR {live.bestSetup.rrRatio.toFixed(2)}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+            {live.checklist.map((c) => {
+              const color =
+                c.status === 'PASS'
+                  ? 'var(--up)'
+                  : c.status === 'FAIL'
+                  ? 'var(--down)'
+                  : 'var(--warn)';
+              const mark = c.status === 'PASS' ? '✓' : c.status === 'FAIL' ? '✕' : '·';
+              return (
+                <div
+                  key={c.step}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '20px 1fr 1fr',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 11,
+                    padding: '2px 0',
+                    borderBottom: '1px solid var(--line)',
+                  }}
+                >
+                  <span className="mono" style={{ color, fontWeight: 700, textAlign: 'center' }}>
+                    {mark}
+                  </span>
+                  <span style={{ color: 'var(--ink-1)' }}>{c.label}</span>
+                  <span
+                    className="muted"
+                    style={{
+                      fontSize: 10,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={c.detail}
+                  >
+                    {c.detail}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function PlaybookHistoryPanel({ entries }: { entries: PlaybookEntry[] }) {
+  return (
+    <Panel title="Playbook · history" right={<button type="button" className="btn btn-sm btn-ghost">+ New</button>}>
       {entries.map((p) => (
         <div
           key={p.id}
@@ -471,9 +723,14 @@ function TradeDecisionPanel({
 
 interface SetupViewProps {
   strategy: Strategy;
+  strategyVotes: StrategyAgentVoteView[];
+  strategyLayerScores: StrategyLayerScore[];
+  strategyFinalScore: number;
+  strategyVetoReasons: string[];
   indicators: Indicators;
   positions: Position[];
   playbook: PlaybookEntry[];
+  playbookLive: PlaybookLive;
   dxy: DxyData;
   correlations: Correlations;
   orderflowProd: OrderFlowProd;
@@ -483,9 +740,14 @@ interface SetupViewProps {
 
 export function SetupView({
   strategy,
+  strategyVotes,
+  strategyLayerScores,
+  strategyFinalScore,
+  strategyVetoReasons,
   indicators,
   positions,
   playbook,
+  playbookLive,
   dxy,
   correlations,
   orderflowProd,
@@ -494,14 +756,21 @@ export function SetupView({
 }: SetupViewProps) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: 12 }}>
-      <StrategyPanel s={strategy} />
+      <StrategyPanel
+        s={strategy}
+        votes={strategyVotes}
+        layerScores={strategyLayerScores}
+        finalScore={strategyFinalScore}
+        vetoReasons={strategyVetoReasons}
+      />
       <IndicatorsPanel i={indicators} tf={tf} instrument={instrument} />
       <PositionsPanel positions={positions} />
       <TradeDecisionPanel tf={tf} instrument={instrument} strategy={strategy} />
       <div style={{ gridColumn: '1 / -1' }}>
         <OrderFlowProdPanel data={orderflowProd} />
       </div>
-      <PlaybookPanel entries={playbook} />
+      <PlaybookLivePanel live={playbookLive} instrument={instrument} tf={tf} />
+      <PlaybookHistoryPanel entries={playbook} />
       <DXYPanel d={dxy} />
       <div style={{ gridColumn: '1 / -1' }}>
         <CorrelationsPanel c={correlations} />
