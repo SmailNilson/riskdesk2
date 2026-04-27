@@ -483,6 +483,16 @@ export function LiveChart({
     return () => cancelAnimationFrame(id);
   }, [toggles, smc, activePosition]);
 
+  // Reset price-scale autoscale + time fit when the instrument changes — without
+  // this, lightweight-charts pins the visible range from the previous symbol
+  // (e.g. MCL ~78) so MNQ candles at ~27,000 render off-screen.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    chart.timeScale().fitContent();
+  }, [symbol]);
+
   return (
     <div
       className="panel-flat"

@@ -323,6 +323,10 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           bbUpper: bb.upper,
           bbLower: bb.lower,
           bbBasis: bb.basis,
+          // No per-instrument backend tape feed yet — clear the (mock-only)
+          // tape + cvd so we don't show MCL crude prices on MNQ/MGC/E6 tabs.
+          orderFlow: [],
+          cvd: [],
           smc,
           footprint,
           dom,
