@@ -74,10 +74,14 @@ function ReviewDetail({
   r,
   onArm,
   onSkip,
+  onReanalyze,
+  onSnooze,
 }: {
   r: Review | undefined;
   onArm?: () => void;
   onSkip?: () => void;
+  onReanalyze?: (overrides: { entry?: number; sl?: number; tp?: number }) => Promise<boolean>;
+  onSnooze?: (durationSec: number) => Promise<boolean>;
 }) {
   if (!r) return null;
   const p = r.plan;
@@ -172,7 +176,215 @@ function ReviewDetail({
           </button>
         </div>
       )}
+
+      {r.alertKey && (onReanalyze || onSnooze) && (
+        <ReviewActions r={r} onReanalyze={onReanalyze} onSnooze={onSnooze} />
+      )}
     </div>
+  );
+}
+
+function ReviewActions({
+  r,
+  onReanalyze,
+  onSnooze,
+}: {
+  r: Review;
+  onReanalyze?: (overrides: { entry?: number; sl?: number; tp?: number }) => Promise<boolean>;
+  onSnooze?: (durationSec: number) => Promise<boolean>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState<'snooze5' | 'snooze10' | 'snooze60' | 'reanalyze' | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [entry, setEntry] = useState<string>(r.plan?.entry?.toString() ?? '');
+  const [sl, setSl] = useState<string>(r.plan?.sl?.toString() ?? '');
+  const [tp, setTp] = useState<string>(r.plan?.tp1?.toString() ?? '');
+
+  const flash = (text: string) => {
+    setMsg(text);
+    setTimeout(() => setMsg(null), 2500);
+  };
+  const snooze = async (dur: number, key: 'snooze5' | 'snooze10' | 'snooze60') => {
+    if (!onSnooze) return;
+    setBusy(key);
+    const ok = await onSnooze(dur);
+    setBusy(null);
+    flash(ok ? `Snoozed ${dur / 60}m` : 'snooze failed');
+  };
+  const reanalyze = async () => {
+    if (!onReanalyze) return;
+    setBusy('reanalyze');
+    const overrides = {
+      entry: entry ? Number(entry) : undefined,
+      sl: sl ? Number(sl) : undefined,
+      tp: tp ? Number(tp) : undefined,
+    };
+    const ok = await onReanalyze(overrides);
+    setBusy(null);
+    flash(ok ? 'Reanalyzed' : 'reanalyze failed');
+    if (ok) setEditing(false);
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        paddingTop: 8,
+        borderTop: '1px solid var(--line)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span
+          style={{
+            fontSize: 9,
+            color: 'var(--ink-3)',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            fontWeight: 600,
+            marginRight: 4,
+          }}
+        >
+          Snooze
+        </span>
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => void snooze(5 * 60, 'snooze5')}
+          disabled={busy !== null}
+        >
+          {busy === 'snooze5' ? '…' : '5m'}
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => void snooze(10 * 60, 'snooze10')}
+          disabled={busy !== null}
+        >
+          {busy === 'snooze10' ? '…' : '10m'}
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => void snooze(60 * 60, 'snooze60')}
+          disabled={busy !== null}
+        >
+          {busy === 'snooze60' ? '…' : '1H'}
+        </button>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => setEditing((e) => !e)}
+          disabled={busy !== null}
+        >
+          {editing ? 'Close' : 'Reanalyze…'}
+        </button>
+      </div>
+      {editing && (
+        <div
+          style={{
+            background: 'var(--s2)',
+            border: '1px solid var(--line)',
+            borderRadius: 4,
+            padding: 8,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+            <ReviewField label="Entry" value={entry} onChange={setEntry} />
+            <ReviewField label="Stop" value={sl} onChange={setSl} />
+            <ReviewField label="Target" value={tp} onChange={setTp} />
+          </div>
+          <button
+            type="button"
+            className="btn btn-accent btn-sm"
+            onClick={() => void reanalyze()}
+            disabled={busy === 'reanalyze'}
+          >
+            {busy === 'reanalyze' ? 'Reanalyzing…' : 'Reanalyze with overrides'}
+          </button>
+        </div>
+      )}
+      {msg && (
+        <span className="mono" style={{ fontSize: 10, color: 'var(--up)' }}>
+          {msg}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ReviewField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+        {label}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode="decimal"
+        style={{
+          height: 24,
+          padding: '0 6px',
+          background: 'var(--s1)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          color: 'var(--ink-1)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+        }}
+      />
+    </label>
+  );
+}
+
+function ManualAskField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <span style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+        {label}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        inputMode="decimal"
+        style={{
+          height: 22,
+          padding: '0 6px',
+          background: 'var(--s2)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          color: 'var(--ink-1)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+        }}
+      />
+    </label>
   );
 }
 
@@ -180,9 +392,24 @@ interface MentorDeskProps {
   reviews: Review[];
   onArm?: (r: Review) => void;
   onSkip?: (r: Review) => void;
+  onReanalyze?: (
+    r: Review,
+    overrides: { entry?: number; sl?: number; tp?: number }
+  ) => Promise<boolean>;
+  onSnooze?: (key: string, durationSec: number) => Promise<boolean>;
+  mutedTimeframes?: string[];
+  onSetTimeframeMuted?: (tf: string, muted: boolean) => Promise<boolean>;
 }
 
-export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
+export function MentorDesk({
+  reviews,
+  onArm,
+  onSkip,
+  onReanalyze,
+  onSnooze,
+  mutedTimeframes = [],
+  onSetTimeframeMuted,
+}: MentorDeskProps) {
   const [activeId, setActiveId] = useState<string>(reviews[0]?.id ?? '');
   const [filter, setFilter] = useState<'all' | 'eligible' | 'take'>('all');
   const [page, setPage] = useState(0);
@@ -242,6 +469,8 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
           gap: 4,
           padding: '8px 12px',
           borderBottom: '1px solid var(--line)',
+          flexWrap: 'wrap',
+          alignItems: 'center',
         }}
       >
         {[
@@ -263,7 +492,43 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
           </button>
         ))}
         <span style={{ flex: 1 }} />
-        <span className="mono muted" style={{ fontSize: 10, alignSelf: 'center' }}>
+        {onSetTimeframeMuted && (
+          <span style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+            <span
+              style={{
+                fontSize: 9,
+                color: 'var(--ink-3)',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+                marginRight: 2,
+              }}
+            >
+              Mute
+            </span>
+            {(['5m', '10m', '1h'] as const).map((tfKey) => {
+              const muted = mutedTimeframes.some((t) => t.toLowerCase() === tfKey);
+              return (
+                <button
+                  key={tfKey}
+                  type="button"
+                  className="btn btn-sm"
+                  title={muted ? `Unmute ${tfKey}` : `Mute ${tfKey} reviews`}
+                  onClick={() => void onSetTimeframeMuted(tfKey, !muted)}
+                  style={{
+                    height: 20,
+                    padding: '0 6px',
+                    fontSize: 10,
+                    background: muted ? 'var(--down)' : 'var(--s2)',
+                    color: muted ? 'var(--down-deep, #0a0a0a)' : 'var(--ink-2)',
+                  }}
+                >
+                  {tfKey}
+                </button>
+              );
+            })}
+          </span>
+        )}
+        <span className="mono muted" style={{ fontSize: 10, alignSelf: 'center', marginLeft: 6 }}>
           {filtered.length} reviews · ttl 4m
         </span>
       </div>
@@ -364,6 +629,16 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
           r={active}
           onArm={() => active && onArm && onArm(active)}
           onSkip={() => active && onSkip && onSkip(active)}
+          onReanalyze={
+            active && onReanalyze
+              ? (overrides) => onReanalyze(active, overrides)
+              : undefined
+          }
+          onSnooze={
+            active?.alertKey && onSnooze
+              ? (durationSec) => onSnooze(active.alertKey!, durationSec)
+              : undefined
+          }
         />
       </div>
 
@@ -376,6 +651,15 @@ export function ManualAsk({ instrument, tf }: { instrument: string; tf: string }
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<MentorAnalyzeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Advanced mode lets the trader pin a side + entry/SL/TP and (optionally)
+  // ask Gemini to factor in current portfolio exposure. When advanced is off
+  // we keep the original 1-line "ask anything" behaviour.
+  const [advanced, setAdvanced] = useState(false);
+  const [side, setSide] = useState<'LONG' | 'SHORT'>('LONG');
+  const [entry, setEntry] = useState('');
+  const [sl, setSl] = useState('');
+  const [tp, setTp] = useState('');
+  const [includePortfolio, setIncludePortfolio] = useState(false);
 
   const ask = async (q: string) => {
     if (loading) return;
@@ -385,11 +669,22 @@ export function ManualAsk({ instrument, tf }: { instrument: string; tf: string }
     setLoading(true);
     setError(null);
     try {
+      const tradeIntention = advanced
+        ? {
+            action: side,
+            entryPrice: entry ? Number(entry) : null,
+            stopLoss: sl ? Number(sl) : null,
+            takeProfit: tp ? Number(tp) : null,
+            isMarketOrder: !entry,
+          }
+        : null;
       const res = await api.analyzeMentor({
         instrument,
         timeframe: tf,
         question: text,
         source: 'manual-mentor:dashboard',
+        tradeIntention,
+        includePortfolioContext: includePortfolio,
       });
       setResponse(res);
     } catch (e) {
@@ -426,7 +721,90 @@ export function ManualAsk({ instrument, tf }: { instrument: string; tf: string }
         <span className="section-label">Ask Mentor</span>
         <Chip kind="ghost">{response?.model || 'gemini'}</Chip>
         {loading && <Chip kind="warn">analyzing…</Chip>}
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => setAdvanced((a) => !a)}
+          style={{ height: 18, fontSize: 9 }}
+        >
+          {advanced ? 'Simple' : 'Advanced'}
+        </button>
       </div>
+      {advanced && (
+        <div
+          style={{
+            background: 'var(--s1)',
+            border: '1px solid var(--line)',
+            borderRadius: 4,
+            padding: 6,
+            marginBottom: 8,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setSide('LONG')}
+              style={{
+                height: 22,
+                padding: '0 8px',
+                fontSize: 10,
+                background: side === 'LONG' ? 'var(--up)' : 'var(--s2)',
+                color: side === 'LONG' ? 'var(--up-deep, #021d10)' : 'var(--ink-2)',
+                fontWeight: 700,
+              }}
+            >
+              LONG
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setSide('SHORT')}
+              style={{
+                height: 22,
+                padding: '0 8px',
+                fontSize: 10,
+                background: side === 'SHORT' ? 'var(--down)' : 'var(--s2)',
+                color: side === 'SHORT' ? 'var(--down-deep, #1d0202)' : 'var(--ink-2)',
+                fontWeight: 700,
+              }}
+            >
+              SHORT
+            </button>
+            <span style={{ flex: 1 }} />
+            <label
+              style={{
+                display: 'flex',
+                gap: 4,
+                alignItems: 'center',
+                fontSize: 10,
+                color: 'var(--ink-2)',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={includePortfolio}
+                onChange={(e) => setIncludePortfolio(e.target.checked)}
+              />
+              portfolio ctx
+            </label>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+            <ManualAskField
+              label="Entry"
+              value={entry}
+              onChange={setEntry}
+              placeholder="market"
+            />
+            <ManualAskField label="Stop" value={sl} onChange={setSl} />
+            <ManualAskField label="Target" value={tp} onChange={setTp} />
+          </div>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
         {quickPrompts.map((p) => (
           <button

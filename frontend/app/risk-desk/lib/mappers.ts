@@ -301,6 +301,11 @@ export function mapReview(r: ApiMentorSignalReview): Review {
 
   return {
     id: String(r?.id ?? ''),
+    alertKey: r.alertKey,
+    category,
+    message,
+    severity: r.severity,
+    triggeredAt: r.timestamp ?? r.createdAt,
     sym: typeof r.instrument === 'string' ? r.instrument : '—',
     tf: typeof r.timeframe === 'string' ? r.timeframe : '—',
     at,

@@ -121,6 +121,14 @@ export interface ReviewPlan {
 }
 export interface Review {
   id: string;
+  // alertKey lets actions (snooze, reanalyze) target the underlying backend
+  // alert without re-fetching by id. Optional: not present on mock reviews.
+  alertKey?: string;
+  // Original backend message + category — used to build the reanalyze payload.
+  category?: string;
+  message?: string;
+  severity?: 'INFO' | 'WARNING' | 'DANGER';
+  triggeredAt?: string;
   sym: string;
   tf: string;
   at: string;

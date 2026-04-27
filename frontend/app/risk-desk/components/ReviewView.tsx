@@ -1,6 +1,7 @@
 'use client';
 
-import { Fragment } from 'react';
+import { Fragment, useState } from 'react';
+import { api, BacktestResult } from '../../lib/api';
 import { BarGauge, Chip, Panel, SectionLabel, Sparkline, StatusDot } from '../lib/atoms';
 import { Backtest, SimulationStats, SimulationView, TradeDecisionView, Trailing } from '../lib/data';
 
@@ -422,6 +423,204 @@ function TradeDecisionsPanel({
   );
 }
 
+// Configurable backtest runner — restores the legacy parameter controls so the
+// trader can sweep stop-loss / BB length / quantity etc. against live IBKR data.
+// Collapsed by default (advanced toggle) so it doesn't bloat the Review view.
+function BacktestRunnerPanel({ instrument, tf }: { instrument: string; tf: string }) {
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<BacktestResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [qty, setQty] = useState('2');
+  const [stopLoss, setStopLoss] = useState('300');
+  const [useAtr, setUseAtr] = useState(false);
+  const [emaPeriod, setEmaPeriod] = useState('0');
+  const [bbLength, setBbLength] = useState('20');
+  const [useBbTp, setUseBbTp] = useState(true);
+  const [closeEod, setCloseEod] = useState(false);
+  const [closeEow, setCloseEow] = useState(false);
+  const [pyramiding, setPyramiding] = useState('0');
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await api.runBacktest({
+        instrument,
+        timeframe: tf,
+        qty: Number(qty) || 1,
+        stopLossPoints: Number(stopLoss) || 0,
+        atrTrailingStop: useAtr,
+        emaFilterPeriod: Number(emaPeriod) || 0,
+        bollingerLength: Number(bbLength) || 20,
+        bollingerTakeProfit: useBbTp,
+        closeEndOfDay: closeEod,
+        closeEndOfWeek: closeEow,
+        pyramiding: Number(pyramiding) || 0,
+      });
+      setResult(res);
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Panel
+      title={`Backtest runner · ${instrument} ${tf}`}
+      right={
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? 'Hide params' : 'Show params'}
+        </button>
+      }
+    >
+      {open && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 6,
+            background: 'var(--s2)',
+            border: '1px solid var(--line)',
+            borderRadius: 4,
+            padding: 8,
+          }}
+        >
+          <ParamField label="Qty" value={qty} onChange={setQty} />
+          <ParamField label="SL pts" value={stopLoss} onChange={setStopLoss} />
+          <ParamField label="EMA filter" value={emaPeriod} onChange={setEmaPeriod} />
+          <ParamField label="BB length" value={bbLength} onChange={setBbLength} />
+          <ParamField label="Pyramiding" value={pyramiding} onChange={setPyramiding} />
+          <ParamCheckbox label="ATR trail" value={useAtr} onChange={setUseAtr} />
+          <ParamCheckbox label="BB TP" value={useBbTp} onChange={setUseBbTp} />
+          <ParamCheckbox label="Close EOD" value={closeEod} onChange={setCloseEod} />
+          <ParamCheckbox label="Close EOW" value={closeEow} onChange={setCloseEow} />
+          <button
+            type="button"
+            className="btn btn-accent btn-sm"
+            onClick={() => void run()}
+            disabled={running}
+            style={{ gridColumn: 'span 3' }}
+          >
+            {running ? 'Running…' : 'Run backtest'}
+          </button>
+        </div>
+      )}
+      {error && (
+        <div style={{ fontSize: 11, color: 'var(--down)', marginTop: 4 }}>
+          Error: {error}
+        </div>
+      )}
+      {result && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
+            {(
+              [
+                ['Trades', result.totalTrades.toString(), 'var(--ink-1)'],
+                ['Win %', `${(result.winRate * 100).toFixed(1)}%`, 'var(--up)'],
+                ['PF', result.profitFactor.toFixed(2), 'var(--ink-1)'],
+                ['Sharpe', result.sharpeRatio.toFixed(2), 'var(--ink-1)'],
+                ['PnL', `${result.totalPnl >= 0 ? '+' : ''}${result.totalPnl.toFixed(0)}`, result.totalPnl >= 0 ? 'var(--up)' : 'var(--down)'],
+                ['MaxDD %', `${(result.maxDrawdownPct * 100).toFixed(1)}%`, 'var(--down)'],
+              ] as Array<[string, string, string]>
+            ).map(([label, value, color]) => (
+              <div key={label}>
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: 'var(--ink-3)',
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {label}
+                </div>
+                <div className="mono" style={{ fontSize: 14, color, fontWeight: 600 }}>
+                  {value}
+                </div>
+              </div>
+            ))}
+          </div>
+          {result.equityCurve.length > 0 && (
+            <Sparkline values={result.equityCurve} color="var(--accent)" w={420} h={48} fill />
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function ParamField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <span
+        style={{
+          fontSize: 9,
+          color: 'var(--ink-3)',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        {label}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode="decimal"
+        style={{
+          height: 22,
+          padding: '0 6px',
+          background: 'var(--s1)',
+          border: '1px solid var(--line)',
+          borderRadius: 3,
+          color: 'var(--ink-1)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+        }}
+      />
+    </label>
+  );
+}
+
+function ParamCheckbox({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 11,
+        color: 'var(--ink-2)',
+        height: '100%',
+      }}
+    >
+      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
+      {label}
+    </label>
+  );
+}
+
 export function ReviewView({
   backtest,
   trailing,
@@ -429,6 +628,7 @@ export function ReviewView({
   simulations,
   simulationStats,
   instrument,
+  tf,
 }: {
   backtest: Backtest;
   trailing: Trailing;
@@ -436,6 +636,7 @@ export function ReviewView({
   simulations: SimulationView[];
   simulationStats: SimulationStats;
   instrument: string;
+  tf: string;
 }) {
   return (
     <div
@@ -448,6 +649,9 @@ export function ReviewView({
     >
       <BacktestPanel b={backtest} />
       <SimulationsStatsPanel stats={simulationStats} rows={simulations} instrument={instrument} />
+      <div style={{ gridColumn: '1 / -1' }}>
+        <BacktestRunnerPanel instrument={instrument} tf={tf} />
+      </div>
       <div style={{ gridColumn: '1 / -1' }}>
         <TradeDecisionsPanel decisions={decisions} instrument={instrument} />
       </div>

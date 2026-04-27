@@ -377,19 +377,61 @@ function FlashCrashPanel({ f }: { f: FlashCrash }) {
   );
 }
 
-function IBKRPanel({ ib }: { ib: Ibkr }) {
+function IBKRPanel({
+  ib,
+  accounts,
+  selectedAccountId,
+  onSelectAccount,
+}: {
+  ib: Ibkr;
+  accounts: Array<{ accountId: string; selected: boolean }>;
+  selectedAccountId: string | null;
+  onSelectAccount: (id: string | null) => void;
+}) {
   const connected = ib.conn === 'online';
+  const hasAccountChoice = accounts.length > 1;
   return (
     <Panel
       title="IBKR · Account"
       right={
         <>
           <StatusDot kind={connected ? 'up' : 'down'} pulse={connected} />
+          {hasAccountChoice ? (
+            <select
+              value={selectedAccountId ?? ib.account}
+              onChange={(e) => onSelectAccount(e.target.value)}
+              style={{
+                marginLeft: 6,
+                height: 20,
+                padding: '0 4px',
+                background: 'var(--s2)',
+                border: '1px solid var(--line)',
+                borderRadius: 3,
+                color: 'var(--ink-2)',
+                fontSize: 10,
+                fontFamily: 'var(--font-mono)',
+              }}
+              title="Select IBKR account"
+            >
+              {accounts.map((a) => (
+                <option key={a.accountId} value={a.accountId}>
+                  {a.accountId}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span
+              className="mono"
+              style={{ fontSize: 10, color: 'var(--ink-2)', marginLeft: 4 }}
+            >
+              {ib.account}
+            </span>
+          )}
           <span
             className="mono"
             style={{ fontSize: 10, color: 'var(--ink-2)', marginLeft: 4 }}
           >
-            {ib.account} · {ib.latencyMs}ms
+            · {ib.latencyMs}ms
           </span>
         </>
       }
@@ -434,6 +476,9 @@ interface ExecuteViewProps {
   footprint: FootprintCol[];
   tf: string;
   instrument: string;
+  ibkrAccounts: Array<{ accountId: string; selected: boolean }>;
+  selectedAccountId: string | null;
+  onSelectAccount: (id: string | null) => void;
 }
 
 export function ExecuteView({
@@ -446,6 +491,9 @@ export function ExecuteView({
   footprint,
   tf,
   instrument,
+  ibkrAccounts,
+  selectedAccountId,
+  onSelectAccount,
 }: ExecuteViewProps) {
   return (
     <div
@@ -460,7 +508,12 @@ export function ExecuteView({
       <OrderFlowTapePanel events={orderFlow} cvd={cvd} instrument={instrument} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <FlashCrashPanel f={flashCrash} />
-        <IBKRPanel ib={ibkr} />
+        <IBKRPanel
+          ib={ibkr}
+          accounts={ibkrAccounts}
+          selectedAccountId={selectedAccountId}
+          onSelectAccount={onSelectAccount}
+        />
       </div>
       <div style={{ gridColumn: '1 / -1' }}>
         <MicrostructurePanel instrument={instrument} events={microEvents} />

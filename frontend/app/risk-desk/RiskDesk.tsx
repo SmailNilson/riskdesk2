@@ -255,6 +255,9 @@ function RiskDeskShell() {
                 footprint={D.footprint}
                 tf={tf}
                 instrument={instrument}
+                ibkrAccounts={D.ibkrAccounts}
+                selectedAccountId={D.selectedAccountId}
+                onSelectAccount={D.setSelectedAccountId}
               />
             )}
             {tweaks.view === 'review' && (
@@ -265,6 +268,7 @@ function RiskDeskShell() {
                 simulations={D.simulations}
                 simulationStats={D.simulationStats}
                 instrument={instrument}
+                tf={tf}
               />
             )}
           </div>
@@ -291,6 +295,10 @@ function RiskDeskShell() {
                 onSkip={() => {
                   /* skip is local-only — no backend action needed */
                 }}
+                onReanalyze={D.reanalyzeReview}
+                onSnooze={D.snoozeAlert}
+                mutedTimeframes={D.mutedTimeframes}
+                onSetTimeframeMuted={D.setTimeframeMuted}
               />
             </div>
             <div

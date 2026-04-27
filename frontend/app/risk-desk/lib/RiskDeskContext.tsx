@@ -71,8 +71,19 @@ export interface RiskDeskState extends RiskDeskMock {
   // Operator actions
   purgeInstrument: (sym: string) => Promise<{ purged?: number; error?: string }>;
   confirmRollover: (instrument: string, contractMonth: string) => Promise<boolean>;
-  // Refresh on-demand (e.g. after purge)
   refreshSnapshots: () => void;
+  // IBKR multi-account
+  ibkrAccounts: Array<{ accountId: string; selected: boolean }>;
+  selectedAccountId: string | null;
+  setSelectedAccountId: (id: string | null) => void;
+  // Mentor desk actions
+  reanalyzeReview: (
+    review: Review,
+    overrides: { entry?: number; sl?: number; tp?: number }
+  ) => Promise<boolean>;
+  snoozeAlert: (key: string, durationSec: number) => Promise<boolean>;
+  mutedTimeframes: string[];
+  setTimeframeMuted: (tf: string, muted: boolean) => Promise<boolean>;
 }
 
 const RiskDeskContext = createContext<RiskDeskState | null>(null);
@@ -103,6 +114,9 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
   // Bumping this nonce re-triggers the per-instrument fetch effect on demand
   // (used after a Purge so the dashboard reloads from the freshly backfilled DB).
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [ibkrAccounts, setIbkrAccounts] = useState<Array<{ accountId: string; selected: boolean }>>([]);
+  const [mutedTimeframes, setMutedTimeframes] = useState<string[]>([]);
 
   // Stable refs for handlers that close over mutable state
   const dataRef = useRef(data);
@@ -197,6 +211,22 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
           anyOk = true;
           if (cancelled) return;
           setData((prev) => ({ ...prev, ibkr: mapIbkr(s, prev.ibkr) }));
+          setIbkrAccounts(
+            (s.accounts ?? []).map((a) => ({ accountId: a.id, selected: a.selected }))
+          );
+          if (s.selectedAccountId) setSelectedAccountId(s.selectedAccountId);
+        })
+        .catch(() => {})
+    );
+
+    // Muted timeframes — let MentorDesk reflect server state on mount.
+    tasks.push(
+      api
+        .getMutedTimeframes()
+        .then((tfs) => {
+          anyOk = true;
+          if (cancelled) return;
+          setMutedTimeframes(tfs);
         })
         .catch(() => {})
     );
@@ -308,6 +338,27 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  // ─── Refetch portfolio when the trader switches IBKR account ──
+  useEffect(() => {
+    if (!selectedAccountId) return;
+    let cancelled = false;
+    Promise.all([
+      api.getPortfolioSummary(selectedAccountId).catch(() => null),
+      api.getIbkrPortfolio(selectedAccountId).catch(() => null),
+    ]).then(([summary, snap]) => {
+      if (cancelled) return;
+      setData((prev) => ({
+        ...prev,
+        portfolio: summary ? mapPortfolio(summary, prev.portfolio) : prev.portfolio,
+        positions: summary ? mapPositions(summary.openPositions) : prev.positions,
+        ibkr: snap ? mapIbkr(snap, prev.ibkr) : prev.ibkr,
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAccountId]);
 
   // ─── Per-instrument / per-tf fetches ──────────────────────────
   useEffect(() => {
@@ -581,6 +632,66 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
     setRefreshNonce((n) => n + 1);
   }, []);
 
+  // Reanalyze a Mentor review with optional entry/SL/TP overrides. The backend
+  // creates a new revision keyed by alertKey + revision; we let the WS push the
+  // updated review row instead of mutating local state here.
+  const reanalyzeReview = useCallback(
+    async (
+      review: Review,
+      overrides: { entry?: number; sl?: number; tp?: number }
+    ): Promise<boolean> => {
+      try {
+        await api.reanalyzeMentorAlert({
+          severity: review.severity ?? 'INFO',
+          category: review.category ?? review.confluence?.[0] ?? 'MANUAL_REANALYSIS',
+          message: review.message ?? review.rationale ?? '',
+          instrument: review.sym,
+          timestamp: review.triggeredAt ?? new Date().toISOString(),
+          entryPrice: overrides.entry,
+          stopLoss: overrides.sl,
+          takeProfit: overrides.tp,
+        });
+        return true;
+      } catch (err) {
+        console.error('reanalyzeReview failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
+  const snoozeAlertAction = useCallback(
+    async (key: string, durationSec: number): Promise<boolean> => {
+      try {
+        await api.snoozeAlert({ key, durationSeconds: durationSec });
+        return true;
+      } catch (err) {
+        console.error('snoozeAlert failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
+  const setTimeframeMutedAction = useCallback(
+    async (tfKey: string, muted: boolean): Promise<boolean> => {
+      try {
+        await api.setTimeframeMuted(tfKey, muted);
+        setMutedTimeframes((prev) => {
+          const has = prev.includes(tfKey);
+          if (muted && !has) return [...prev, tfKey];
+          if (!muted && has) return prev.filter((t) => t !== tfKey);
+          return prev;
+        });
+        return true;
+      } catch (err) {
+        console.error('setTimeframeMuted failed', err);
+        return false;
+      }
+    },
+    []
+  );
+
   // The 10m indicator snapshot is already used as the global indicator panel
   // when on the watchlist's default timeframe. Mark it as referenced so eslint
   // doesn't flag the constant as unused — it's there to document intent.
@@ -603,6 +714,13 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
       purgeInstrument,
       confirmRollover: confirmRolloverAction,
       refreshSnapshots,
+      ibkrAccounts,
+      selectedAccountId,
+      setSelectedAccountId,
+      reanalyzeReview,
+      snoozeAlert: snoozeAlertAction,
+      mutedTimeframes,
+      setTimeframeMuted: setTimeframeMutedAction,
     }),
     [
       data,
@@ -617,6 +735,12 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
       purgeInstrument,
       confirmRolloverAction,
       refreshSnapshots,
+      ibkrAccounts,
+      selectedAccountId,
+      reanalyzeReview,
+      snoozeAlertAction,
+      mutedTimeframes,
+      setTimeframeMutedAction,
     ]
   );
 
