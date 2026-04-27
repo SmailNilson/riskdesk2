@@ -5,6 +5,9 @@ import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.WallEvent;
 import com.riskdesk.domain.orderflow.model.WallInfo;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -25,6 +28,8 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  * at 200 entries (oldest evicted).</p>
  */
 public class MutableOrderBook {
+
+    private static final Logger log = LoggerFactory.getLogger(MutableOrderBook.class);
 
     public static final int MAX_DEPTH = 10;
     private static final int MAX_WALL_EVENTS = 200;
@@ -223,7 +228,7 @@ public class MutableOrderBook {
             );
         }
 
-        // Exhausted retries — return best-effort snapshot with whatever we can read
+        log.warn("Seqlock retries exhausted for {} — returning zero-value metrics", instrument);
         return new DepthMetrics(
             instrument, 0, 0, 0, 0, 0, 0, 0,
             null, null, Instant.now()
@@ -231,15 +236,15 @@ public class MutableOrderBook {
     }
 
     /**
-     * Returns wall events within the specified lookback period.
+     * Returns wall events within the specified lookback period, in chronological order.
      */
     public List<WallEvent> recentWallEvents(Duration lookback) {
         Instant cutoff = Instant.now().minus(lookback);
         List<WallEvent> result = new ArrayList<>();
-        // Iterate from newest to oldest
-        for (WallEvent event : wallEvents) {
+        var it = wallEvents.descendingIterator();
+        while (it.hasNext()) {
+            WallEvent event = it.next();
             if (event.timestamp().isBefore(cutoff)) {
-                // All remaining events are older — stop
                 break;
             }
             result.add(event);
