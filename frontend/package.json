@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@stomp/stompjs": "^7.3.0",
-    "lightweight-charts": "^4.2.3",
+    "lightweight-charts": "^5.1.0",
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18",

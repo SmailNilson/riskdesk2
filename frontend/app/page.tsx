@@ -1,7 +1,5 @@
-import { RiskDesk } from './risk-desk/RiskDesk';
-import './risk-desk/tokens.css';
-import './risk-desk/app.css';
+import Dashboard from './components/Dashboard';
 
 export default function Home() {
-  return <RiskDesk />;
+  return <Dashboard />;
 }
