@@ -91,6 +91,10 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
   // Stable refs for handlers that close over mutable state
   const dataRef = useRef(data);
   dataRef.current = data;
+  // WS subscriptions are registered once at mount; this ref lets the price
+  // handler know which instrument is currently active without re-subscribing.
+  const activeInstrumentRef = useRef(instrumentSym);
+  activeInstrumentRef.current = instrumentSym;
 
   // ─── Global one-shot fetches ─────────────────────────────────
   useEffect(() => {
@@ -298,7 +302,9 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         });
         const smc = ind ? mapSmc(ind, candles, prev.smc) : prev.smc;
         const mappedFp = fp && isFootprintBar(fp) ? mapFootprint(fp) : null;
-        const footprint = mappedFp && mappedFp.length ? mappedFp : prev.footprint;
+        // Don't fall back to prev.footprint — that's MCL crude mock data and
+        // would make MNQ/MGC/E6 tabs show MCL prices in the footprint matrix.
+        const footprint = mappedFp ?? [];
         const dom = depth ? mapDom(depth, prev.dom) : prev.dom;
         const flashCrash = flash ? mapFlashCrash(flash, prev.flashCrash) : prev.flashCrash;
         const microEvents = mapMicroEvents({
@@ -355,15 +361,35 @@ export function RiskDeskProvider({ children }: { children: ReactNode }) {
         client.subscribe('/topic/prices', (msg: IMessage) => {
           try {
             const update = JSON.parse(msg.body) as { instrument: string; price: number };
-            setData((prev) => ({
-              ...prev,
-              instruments: prev.instruments.map((i) =>
-                i.sym === update.instrument ? { ...i, last: update.price, px: update.price } : i
-              ),
-              watchlist: prev.watchlist.map((w) =>
-                w.sym === update.instrument ? { ...w, px: update.price } : w
-              ),
-            }));
+            setData((prev) => {
+              // Patch the last candle for the active instrument so the chart's
+              // price reflects live ticks (close + bounded high/low). Without
+              // this the chart freezes on whatever the last candle backfill
+              // returned and the OHLC label never moves.
+              let candles = prev.candles;
+              if (update.instrument === activeInstrumentRef.current && candles.length) {
+                const last = candles[candles.length - 1];
+                candles = [
+                  ...candles.slice(0, -1),
+                  {
+                    ...last,
+                    close: update.price,
+                    high: Math.max(last.high, update.price),
+                    low: Math.min(last.low, update.price),
+                  },
+                ];
+              }
+              return {
+                ...prev,
+                candles,
+                instruments: prev.instruments.map((i) =>
+                  i.sym === update.instrument ? { ...i, last: update.price, px: update.price } : i
+                ),
+                watchlist: prev.watchlist.map((w) =>
+                  w.sym === update.instrument ? { ...w, px: update.price } : w
+                ),
+              };
+            });
           } catch {
             /* ignore */
           }

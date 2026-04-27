@@ -262,6 +262,7 @@ function RiskDeskShell() {
               <MentorDesk
                 reviews={D.reviews}
                 instrument={instrument}
+                tf={tf}
                 onArm={(r) => {
                   void D.armReview(r, r.plan?.qty ?? 1);
                 }}

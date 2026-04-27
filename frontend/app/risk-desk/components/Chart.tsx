@@ -118,6 +118,13 @@ export function LiveChart({
 
   const drawOverlayRef = useRef<() => void>(() => undefined);
 
+  // Tracks the (length, first-time, last-time) signature of the candles array
+  // so we can tell a structural reload (instrument switch / backfill) from a
+  // live tick patch (only the last candle's close changed). On ticks we skip
+  // fitContent — otherwise the chart would jump back to fit on every tick and
+  // the user could never pan or zoom.
+  const candleSigRef = useRef<string>('');
+
   const last = candles[candles.length - 1];
 
   const [initError, setInitError] = useState<string | null>(null);
@@ -328,7 +335,12 @@ export function LiveChart({
         : []
     );
 
-    chartRef.current?.timeScale().fitContent();
+    const sig = `${candles.length}|${candles[0].time}|${candles[candles.length - 1].time}`;
+    const isStructural = sig !== candleSigRef.current;
+    candleSigRef.current = sig;
+    if (isStructural) {
+      chartRef.current?.timeScale().fitContent();
+    }
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => drawOverlay());
