@@ -80,8 +80,19 @@ function ReviewDetail({
 }) {
   if (!r) return null;
   const p = r.plan;
+  // Rationale is the most important field — fall back through any signal we
+  // have so this section never shows blank space (which made the panel look
+  // like it duplicated the list card).
+  const rationale =
+    (r.rationale && r.rationale.trim()) ||
+    (r.confluence[0] && `Signal: ${r.confluence[0]}`) ||
+    (r.verdict === 'WATCH'
+      ? 'Monitoring — awaiting a higher-quality setup before this becomes actionable.'
+      : r.verdict === 'SKIP'
+      ? 'Setup did not qualify against the current playbook filters.'
+      : 'No trade plan attached to this signal.');
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <VerdictBadge v={r.verdict} />
         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink-0)' }}>
@@ -93,7 +104,7 @@ function ReviewDetail({
         <span style={{ flex: 1 }} />
         <ConfidenceMeter v={r.confidence} />
       </div>
-      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-1)' }}>{r.rationale}</div>
+      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-1)' }}>{rationale}</div>
 
       {p && (
         <>
@@ -258,16 +269,19 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
 
       <div
         style={{
-          // Cap to ~50% of available space so the pager and the detail
-          // pane below stay in view. Without this the list grows to fit all
-          // 10 cards and pushes the pager off screen on smaller displays.
-          flex: '0 1 auto',
-          maxHeight: '46vh',
+          // Proportional split with the detail section below: 1.4× their share
+          // so 10 cards stay readable without crushing the detail pane.
+          // overflow-x: hidden + min-width: 0 prevent the long confluence
+          // chips from triggering a stray horizontal scrollbar.
+          flex: '1.4 1 0',
+          minHeight: 120,
           overflowY: 'auto',
+          overflowX: 'hidden',
           padding: 10,
           display: 'flex',
           flexDirection: 'column',
           gap: 8,
+          minWidth: 0,
         }}
       >
         {pageItems.map((r) => (
@@ -337,9 +351,12 @@ export function MentorDesk({ reviews, onArm, onSkip }: MentorDeskProps) {
         style={{
           borderTop: '1px solid var(--line)',
           padding: 14,
-          flex: 1,
+          flex: '1 1 0',
+          minHeight: 180,
           overflowY: 'auto',
+          overflowX: 'hidden',
           background: 'var(--s1)',
+          minWidth: 0,
         }}
       >
         <ReviewDetail
