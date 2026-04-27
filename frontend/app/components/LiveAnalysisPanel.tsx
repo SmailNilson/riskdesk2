@@ -132,6 +132,17 @@ export function LiveAnalysisPanel({ instrument, timeframe, refreshInterval = POL
           scheduler may be stalled. Do not act on this signal.
         </div>
       )}
+      {error && (
+        // PR #270 round-9 review fix: previously we only showed the error
+        // state when there was no prior verdict, so once the first poll
+        // succeeded any later 503/network failures were silently hidden
+        // while stale data stayed on screen. Operators in live trading
+        // could believe the panel was current. Now: any active fetch
+        // failure surfaces here, even with cached data behind it.
+        <div className="text-[11px] text-orange-300 bg-orange-900/20 border border-orange-900/40 rounded px-2 py-1">
+          ⚠ Last poll failed: {error}. Showing previous verdict.
+        </div>
+      )}
       <Header verdict={verdict} loading={loading} />
       <ScoreBars verdict={verdict} />
       <FactorLists verdict={verdict} />
