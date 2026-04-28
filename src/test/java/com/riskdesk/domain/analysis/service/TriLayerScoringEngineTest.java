@@ -224,6 +224,73 @@ class TriLayerScoringEngineTest {
     }
 
     @Test
+    void consensusBoost_appliesWhenAllThreeLayersAlign() {
+        // Direct test of the helper — when all 3 layers carry the same non-zero sign,
+        // the boost = (multiplier - 1) × |weighted|, capped at the boost cap.
+        // multiplier=1.5 → boost = 0.5 × |weighted|, capped at 25.
+
+        // Aligned bearish, |weighted| = 30 → boost = 15 (under cap)
+        double boost = TriLayerScoringEngine.computeConsensusBoost(-30, -25, -10, 30);
+        assertThat(boost).isEqualTo(15.0);
+
+        // Aligned bullish, |weighted| = 60 → 30 raw boost, capped at 25
+        boost = TriLayerScoringEngine.computeConsensusBoost(40, 50, 20, 60);
+        assertThat(boost).isEqualTo(25.0);
+    }
+
+    @Test
+    void consensusBoost_returnsZeroWhenLayersDisagree() {
+        // Structure bear, OF bull, Momentum bull → no consensus → 0 boost
+        double boost = TriLayerScoringEngine.computeConsensusBoost(-30, 25, 10, 20);
+        assertThat(boost).isEqualTo(0.0);
+
+        // Structure bull, OF bear, Momentum bull → no consensus → 0 boost
+        boost = TriLayerScoringEngine.computeConsensusBoost(30, -25, 10, 20);
+        assertThat(boost).isEqualTo(0.0);
+    }
+
+    @Test
+    void consensusBoost_returnsZeroWhenAnyLayerIsZero() {
+        // One layer is exactly zero → no consensus boost (insufficient signal)
+        assertThat(TriLayerScoringEngine.computeConsensusBoost(-30, -25, 0, 20)).isEqualTo(0.0);
+        assertThat(TriLayerScoringEngine.computeConsensusBoost(0, -25, -10, 20)).isEqualTo(0.0);
+        assertThat(TriLayerScoringEngine.computeConsensusBoost(-30, 0, -10, 20)).isEqualTo(0.0);
+    }
+
+    @Test
+    void consensusBoost_realProductionBearishScenarioReachesTradableConfidence() {
+        // Replays the empirical 2026-04-28 MNQ session — Structure -34.8, OF -28, Momentum -9.3
+        // Pre-fix, this produced conf=27 (untrustworthy threshold). Post-fix with consensus
+        // boost, the same input must clear conf ≥ 35 so the discretionary "≥30" threshold
+        // is comfortably reached when the 3 layers agree.
+        double weighted = 0.5 * (-34.8) + 0.3 * (-28.0) + 0.2 * (-9.3);
+        double absWeighted = Math.abs(weighted);            // ≈ 27.66
+        double boost = TriLayerScoringEngine.computeConsensusBoost(-34.8, -28.0, -9.3, absWeighted);
+        double rawConf = absWeighted + boost;               // 27.66 + 13.83 ≈ 41.5
+
+        assertThat(rawConf).isGreaterThanOrEqualTo(35.0);
+        assertThat(rawConf).isLessThanOrEqualTo(60.0);   // not over-boosted either
+    }
+
+    @Test
+    void consensusBoost_endToEndBearishAlignedSetupReachesConfidenceAboveThirty() {
+        // Build a fully aligned bearish snapshot mirroring real intra-day conditions
+        // (not the maxed-out test case in confidenceBoundedZeroHundred). Conf must clear 30.
+        var ind = new IndicatorSnapshot(BigDecimal.valueOf(27050), 35.0, "NEUTRAL",
+            -3.0, false, 27100.0, -0.10, 0.45, true, 35.0, 40.0, null, -10.0, -8.0);
+        var snap = snapshot(ind, bearishSmc(), flatOrderFlow(),
+            List.of(new OrderFlowEventSummary(decisionAt.minusSeconds(15), "MOMENTUM", "BEARISH_MOMENTUM", 40.0, -300)),
+            List.of(new OrderFlowEventSummary(decisionAt.minusSeconds(45), "ABSORPTION", "BEARISH_ABSORPTION", 3.0, 100)),
+            List.of(new OrderFlowEventSummary(decisionAt.minusSeconds(120), "DISTRIBUTION", "DISTRIBUTION", 70.0, 30)),
+            List.of());
+
+        DirectionalBias bias = engine.score(snap);
+
+        assertThat(bias.primary()).isEqualTo(Direction.SHORT);
+        assertThat(bias.confidence()).isGreaterThanOrEqualTo(30);
+    }
+
+    @Test
     void multiResolutionSplitFlaggedAsContradiction() {
         var smc = new SmcContext("BULLISH", "BEARISH", "DISCOUNT", 27190.0, 27360.0, 27000.0,
             Map.of("swing50", "BEARISH", "swing25", "BEARISH",
