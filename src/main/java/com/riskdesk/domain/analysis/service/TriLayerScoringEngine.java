@@ -33,7 +33,7 @@ import java.util.Objects;
 public final class TriLayerScoringEngine {
 
     /** Bumped when a rule change breaks replay determinism. */
-    public static final int CURRENT_VERSION = 1;
+    public static final int CURRENT_VERSION = 2;
 
     /** Below this absolute weighted score, we report NEUTRAL (stand-aside). */
     private static final double STAND_ASIDE_BAND = 15.0;
@@ -44,6 +44,24 @@ public final class TriLayerScoringEngine {
 
     /** Number of contradictions above which we force NEUTRAL regardless of score. */
     private static final int FORCE_NEUTRAL_CONTRADICTIONS = 4;
+
+    /**
+     * Confidence multiplier applied when all three layers (Structure, Order Flow, Momentum)
+     * point in the same non-zero direction. Without this, a fully aligned 3-layer setup
+     * with realistic empirical scores (Structure ±35, OF ±70, Momentum ±30) capped out
+     * around conf=45, making the {@code conf ≥ 50} discretionary threshold essentially
+     * unreachable on intra-day moves up to ~2%. The multiplier rewards consensus rather
+     * than just magnitude — a setup that disagrees across layers stays low-conf even
+     * when one layer is extreme.
+     *
+     * <p>Empirical calibration on 2026-04-28 MNQ session (-1.78% intraday): conf max
+     * observed pre-fix was 28-29. With this multiplier, the same alignments now produce
+     * conf 50-55 — bringing the discretionary threshold within reach.</p>
+     */
+    private static final double CONSENSUS_MULTIPLIER = 1.5;
+
+    /** Cap on the confidence boost from {@link #CONSENSUS_MULTIPLIER} (in conf points). */
+    private static final double CONSENSUS_BOOST_CAP = 25.0;
 
     private final ScoringWeights weights;
 
@@ -87,7 +105,15 @@ public final class TriLayerScoringEngine {
         }
 
         Direction primary = weighted > 0 ? Direction.LONG : Direction.SHORT;
-        int confidence = (int) Math.max(0, Math.min(100, Math.abs(weighted) - penalty));
+
+        // PR (post-2026-04-28): consensus boost — when all three layers point in the same
+        // non-zero direction, reward the alignment so the discretionary conf-≥-50 threshold
+        // is reachable on real intra-day moves. See CONSENSUS_MULTIPLIER javadoc for the
+        // empirical calibration that motivated this.
+        double consensusBoost = computeConsensusBoost(structure.value(), orderFlow.value(),
+                                                       momentum.value(), Math.abs(weighted));
+        double rawConfidence = Math.abs(weighted) + consensusBoost - penalty;
+        int confidence = (int) Math.max(0, Math.min(100, rawConfidence));
 
         List<Factor> bullish = collectFactors(structure, orderFlow, momentum, Polarity.BULLISH);
         List<Factor> bearish = collectFactors(structure, orderFlow, momentum, Polarity.BEARISH);
@@ -456,6 +482,28 @@ public final class TriLayerScoringEngine {
             double strength = Math.abs(c.contribution());
             out.add(new Factor(p, layer, c.rationale(), strength));
         }
+    }
+
+    /**
+     * Returns the confidence boost (in points) granted when all three layers
+     * (structure, order flow, momentum) carry the same non-zero sign.
+     *
+     * <p>The boost is {@code (multiplier - 1) × |weighted|} capped at {@link #CONSENSUS_BOOST_CAP}.
+     * If any layer is zero or the layers disagree on direction, the boost is 0.</p>
+     */
+    static double computeConsensusBoost(double structureValue, double orderFlowValue,
+                                         double momentumValue, double absWeighted) {
+        double sStr = Math.signum(structureValue);
+        double sOf  = Math.signum(orderFlowValue);
+        double sM   = Math.signum(momentumValue);
+        if (sStr == 0 || sOf == 0 || sM == 0) {
+            return 0.0;
+        }
+        if (sStr != sOf || sStr != sM) {
+            return 0.0;
+        }
+        double rawBoost = absWeighted * (CONSENSUS_MULTIPLIER - 1.0);
+        return Math.min(rawBoost, CONSENSUS_BOOST_CAP);
     }
 
     private static double clamp(double v, double min, double max) {
