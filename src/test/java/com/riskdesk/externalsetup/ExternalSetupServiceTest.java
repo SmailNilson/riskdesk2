@@ -1,9 +1,11 @@
 package com.riskdesk.externalsetup;
 
+import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.externalsetup.ExternalSetupService;
 import com.riskdesk.application.externalsetup.ExternalSetupSubmissionCommand;
 import com.riskdesk.application.externalsetup.ExternalSetupValidationCommand;
 import com.riskdesk.application.service.ExecutionManagerService;
+import com.riskdesk.application.service.IndicatorService;
 import com.riskdesk.application.service.OrderFlowQuickExecutionCommand;
 import com.riskdesk.application.service.OrderFlowQuickExecutionService;
 import com.riskdesk.application.service.SubmitEntryOrderCommand;
@@ -33,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.mockito.Mockito.lenient;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -47,6 +51,7 @@ class ExternalSetupServiceTest {
     @Mock OrderFlowQuickExecutionService quickExec;
     @Mock ExecutionManagerService executionManager;
     @Mock SimpMessagingTemplate messagingTemplate;
+    @Mock IndicatorService indicatorService;
 
     ExternalSetupProperties props;
     Clock fixedClock;
@@ -60,7 +65,9 @@ class ExternalSetupServiceTest {
         props.setDefaultBrokerAccount("U1234567");
         props.setTtl(Map.of("MNQ", Duration.ofMinutes(3)));
         fixedClock = Clock.fixed(Instant.parse("2026-04-28T10:00:00Z"), ZoneOffset.UTC);
-        service = new ExternalSetupService(repository, props, quickExec, executionManager, messagingTemplate, fixedClock);
+        service = new ExternalSetupService(repository, props, quickExec, executionManager, messagingTemplate, fixedClock, indicatorService);
+        // Default: choppy regime (EMA values null → CHOPPY) — allows all setups unless overridden per-test
+        lenient().when(indicatorService.computeSnapshot(any(), any())).thenReturn(snapshotWithEmas(null, null, null, false));
     }
 
     @Test
@@ -243,6 +250,100 @@ class ExternalSetupServiceTest {
             .hasMessageContaining("quick-execution.enabled");
     }
 
+    // ── Regime filter tests ───────────────────────────────────────────────────
+
+    @Test
+    void submit_blocksLongWhenRegimeIsTrendingDown() {
+        // EMA9 < EMA50 < EMA200 + bbExpanding → TRENDING_DOWN → LONG must be rejected
+        when(indicatorService.computeSnapshot(any(), any())).thenReturn(
+            snapshotWithEmas(new BigDecimal("19000"), new BigDecimal("19500"), new BigDecimal("20000"), true));
+
+        assertThatThrownBy(() -> service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.LONG,
+            new BigDecimal("27258"), new BigDecimal("27240"), new BigDecimal("27280"),
+            null, ExternalSetupConfidence.HIGH, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ))).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("counter-trend")
+            .hasMessageContaining("TRENDING_DOWN");
+    }
+
+    @Test
+    void submit_blocksShortWhenRegimeIsTrendingUp() {
+        // EMA9 > EMA50 > EMA200 + bbExpanding → TRENDING_UP → SHORT must be rejected
+        when(indicatorService.computeSnapshot(any(), any())).thenReturn(
+            snapshotWithEmas(new BigDecimal("21000"), new BigDecimal("20500"), new BigDecimal("20000"), true));
+
+        assertThatThrownBy(() -> service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.SHORT,
+            new BigDecimal("27258"), new BigDecimal("27278"), new BigDecimal("27240"),
+            null, ExternalSetupConfidence.HIGH, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ))).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("counter-trend")
+            .hasMessageContaining("TRENDING_UP");
+    }
+
+    @Test
+    void submit_allowsShortWhenRegimeIsTrendingDown() {
+        // SHORT continuation in bear regime → allowed
+        when(indicatorService.computeSnapshot(any(), any())).thenReturn(
+            snapshotWithEmas(new BigDecimal("19000"), new BigDecimal("19500"), new BigDecimal("20000"), true));
+        when(repository.save(any())).thenAnswer(inv -> {
+            ExternalSetup s = inv.getArgument(0);
+            s.setId(10L);
+            return s;
+        });
+
+        ExternalSetup saved = service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.SHORT,
+            new BigDecimal("27258"), new BigDecimal("27278"), new BigDecimal("27240"),
+            null, ExternalSetupConfidence.MEDIUM, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ));
+        assertThat(saved.getStatus()).isEqualTo(ExternalSetupStatus.PENDING);
+    }
+
+    @Test
+    void submit_allowsLongWhenRegimeIsRanging() {
+        // Ranging regime — no direction block for either side
+        when(indicatorService.computeSnapshot(any(), any())).thenReturn(
+            // EMAs close together (within 0.2%) + bbExpanding=false → RANGING
+            snapshotWithEmas(new BigDecimal("20000"), new BigDecimal("20001"), new BigDecimal("20200"), false));
+        when(repository.save(any())).thenAnswer(inv -> {
+            ExternalSetup s = inv.getArgument(0);
+            s.setId(11L);
+            return s;
+        });
+
+        ExternalSetup saved = service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.LONG,
+            new BigDecimal("27258"), new BigDecimal("27240"), new BigDecimal("27280"),
+            null, ExternalSetupConfidence.MEDIUM, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ));
+        assertThat(saved.getStatus()).isEqualTo(ExternalSetupStatus.PENDING);
+    }
+
+    @Test
+    void submit_allowsWhenIndicatorServiceFails() {
+        // Regime filter must fail-open: if the query throws, the setup is still accepted
+        when(indicatorService.computeSnapshot(any(), any())).thenThrow(new RuntimeException("db unavailable"));
+        when(repository.save(any())).thenAnswer(inv -> {
+            ExternalSetup s = inv.getArgument(0);
+            s.setId(12L);
+            return s;
+        });
+
+        ExternalSetup saved = service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.LONG,
+            new BigDecimal("27258"), new BigDecimal("27240"), new BigDecimal("27280"),
+            null, ExternalSetupConfidence.MEDIUM, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ));
+        assertThat(saved.getStatus()).isEqualTo(ExternalSetupStatus.PENDING);
+    }
+
     private ExternalSetup newPending(Side side, String entry, String sl, String tp) {
         return ExternalSetup.forSubmission(
             "es:test:" + side + ":1",
@@ -252,5 +353,57 @@ class ExternalSetupServiceTest {
             ExternalSetupSource.CLAUDE_WAKEUP, "ref",
             Instant.now(fixedClock),
             Instant.now(fixedClock).plus(Duration.ofMinutes(5)));
+    }
+
+    /**
+     * Builds a minimal IndicatorSnapshot with the four fields that drive MarketRegimeDetector.
+     * All other fields are null / false / empty — enough for the regime filter tests.
+     */
+    @SuppressWarnings("all")
+    private static IndicatorSnapshot snapshotWithEmas(BigDecimal ema9, BigDecimal ema50, BigDecimal ema200, boolean bbExpanding) {
+        return new IndicatorSnapshot(
+            "MNQ", "1H",
+            ema9, ema50, ema200, null,
+            null, null,
+            null, null, null, null,
+            null, false,
+            null, null, null,
+            null, null,
+            null, null, null, null, null,
+            null, bbExpanding, null,
+            null, null, null, null,
+            null, null, null, null, null,
+            // Stochastic
+            null, null, null, null,
+            // SMC: Internal
+            null, null, null, null, null, null,
+            // SMC: Swing
+            null, null, null, null, null, null,
+            // confluence filter
+            false,
+            // multi-resolution bias
+            null,
+            // SMC: Legacy
+            "UNDEFINED", null, null, null, null, null,
+            null, null, null, null,
+            // Liquidity
+            List.of(), List.of(),
+            // PD zones
+            null, null, null, null,
+            // SMC Zones
+            List.of(), List.of(), List.of(),
+            List.of(),
+            List.of(),
+            // MTF levels
+            null,
+            // Session PD Array
+            null, null, null, null,
+            // Volume Profile
+            null, null, null,
+            // Session phase
+            null,
+            null,
+            null
+        );
     }
 }

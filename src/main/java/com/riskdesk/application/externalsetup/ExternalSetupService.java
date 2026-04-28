@@ -1,9 +1,12 @@
 package com.riskdesk.application.externalsetup;
 
+import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.application.service.ExecutionManagerService;
+import com.riskdesk.application.service.IndicatorService;
 import com.riskdesk.application.service.OrderFlowQuickExecutionCommand;
 import com.riskdesk.application.service.OrderFlowQuickExecutionService;
 import com.riskdesk.application.service.SubmitEntryOrderCommand;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.externalsetup.ExternalSetup;
 import com.riskdesk.domain.externalsetup.ExternalSetupConfidence;
 import com.riskdesk.domain.externalsetup.ExternalSetupStatus;
@@ -41,6 +44,7 @@ public class ExternalSetupService {
     private static final Logger log = LoggerFactory.getLogger(ExternalSetupService.class);
     private static final String WS_TOPIC = "/topic/external-setups";
     private static final String DEFAULT_TIMEFRAME = "5m";
+    private static final String REGIME_FILTER_TIMEFRAME = "1H";
 
     private final ExternalSetupRepositoryPort repository;
     private final ExternalSetupProperties properties;
@@ -48,19 +52,23 @@ public class ExternalSetupService {
     private final ExecutionManagerService executionManagerService;
     private final SimpMessagingTemplate messagingTemplate;
     private final Clock clock;
+    private final IndicatorService indicatorService;
+    private final MarketRegimeDetector regimeDetector = new MarketRegimeDetector();
 
     public ExternalSetupService(ExternalSetupRepositoryPort repository,
                                 ExternalSetupProperties properties,
                                 OrderFlowQuickExecutionService quickExecutionService,
                                 ExecutionManagerService executionManagerService,
                                 SimpMessagingTemplate messagingTemplate,
-                                Clock clock) {
+                                Clock clock,
+                                IndicatorService indicatorService) {
         this.repository = repository;
         this.properties = properties;
         this.quickExecutionService = quickExecutionService;
         this.executionManagerService = executionManagerService;
         this.messagingTemplate = messagingTemplate;
         this.clock = clock;
+        this.indicatorService = indicatorService;
     }
 
     @Transactional
@@ -69,6 +77,7 @@ public class ExternalSetupService {
             throw new IllegalStateException("external setup pipeline is disabled");
         }
         validateSubmission(command);
+        checkCounterTrendRegime(command);
 
         Instant now = Instant.now(clock);
         Instant expiresAt = now.plus(properties.ttlFor(command.instrument()));
@@ -299,6 +308,34 @@ public class ExternalSetupService {
             brokerAccount,
             reasonPrefix + " — " + (setup.getTriggerLabel() == null ? "n/a" : setup.getTriggerLabel())
         ));
+    }
+
+    /**
+     * Rejects counter-trend setups when the 1H regime is clearly trending in the opposite direction.
+     * LONG is rejected in TRENDING_DOWN; SHORT is rejected in TRENDING_UP.
+     * Fails open: if candle data is absent or the detector throws, the setup is allowed through.
+     */
+    private void checkCounterTrendRegime(ExternalSetupSubmissionCommand command) {
+        try {
+            IndicatorSnapshot snapshot = indicatorService.computeSnapshot(command.instrument(), REGIME_FILTER_TIMEFRAME);
+            String regime = regimeDetector.detect(
+                snapshot.ema9(), snapshot.ema50(), snapshot.ema200(), snapshot.bbTrendExpanding());
+            boolean rejectLong  = command.direction() == Side.LONG  && MarketRegimeDetector.TRENDING_DOWN.equals(regime);
+            boolean rejectShort = command.direction() == Side.SHORT && MarketRegimeDetector.TRENDING_UP.equals(regime);
+            if (rejectLong || rejectShort) {
+                log.warn("ExternalSetup regime filter: blocking {} {} — 1H regime is {}",
+                    command.instrument(), command.direction(), regime);
+                throw new IllegalStateException(
+                    "counter-trend setup rejected: " + command.direction() + " on " + command.instrument()
+                    + " while 1H regime is " + regime);
+            }
+            log.debug("ExternalSetup regime check passed: {} {} regime={}",
+                command.instrument(), command.direction(), regime);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.warn("ExternalSetup regime filter skipped (indicator query failed): {}", e.getMessage());
+        }
     }
 
     private void validateSubmission(ExternalSetupSubmissionCommand c) {
