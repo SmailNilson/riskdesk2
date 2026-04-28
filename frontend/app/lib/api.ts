@@ -1220,7 +1220,84 @@ export const api = {
         `&direction=${encodeURIComponent(direction)}` +
         `&zoneName=${encodeURIComponent(zoneName)}`
     ),
+
+  // ── External Setups (Claude wakeup → user validation) ──────────────────
+  getExternalSetupStatus: () =>
+    get<{
+      enabled: boolean;
+      autoExecuteOnHighConfidence: boolean;
+      defaultTtlSeconds: number;
+      ttlPerInstrument: Record<string, number>;
+      rateLimitPerMinute: number;
+      hasDefaultBrokerAccount: boolean;
+    }>('/api/external-setups/status'),
+  listExternalSetups: (status?: string, limit = 50) =>
+    get<ExternalSetupSummary[]>(
+      `/api/external-setups?${status ? `status=${encodeURIComponent(status)}&` : ''}limit=${limit}`
+    ),
+  getExternalSetup: (id: number) =>
+    get<{ summary: ExternalSetupSummary; payloadJson: string | null }>(
+      `/api/external-setups/${id}`
+    ),
+  validateExternalSetup: (id: number, body: ExternalSetupValidateRequest) =>
+    post<ExternalSetupSummary>(`/api/external-setups/${id}/validate`, body),
+  rejectExternalSetup: (id: number, body: ExternalSetupRejectRequest) =>
+    post<ExternalSetupSummary>(`/api/external-setups/${id}/reject`, body),
 };
+
+// ── External Setup types ────────────────────────────────────────────────
+export type ExternalSetupStatus =
+  | 'PENDING'
+  | 'VALIDATED'
+  | 'EXECUTED'
+  | 'EXECUTION_FAILED'
+  | 'REJECTED'
+  | 'EXPIRED';
+
+export type ExternalSetupConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
+export type ExternalSetupSourceTag = 'CLAUDE_WAKEUP';
+export type ExternalSetupDirection = 'LONG' | 'SHORT';
+
+export interface ExternalSetupSummary {
+  id: number;
+  setupKey: string;
+  instrument: string;
+  direction: ExternalSetupDirection;
+  entry: number;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
+  confidence: ExternalSetupConfidence;
+  triggerLabel: string | null;
+  source: ExternalSetupSourceTag;
+  sourceRef: string | null;
+  status: ExternalSetupStatus;
+  submittedAt: string;
+  expiresAt: string;
+  validatedAt: string | null;
+  validatedBy: string | null;
+  rejectionReason: string | null;
+  tradeExecutionId: number | null;
+  executedAtPrice: number | null;
+  autoExecuted: boolean;
+}
+
+export interface ExternalSetupValidateRequest {
+  quantity?: number;
+  brokerAccountId?: string;
+  overrideEntryPrice?: number;
+  validatedBy?: string;
+}
+
+export interface ExternalSetupRejectRequest {
+  reason?: string;
+  rejectedBy?: string;
+}
+
+export interface ExternalSetupWebSocketMessage {
+  event: 'SETUP_NEW' | 'SETUP_VALIDATED' | 'SETUP_REJECTED' | 'SETUP_EXPIRED';
+  setup: ExternalSetupSummary;
+}
 
 // ── Playbook Types ────────────────────────────────────────────────────
 

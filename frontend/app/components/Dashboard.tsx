@@ -19,6 +19,7 @@ import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
+import ExternalSetupPanel from './ExternalSetupPanel';
 import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -277,6 +278,7 @@ export default function Dashboard() {
             selectedBrokerAccountId={selectedIbkrAccountId}
             onRefresh={refresh}
           />
+          <ExternalSetupPanel />
           <TrailingStopStatsPanel />
         </CollapsibleZone>
       </div>
