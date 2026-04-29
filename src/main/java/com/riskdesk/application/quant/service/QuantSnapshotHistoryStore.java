@@ -12,6 +12,7 @@ import java.util.Deque;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * In-memory ring buffer of past Quant snapshots, keyed by instrument.
@@ -48,6 +49,19 @@ public class QuantSnapshotHistoryStore {
             }
         }
         return out;
+    }
+
+    /**
+     * Returns the most recent snapshot for the instrument <b>regardless of age</b>.
+     * Used by {@code GET /api/quant/snapshot/{instr}} so a scheduler stall longer
+     * than the dashboard's history window does not erase the trader's last
+     * known view (PR #297 follow-up review). Returns empty only when no scan
+     * has ever been recorded for the instrument.
+     */
+    public synchronized Optional<QuantSnapshot> latest(Instrument instrument) {
+        Deque<Entry> deque = buffers.get(instrument);
+        if (deque == null || deque.isEmpty()) return Optional.empty();
+        return Optional.of(deque.peekLast().snapshot);
     }
 
     private record Entry(Instant recordedAt, QuantSnapshot snapshot) {}

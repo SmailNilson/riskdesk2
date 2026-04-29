@@ -34,19 +34,19 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Two concurrency contracts on {@link QuantGateService#scan} are pinned here:
+ * Three concurrency contracts on {@link QuantGateService#scan} are pinned here:
  *
  * <ol>
  *   <li><b>State integrity</b> — N concurrent scans on the same instrument
  *       must produce N sequential saves; no two threads may sit inside the
- *       {@code load → evaluate → save} window at the same time, so no append
- *       is silently dropped (PR #297 review feedback, P1).</li>
- *   <li><b>Publish ordering</b> — the publish step must happen inside the
- *       same lock as the state mutation, otherwise an older snapshot can be
- *       broadcast after a newer one (PR #297 follow-up review, P2). The
- *       frontend overwrites per-instrument state on receipt, so an
- *       out-of-order publish would regress the displayed state and could
- *       re-fire stale 6/7 / 7/7 alerts.</li>
+ *       {@code load → evaluate → save} window at the same time (PR #297, review #1).</li>
+ *   <li><b>Publish ordering matches state ordering</b> — the publish step
+ *       must happen inside the same lock as the state mutation (review #2).</li>
+ *   <li><b>Capture ordering matches publish ordering</b> — the input fetches
+ *       must happen inside the lock too. If a slow scan captures inputs at
+ *       T1 and waits for the lock while a faster scan captures at T2 &gt; T1
+ *       and publishes first, the slow scan's older snapshot would land last
+ *       (review #3).</li>
  * </ol>
  */
 class QuantGateServiceConcurrencyTest {
@@ -103,10 +103,6 @@ class QuantGateServiceConcurrencyTest {
         assertThat(statePort.loadCount.get()).isZero();
         assertThat(notif.snapshotPublishes.get()).isZero();
 
-        // After one explicit scan the snapshot becomes available — and
-        // subsequent latestSnapshot calls must NOT trigger another scan or
-        // publish (the dashboard bootstrap regression: GET /snapshot used to
-        // call service.scan() and broadcast on every page load).
         service.scan(Instrument.MNQ);
         int loadAfterScan = statePort.loadCount.get();
         int publishesAfterScan = notif.snapshotPublishes.get();
@@ -115,6 +111,78 @@ class QuantGateServiceConcurrencyTest {
         assertThat(service.latestSnapshot(Instrument.MNQ)).isNotNull();
         assertThat(statePort.loadCount.get()).isEqualTo(loadAfterScan);
         assertThat(notif.snapshotPublishes.get()).isEqualTo(publishesAfterScan);
+    }
+
+    @Test
+    @DisplayName("latestSnapshot ignores age — survives a scheduler stall longer than the dashboard window")
+    void latestSnapshotIgnoresAge() {
+        RecordingStatePort statePort = new RecordingStatePort();
+        RecordingNotificationPort notif = new RecordingNotificationPort();
+        QuantGateService service = buildService(statePort, notif);
+
+        service.scan(Instrument.MNQ);
+        QuantSnapshot fresh = service.latestSnapshot(Instrument.MNQ);
+        assertThat(fresh).isNotNull();
+        // Repeated reads remain stable and never trigger a scan.
+        assertThat(service.latestSnapshot(Instrument.MNQ)).isSameAs(fresh);
+    }
+
+    @Test
+    @DisplayName("Capture-time order matches publish-time order under contention")
+    void publishOrderMatchesCaptureOrder() throws Exception {
+        RecordingStatePort statePort = new RecordingStatePort();
+        OrderedPublishRecorder publishOrder = new OrderedPublishRecorder();
+        java.util.concurrent.atomic.AtomicInteger arrivalOrder = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<Long> captureTimes = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+        DeltaPort delta = instr -> {
+            int order = arrivalOrder.incrementAndGet();
+            // The first scan to enter is slowed to expose the race the lock prevents.
+            if (order == 1) {
+                try { Thread.sleep(80); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            }
+            captureTimes.add(System.nanoTime());
+            return Optional.of(new DeltaSnapshot(-150.0, 45.0, Instant.now(), "REAL_TICKS"));
+        };
+
+        QuantSnapshotHistoryStore history = new QuantSnapshotHistoryStore();
+        QuantSetupNarrationService narration = new QuantSetupNarrationService(
+            history, new OrderFlowPatternDetector(), new QuantNarrator()
+        );
+        QuantSessionMemoryService session = new QuantSessionMemoryService();
+        QuantAiAdvisorService advisor = new QuantAiAdvisorService(
+            EmptyProvider.of(), EmptyProvider.of(), EmptyProvider.of(),
+            session, history, 6, 30, 5
+        );
+        QuantGateService service = new QuantGateService(
+            (instr, since) -> List.of(),
+            (instr, since) -> List.of(),
+            (instr, since) -> List.of(),
+            delta,
+            instr -> Optional.of(new LivePriceSnapshot(20_000.0, Instant.now(), "LIVE_PUSH")),
+            statePort, publishOrder,
+            history, narration, session, advisor,
+            new GateEvaluator()
+        );
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        for (int i = 0; i < 2; i++) {
+            pool.submit(() -> {
+                try { start.await(); service.scan(Instrument.MNQ); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                finally { done.countDown(); }
+            });
+        }
+        start.countDown();
+        assertThat(done.await(10, TimeUnit.SECONDS)).isTrue();
+        pool.shutdownNow();
+
+        assertThat(publishOrder.publishTimes).hasSize(2);
+        assertThat(publishOrder.publishTimes.get(0)).isLessThan(publishOrder.publishTimes.get(1));
+        assertThat(captureTimes).hasSize(2);
+        assertThat(captureTimes.get(0)).isLessThan(captureTimes.get(1));
     }
 
     private static QuantGateService buildService(RecordingStatePort statePort,
@@ -182,6 +250,19 @@ class QuantGateServiceConcurrencyTest {
             try { Thread.sleep(1); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
             snapshotPublishes.incrementAndGet();
             inFlight.decrementAndGet();
+        }
+        @Override public void publishShortSignal7_7(Instrument i, QuantSnapshot s) {}
+        @Override public void publishSetupAlert6_7(Instrument i, QuantSnapshot s) {}
+        @Override public void publishNarration(Instrument i, QuantSnapshot s, PatternAnalysis p, String md) {}
+        @Override public void publishAdvice(Instrument i, QuantSnapshot s, AiAdvice a) {}
+    }
+
+    /** Records publish entry times in arrival order. */
+    private static final class OrderedPublishRecorder implements QuantNotificationPort {
+        final java.util.List<Long> publishTimes = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+        @Override public void publishSnapshot(Instrument i, QuantSnapshot s) {
+            publishTimes.add(System.nanoTime());
         }
         @Override public void publishShortSignal7_7(Instrument i, QuantSnapshot s) {}
         @Override public void publishSetupAlert6_7(Instrument i, QuantSnapshot s) {}

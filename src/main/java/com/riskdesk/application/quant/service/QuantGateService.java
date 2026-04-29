@@ -66,28 +66,30 @@ public class QuantGateService {
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
 
     /**
-     * Per-instrument lock guarding the entire {@code load → evaluate → save →
-     * history → publish → narration → auto-advise check} sequence. Two
-     * separate guarantees:
+     * Per-instrument lock guarding the entire scan pipeline — input fetch,
+     * snapshot construction, state mutation, publish, narration and the
+     * auto-advise gate. Three guarantees:
      *
      * <ol>
      *   <li><b>State integrity.</b> Two concurrent scans on the same instrument
      *       could both load the same prior state, both append history entries
      *       on top of it, and the later save would silently drop the earlier
      *       append.</li>
-     *   <li><b>Publish ordering.</b> If the lock only covered the state
-     *       mutation, scan B could publish snapshot B and then scan A's publish
-     *       (older) would land later — the frontend, which overwrites
-     *       per-instrument state on receipt, would regress to A and could
-     *       re-fire its 6/7 / 7/7 alert.</li>
+     *   <li><b>Publish ordering matches state ordering.</b> Without the publish
+     *       inside the lock, scan B could publish snapshot B and then scan A's
+     *       publish (older state) would land later — the frontend regresses.</li>
+     *   <li><b>Capture-time ordering matches publish-time ordering.</b> If the
+     *       lock only covered the state mutation, a scan whose ports replied
+     *       slowly could finish capturing inputs at T1, wait for the lock,
+     *       and publish AFTER another scan that captured at T2 &gt; T1.
+     *       Holding the lock across the parallel port fetches makes capture
+     *       and publish strictly sequential per instrument.</li>
      * </ol>
      *
-     * Holding the lock across publish + narration is cheap because
-     * {@code SimpMessagingTemplate.convertAndSend} is non-blocking. The
-     * advisor LLM call is intentionally outside the lock — it can be slow,
-     * and its own per-instrument cache + auto-advise gate provide the
-     * deduplication. Locks across instruments are independent so MNQ / MGC /
-     * MCL still scan in parallel.
+     * The advisor LLM call is intentionally outside the lock — it can be slow,
+     * and its own per-instrument 30 s cache provides the deduplication.
+     * Different instruments still scan in parallel because each has its own
+     * lock.
      */
     private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
@@ -118,42 +120,39 @@ public class QuantGateService {
     }
 
     /**
-     * Runs a single evaluation tick for the instrument. Fetches data in parallel,
-     * evaluates the gates, persists the new state and notifies subscribers.
+     * Runs a single evaluation tick for the instrument. Holds the per-instrument
+     * lock across the full pipeline (input fetch → evaluate → save → publish →
+     * narration → auto-advise gate) so the chronological order of input
+     * capture matches the order of downstream publish — see
+     * {@link #instrumentLocks} Javadoc for the three concurrency guarantees.
      */
     public QuantSnapshot scan(Instrument instrument) {
-        Instant now = Instant.now();
-        Instant absSince  = now.minus(ABS_WINDOW);
-        Instant distSince = now.minus(DIST_WINDOW);
-        Instant cycSince  = now.minus(CYC_WINDOW);
-
-        CompletableFuture<List<AbsorptionSignal>>      absF  =
-            CompletableFuture.supplyAsync(() -> safeList(() -> absorptionPort.recent(instrument, absSince)));
-        CompletableFuture<List<DistributionSignal>>    distF =
-            CompletableFuture.supplyAsync(() -> safeList(() -> distributionPort.recent(instrument, distSince)));
-        CompletableFuture<List<SmartMoneyCycleSignal>> cycF  =
-            CompletableFuture.supplyAsync(() -> safeList(() -> cyclePort.recent(instrument, cycSince)));
-        CompletableFuture<Optional<DeltaSnapshot>>     dltF  =
-            CompletableFuture.supplyAsync(() -> safeOpt(() -> deltaPort.current(instrument)));
-        CompletableFuture<Optional<LivePriceSnapshot>> pxF   =
-            CompletableFuture.supplyAsync(() -> safeOpt(() -> livePricePort.current(instrument)));
-
-        CompletableFuture.allOf(absF, distF, cycF, dltF, pxF).join();
-
-        MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
-
-        // Serialise the full read-evaluate-write-publish window per instrument
-        // so concurrent scans (scheduler tick + manual refresh) cannot
-        // (a) lose history appends, or
-        // (b) publish snapshots out of order on /topic/quant/* and regress the
-        //     frontend or re-emit stale 6/7 / 7/7 alerts.
-        // See instrumentLocks Javadoc for full rationale.
         QuantSnapshot result;
         QuantSetupNarrationService.NarrationResult narration;
         boolean shouldAdvise;
         ReentrantLock lock = lockFor(instrument);
         lock.lock();
         try {
+            Instant now = Instant.now();
+            Instant absSince  = now.minus(ABS_WINDOW);
+            Instant distSince = now.minus(DIST_WINDOW);
+            Instant cycSince  = now.minus(CYC_WINDOW);
+
+            CompletableFuture<List<AbsorptionSignal>>      absF  =
+                CompletableFuture.supplyAsync(() -> safeList(() -> absorptionPort.recent(instrument, absSince)));
+            CompletableFuture<List<DistributionSignal>>    distF =
+                CompletableFuture.supplyAsync(() -> safeList(() -> distributionPort.recent(instrument, distSince)));
+            CompletableFuture<List<SmartMoneyCycleSignal>> cycF  =
+                CompletableFuture.supplyAsync(() -> safeList(() -> cyclePort.recent(instrument, cycSince)));
+            CompletableFuture<Optional<DeltaSnapshot>>     dltF  =
+                CompletableFuture.supplyAsync(() -> safeOpt(() -> deltaPort.current(instrument)));
+            CompletableFuture<Optional<LivePriceSnapshot>> pxF   =
+                CompletableFuture.supplyAsync(() -> safeOpt(() -> livePricePort.current(instrument)));
+
+            CompletableFuture.allOf(absF, distF, cycF, dltF, pxF).join();
+
+            MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
+
             QuantState saved = statePort.load(instrument);
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
             statePort.save(instrument, outcome.nextState());
@@ -167,8 +166,8 @@ public class QuantGateService {
             publish(instrument, result);
             notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
 
-            // Decide-and-mark must be inside the lock so two concurrent scans
-            // can't both pass the auto-advise gate for the same score.
+            // Decide-and-mark inside the lock so two concurrent scans can't
+            // both pass the auto-advise gate for the same score.
             shouldAdvise = shouldAutoAdvise(instrument, result);
         } finally {
             lock.unlock();
@@ -192,16 +191,15 @@ public class QuantGateService {
 
     /**
      * Returns the most recently published snapshot for the instrument, or
-     * {@code null} if the scheduler has not produced one yet. Pure read — does
-     * not run a scan, does not write to {@link QuantStatePort}, does not
-     * publish to any topic. Used by {@code GET /api/quant/snapshot/{instr}} so
-     * that opening the dashboard never side-effects every connected user.
+     * {@code null} if no scan has ever produced one. Pure read — does not run
+     * a scan, does not write to {@link QuantStatePort}, does not publish to
+     * any topic.
+     *
+     * <p>Returns the latest entry regardless of age — a scheduler stall must
+     * not erase the trader's last known view.</p>
      */
     public QuantSnapshot latestSnapshot(Instrument instrument) {
-        return historyStore.recent(instrument, Duration.ofMinutes(5))
-            .stream()
-            .reduce((a, b) -> b)
-            .orElse(null);
+        return historyStore.latest(instrument).orElse(null);
     }
 
     private boolean shouldAutoAdvise(Instrument instrument, QuantSnapshot snapshot) {
