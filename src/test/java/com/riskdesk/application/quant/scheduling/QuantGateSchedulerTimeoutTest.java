@@ -74,7 +74,10 @@ class QuantGateSchedulerTimeoutTest {
                 new OrderFlowPatternDetector(), new QuantNarrator()),
             new QuantSessionMemoryService(),
             advisor(),
-            new GateEvaluator()
+            new GateEvaluator(),
+            i -> Optional.empty(),
+            i -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         ) {
             @Override
             public QuantSnapshot scan(Instrument instrument) {
@@ -106,7 +109,10 @@ class QuantGateSchedulerTimeoutTest {
             new QuantSetupNarrationService(history, new OrderFlowPatternDetector(), new QuantNarrator()),
             new QuantSessionMemoryService(),
             advisor(),
-            new GateEvaluator()
+            new GateEvaluator(),
+            i -> Optional.empty(),
+            i -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         ) {
             @Override
             public QuantSnapshot scan(Instrument instrument) {

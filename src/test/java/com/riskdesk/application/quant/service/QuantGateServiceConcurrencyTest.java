@@ -162,7 +162,10 @@ class QuantGateServiceConcurrencyTest {
             instr -> Optional.of(new LivePriceSnapshot(20_000.0, Instant.now(), "LIVE_PUSH")),
             statePort, publishOrder,
             history, narration, session, advisor,
-            new GateEvaluator()
+            new GateEvaluator(),
+            instr -> Optional.empty(),
+            instr -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         );
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -209,7 +212,10 @@ class QuantGateServiceConcurrencyTest {
             absorption, distribution, cycle, delta, livePrice,
             statePort, notif,
             history, narration, session, advisor,
-            new GateEvaluator()
+            new GateEvaluator(),
+            instr -> Optional.empty(),
+            instr -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         );
     }
 

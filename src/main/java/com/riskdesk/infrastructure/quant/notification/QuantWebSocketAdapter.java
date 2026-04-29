@@ -7,12 +7,16 @@ import com.riskdesk.domain.quant.model.GateResult;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
 import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import com.riskdesk.domain.quant.port.QuantNotificationPort;
+import com.riskdesk.domain.quant.structure.StructuralBlock;
+import com.riskdesk.domain.quant.structure.StructuralWarning;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -106,6 +110,29 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
             gateMap.put(g.name(), entry);
         }
         root.put("gates", gateMap);
+
+        // ── Structural filters (PR #299) ────────────────────────────────
+        List<Map<String, Object>> blocks = new ArrayList<>(snapshot.structuralBlocks().size());
+        for (StructuralBlock b : snapshot.structuralBlocks()) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("code", b.code());
+            e.put("evidence", b.evidence());
+            blocks.add(e);
+        }
+        List<Map<String, Object>> warnings = new ArrayList<>(snapshot.structuralWarnings().size());
+        for (StructuralWarning w : snapshot.structuralWarnings()) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("code", w.code());
+            e.put("evidence", w.evidence());
+            e.put("scoreModifier", w.scoreModifier());
+            warnings.add(e);
+        }
+        root.put("structuralBlocks", blocks);
+        root.put("structuralWarnings", warnings);
+        root.put("structuralScoreModifier", snapshot.structuralScoreModifier());
+        root.put("finalScore", snapshot.finalScore());
+        root.put("shortBlocked", snapshot.shortBlocked());
+        root.put("shortAvailable", snapshot.shortAvailable());
         return root;
     }
 

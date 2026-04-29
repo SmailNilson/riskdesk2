@@ -7,6 +7,17 @@ export interface QuantGateView {
   reason: string;
 }
 
+export interface StructuralBlockView {
+  code: string;
+  evidence: string;
+}
+
+export interface StructuralWarningView {
+  code: string;
+  evidence: string;
+  scoreModifier: number;
+}
+
 export interface QuantSnapshotView {
   instrument: string;
   score: number;
@@ -21,6 +32,13 @@ export interface QuantSnapshotView {
   shortSetup7_7: boolean;
   shortAlert6_7: boolean;
   gates: QuantGateView[];
+  // Structural filters (PR #299) — optional for backward compat.
+  structuralBlocks?: StructuralBlockView[];
+  structuralWarnings?: StructuralWarningView[];
+  structuralScoreModifier?: number;
+  finalScore?: number;
+  shortBlocked?: boolean;
+  shortAvailable?: boolean;
 }
 
 /** WebSocket payload — same shape as REST plus a `kind` discriminator. */
@@ -40,6 +58,13 @@ export interface QuantWsPayload {
   pattern?: PatternView | null;
   markdown?: string | null;
   advice?: AdviceView | null;
+  // Structural filters (PR #299) — optional for backward compat.
+  structuralBlocks?: StructuralBlockView[];
+  structuralWarnings?: StructuralWarningView[];
+  structuralScoreModifier?: number;
+  finalScore?: number;
+  shortBlocked?: boolean;
+  shortAvailable?: boolean;
 }
 
 export interface PatternView {

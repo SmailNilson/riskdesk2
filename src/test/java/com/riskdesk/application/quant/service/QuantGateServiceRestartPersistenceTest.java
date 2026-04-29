@@ -102,7 +102,10 @@ class QuantGateServiceRestartPersistenceTest {
             instr -> Optional.of(new LivePriceSnapshot(20_000.0, Instant.now(), "LIVE_PUSH")),
             statePort, notif,
             history, narration, session, advisor,
-            new GateEvaluator()
+            new GateEvaluator(),
+            instr -> Optional.empty(),
+            instr -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         );
     }
 

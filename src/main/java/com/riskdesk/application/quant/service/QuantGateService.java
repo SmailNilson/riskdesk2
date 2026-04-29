@@ -17,6 +17,12 @@ import com.riskdesk.domain.quant.port.DistributionPort;
 import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.domain.quant.port.QuantNotificationPort;
 import com.riskdesk.domain.quant.port.QuantStatePort;
+import com.riskdesk.domain.quant.structure.IndicatorsPort;
+import com.riskdesk.domain.quant.structure.IndicatorsSnapshot;
+import com.riskdesk.domain.quant.structure.StrategyPort;
+import com.riskdesk.domain.quant.structure.StrategyVotes;
+import com.riskdesk.domain.quant.structure.StructuralFilterEvaluator;
+import com.riskdesk.domain.quant.structure.StructuralFilterResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -61,6 +67,9 @@ public class QuantGateService {
     private final QuantSessionMemoryService sessionMemoryService;
     private final QuantAiAdvisorService advisorService;
     private final GateEvaluator evaluator;
+    private final IndicatorsPort indicatorsPort;
+    private final StrategyPort strategyPort;
+    private final StructuralFilterEvaluator structuralEvaluator;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
@@ -107,7 +116,10 @@ public class QuantGateService {
                             QuantSetupNarrationService narrationService,
                             QuantSessionMemoryService sessionMemoryService,
                             QuantAiAdvisorService advisorService,
-                            GateEvaluator evaluator) {
+                            GateEvaluator evaluator,
+                            IndicatorsPort indicatorsPort,
+                            StrategyPort strategyPort,
+                            StructuralFilterEvaluator structuralEvaluator) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
         this.cyclePort = cyclePort;
@@ -120,6 +132,9 @@ public class QuantGateService {
         this.sessionMemoryService = sessionMemoryService;
         this.advisorService = advisorService;
         this.evaluator = evaluator;
+        this.indicatorsPort = indicatorsPort;
+        this.strategyPort = strategyPort;
+        this.structuralEvaluator = structuralEvaluator;
     }
 
     /**
@@ -158,7 +173,27 @@ public class QuantGateService {
 
             QuantState saved = statePort.load(instrument);
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
-            result = outcome.snapshot();
+            QuantSnapshot rawSnapshot = outcome.snapshot();
+
+            // Structural filters (PR #299): leverage the existing IndicatorService
+            // and StrategyEngineService to veto SHORT setups that the pure 7-gate
+            // quant score would otherwise greenlight (active bull OB, CHOPPY
+            // regime, MTF bull alignment, very-bull CMF, Java NO_TRADE).
+            //
+            // Pattern is computed BEFORE the snapshot lands in history, but
+            // {@link QuantSetupNarrationService#buildNarration} now always
+            // appends {@code snapshot.price()} to the price window passed to
+            // the detector — so the structural evaluator and the final
+            // narration both observe the *current* tick, never a stale window
+            // (Codex review fix on PR #299). The two narration calls below
+            // therefore produce the same pattern: the first gives us the
+            // pattern to feed structural, the second re-renders the markdown
+            // with the structural blocks/warnings attached.
+            QuantSetupNarrationService.NarrationResult preNarration =
+                narrationService.buildNarration(instrument, rawSnapshot, outcome.nextState(), snap);
+            StructuralFilterResult structural = evaluateStructural(
+                instrument, rawSnapshot.price(), preNarration.pattern());
+            result = rawSnapshot.withStructuralResult(structural);
 
             historyStore.add(instrument, result);
             narration = narrationService.buildNarration(instrument, result, outcome.nextState(), snap);
@@ -213,6 +248,25 @@ public class QuantGateService {
      */
     public QuantSnapshot latestSnapshot(Instrument instrument) {
         return historyStore.latest(instrument).orElse(null);
+    }
+
+    /**
+     * Runs the structural filters for the instrument. Both ports degrade
+     * silently to {@link Optional#empty()} on failure; the evaluator handles
+     * missing data so we never let a structural-side glitch bring down the
+     * whole quant scan.
+     */
+    private StructuralFilterResult evaluateStructural(Instrument instrument,
+                                                       Double price,
+                                                       com.riskdesk.domain.quant.pattern.PatternAnalysis pattern) {
+        try {
+            IndicatorsSnapshot ind = safeOpt(() -> indicatorsPort.snapshot5m(instrument)).orElse(null);
+            StrategyVotes strat   = safeOpt(() -> strategyPort.votes5m(instrument)).orElse(null);
+            return structuralEvaluator.evaluateForShort(price, ind, strat, pattern);
+        } catch (RuntimeException e) {
+            log.warn("structural filter failed instrument={}: {}", instrument, e.toString());
+            return StructuralFilterResult.empty();
+        }
     }
 
     private boolean shouldAutoAdvise(Instrument instrument, QuantSnapshot snapshot) {

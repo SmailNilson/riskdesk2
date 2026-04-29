@@ -52,7 +52,27 @@ public final class QuantNarrator {
             md.append("> ").append(pattern.reason()).append("\n\n");
         }
 
-        if (snap.isShortSetup7_7()) {
+        if (!snap.structuralBlocks().isEmpty()) {
+            md.append("### 🚫 Structural blocks\n");
+            for (var b : snap.structuralBlocks()) {
+                md.append("- **").append(b.code()).append("** — ").append(b.evidence()).append("\n");
+            }
+            md.append("\n");
+        }
+        if (!snap.structuralWarnings().isEmpty()) {
+            md.append("### ⚠️ Warnings (score ").append(String.format(Locale.US, "%+d", snap.structuralScoreModifier())).append(")\n");
+            for (var w : snap.structuralWarnings()) {
+                md.append("- `")
+                  .append(String.format(Locale.US, "%+d", w.scoreModifier()))
+                  .append("` **").append(w.code()).append("** — ").append(w.evidence()).append("\n");
+            }
+            md.append("\n");
+        }
+
+        if (snap.shortBlocked()) {
+            md.append("### ❌ SHORT bloqué — ").append(snap.structuralBlocks().size())
+              .append(snap.structuralBlocks().size() == 1 ? " block" : " blocks").append(" structurel(s)\n");
+        } else if (snap.isShortSetup7_7()) {
             md.append("### 🔔 SHORT 7/7 — exécutable\n");
             md.append(planBlock(snap));
         } else if (snap.isShortAlert6_7()) {
