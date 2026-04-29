@@ -60,6 +60,20 @@ public class QuantGateService {
     private final GateEvaluator evaluator;
 
     /**
+     * Last score for which we published a 6/7 or 7/7 alert per instrument.
+     * Used to make the alert publish transition-based: re-fire only when the
+     * score escalates into a new alert level, never on persistence. Guarded by
+     * the per-instrument {@link #instrumentLocks}.
+     *
+     * <p>Score below 6 resets to 0, so a setup that drops out and comes back
+     * fires a fresh alert (legitimate re-entry).</p>
+     */
+    private final Map<Instrument, Integer> lastSignaledScore = new EnumMap<>(Instrument.class);
+
+    /** Score threshold below which we reset {@link #lastSignaledScore} so the next rise re-fires. */
+    private static final int SIGNAL_RESET_BELOW = 6;
+
+    /**
      * Per-instrument lock guarding the entire scan pipeline — input fetch,
      * snapshot construction, state mutation and publish. Three guarantees:
      *
@@ -217,12 +231,40 @@ public class QuantGateService {
             .build();
     }
 
-    private void publish(Instrument instrument, QuantSnapshot snapshot) {
+    /**
+     * Publishes the per-scan snapshot every time, but emits the 6/7 / 7/7
+     * one-shot alerts only on TRANSITIONS into those states. This matches the
+     * existing project rule (CLAUDE.md / ARCHITECTURE_PRINCIPLES — "Alert
+     * Evaluation Rule": alerts fire on state change, not persistence) and
+     * matches the frontend contract that {@code /topic/quant/signals} is a
+     * one-shot confirmation.
+     *
+     * <p>Transitions that fire:</p>
+     * <ul>
+     *   <li>score reaches 7 from anything below → fire 7/7 (covers 5→7, 6→7, etc.)</li>
+     *   <li>score reaches 6 from below 6 → fire 6/7 (does NOT fire on 7→6)</li>
+     * </ul>
+     *
+     * <p>Persistence (6→6, 7→7) does NOT re-fire. Drop below 6 resets the
+     * tracker so the next rise re-fires. Caller is expected to hold the
+     * per-instrument lock.</p>
+     */
+    /** Package-private for {@link QuantGateServiceAlertTransitionTest}. */
+    void publish(Instrument instrument, QuantSnapshot snapshot) {
         notificationPort.publishSnapshot(instrument, snapshot);
-        if (snapshot.isShortSetup7_7()) {
+
+        int score = snapshot.score();
+        int lastSignaled = lastSignaledScore.getOrDefault(instrument, 0);
+
+        if (score >= 7 && lastSignaled < 7) {
             notificationPort.publishShortSignal7_7(instrument, snapshot);
-        } else if (snapshot.isShortAlert6_7()) {
+            lastSignaledScore.put(instrument, 7);
+        } else if (score == 6 && lastSignaled < 6) {
             notificationPort.publishSetupAlert6_7(instrument, snapshot);
+            lastSignaledScore.put(instrument, 6);
+        } else if (score < SIGNAL_RESET_BELOW) {
+            // Setup lost — reset so a re-entry fires fresh alerts.
+            lastSignaledScore.put(instrument, 0);
         }
     }
 
