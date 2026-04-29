@@ -2,6 +2,7 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
+import com.riskdesk.domain.engine.strategy.model.IndicatorContext;
 import com.riskdesk.domain.engine.strategy.model.MacroBias;
 import com.riskdesk.domain.engine.strategy.model.MarketContext;
 import com.riskdesk.domain.engine.strategy.model.MarketRegime;
@@ -61,13 +62,22 @@ public class MarketContextBuilder {
         MtfSnapshot mtf = mtfBuilder.build(instrument, timeframe);
         PortfolioState portfolio = portfolioBuilder.build(instrument);
         SessionInfo session = sessionBuilder.build(instrument);
+        IndicatorContext indicators = new IndicatorContext(
+            snapshot.vwap(),
+            snapshot.vwapLowerBand(),
+            snapshot.vwapUpperBand(),
+            snapshot.bbPct(),
+            snapshot.bbWidth(),
+            snapshot.cmf(),
+            snapshot.chaikinOscillator()
+        );
         Instant asOf = snapshot.lastCandleTimestamp() != null
             ? snapshot.lastCandleTimestamp()
             : clock.instant();
 
         return new MarketContext(
             instrument, timeframe, bias, regime, loc, pd,
-            snapshot.lastPrice(), atr, mtf, portfolio, session, asOf
+            snapshot.lastPrice(), atr, mtf, portfolio, session, asOf, indicators
         );
     }
 }
