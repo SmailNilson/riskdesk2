@@ -23,9 +23,12 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 /**
@@ -61,6 +64,18 @@ public class QuantGateService {
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
+
+    /**
+     * Per-instrument lock guarding the {@code load → evaluate → save} sequence.
+     * The scheduled scanner and the manual {@code GET /api/quant/snapshot/{instr}}
+     * endpoint can fire concurrently; without this lock both reads see the same
+     * prior state, both append history entries on top of it, and the later save
+     * silently overwrites the earlier one — gate outcomes would become
+     * non-deterministic and alerts could double-fire or be skipped.
+     * Locks across instruments are independent, so MNQ / MGC / MCL still scan
+     * in parallel.
+     */
+    private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
     public QuantGateService(AbsorptionPort absorptionPort,
                             DistributionPort distributionPort,
@@ -113,15 +128,27 @@ public class QuantGateService {
 
         MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
 
-        QuantState saved = statePort.load(instrument);
-        GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
-        statePort.save(instrument, outcome.nextState());
+        // Serialise the read-evaluate-write window per instrument so concurrent
+        // scans (scheduler tick + manual snapshot refresh) cannot lose history
+        // appends or trigger duplicate alerts. See instrumentLocks Javadoc.
+        QuantSnapshot result;
+        QuantState nextState;
+        ReentrantLock lock = lockFor(instrument);
+        lock.lock();
+        try {
+            QuantState saved = statePort.load(instrument);
+            GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
+            statePort.save(instrument, outcome.nextState());
+            result = outcome.snapshot();
+            nextState = outcome.nextState();
+        } finally {
+            lock.unlock();
+        }
 
-        QuantSnapshot result = outcome.snapshot();
         historyStore.add(instrument, result);
 
         QuantSetupNarrationService.NarrationResult narration =
-            narrationService.buildNarration(instrument, result, outcome.nextState(), snap);
+            narrationService.buildNarration(instrument, result, nextState, snap);
         sessionMemoryService.recordScan(instrument,
             narration.pattern() == null ? null : narration.pattern().type());
 
@@ -147,6 +174,10 @@ public class QuantGateService {
         if (alreadyFired != null && alreadyFired >= snapshot.score()) return false;
         autoAdviceFiredFor.put(instrument, snapshot.score());
         return true;
+    }
+
+    private synchronized ReentrantLock lockFor(Instrument instrument) {
+        return instrumentLocks.computeIfAbsent(instrument, k -> new ReentrantLock());
     }
 
     /** Exposed for the on-demand "Ask AI" flow on the controller. */

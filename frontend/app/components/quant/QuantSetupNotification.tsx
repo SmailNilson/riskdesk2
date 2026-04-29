@@ -2,15 +2,17 @@
 
 import { useEffect, useRef } from 'react';
 import { useQuantStream } from '@/app/hooks/useQuantStream';
-import { QUANT_INSTRUMENTS } from './types';
 
 /**
  * Fires a one-shot audio + visual ping when the backend confirms a
  * SHORT 7/7 setup. The audio is generated client-side via WebAudio so the
  * browser does not need to fetch an external sound file.
+ *
+ * Reads from the shared {@code QuantStreamProvider} — one STOMP client is
+ * shared across this notification and {@code QuantGatePanel} (PR #297 P2 fix).
  */
 export default function QuantSetupNotification() {
-  const { latestSignal, ack } = useQuantStream(QUANT_INSTRUMENTS);
+  const { latestSignal, ack } = useQuantStream();
   const audioCtxRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
