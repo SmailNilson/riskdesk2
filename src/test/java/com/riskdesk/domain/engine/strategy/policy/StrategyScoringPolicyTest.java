@@ -131,6 +131,32 @@ class StrategyScoringPolicyTest {
         assertThat(d.candidatePlaybookId()).isEmpty();
     }
 
+    @Test
+    void no_trade_preserves_playbook_and_score_when_plan_empty() {
+        // High-confidence votes that would normally graduate to FULL_SIZE…
+        List<AgentVote> votes = List.of(
+            AgentVote.of("ctx-bias", StrategyLayer.CONTEXT, +90, 0.9, List.of()),
+            AgentVote.of("zone-ob", StrategyLayer.ZONE, +60, 0.9, List.of()),
+            AgentVote.of("trig-flow", StrategyLayer.TRIGGER, +50, 0.8, List.of())
+        );
+
+        // …but the playbook accepted the context yet returned no plan (e.g. CTX
+        // applicable on regime+bias but no matching-direction OB available).
+        StrategyDecision d = policy.decide(votes, LSAR_STUB, Optional.empty(), at);
+
+        // Tradeable invariant: never emit HALF_SIZE/FULL_SIZE without a plan.
+        assertThat(d.decision()).isEqualTo(DecisionType.NO_TRADE);
+        assertThat(d.plan()).isEmpty();
+        assertThat(d.direction()).isEmpty();
+        // Diagnostic invariant: candidate id and final score MUST be preserved so
+        // the UI / analytics payloads distinguish "no playbook applicable" from
+        // "playbook applicable but plan unbuildable". Collapsing to standby() —
+        // which nulls both — would hide the real failure mode.
+        assertThat(d.candidatePlaybookId()).contains("LSAR");
+        // finalScore = 0.5 × 90 + 0.3 × 60 + 0.2 × 50 = 73 — must surface, not zero out.
+        assertThat(d.finalScore()).isCloseTo(73.0, org.assertj.core.data.Offset.offset(0.5));
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     private static Playbook stubPlaybook(String id, double minScore) {

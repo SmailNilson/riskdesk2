@@ -13,6 +13,7 @@ import com.riskdesk.domain.engine.strategy.agent.trigger.DeltaFlowTriggerAgent;
 import com.riskdesk.domain.engine.strategy.agent.trigger.ReactionTriggerAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.LiquidityZoneAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.OrderBlockZoneAgent;
+import com.riskdesk.domain.engine.strategy.playbook.ContextualPullbackPlaybook;
 import com.riskdesk.domain.engine.strategy.playbook.LondonSweepPlaybook;
 import com.riskdesk.domain.engine.strategy.playbook.LsarPlaybook;
 import com.riskdesk.domain.engine.strategy.playbook.NyOpenReversalPlaybook;
@@ -64,6 +65,7 @@ public class StrategyEngineConfig {
     @Bean public SilverBulletPlaybook silverBulletPlaybook() { return new SilverBulletPlaybook(); }
     @Bean public NyOpenReversalPlaybook nyOpenReversalPlaybook() { return new NyOpenReversalPlaybook(); }
     @Bean public LondonSweepPlaybook londonSweepPlaybook() { return new LondonSweepPlaybook(); }
+    @Bean public ContextualPullbackPlaybook contextualPullbackPlaybook() { return new ContextualPullbackPlaybook(); }
 
     /**
      * Playbook priority order — <b>most specific first, fallback last</b>.
@@ -84,9 +86,13 @@ public class StrategyEngineConfig {
                                               NyOpenReversalPlaybook nor,
                                               LondonSweepPlaybook ls,
                                               SbdrPlaybook sbdr,
-                                              LsarPlaybook lsar) {
-        // Order: most specific (session + structural) → least specific (structural only)
-        List<Playbook> ordered = List.of(sb, nor, ls, sbdr, lsar);
+                                              LsarPlaybook lsar,
+                                              ContextualPullbackPlaybook ctx) {
+        // Order: most specific (session + structural) → least specific (fallback last).
+        // CTX is the catch-all that fires when none of the kill-zone or VA-extreme
+        // playbooks match; it is intentionally last so it never preempts a more
+        // disciplined setup.
+        List<Playbook> ordered = List.of(sb, nor, ls, sbdr, lsar, ctx);
         return new PlaybookSelector(ordered);
     }
 

@@ -2,8 +2,12 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.IndicatorSnapshot;
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.engine.strategy.model.DeltaSignature;
 import com.riskdesk.domain.engine.strategy.model.ReactionPattern;
+import com.riskdesk.domain.engine.strategy.model.TickDataQuality;
 import com.riskdesk.domain.engine.strategy.model.TriggerContext;
+import com.riskdesk.domain.marketdata.model.TickAggregation;
+import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
@@ -76,6 +80,178 @@ class TriggerContextBuilderTest {
 
         assertThat(trig.reaction()).isEqualTo(ReactionPattern.NONE);
         assertThat(tripwire.called).isFalse();
+    }
+
+    // ── Real-tick path ─────────────────────────────────────────────────────
+
+    @Test
+    void prefers_real_ticks_over_snapshot_when_aggregation_present() {
+        TickAggregation agg = aggregation(700, 300, 70.0, false, null);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, agg);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.qualityMultiplier()).isEqualTo(1.0);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.FLOW);
+        assertThat(trig.buyRatio()).isEqualByComparingTo("0.7");
+    }
+
+    @Test
+    void real_ticks_with_divergence_classify_as_absorption() {
+        // Heavy buying but price-vs-delta divergence → buyers absorbing the move.
+        TickAggregation agg = aggregation(800, 200, 80.0, true,
+            TickAggregation.DIVERGENCE_BEARISH);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, agg);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.ABSORPTION);
+    }
+
+    @Test
+    void real_ticks_balanced_buy_ratio_classifies_as_neutral() {
+        TickAggregation agg = aggregation(520, 480, 52.0, false, null);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, agg);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.NEUTRAL);
+    }
+
+    @Test
+    void falls_back_to_snapshot_when_port_returns_empty() {
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, null);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        // No real ticks, snapshot has no delta → UNAVAILABLE (CLV path returns
+        // CLV_ESTIMATED only when buyRatio/cumulativeDelta is present).
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.UNAVAILABLE);
+    }
+
+    @Test
+    void falls_back_to_snapshot_when_aggregation_source_is_clv() {
+        // The port might return a CLV-flagged aggregation (degraded mode); the
+        // builder must NOT promote it to REAL_TICKS.
+        TickAggregation clvAgg = new TickAggregation(
+            Instrument.MGC, 0, 0, 0L, 0L, 50.0,
+            TickAggregation.TREND_FLAT, false, null,
+            Instant.parse("2026-04-17T11:55:00Z"), Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_CLV_ESTIMATED, Double.NaN, Double.NaN);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, clvAgg);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isNotEqualTo(TickDataQuality.REAL_TICKS);
+    }
+
+    @Test
+    void rejects_real_ticks_with_empty_window() {
+        // After a quiet period TickByTickAggregator.snapshot() can return a
+        // REAL_TICKS-flagged record with buy/sell volume both zero (window
+        // evicted). Without filtering, buyRatioPct=0.0 would classify as a
+        // strong bearish FLOW — a false trigger vote.
+        TickAggregation emptyWindow = new TickAggregation(
+            Instrument.MGC, 0L, 0L, 0L, 0L, 0.0,
+            TickAggregation.TREND_FLAT, false, null,
+            Instant.parse("2026-04-17T12:00:00Z"),
+            Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS,
+            Double.NaN, Double.NaN);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, emptyWindow);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        // Must NOT promote to REAL_TICKS; must NOT classify as bearish FLOW.
+        assertThat(trig.quality()).isNotEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.NEUTRAL);
+    }
+
+    @Test
+    void accepts_real_ticks_with_all_sell_volume() {
+        // Discriminator is total volume, not ratio. A genuine all-sell window
+        // (sellVol > 0, buyVol = 0 → buyRatioPct = 0.0) IS a real signal and
+        // must produce a bearish FLOW vote, not be filtered out as "empty window".
+        TickAggregation allSells = new TickAggregation(
+            Instrument.MGC, 0L, 800L, -800L, -800L, 0.0,
+            TickAggregation.TREND_FALLING, false, null,
+            Instant.parse("2026-04-17T11:55:00Z"),
+            Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS,
+            100.5, 99.5);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, allSells);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.FLOW);
+    }
+
+    @Test
+    void degrades_silently_when_port_throws() {
+        TickDataPort port = new TickDataPort() {
+            @Override public Optional<TickAggregation> currentAggregation(Instrument i) {
+                throw new RuntimeException("simulated infra hiccup");
+            }
+            @Override public boolean isRealTickDataAvailable(Instrument i) { return false; }
+        };
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        // Falls through to CLV path; UNAVAILABLE because the empty snapshot has no delta.
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.UNAVAILABLE);
+    }
+
+    private static TickAggregation aggregation(long buy, long sell, double pct,
+                                                boolean divergence, String divergenceType) {
+        return new TickAggregation(
+            Instrument.MGC,
+            buy, sell, buy - sell, buy - sell,
+            pct,
+            buy >= sell ? TickAggregation.TREND_RISING : TickAggregation.TREND_FALLING,
+            divergence, divergenceType,
+            Instant.parse("2026-04-17T11:55:00Z"),
+            Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS,
+            100.5, 99.5
+        );
+    }
+
+    private static final class StubTickDataPort implements TickDataPort {
+        private final Instrument key;
+        private final TickAggregation agg;
+
+        StubTickDataPort(Instrument key, TickAggregation agg) {
+            this.key = key;
+            this.agg = agg;
+        }
+
+        @Override public Optional<TickAggregation> currentAggregation(Instrument i) {
+            return i == key ? Optional.ofNullable(agg) : Optional.empty();
+        }
+
+        @Override public boolean isRealTickDataAvailable(Instrument i) {
+            return agg != null && i == key;
+        }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────
