@@ -1,10 +1,24 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
-import type { QuantInstrument, QuantSnapshotView, QuantWsPayload } from '@/app/components/quant/types';
+import type {
+  QuantInstrument,
+  QuantSnapshotView,
+  QuantWsPayload,
+} from '@/app/components/quant/types';
 
 function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined): string {
   const base = (wsBase || apiBase || '').replace(/\/$/, '');
@@ -36,12 +50,28 @@ function payloadToView(p: QuantWsPayload): QuantSnapshotView {
 
 const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 
+interface QuantStreamValue {
+  snapshots: Record<string, QuantSnapshotView>;
+  latestSignal: QuantSnapshotView | null;
+  connected: boolean;
+  ack: () => void;
+}
+
+const QuantStreamContext = createContext<QuantStreamValue | null>(null);
+
+interface ProviderProps {
+  instruments: readonly QuantInstrument[];
+  children: ReactNode;
+}
+
 /**
- * Self-contained STOMP client for the Quant 7-Gates feed. Subscribes per
- * instrument to {@code /topic/quant/snapshot/{instr}} and to the global
- * {@code /topic/quant/signals} channel for setup-confirmation pings.
+ * Mounts ONE STOMP client for the whole dashboard. Consumers (`QuantGatePanel`,
+ * `QuantSetupNotification`, …) call {@link useQuantStream} which reads the
+ * shared state from context. Without this provider, hosting two panels would
+ * open two SockJS connections per session and double the broker's quant
+ * traffic — see PR #297 review feedback (P2).
  */
-export function useQuantStream(instruments: readonly QuantInstrument[]) {
+export function QuantStreamProvider({ instruments, children }: ProviderProps): JSX.Element {
   const clientRef = useRef<Client | null>(null);
   const [snapshots, setSnapshots] = useState<Record<string, QuantSnapshotView>>({});
   const [latestSignal, setLatestSignal] = useState<QuantSnapshotView | null>(null);
@@ -60,26 +90,23 @@ export function useQuantStream(instruments: readonly QuantInstrument[]) {
     client.onConnect = () => {
       setConnected(true);
       for (const instr of instruments) {
-        const s = client.subscribe(`/topic/quant/snapshot/${instr}`, (msg: IMessage) => {
+        subs.push(client.subscribe(`/topic/quant/snapshot/${instr}`, (msg: IMessage) => {
           try {
             const payload = JSON.parse(msg.body) as QuantWsPayload;
-            const view = payloadToView(payload);
-            setSnapshots(prev => ({ ...prev, [view.instrument]: view }));
+            setSnapshots(prev => ({ ...prev, [payload.instrument]: payloadToView(payload) }));
           } catch (err) {
             console.warn('quant snapshot parse failed', err);
           }
-        });
-        subs.push(s);
+        }));
       }
-      const signalSub = client.subscribe('/topic/quant/signals', (msg: IMessage) => {
+      subs.push(client.subscribe('/topic/quant/signals', (msg: IMessage) => {
         try {
           const payload = JSON.parse(msg.body) as QuantWsPayload;
           setLatestSignal(payloadToView(payload));
         } catch (err) {
           console.warn('quant signal parse failed', err);
         }
-      });
-      subs.push(signalSub);
+      }));
     };
 
     client.onDisconnect = () => setConnected(false);
@@ -93,10 +120,30 @@ export function useQuantStream(instruments: readonly QuantInstrument[]) {
       clientRef.current?.deactivate();
       clientRef.current = null;
     };
-    // The instruments array is intentionally treated as fixed for the panel lifetime;
-    // callers should pass a stable reference (e.g. a module-level constant).
+    // The instruments list is intentionally fixed for the dashboard lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { snapshots, latestSignal, connected, ack };
+  const value = useMemo<QuantStreamValue>(
+    () => ({ snapshots, latestSignal, connected, ack }),
+    [snapshots, latestSignal, connected, ack],
+  );
+
+  return createElement(QuantStreamContext.Provider, { value }, children);
+}
+
+/**
+ * Consumes the shared {@link QuantStreamProvider}. Throws a clear error in
+ * dev / test if a consumer is mounted outside the provider so the missing
+ * wiring is obvious.
+ */
+export function useQuantStream(): QuantStreamValue {
+  const ctx = useContext(QuantStreamContext);
+  if (ctx === null) {
+    throw new Error(
+      'useQuantStream must be used inside <QuantStreamProvider>. ' +
+      'Wrap the dashboard subtree with QuantStreamProvider so all quant panels share one STOMP client.'
+    );
+  }
+  return ctx;
 }

@@ -29,7 +29,7 @@ function formatPrice(p: number | null): string {
  */
 export default function QuantGatePanel() {
   const [active, setActive] = useState<QuantInstrument>('MNQ');
-  const { snapshots, connected } = useQuantStream(QUANT_INSTRUMENTS);
+  const { snapshots, connected } = useQuantStream();
   const [bootstrap, setBootstrap] = useState<Record<string, QuantSnapshotView>>({});
 
   useEffect(() => {
