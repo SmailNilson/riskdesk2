@@ -9,6 +9,8 @@ import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
+import QuantGatePanel from './quant/QuantGatePanel';
+import QuantSetupNotification from './quant/QuantSetupNotification';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -278,12 +280,14 @@ export default function Dashboard() {
             selectedBrokerAccountId={selectedIbkrAccountId}
             onRefresh={refresh}
           />
+          <QuantGatePanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
         </CollapsibleZone>
       </div>
 
       <AlertsFeed alerts={alerts} />
+      <QuantSetupNotification />
     </div>
   );
 }

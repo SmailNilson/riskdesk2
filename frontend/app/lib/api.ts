@@ -1,4 +1,5 @@
 import { API_BASE } from '@/app/lib/runtimeConfig';
+import type { QuantSnapshotView } from '@/app/components/quant/types';
 
 const BASE = API_BASE;
 
@@ -1243,6 +1244,15 @@ export const api = {
     post<ExternalSetupSummary>(`/api/external-setups/${id}/validate`, body),
   rejectExternalSetup: (id: number, body: ExternalSetupRejectRequest) =>
     post<ExternalSetupSummary>(`/api/external-setups/${id}/reject`, body),
+
+  // ── Quant 7-Gates evaluator ────────────────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantGateController
+  // /snapshot/{instr} runs a fresh scan; /history/{instr}?hours=2 returns the
+  // in-memory ring buffer.
+  getQuantSnapshot: (instrument: string) =>
+    get<QuantSnapshotView>(`/api/quant/snapshot/${instrument}`),
+  getQuantHistory: (instrument: string, hours = 2) =>
+    get<QuantSnapshotView[]>(`/api/quant/history/${instrument}?hours=${hours}`),
 };
 
 // ── External Setup types ────────────────────────────────────────────────

@@ -60,4 +60,19 @@ class HexagonalArchitectureTest {
                 "javax.persistence.."
             )
             .because("domain should not be coupled to persistence concerns");
+
+    @ArchTest
+    static final ArchRule quant_domain_only_depends_on_domain =
+        noClasses()
+            .that().resideInAPackage("..domain.quant..")
+            .should().dependOnClassesThat().resideInAnyPackage(
+                "..application..",
+                "..presentation..",
+                "..infrastructure..",
+                "org.springframework..",
+                "jakarta.persistence..",
+                "javax.persistence..",
+                "com.fasterxml.jackson.."
+            )
+            .because("the quant domain slice must stay framework-free and may only depend on other com.riskdesk.domain classes");
 }

@@ -111,6 +111,7 @@ These should stay transport-oriented only.
 - `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
 - `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
 - `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
+- `application/quant/service/QuantGateService.java` — runs the 7-gate SHORT-setup evaluator every 60 s (MNQ, MGC, MCL). Pure orchestration: parallel port fetch (Absorption, Distribution, Cycle, Delta, LivePrice) → `GateEvaluator.evaluate()` → state save → WebSocket publish. State persists in the `quant_state` table; recent snapshots in an in-memory ring buffer (`QuantSnapshotHistoryStore`).
 
 These coordinate use cases and should not become infrastructure adapters.
 

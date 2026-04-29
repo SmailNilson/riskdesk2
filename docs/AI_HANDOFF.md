@@ -1,6 +1,57 @@
 # AI Handoff
 
-Last updated: 2026-04-23
+Last updated: 2026-04-29
+
+## Quant 7-Gates Order Flow Evaluator
+
+Deterministic, framework-free SHORT-setup detector lifted verbatim from the
+battle-tested `mnq_monitor_v3.py` Python script. No LLM in the loop — the seven
+gates are pure functions over the order-flow stream, scanned every 60 s for
+MNQ, MGC and MCL.
+
+**Gates (G0..G6):**
+
+| Gate | Rule (failure means setup invalid) |
+| --- | --- |
+| G0 Régime | day-move > +75 pts OR ≥3 ABS BULL scans (n8 ≥ 8) in the last 30 min |
+| G1 ABS BEAR | n8 < 8, dom ≠ BEAR, or Δ > +500 (incoherent) |
+| G2 DIST_pur 2/3 | fewer than 2/3 recent DIST scans ≥ 60 % (ACCU **never** counts toward this — Option B fix) |
+| G3 Δ < -100 | spot delta not below −100 (bonus +TREND when strictly decreasing) |
+| G4 buy% < 48 | buy ratio ≥ 48 % |
+| G5 ACCU seuil | latest ACCU ≥ conditional threshold (50 / 65 / 75 depending on Δ + buy%) |
+| G6 LIVE_PUSH | price source not `LIVE_PUSH` (stale snapshot) |
+
+**Architecture (hexagonal, ArchUnit-enforced):**
+
+- `domain/quant/model/` — pure records + enum (`Gate`, `GateResult`, `DistEntry`, `QuantState`, `MarketSnapshot`, `QuantSnapshot`, `LivePriceSnapshot`, `DeltaSnapshot`)
+- `domain/quant/engine/GateEvaluator` — stateless pure function `evaluate(snap, state, instr) → Outcome(snapshot, nextState)`. Reset is per ET calendar day.
+- `domain/quant/port/` — input/output ports (`AbsorptionPort`, `DistributionPort`, `CyclePort`, `DeltaPort`, `LivePricePort`, `QuantStatePort`, `QuantNotificationPort`)
+- `application/quant/service/QuantGateService` — orchestrates parallel port fetch (CompletableFuture) + evaluator + state save + notify
+- `application/quant/scheduling/QuantGateScheduler` — `@Scheduled(60_000)` calling `service.scan(instr)` for MNQ, MGC, MCL in parallel
+- `application/quant/adapter/{Delta,LivePrice}PortAdapter` — bridges to existing `TickDataPort` and `MarketDataService`
+- `infrastructure/quant/persistence/QuantState{Entity,JpaRepository,JpaAdapter}` — `quant_state` table, JSON-serialised history lists
+- `infrastructure/quant/notification/QuantWebSocketAdapter` — STOMP topics `/topic/quant/snapshot/{instr}`, `/topic/quant/signals` (7/7), `/topic/quant/setups` (6/7)
+- `infrastructure/quant/port/{Absorption,Distribution,Cycle}PortAdapter` — translate JPA event entities into domain signals
+- `infrastructure/quant/QuantConfiguration` — exposes `GateEvaluator` as a Spring bean (kept out of the domain so it stays framework-free)
+- `presentation/quant/QuantGateController` — `GET /api/quant/snapshot/{instr}` + `GET /api/quant/history/{instr}?hours=N`
+
+**Frontend:** `frontend/app/components/quant/QuantGatePanel.tsx` is mounted in
+the AI Trade Desk zone, subscribes to `/topic/quant/snapshot/{instr}` via the
+new `useQuantStream` hook, and renders the 7 gates with ✅/❌ + reason. A
+`QuantSetupNotification` component fires a one-shot WebAudio cue and a
+toast when the backend confirms a 7/7 setup.
+
+**State persistence:** `QuantState` lives in the `quant_state` table (PK =
+instrument). The history lists (delta, dist_only, accu_only, abs_bull_scans)
+are stored as JSON and rotated on every scan. The `/history` endpoint is
+backed by an in-memory ring buffer (`QuantSnapshotHistoryStore`, capacity 240
+entries per instrument ≈ 4 hours) — fine for dashboard playback, resets on
+restart.
+
+**Spec source-of-truth:** `mnq_monitor_v3.py` was the reference — every
+threshold, window and reset rule mirrors that script. Coverage is in
+`GateEvaluatorTest` (13 cases including the v2→v3 G2 dist/accu separation,
+G5 conditional threshold paths, regime trap, and ET session reset).
 
 ## Hidden features surfaced — FALLBACK_DB badge, DXY breakdown, Flash Crash status, Rollover OI
 
