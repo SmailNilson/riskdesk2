@@ -34,23 +34,29 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Reproduces the race the Codex reviewer flagged on PR #297: when the
- * scheduler tick and a manual snapshot request fire in parallel for the same
- * instrument, both reads see the same prior state, both append a delta, and
- * the later save silently drops the earlier append.
+ * Two concurrency contracts on {@link QuantGateService#scan} are pinned here:
  *
- * <p>The lock added in {@code QuantGateService.scan} must serialise the
- * read-evaluate-write window so that, after N concurrent scans on the same
- * instrument, the store has been written N times sequentially and every
- * append is preserved.</p>
+ * <ol>
+ *   <li><b>State integrity</b> — N concurrent scans on the same instrument
+ *       must produce N sequential saves; no two threads may sit inside the
+ *       {@code load → evaluate → save} window at the same time, so no append
+ *       is silently dropped (PR #297 review feedback, P1).</li>
+ *   <li><b>Publish ordering</b> — the publish step must happen inside the
+ *       same lock as the state mutation, otherwise an older snapshot can be
+ *       broadcast after a newer one (PR #297 follow-up review, P2). The
+ *       frontend overwrites per-instrument state on receipt, so an
+ *       out-of-order publish would regress the displayed state and could
+ *       re-fire stale 6/7 / 7/7 alerts.</li>
+ * </ol>
  */
 class QuantGateServiceConcurrencyTest {
 
     @Test
-    @DisplayName("Concurrent scans on the same instrument serialise the load→evaluate→save window")
+    @DisplayName("Concurrent scans on the same instrument serialise the load→evaluate→save→publish window")
     void concurrentScansSerialiseStateUpdates() throws Exception {
         RecordingStatePort statePort = new RecordingStatePort();
-        QuantGateService service = buildService(statePort);
+        RecordingNotificationPort notif = new RecordingNotificationPort();
+        QuantGateService service = buildService(statePort, notif);
 
         int concurrentScans = 16;
         ExecutorService pool = Executors.newFixedThreadPool(8);
@@ -77,17 +83,47 @@ class QuantGateServiceConcurrencyTest {
         assertThat(statePort.saveCount.get()).isEqualTo(concurrentScans);
         assertThat(statePort.loadCount.get()).isEqualTo(concurrentScans);
         assertThat(statePort.peakConcurrentInState.get())
-            .as("at most one scan was inside the load→save window at a time")
+            .as("at most one scan was inside the load→save→publish window at a time")
             .isEqualTo(1);
+        assertThat(notif.peakConcurrentPublishes.get())
+            .as("publish must not run concurrently with another scan's state mutation")
+            .isEqualTo(1);
+        assertThat(notif.snapshotPublishes.get()).isEqualTo(concurrentScans);
     }
 
-    private static QuantGateService buildService(RecordingStatePort statePort) {
+    @Test
+    @DisplayName("latestSnapshot returns null on cold start, then the most recent published snapshot")
+    void latestSnapshotIsReadOnly() {
+        RecordingStatePort statePort = new RecordingStatePort();
+        RecordingNotificationPort notif = new RecordingNotificationPort();
+        QuantGateService service = buildService(statePort, notif);
+
+        // Cold start: no scan has run yet.
+        assertThat(service.latestSnapshot(Instrument.MNQ)).isNull();
+        assertThat(statePort.loadCount.get()).isZero();
+        assertThat(notif.snapshotPublishes.get()).isZero();
+
+        // After one explicit scan the snapshot becomes available — and
+        // subsequent latestSnapshot calls must NOT trigger another scan or
+        // publish (the dashboard bootstrap regression: GET /snapshot used to
+        // call service.scan() and broadcast on every page load).
+        service.scan(Instrument.MNQ);
+        int loadAfterScan = statePort.loadCount.get();
+        int publishesAfterScan = notif.snapshotPublishes.get();
+
+        assertThat(service.latestSnapshot(Instrument.MNQ)).isNotNull();
+        assertThat(service.latestSnapshot(Instrument.MNQ)).isNotNull();
+        assertThat(statePort.loadCount.get()).isEqualTo(loadAfterScan);
+        assertThat(notif.snapshotPublishes.get()).isEqualTo(publishesAfterScan);
+    }
+
+    private static QuantGateService buildService(RecordingStatePort statePort,
+                                                  RecordingNotificationPort notif) {
         AbsorptionPort absorption       = (instr, since) -> List.of();
         DistributionPort distribution   = (instr, since) -> List.of();
         CyclePort cycle                  = (instr, since) -> List.of();
         DeltaPort delta                  = instr -> Optional.of(new DeltaSnapshot(-150.0, 45.0, Instant.now(), "REAL_TICKS"));
         LivePricePort livePrice          = instr -> Optional.of(new LivePriceSnapshot(20_000.0, Instant.now(), "LIVE_PUSH"));
-        QuantNotificationPort silentNotif = new SilentNotificationPort();
 
         QuantSnapshotHistoryStore history = new QuantSnapshotHistoryStore();
         QuantSetupNarrationService narration = new QuantSetupNarrationService(
@@ -103,7 +139,7 @@ class QuantGateServiceConcurrencyTest {
 
         return new QuantGateService(
             absorption, distribution, cycle, delta, livePrice,
-            statePort, silentNotif,
+            statePort, notif,
             history, narration, session, advisor,
             new GateEvaluator()
         );
@@ -134,9 +170,19 @@ class QuantGateServiceConcurrencyTest {
         }
     }
 
-    /** No-op notification port — tests focus on state ordering, not on broadcasts. */
-    private static final class SilentNotificationPort implements QuantNotificationPort {
-        @Override public void publishSnapshot(Instrument i, QuantSnapshot s) {}
+    /** Counts publishes and tracks the peak concurrent publishes. */
+    private static final class RecordingNotificationPort implements QuantNotificationPort {
+        final java.util.concurrent.atomic.AtomicInteger snapshotPublishes = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger inFlight = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger peakConcurrentPublishes = new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override public void publishSnapshot(Instrument i, QuantSnapshot s) {
+            int now = inFlight.incrementAndGet();
+            peakConcurrentPublishes.accumulateAndGet(now, Math::max);
+            try { Thread.sleep(1); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            snapshotPublishes.incrementAndGet();
+            inFlight.decrementAndGet();
+        }
         @Override public void publishShortSignal7_7(Instrument i, QuantSnapshot s) {}
         @Override public void publishSetupAlert6_7(Instrument i, QuantSnapshot s) {}
         @Override public void publishNarration(Instrument i, QuantSnapshot s, PatternAnalysis p, String md) {}

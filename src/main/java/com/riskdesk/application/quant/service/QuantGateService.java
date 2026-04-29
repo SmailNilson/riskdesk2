@@ -66,14 +66,28 @@ public class QuantGateService {
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
 
     /**
-     * Per-instrument lock guarding the {@code load → evaluate → save} sequence.
-     * The scheduled scanner and the manual {@code GET /api/quant/snapshot/{instr}}
-     * endpoint can fire concurrently; without this lock both reads see the same
-     * prior state, both append history entries on top of it, and the later save
-     * silently overwrites the earlier one — gate outcomes would become
-     * non-deterministic and alerts could double-fire or be skipped.
-     * Locks across instruments are independent, so MNQ / MGC / MCL still scan
-     * in parallel.
+     * Per-instrument lock guarding the entire {@code load → evaluate → save →
+     * history → publish → narration → auto-advise check} sequence. Two
+     * separate guarantees:
+     *
+     * <ol>
+     *   <li><b>State integrity.</b> Two concurrent scans on the same instrument
+     *       could both load the same prior state, both append history entries
+     *       on top of it, and the later save would silently drop the earlier
+     *       append.</li>
+     *   <li><b>Publish ordering.</b> If the lock only covered the state
+     *       mutation, scan B could publish snapshot B and then scan A's publish
+     *       (older) would land later — the frontend, which overwrites
+     *       per-instrument state on receipt, would regress to A and could
+     *       re-fire its 6/7 / 7/7 alert.</li>
+     * </ol>
+     *
+     * Holding the lock across publish + narration is cheap because
+     * {@code SimpMessagingTemplate.convertAndSend} is non-blocking. The
+     * advisor LLM call is intentionally outside the lock — it can be slow,
+     * and its own per-instrument cache + auto-advise gate provide the
+     * deduplication. Locks across instruments are independent so MNQ / MGC /
+     * MCL still scan in parallel.
      */
     private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
@@ -128,11 +142,15 @@ public class QuantGateService {
 
         MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
 
-        // Serialise the read-evaluate-write window per instrument so concurrent
-        // scans (scheduler tick + manual snapshot refresh) cannot lose history
-        // appends or trigger duplicate alerts. See instrumentLocks Javadoc.
+        // Serialise the full read-evaluate-write-publish window per instrument
+        // so concurrent scans (scheduler tick + manual refresh) cannot
+        // (a) lose history appends, or
+        // (b) publish snapshots out of order on /topic/quant/* and regress the
+        //     frontend or re-emit stale 6/7 / 7/7 alerts.
+        // See instrumentLocks Javadoc for full rationale.
         QuantSnapshot result;
-        QuantState nextState;
+        QuantSetupNarrationService.NarrationResult narration;
+        boolean shouldAdvise;
         ReentrantLock lock = lockFor(instrument);
         lock.lock();
         try {
@@ -140,22 +158,26 @@ public class QuantGateService {
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
             statePort.save(instrument, outcome.nextState());
             result = outcome.snapshot();
-            nextState = outcome.nextState();
+
+            historyStore.add(instrument, result);
+            narration = narrationService.buildNarration(instrument, result, outcome.nextState(), snap);
+            sessionMemoryService.recordScan(instrument,
+                narration.pattern() == null ? null : narration.pattern().type());
+
+            publish(instrument, result);
+            notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
+
+            // Decide-and-mark must be inside the lock so two concurrent scans
+            // can't both pass the auto-advise gate for the same score.
+            shouldAdvise = shouldAutoAdvise(instrument, result);
         } finally {
             lock.unlock();
         }
 
-        historyStore.add(instrument, result);
-
-        QuantSetupNarrationService.NarrationResult narration =
-            narrationService.buildNarration(instrument, result, nextState, snap);
-        sessionMemoryService.recordScan(instrument,
-            narration.pattern() == null ? null : narration.pattern().type());
-
-        publish(instrument, result);
-        notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
-
-        if (shouldAutoAdvise(instrument, result)) {
+        // The advisor LLM call is slow — done outside the lock. The advisor
+        // service has its own per-instrument 30 s cache so a second concurrent
+        // call would just return the cached verdict.
+        if (shouldAdvise) {
             com.riskdesk.domain.quant.advisor.AiAdvice advice =
                 advisorService.requestAdviceIfQualified(instrument, result, narration.pattern());
             if (advice != null
@@ -166,6 +188,20 @@ public class QuantGateService {
 
         logScan(instrument, result);
         return result;
+    }
+
+    /**
+     * Returns the most recently published snapshot for the instrument, or
+     * {@code null} if the scheduler has not produced one yet. Pure read — does
+     * not run a scan, does not write to {@link QuantStatePort}, does not
+     * publish to any topic. Used by {@code GET /api/quant/snapshot/{instr}} so
+     * that opening the dashboard never side-effects every connected user.
+     */
+    public QuantSnapshot latestSnapshot(Instrument instrument) {
+        return historyStore.recent(instrument, Duration.ofMinutes(5))
+            .stream()
+            .reduce((a, b) -> b)
+            .orElse(null);
     }
 
     private boolean shouldAutoAdvise(Instrument instrument, QuantSnapshot snapshot) {
