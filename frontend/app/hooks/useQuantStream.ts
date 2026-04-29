@@ -144,6 +144,12 @@ export function QuantStreamProvider({ instruments, children }: ProviderProps): J
 
     client.onDisconnect = () => setConnected(false);
     client.onStompError = () => setConnected(false);
+    // Abrupt network drops (Wi-Fi loss, VPN switch, server crash) surface
+    // through the underlying WebSocket close/error callbacks, not through a
+    // graceful STOMP DISCONNECT frame. Without these the badge stays "live"
+    // until the next reconnect attempt — misleading the trader.
+    client.onWebSocketClose = () => setConnected(false);
+    client.onWebSocketError = () => setConnected(false);
 
     client.activate();
     clientRef.current = client;

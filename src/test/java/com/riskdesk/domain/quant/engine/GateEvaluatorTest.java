@@ -134,7 +134,7 @@ class GateEvaluatorTest {
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
             .delta(-150.0).buyPct(45.0)
             .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
-            .dist("ACCUMULATION", 60).build();
+            .dist("ACCUMULATION", 60).distTimestamp(NOW.minusSeconds(60)).build();
 
         GateEvaluator.Outcome outcome = evaluator.evaluate(ms, state, Instrument.MNQ);
 
@@ -254,7 +254,7 @@ class GateEvaluatorTest {
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
             .delta(-200.0).buyPct(40.0)
             .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
-            .dist("DISTRIBUTION", 80).build();
+            .dist("DISTRIBUTION", 80).distTimestamp(NOW.minusSeconds(60)).build();
 
         GateEvaluator.Outcome outcome = evaluator.evaluate(ms, state, Instrument.MNQ);
 
@@ -291,5 +291,47 @@ class GateEvaluatorTest {
 
         assertThat(snapOut.score()).isLessThanOrEqualTo(2);
         assertThat(snapOut.gates()).hasSize(7);
+    }
+
+    @Test
+    @DisplayName("Dist event dedupe: same DIST event seen on N consecutive scans appends only once")
+    void distHistory_dedupesByTimestamp() {
+        java.time.Instant eventTs = NOW.minusSeconds(120);
+        MarketSnapshot.Builder base = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-200.0).buyPct(45.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0);
+        MarketSnapshot tick = base.dist("DISTRIBUTION", 80).distTimestamp(eventTs).build();
+
+        QuantState state = baseState();
+        for (int i = 0; i < 5; i++) {
+            state = evaluator.evaluate(tick, state, Instrument.MNQ).nextState();
+        }
+
+        assertThat(state.distOnlyHistory()).hasSize(1);
+        QuantSnapshot snapOut = evaluator.evaluate(tick, state, Instrument.MNQ).snapshot();
+        assertThat(snapOut.gates().get(Gate.G2_DIST_PUR).ok()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Dist event dedupe: distinct timestamps each get their own history entry")
+    void distHistory_appendsDistinctTimestamps() {
+        QuantState state = baseState();
+        java.time.Instant t1 = NOW.minusSeconds(300);
+        java.time.Instant t2 = NOW.minusSeconds(180);
+        java.time.Instant t3 = NOW.minusSeconds(60);
+
+        MarketSnapshot.Builder base = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-200.0).buyPct(45.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0);
+
+        for (int i = 0; i < 2; i++) state = evaluator.evaluate(base.dist("DISTRIBUTION", 75).distTimestamp(t1).build(), state, Instrument.MNQ).nextState();
+        for (int i = 0; i < 2; i++) state = evaluator.evaluate(base.dist("DISTRIBUTION", 80).distTimestamp(t2).build(), state, Instrument.MNQ).nextState();
+        for (int i = 0; i < 2; i++) state = evaluator.evaluate(base.dist("DISTRIBUTION", 85).distTimestamp(t3).build(), state, Instrument.MNQ).nextState();
+
+        assertThat(state.distOnlyHistory()).hasSize(3);
+        assertThat(state.distOnlyHistory()).extracting(DistEntry::ts)
+            .containsExactly(t1, t2, t3);
     }
 }
