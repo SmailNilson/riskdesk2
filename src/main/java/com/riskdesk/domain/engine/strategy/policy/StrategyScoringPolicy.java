@@ -40,6 +40,11 @@ import java.util.Optional;
  * <h2>Gates</h2>
  * <ol>
  *   <li><b>Hard veto</b> — any vote with a {@code vetoReason} forces NO_TRADE.</li>
+ *   <li><b>Plan present</b> — a non-null candidate without a {@link MechanicalPlan}
+ *       degrades to STANDBY. Tradeable verdicts must carry entry/SL/TP; this
+ *       prevents the engine from emitting HALF_SIZE/FULL_SIZE with empty plan
+ *       fields when a playbook is applicable but cannot anchor a plan
+ *       (e.g. no matching-direction OB).</li>
  *   <li><b>Inter-layer coherence</b> — if CONTEXT and TRIGGER disagree in sign AND
  *       {@code |finalScore| < 70}, the decision is MONITORING. This is the lever
  *       that catches "SMC says LONG but flow says SHORT" without silently averaging.</li>
@@ -78,6 +83,15 @@ public final class StrategyScoringPolicy {
                 DecisionType.NO_TRADE, plan, evaluatedAt);
         }
         if (candidate == null) {
+            return StrategyDecision.standby(evaluatedAt, List.copyOf(votes), layerScores);
+        }
+        // Tradeable verdicts must carry a mechanical plan. When a playbook accepts
+        // the context but cannot build a plan (e.g. the {@code CTX} fallback fires
+        // on regime+bias alone but finds no matching-direction OB), fall back to
+        // STANDBY rather than emit HALF_SIZE/FULL_SIZE with empty entry/SL/TP.
+        // This protects every playbook whose buildPlan() is allowed to return
+        // empty — SB, SBDR, CTX — not just CTX.
+        if (plan.isEmpty()) {
             return StrategyDecision.standby(evaluatedAt, List.copyOf(votes), layerScores);
         }
 

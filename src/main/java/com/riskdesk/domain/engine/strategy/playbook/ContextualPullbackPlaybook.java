@@ -67,9 +67,15 @@ public final class ContextualPullbackPlaybook implements Playbook {
         boolean longSide = ctx.macroBias() == MacroBias.BULL;
         Direction direction = longSide ? Direction.LONG : Direction.SHORT;
 
+        // Pick the OB whose midpoint is closest to current price.
+        // ZoneContextBuilder preserves snapshot iteration order, so findFirst()
+        // would silently grab a farther block when several same-direction OBs sit
+        // in the proximity band — distorting entry/SL/TP. Mirrors SbdrPlaybook.
+        BigDecimal price = ctx.lastPrice();
         Optional<OrderBlockZone> anchor = input.zones().activeOrderBlocks().stream()
-            .filter(ob -> ob.bullish() == longSide)
-            .findFirst();
+            .filter(o -> o.bullish() == longSide)
+            .min((a, b) -> a.mid().subtract(price).abs()
+                .compareTo(b.mid().subtract(price).abs()));
         if (anchor.isEmpty()) return Optional.empty();
 
         OrderBlockZone ob = anchor.get();

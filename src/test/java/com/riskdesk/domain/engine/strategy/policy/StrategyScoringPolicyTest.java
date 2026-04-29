@@ -131,6 +131,27 @@ class StrategyScoringPolicyTest {
         assertThat(d.candidatePlaybookId()).isEmpty();
     }
 
+    @Test
+    void standby_when_candidate_present_but_plan_empty() {
+        // High-confidence votes that would normally graduate to FULL_SIZE…
+        List<AgentVote> votes = List.of(
+            AgentVote.of("ctx-bias", StrategyLayer.CONTEXT, +90, 0.9, List.of()),
+            AgentVote.of("zone-ob", StrategyLayer.ZONE, +60, 0.9, List.of()),
+            AgentVote.of("trig-flow", StrategyLayer.TRIGGER, +50, 0.8, List.of())
+        );
+
+        // …but the playbook accepted the context yet returned no plan (e.g. CTX
+        // applicable on regime+bias but no matching-direction OB available).
+        StrategyDecision d = policy.decide(votes, LSAR_STUB, Optional.empty(), at);
+
+        // Tradeable invariant: never emit HALF_SIZE/FULL_SIZE without a plan.
+        assertThat(d.decision()).isEqualTo(DecisionType.NO_TRADE);
+        assertThat(d.plan()).isEmpty();
+        assertThat(d.direction()).isEmpty();
+        // Score itself is left to the scoring engine (could be zero in standby);
+        // the contract is the type and the absence of plan/direction.
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     private static Playbook stubPlaybook(String id, double minScore) {

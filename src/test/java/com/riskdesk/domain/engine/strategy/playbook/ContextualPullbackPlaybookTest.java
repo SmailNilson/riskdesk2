@@ -124,6 +124,34 @@ class ContextualPullbackPlaybookTest {
     }
 
     @Test
+    void picks_nearest_ob_when_multiple_same_direction_blocks_present() {
+        // Three bullish OBs in the snapshot: the FIRST one in iteration order is
+        // farthest from price. A naive findFirst() would anchor there; the
+        // distance-based selection must pick the middle OB (closest to 100.00).
+        MarketContext ctx = context(MarketRegime.TRENDING, MacroBias.BULL,
+            PriceLocation.INSIDE_VA, PdZone.DISCOUNT);
+
+        OrderBlockZone far    = new OrderBlockZone(true,
+            new BigDecimal("96.50"), new BigDecimal("95.50"),
+            new BigDecimal("96.00"), 80.0);
+        OrderBlockZone nearest = new OrderBlockZone(true,
+            new BigDecimal("99.80"), new BigDecimal("98.80"),
+            new BigDecimal("99.30"), 85.0);
+        OrderBlockZone medium = new OrderBlockZone(true,
+            new BigDecimal("98.50"), new BigDecimal("97.50"),
+            new BigDecimal("98.00"), 75.0);
+
+        // Order matters: far first to expose the bug.
+        ZoneContext zones = new ZoneContext(List.of(far, nearest, medium), List.of(), List.of());
+        StrategyInput input = new StrategyInput(ctx, zones, null, ContextualPullbackPlaybook.ID);
+        Optional<MechanicalPlan> plan = playbook.buildPlan(input);
+
+        assertThat(plan).isPresent();
+        // Entry must be the nearest OB's midpoint, not the first one's.
+        assertThat(plan.get().entry()).isEqualByComparingTo("99.30");
+    }
+
+    @Test
     void minimum_score_higher_than_specific_playbooks() {
         // Permissive applicability is offset by stricter scoring threshold.
         assertThat(playbook.minimumScoreForExecution()).isEqualTo(65.0);
