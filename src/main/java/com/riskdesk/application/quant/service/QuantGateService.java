@@ -179,9 +179,16 @@ public class QuantGateService {
             // and StrategyEngineService to veto SHORT setups that the pure 7-gate
             // quant score would otherwise greenlight (active bull OB, CHOPPY
             // regime, MTF bull alignment, very-bull CMF, Java NO_TRADE).
-            // Narration runs first to compute the order-flow pattern, then we
-            // re-render with the structural data attached so the markdown shows
-            // the blocks/warnings section.
+            //
+            // Pattern is computed BEFORE the snapshot lands in history, but
+            // {@link QuantSetupNarrationService#buildNarration} now always
+            // appends {@code snapshot.price()} to the price window passed to
+            // the detector — so the structural evaluator and the final
+            // narration both observe the *current* tick, never a stale window
+            // (Codex review fix on PR #299). The two narration calls below
+            // therefore produce the same pattern: the first gives us the
+            // pattern to feed structural, the second re-renders the markdown
+            // with the structural blocks/warnings attached.
             QuantSetupNarrationService.NarrationResult preNarration =
                 narrationService.buildNarration(instrument, rawSnapshot, outcome.nextState(), snap);
             StructuralFilterResult structural = evaluateStructural(
