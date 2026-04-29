@@ -37,7 +37,13 @@ public record MarketContext(
     /** Session / liquidity picture. Never null — unknown sentinel when session data is missing. */
     SessionInfo session,
     /** UTC instant this context was built. Used to detect staleness vs trigger stream. */
-    Instant asOf
+    Instant asOf,
+    /**
+     * Secondary indicator values (VWAP, Bollinger, CMF) made available to CONTEXT-layer
+     * agents. Never null — defaults to {@link IndicatorContext#empty()} so agents abstain
+     * gracefully when no indicator data is wired in (tests, legacy call sites).
+     */
+    IndicatorContext indicators
 ) {
     public MarketContext {
         if (instrument == null) throw new IllegalArgumentException("instrument required");
@@ -50,6 +56,7 @@ public record MarketContext(
         if (mtf == null) mtf = MtfSnapshot.neutral();
         if (portfolio == null) portfolio = PortfolioState.unknown();
         if (session == null) session = SessionInfo.unknown();
+        if (indicators == null) indicators = IndicatorContext.empty();
     }
 
     /**
@@ -64,7 +71,7 @@ public record MarketContext(
                           BigDecimal lastPrice, BigDecimal atr, Instant asOf) {
         this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
             lastPrice, atr, MtfSnapshot.neutral(), PortfolioState.unknown(),
-            SessionInfo.unknown(), asOf);
+            SessionInfo.unknown(), asOf, IndicatorContext.empty());
     }
 
     /**
@@ -78,7 +85,24 @@ public record MarketContext(
                           BigDecimal lastPrice, BigDecimal atr,
                           MtfSnapshot mtf, Instant asOf) {
         this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
-            lastPrice, atr, mtf, PortfolioState.unknown(), SessionInfo.unknown(), asOf);
+            lastPrice, atr, mtf, PortfolioState.unknown(), SessionInfo.unknown(), asOf,
+            IndicatorContext.empty());
+    }
+
+    /**
+     * S4a-era constructor (pre-indicators). Delegates the new {@code indicators}
+     * field to {@link IndicatorContext#empty()} so existing call sites
+     * (tests, builders that haven't been wired to surface VWAP/BB/CMF yet)
+     * keep compiling and the new agents abstain instead of voting on null data.
+     */
+    public MarketContext(Instrument instrument, String referenceTimeframe,
+                          MacroBias macroBias, MarketRegime regime,
+                          PriceLocation priceLocation, PdZone pdZone,
+                          BigDecimal lastPrice, BigDecimal atr,
+                          MtfSnapshot mtf, PortfolioState portfolio,
+                          SessionInfo session, Instant asOf) {
+        this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
+            lastPrice, atr, mtf, portfolio, session, asOf, IndicatorContext.empty());
     }
 
     /** True when every context fact is known — tighter setups can require this. */
