@@ -63,10 +63,16 @@ public final class GateEvaluator {
             working = working.appendDelta(roundToOneDecimal(snap.delta()));
         }
 
-        // 4) Route the latest dist/accu signal into the appropriate history list.
-        if ("DISTRIBUTION".equals(snap.distType()) && snap.distConf() != null) {
+        // 4) Route the latest dist/accu signal into the appropriate history
+        // list — but only if it is a NEW event. The application layer feeds
+        // the most recent event from a 10-minute window, so a single event
+        // would otherwise be appended on every 60 s scan and inflate the
+        // dist_only_history to 3 copies of itself, falsely satisfying G2.
+        if ("DISTRIBUTION".equals(snap.distType()) && snap.distConf() != null
+                && isNewerThanLast(snap.distTimestamp(), working.distOnlyHistory())) {
             working = working.appendDistOnly(new DistEntry(DistEntry.DIST, snap.distConf(), snap.distTimestamp()));
-        } else if ("ACCUMULATION".equals(snap.distType()) && snap.distConf() != null) {
+        } else if ("ACCUMULATION".equals(snap.distType()) && snap.distConf() != null
+                && isNewerThanLast(snap.distTimestamp(), working.accuOnlyHistory())) {
             working = working.appendAccuOnly(new DistEntry(DistEntry.ACCU, snap.distConf(), snap.distTimestamp()));
         }
 
@@ -198,6 +204,25 @@ public final class GateEvaluator {
 
     static double roundToOneDecimal(double v) {
         return Math.round(v * 10.0) / 10.0;
+    }
+
+    /**
+     * Returns {@code true} when {@code candidateTs} represents an event the
+     * caller has not yet appended to {@code history}. Compares against the
+     * most recent entry's timestamp — DIST/ACCU events are always appended in
+     * order so checking the tail is sufficient.
+     *
+     * <p>If {@code candidateTs} is {@code null} we cannot tell whether the
+     * event is new, so we conservatively skip the append. Without a
+     * deduplication key, the alternative (always appending) would re-introduce
+     * the very bug this guard exists to prevent.</p>
+     */
+    static boolean isNewerThanLast(java.time.Instant candidateTs, List<DistEntry> history) {
+        if (candidateTs == null) return false;
+        if (history == null || history.isEmpty()) return true;
+        java.time.Instant lastTs = history.get(history.size() - 1).ts();
+        if (lastTs == null) return true;
+        return !candidateTs.equals(lastTs);
     }
 
     static String formatDeltaTrend(List<Double> hist) {
