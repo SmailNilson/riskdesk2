@@ -44,7 +44,7 @@ public class ExternalSetupService {
     private static final Logger log = LoggerFactory.getLogger(ExternalSetupService.class);
     private static final String WS_TOPIC = "/topic/external-setups";
     private static final String DEFAULT_TIMEFRAME = "5m";
-    private static final String REGIME_FILTER_TIMEFRAME = "1H";
+    private static final String REGIME_FILTER_TIMEFRAME = "1h";
 
     private final ExternalSetupRepositoryPort repository;
     private final ExternalSetupProperties properties;
@@ -323,11 +323,11 @@ public class ExternalSetupService {
             boolean rejectLong  = command.direction() == Side.LONG  && MarketRegimeDetector.TRENDING_DOWN.equals(regime);
             boolean rejectShort = command.direction() == Side.SHORT && MarketRegimeDetector.TRENDING_UP.equals(regime);
             if (rejectLong || rejectShort) {
-                log.warn("ExternalSetup regime filter: blocking {} {} — 1H regime is {}",
+                log.warn("ExternalSetup regime filter: blocking {} {} — 1h regime is {}",
                     command.instrument(), command.direction(), regime);
                 throw new IllegalStateException(
                     "counter-trend setup rejected: " + command.direction() + " on " + command.instrument()
-                    + " while 1H regime is " + regime);
+                    + " while 1h regime is " + regime);
             }
             log.debug("ExternalSetup regime check passed: {} {} regime={}",
                 command.instrument(), command.direction(), regime);

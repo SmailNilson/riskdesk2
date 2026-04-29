@@ -253,6 +253,27 @@ class ExternalSetupServiceTest {
     // ── Regime filter tests ───────────────────────────────────────────────────
 
     @Test
+    void submit_queriesIndicatorServiceWithLowerCase1hTimeframe() {
+        // Regression: timeframe label MUST match the JPA-stored convention ("1h", not "1H").
+        // An upper-case label silently returns no candles → empty snapshot → CHOPPY → filter
+        // would silently pass everything (P1 bug caught by codex on PR #295).
+        when(repository.save(any())).thenAnswer(inv -> {
+            ExternalSetup s = inv.getArgument(0);
+            s.setId(1L);
+            return s;
+        });
+
+        service.submit(new ExternalSetupSubmissionCommand(
+            Instrument.MNQ, Side.LONG,
+            new BigDecimal("27258"), new BigDecimal("27240"), new BigDecimal("27280"),
+            null, ExternalSetupConfidence.MEDIUM, "test", "{}",
+            ExternalSetupSource.CLAUDE_WAKEUP, "ref"
+        ));
+
+        verify(indicatorService).computeSnapshot(Instrument.MNQ, "1h");
+    }
+
+    @Test
     void submit_blocksLongWhenRegimeIsTrendingDown() {
         // EMA9 < EMA50 < EMA200 + bbExpanding → TRENDING_DOWN → LONG must be rejected
         when(indicatorService.computeSnapshot(any(), any())).thenReturn(
@@ -362,7 +383,7 @@ class ExternalSetupServiceTest {
     @SuppressWarnings("all")
     private static IndicatorSnapshot snapshotWithEmas(BigDecimal ema9, BigDecimal ema50, BigDecimal ema200, boolean bbExpanding) {
         return new IndicatorSnapshot(
-            "MNQ", "1H",
+            "MNQ", "1h",
             ema9, ema50, ema200, null,
             null, null,
             null, null, null, null,
