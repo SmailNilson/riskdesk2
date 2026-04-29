@@ -281,6 +281,37 @@ When introducing real-order execution:
 - freeze execution quantity on the execution aggregate itself before any broker submission
 - when submitting an entry order, lock the execution row before the external broker side effect so two concurrent triggers cannot place two orders
 
+## Tier 1 deterministic / Tier 2 AI advisory split
+
+For real-time decision systems we apply a strict split between deterministic
+and AI-driven layers:
+
+- **Tier 1 — deterministic.** Pure Java rules engines (e.g. `GateEvaluator`,
+  `OrderFlowPatternDetector`). Run on every scan, sub-millisecond, no external
+  dependency. They are the **source of truth** for the trader's UI: the score,
+  the gate verdicts and the suggested entry/SL/TP all come from tier 1.
+- **Tier 2 — advisory.** A single LLM call enriches qualified setups with
+  long-term memory (pgvector RAG), multi-instrument context and natural-
+  language reasoning. Tier 2 is **never on the critical path**: any failure
+  (network, API key, parse error, schema absent) collapses to
+  `AiAdvice.unavailable(...)` and the dashboard keeps showing tier 1 as if
+  tier 2 had never existed.
+
+**Rules:**
+
+1. Tier 1 must compile, test and run without any LLM dependency available.
+2. Tier 1 output is the canonical state — tier 2 cannot override the verdict,
+   only annotate it. The frontend renders tier 1 first; tier 2 appears as a
+   separate badge/tooltip.
+3. Tier 2 is **opt-in** via configuration (`riskdesk.quant.advisor.enabled=false`
+   by default). Disabled means the adapter bean is not even created — the
+   service returns `unavailable` immediately and never hits the network.
+4. Tier 2 calls must be **rare** (gate-triggered, cached). A tier 2 component
+   that fires every scan is a bug.
+5. Tier 2 responses must be **structured** (JSON schema). Free-form prose is
+   fine in `reasoning` / `risk` fields but the verdict must come from a fixed
+   enum so the frontend can render a stable colour token.
+
 ## Date, Time & Timezone Rules
 
 RiskDesk trades CME Futures. A "trading day" runs from 17:00 ET to 17:00 ET the next calendar day — NOT from midnight UTC. Every piece of code that touches time must respect this.

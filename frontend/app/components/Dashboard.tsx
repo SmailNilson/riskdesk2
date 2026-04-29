@@ -9,6 +9,10 @@ import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
+import QuantGatePanel from './quant/QuantGatePanel';
+import QuantSetupNotification from './quant/QuantSetupNotification';
+import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
+import { QUANT_INSTRUMENTS } from './quant/types';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
@@ -105,6 +109,7 @@ export default function Dashboard() {
   }, [loadSnapshot]);
 
   return (
+    <QuantStreamProvider instruments={QUANT_INSTRUMENTS}>
     <div className={`min-h-screen bg-zinc-950 text-white flex flex-col ${theme === 'light' ? 'light' : ''}`}>
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2.5 bg-zinc-900 border-b border-zinc-800">
@@ -278,12 +283,15 @@ export default function Dashboard() {
             selectedBrokerAccountId={selectedIbkrAccountId}
             onRefresh={refresh}
           />
+          <QuantGatePanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
         </CollapsibleZone>
       </div>
 
       <AlertsFeed alerts={alerts} />
+      <QuantSetupNotification />
     </div>
+    </QuantStreamProvider>
   );
 }
