@@ -103,13 +103,33 @@ public class TriggerContextBuilder {
         if (tickDataPort == null) return Optional.empty();
         try {
             return tickDataPort.currentAggregation(instrument)
-                .filter(agg -> TickAggregation.SOURCE_REAL_TICKS.equals(agg.source()));
+                .filter(agg -> TickAggregation.SOURCE_REAL_TICKS.equals(agg.source()))
+                .filter(TriggerContextBuilder::hasUsableVolume);
         } catch (RuntimeException e) {
             // The port is infra; a transient hiccup must never sink the strategy
             // evaluation. Degrade silently to the CLV path.
             log.debug("Tick aggregation lookup failed for {}: {}", instrument, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Reject {@code REAL_TICKS} snapshots whose rolling window is empty.
+     *
+     * <p>{@code TickByTickAggregator.snapshot()} calls {@code evictExpired()} before
+     * computing, so an instrument that traded earlier but has gone quiet for the
+     * full window is reported with {@code buyVolume=0, sellVolume=0,
+     * buyRatioPct=0.0} — and the source flag stays {@code REAL_TICKS}. Without
+     * this filter the classifier would read 0% buy ratio as a strong bearish FLOW,
+     * generating a false trigger vote during quiet periods or feed gaps.
+     *
+     * <p>This is distinct from a "all sells" snapshot: if {@code sellVolume > 0
+     * && buyVolume == 0}, total volume is non-zero, the ratio is genuinely 0.0,
+     * and the bearish FLOW vote is correct. We discriminate on total volume, not
+     * on the ratio.
+     */
+    private static boolean hasUsableVolume(TickAggregation agg) {
+        return (agg.buyVolume() + agg.sellVolume()) > 0L;
     }
 
     private TriggerContext fromRealTicks(TickAggregation agg, ReactionPattern reaction, DomSignal dom) {

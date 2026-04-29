@@ -159,6 +159,52 @@ class TriggerContextBuilderTest {
     }
 
     @Test
+    void rejects_real_ticks_with_empty_window() {
+        // After a quiet period TickByTickAggregator.snapshot() can return a
+        // REAL_TICKS-flagged record with buy/sell volume both zero (window
+        // evicted). Without filtering, buyRatioPct=0.0 would classify as a
+        // strong bearish FLOW — a false trigger vote.
+        TickAggregation emptyWindow = new TickAggregation(
+            Instrument.MGC, 0L, 0L, 0L, 0L, 0.0,
+            TickAggregation.TREND_FLAT, false, null,
+            Instant.parse("2026-04-17T12:00:00Z"),
+            Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS,
+            Double.NaN, Double.NaN);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, emptyWindow);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        // Must NOT promote to REAL_TICKS; must NOT classify as bearish FLOW.
+        assertThat(trig.quality()).isNotEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.NEUTRAL);
+    }
+
+    @Test
+    void accepts_real_ticks_with_all_sell_volume() {
+        // Discriminator is total volume, not ratio. A genuine all-sell window
+        // (sellVol > 0, buyVol = 0 → buyRatioPct = 0.0) IS a real signal and
+        // must produce a bearish FLOW vote, not be filtered out as "empty window".
+        TickAggregation allSells = new TickAggregation(
+            Instrument.MGC, 0L, 800L, -800L, -800L, 0.0,
+            TickAggregation.TREND_FALLING, false, null,
+            Instant.parse("2026-04-17T11:55:00Z"),
+            Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS,
+            100.5, 99.5);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, allSells);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.REAL_TICKS);
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.FLOW);
+    }
+
+    @Test
     void degrades_silently_when_port_throws() {
         TickDataPort port = new TickDataPort() {
             @Override public Optional<TickAggregation> currentAggregation(Instrument i) {
