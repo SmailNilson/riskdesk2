@@ -55,8 +55,24 @@ public class QuantSetupNarrationService {
 
     private List<Double> recentPricesIncluding(Instrument instrument, QuantSnapshot current) {
         List<QuantSnapshot> history = historyStore.recent(instrument, java.time.Duration.ofMinutes(15));
-        // PRICE_HISTORY_DEPTH-1 from history + current price = PRICE_HISTORY_DEPTH total. Falling
-        // back to whatever history is available when shorter (cold start, scheduler stall…).
+
+        // If the orchestrator already called historyStore.add(current) before this method (e.g.
+        // the second narration pass in QuantGateService.scan), the tail of history IS the current
+        // tick. Drop it so we rebuild the window from the *prior* scans, then re-append current —
+        // guaranteeing both passes produce the SAME PRICE_HISTORY_DEPTH-sized window. Identity is
+        // tracked by scanTime, not by price value: two consecutive scans can legitimately share a
+        // price (flat market) but never share a scanTime (assigned by the scheduler per scan).
+        if (current != null && current.scanTime() != null && !history.isEmpty()) {
+            QuantSnapshot tail = history.get(history.size() - 1);
+            if (tail != null && current.scanTime().equals(tail.scanTime())) {
+                history = history.subList(0, history.size() - 1);
+            }
+        }
+
+        // Take the last (DEPTH-1) prior snapshots, then always append the current tick → exactly
+        // PRICE_HISTORY_DEPTH prices when history is warm, fewer on cold start (the detector's
+        // {@code recentPrices.size() >= 2} guard handles short windows by falling back to the
+        // single-scan classifier).
         int keepFromHistory = Math.max(0, PRICE_HISTORY_DEPTH - 1);
         int from = Math.max(0, history.size() - keepFromHistory);
         List<Double> out = new ArrayList<>(PRICE_HISTORY_DEPTH);
@@ -64,14 +80,8 @@ public class QuantSetupNarrationService {
             Double p = history.get(i).price();
             if (p != null) out.add(p);
         }
-        // Always include the current tick so the pattern detector sees the most recent price,
-        // even when the orchestrator hasn't yet called historyStore.add(current).
         if (current != null && current.price() != null) {
-            // Avoid double-counting if the orchestrator already added the snapshot to history
-            // before calling buildNarration (defensive — current contract is "add after").
-            if (out.isEmpty() || !out.get(out.size() - 1).equals(current.price())) {
-                out.add(current.price());
-            }
+            out.add(current.price());
         }
         return out;
     }
