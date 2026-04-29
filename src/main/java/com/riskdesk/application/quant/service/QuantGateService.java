@@ -60,14 +60,24 @@ public class QuantGateService {
     private final GateEvaluator evaluator;
 
     /**
-     * Per-instrument lock guarding the {@code load → evaluate → save} sequence.
-     * The scheduled scanner and the manual {@code GET /api/quant/snapshot/{instr}}
-     * endpoint can fire concurrently; without this lock both reads see the same
-     * prior state, both append history entries on top of it, and the later save
-     * silently overwrites the earlier one — gate outcomes would become
-     * non-deterministic and alerts could double-fire or be skipped.
-     * Locks across instruments are independent, so MNQ / MGC / MCL still scan
-     * in parallel.
+     * Per-instrument lock guarding the {@code load → evaluate → save → history → publish}
+     * sequence. Two separate guarantees:
+     *
+     * <ol>
+     *   <li><b>State integrity.</b> Two concurrent scans on the same instrument
+     *       could both load the same prior state, both append history entries on
+     *       top of it, and the later save would silently drop the earlier
+     *       append.</li>
+     *   <li><b>Publish ordering.</b> If the lock only covered the state mutation,
+     *       scan B could acquire and release first (publishing snapshot B) and
+     *       then scan A's publish would land later — the frontend, which
+     *       overwrites per-instrument state on receipt, would regress to A
+     *       (the older snapshot) and could re-fire its 6/7 or 7/7 alert.</li>
+     * </ol>
+     *
+     * Holding the lock across the publish is cheap because
+     * {@code SimpMessagingTemplate.convertAndSend} is non-blocking. Locks across
+     * instruments are independent, so MNQ / MGC / MCL still scan in parallel.
      */
     private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
@@ -116,9 +126,12 @@ public class QuantGateService {
 
         MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
 
-        // Serialise the read-evaluate-write window per instrument so concurrent
-        // scans (scheduler tick + manual snapshot refresh) cannot lose history
-        // appends or trigger duplicate alerts. See instrumentLocks Javadoc.
+        // Serialise the full read-evaluate-write-publish window per instrument
+        // so concurrent scans (scheduler tick + manual refresh) cannot
+        // (a) lose history appends, or
+        // (b) publish snapshots out of order on /topic/quant/* and regress the
+        //     frontend or re-emit stale 6/7 / 7/7 alerts.
+        // See instrumentLocks Javadoc for full rationale.
         QuantSnapshot result;
         ReentrantLock lock = lockFor(instrument);
         lock.lock();
@@ -127,14 +140,28 @@ public class QuantGateService {
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
             statePort.save(instrument, outcome.nextState());
             result = outcome.snapshot();
+            historyStore.add(instrument, result);
+            publish(instrument, result);
         } finally {
             lock.unlock();
         }
 
-        historyStore.add(instrument, result);
-        publish(instrument, result);
         logScan(instrument, result);
         return result;
+    }
+
+    /**
+     * Returns the most recently published snapshot for the instrument, or
+     * {@code null} if the scheduler has not produced one yet. Pure read — does
+     * not run a scan, does not write to {@link QuantStatePort}, does not
+     * publish to any topic. Used by {@code GET /api/quant/snapshot/{instr}} so
+     * that opening the dashboard never side-effects every connected user.
+     */
+    public QuantSnapshot latestSnapshot(Instrument instrument) {
+        return historyStore.recent(instrument, Duration.ofMinutes(5))
+            .stream()
+            .reduce((a, b) -> b)
+            .orElse(null);
     }
 
     private synchronized ReentrantLock lockFor(Instrument instrument) {
