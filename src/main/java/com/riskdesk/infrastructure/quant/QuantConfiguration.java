@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.quant;
 import com.riskdesk.domain.quant.engine.GateEvaluator;
 import com.riskdesk.domain.quant.narrative.QuantNarrator;
 import com.riskdesk.domain.quant.pattern.OrderFlowPatternDetector;
+import com.riskdesk.domain.quant.structure.StructuralFilterEvaluator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -28,5 +29,10 @@ public class QuantConfiguration {
     @Bean
     public QuantNarrator quantNarrator() {
         return new QuantNarrator();
+    }
+
+    @Bean
+    public StructuralFilterEvaluator structuralFilterEvaluator() {
+        return new StructuralFilterEvaluator();
     }
 }

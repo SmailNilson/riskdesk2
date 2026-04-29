@@ -65,7 +65,10 @@ class QuantGateServiceAlertTransitionTest {
             instr -> Optional.empty(),
             new InMemoryStatePort(), notif,
             history, narration, session, advisor,
-            new GateEvaluator()
+            new GateEvaluator(),
+            instr -> Optional.empty(),
+            instr -> Optional.empty(),
+            new com.riskdesk.domain.quant.structure.StructuralFilterEvaluator()
         );
     }
 

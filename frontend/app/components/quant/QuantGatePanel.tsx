@@ -140,7 +140,57 @@ export default function QuantGatePanel() {
             ))}
           </ul>
 
-          {snapshot.score >= 6 && snapshot.entry !== null && snapshot.sl !== null && (
+          {(snapshot.structuralBlocks?.length ?? 0) > 0 && (
+            <ul className="mt-3 space-y-1 text-xs font-mono">
+              {snapshot.structuralBlocks!.map((b) => (
+                <li
+                  key={`block-${b.code}`}
+                  className="flex items-start gap-2 px-2 py-1 rounded bg-red-950/60 border border-red-800"
+                  title={b.evidence}
+                >
+                  <span className="text-red-400">🚫</span>
+                  <span className="text-red-200 font-semibold">{b.code}</span>
+                  <span className="text-red-300/80 truncate">{b.evidence}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(snapshot.structuralWarnings?.length ?? 0) > 0 && (
+            <ul className="mt-2 space-y-1 text-xs font-mono">
+              {snapshot.structuralWarnings!.map((w, idx) => (
+                <li
+                  key={`warn-${w.code}-${idx}`}
+                  className="flex items-start gap-2 px-2 py-1 rounded bg-amber-950/40 border border-amber-900/60"
+                  title={w.evidence}
+                >
+                  <span className="text-amber-400">⚠️</span>
+                  <span className="text-amber-200 font-semibold w-10 shrink-0">{w.scoreModifier >= 0 ? `+${w.scoreModifier}` : w.scoreModifier}</span>
+                  <span className="text-amber-100">{w.code}</span>
+                  <span className="text-amber-300/80 truncate">{w.evidence}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(snapshot.structuralScoreModifier ?? 0) !== 0 && (
+            <div className="mt-2 text-xs text-slate-400">
+              raw <span className="font-mono">{snapshot.score}/7</span>
+              {' '}→ final <span className="font-mono text-slate-200">{snapshot.finalScore ?? snapshot.score}</span>
+              {' '}(structural <span className="font-mono">{(snapshot.structuralScoreModifier ?? 0) >= 0 ? '+' : ''}{snapshot.structuralScoreModifier}</span>)
+            </div>
+          )}
+
+          {snapshot.shortBlocked && (
+            <div className="mt-4 rounded border border-red-700 bg-red-950/40 p-3 text-sm">
+              <div className="font-semibold text-red-300">
+                ❌ SHORT bloqué — {snapshot.structuralBlocks?.length ?? 0} block{(snapshot.structuralBlocks?.length ?? 0) === 1 ? '' : 's'} structurel(s)
+              </div>
+              <div className="text-xs text-red-200/80 mt-1">
+                Le score quant est suffisant mais la structure de marché veto le SHORT.
+              </div>
+            </div>
+          )}
+
+          {!snapshot.shortBlocked && snapshot.score >= 6 && snapshot.entry !== null && snapshot.sl !== null && (
             <div className="mt-4 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm">
               <div className="font-semibold mb-2 flex items-center gap-2 flex-wrap">
                 {snapshot.shortSetup7_7 ? (

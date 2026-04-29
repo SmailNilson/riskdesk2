@@ -48,6 +48,13 @@ function payloadToView(p: QuantWsPayload): QuantSnapshotView {
       ok: value.ok,
       reason: value.reason,
     })),
+    // Structural filters (PR #299)
+    structuralBlocks: p.structuralBlocks ?? [],
+    structuralWarnings: p.structuralWarnings ?? [],
+    structuralScoreModifier: p.structuralScoreModifier ?? 0,
+    finalScore: p.finalScore ?? p.score,
+    shortBlocked: p.shortBlocked ?? false,
+    shortAvailable: p.shortAvailable ?? p.score >= 6,
   };
 }
 
