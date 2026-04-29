@@ -132,7 +132,7 @@ class StrategyScoringPolicyTest {
     }
 
     @Test
-    void standby_when_candidate_present_but_plan_empty() {
+    void no_trade_preserves_playbook_and_score_when_plan_empty() {
         // High-confidence votes that would normally graduate to FULL_SIZE…
         List<AgentVote> votes = List.of(
             AgentVote.of("ctx-bias", StrategyLayer.CONTEXT, +90, 0.9, List.of()),
@@ -148,8 +148,13 @@ class StrategyScoringPolicyTest {
         assertThat(d.decision()).isEqualTo(DecisionType.NO_TRADE);
         assertThat(d.plan()).isEmpty();
         assertThat(d.direction()).isEmpty();
-        // Score itself is left to the scoring engine (could be zero in standby);
-        // the contract is the type and the absence of plan/direction.
+        // Diagnostic invariant: candidate id and final score MUST be preserved so
+        // the UI / analytics payloads distinguish "no playbook applicable" from
+        // "playbook applicable but plan unbuildable". Collapsing to standby() —
+        // which nulls both — would hide the real failure mode.
+        assertThat(d.candidatePlaybookId()).contains("LSAR");
+        // finalScore = 0.5 × 90 + 0.3 × 60 + 0.2 × 50 = 73 — must surface, not zero out.
+        assertThat(d.finalScore()).isCloseTo(73.0, org.assertj.core.data.Offset.offset(0.5));
     }
 
     // ── helpers ────────────────────────────────────────────────────────────

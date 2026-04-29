@@ -41,10 +41,13 @@ import java.util.Optional;
  * <ol>
  *   <li><b>Hard veto</b> — any vote with a {@code vetoReason} forces NO_TRADE.</li>
  *   <li><b>Plan present</b> — a non-null candidate without a {@link MechanicalPlan}
- *       degrades to STANDBY. Tradeable verdicts must carry entry/SL/TP; this
- *       prevents the engine from emitting HALF_SIZE/FULL_SIZE with empty plan
- *       fields when a playbook is applicable but cannot anchor a plan
- *       (e.g. no matching-direction OB).</li>
+ *       forces NO_TRADE while preserving {@code candidatePlaybookId} and
+ *       {@code finalScore}. Tradeable verdicts must carry entry/SL/TP; this
+ *       prevents HALF_SIZE/FULL_SIZE with empty plan fields when a playbook is
+ *       applicable but cannot anchor a plan (e.g. no matching-direction OB).
+ *       The decision is NOT collapsed to STANDBY because diagnostics need to
+ *       distinguish "no playbook applicable" from "playbook applicable but
+ *       plan unbuildable" — the UI shows the playbook id either way.</li>
  *   <li><b>Inter-layer coherence</b> — if CONTEXT and TRIGGER disagree in sign AND
  *       {@code |finalScore| < 70}, the decision is MONITORING. This is the lever
  *       that catches "SMC says LONG but flow says SHORT" without silently averaging.</li>
@@ -87,12 +90,18 @@ public final class StrategyScoringPolicy {
         }
         // Tradeable verdicts must carry a mechanical plan. When a playbook accepts
         // the context but cannot build a plan (e.g. the {@code CTX} fallback fires
-        // on regime+bias alone but finds no matching-direction OB), fall back to
-        // STANDBY rather than emit HALF_SIZE/FULL_SIZE with empty entry/SL/TP.
-        // This protects every playbook whose buildPlan() is allowed to return
-        // empty — SB, SBDR, CTX — not just CTX.
+        // on regime+bias alone but finds no matching-direction OB), force NO_TRADE
+        // rather than emit HALF_SIZE/FULL_SIZE with empty entry/SL/TP.
+        //
+        // Preserve {@code candidatePlaybookId} and {@code finalScore} on this
+        // path — collapsing to {@link StrategyDecision#standby} would conflate
+        // "no playbook applicable" with "playbook applicable but plan unbuildable",
+        // and the UI / analytics payloads need to distinguish them to diagnose
+        // why a setup never trades. Empty plan/direction is enforced by
+        // {@link #buildDecision} when {@code plan.isEmpty()}.
         if (plan.isEmpty()) {
-            return StrategyDecision.standby(evaluatedAt, List.copyOf(votes), layerScores);
+            return buildDecision(candidate, votes, layerScores, finalScore, List.of(),
+                DecisionType.NO_TRADE, plan, evaluatedAt);
         }
 
         // Inter-layer coherence gate — only relevant when both layers have
