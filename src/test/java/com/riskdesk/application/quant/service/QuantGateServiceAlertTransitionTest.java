@@ -32,16 +32,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link QuantGateService#publish}: the one-shot {@code publishShortSignal7_7}
  * / {@code publishSetupAlert6_7} alerts must fire only when the
  * per-instrument score TRANSITIONS into the 6/7 or 7/7 band — never on
- * persistence (PR #297, review #5).
+ * persistence (PR #297, review #5). The transition state ({@code prev →
+ * current}) lives in {@link QuantState#lastSignaledScore()} and is
+ * round-tripped through {@code QuantStatePort}, so it survives process
+ * restarts (PR #297, review #7).
  */
 class QuantGateServiceAlertTransitionTest {
 
     private RecordingNotificationPort notif;
     private QuantGateService service;
+    /** Mirrors what scan() does in production: track prev signaled per instrument across calls. */
+    private final Map<Instrument, Integer> testPrev = new EnumMap<>(Instrument.class);
 
     @BeforeEach
     void setUp() {
         notif = new RecordingNotificationPort();
+        testPrev.clear();
         QuantSnapshotHistoryStore history = new QuantSnapshotHistoryStore();
         QuantSetupNarrationService narration = new QuantSetupNarrationService(
             history, new OrderFlowPatternDetector(), new QuantNarrator()
@@ -63,11 +69,18 @@ class QuantGateServiceAlertTransitionTest {
         );
     }
 
+    /** Mirrors what scan() does: emit + advance the prev tracker for the next call. */
+    private void publishWithTracking(Instrument instr, QuantSnapshot snap) {
+        int prev = testPrev.getOrDefault(instr, 0);
+        service.publish(instr, snap, prev);
+        testPrev.put(instr, QuantGateService.nextSignaledScoreFor(prev, snap.score()));
+    }
+
     @Test
     @DisplayName("Persisting at 7/7 across N scans → publishShortSignal7_7 fires exactly once")
     void persistingAt7_7_firesOnce() {
         for (int i = 0; i < 5; i++) {
-            service.publish(Instrument.MNQ, snapshotWithScore(7));
+            publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
         }
         assertThat(notif.shortSignal7Count.get()).isEqualTo(1);
         assertThat(notif.setup6Count.get()).isZero();
@@ -78,7 +91,7 @@ class QuantGateServiceAlertTransitionTest {
     @DisplayName("Persisting at 6/7 across N scans → publishSetupAlert6_7 fires exactly once")
     void persistingAt6_7_firesOnce() {
         for (int i = 0; i < 5; i++) {
-            service.publish(Instrument.MNQ, snapshotWithScore(6));
+            publishWithTracking(Instrument.MNQ, snapshotWithScore(6));
         }
         assertThat(notif.setup6Count.get()).isEqualTo(1);
         assertThat(notif.shortSignal7Count.get()).isZero();
@@ -87,21 +100,21 @@ class QuantGateServiceAlertTransitionTest {
     @Test
     @DisplayName("Setup lost then regained → fresh 7/7 alert on each re-entry")
     void setupLostThenRegained_refires() {
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MNQ, snapshotWithScore(5));
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(5));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
         assertThat(notif.shortSignal7Count.get()).isEqualTo(2);
     }
 
     @Test
     @DisplayName("Escalation 6→7 → 7/7 fires; 6/7 does NOT re-fire on the way back down")
     void escalation6to7_firesOnly7And_doesNotRefireOn7to6() {
-        service.publish(Instrument.MNQ, snapshotWithScore(6));
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MNQ, snapshotWithScore(6));
-        service.publish(Instrument.MNQ, snapshotWithScore(6));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(6));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(6));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(6));
         assertThat(notif.setup6Count.get()).isEqualTo(1);
         assertThat(notif.shortSignal7Count.get()).isEqualTo(1);
     }
@@ -109,10 +122,10 @@ class QuantGateServiceAlertTransitionTest {
     @Test
     @DisplayName("Per-instrument tracking: MNQ alerts do not block MGC alerts")
     void perInstrumentTracking() {
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MGC, snapshotWithScore(7));
-        service.publish(Instrument.MNQ, snapshotWithScore(7));
-        service.publish(Instrument.MGC, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MGC, snapshotWithScore(7));
+        publishWithTracking(Instrument.MNQ, snapshotWithScore(7));
+        publishWithTracking(Instrument.MGC, snapshotWithScore(7));
         assertThat(notif.shortSignal7Count.get()).isEqualTo(2);
     }
 
@@ -120,11 +133,30 @@ class QuantGateServiceAlertTransitionTest {
     @DisplayName("Score below 6 never fires the one-shot alerts but still publishes the snapshot")
     void scoreBelow6_neverFires() {
         for (int s : new int[]{0, 1, 2, 3, 4, 5}) {
-            service.publish(Instrument.MNQ, snapshotWithScore(s));
+            publishWithTracking(Instrument.MNQ, snapshotWithScore(s));
         }
         assertThat(notif.shortSignal7Count.get()).isZero();
         assertThat(notif.setup6Count.get()).isZero();
         assertThat(notif.snapshotCount.get()).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("nextSignaledScoreFor: pure transition table")
+    void transitionTable() {
+        // 0→7 fires; 0→6 fires
+        assertThat(QuantGateService.nextSignaledScoreFor(0, 7)).isEqualTo(7);
+        assertThat(QuantGateService.nextSignaledScoreFor(0, 6)).isEqualTo(6);
+        // Persistence: stays
+        assertThat(QuantGateService.nextSignaledScoreFor(7, 7)).isEqualTo(7);
+        assertThat(QuantGateService.nextSignaledScoreFor(6, 6)).isEqualTo(6);
+        // 7→6 keeps prev (no re-fire on the way down)
+        assertThat(QuantGateService.nextSignaledScoreFor(7, 6)).isEqualTo(7);
+        // Drop below 6 resets so the next rise re-fires
+        assertThat(QuantGateService.nextSignaledScoreFor(7, 5)).isZero();
+        assertThat(QuantGateService.nextSignaledScoreFor(7, 4)).isZero();
+        assertThat(QuantGateService.nextSignaledScoreFor(6, 0)).isZero();
+        // 6→7 escalation
+        assertThat(QuantGateService.nextSignaledScoreFor(6, 7)).isEqualTo(7);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

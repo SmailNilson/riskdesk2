@@ -65,18 +65,7 @@ public class QuantGateService {
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
 
-    /**
-     * Last score for which we published a 6/7 or 7/7 alert per instrument.
-     * Used to make the alert publish transition-based: re-fire only when the
-     * score escalates into a new alert level, never on persistence. Guarded by
-     * the per-instrument {@link #instrumentLocks}.
-     *
-     * <p>Score below 6 resets to 0, so a setup that drops out and comes back
-     * fires a fresh alert (legitimate re-entry).</p>
-     */
-    private final Map<Instrument, Integer> lastSignaledScore = new EnumMap<>(Instrument.class);
-
-    /** Score threshold below which we reset {@link #lastSignaledScore} so the next rise re-fires. */
+    /** Score threshold below which {@code lastSignaledScore} resets so the next rise re-fires. */
     private static final int SIGNAL_RESET_BELOW = 6;
 
     /**
@@ -169,7 +158,6 @@ public class QuantGateService {
 
             QuantState saved = statePort.load(instrument);
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
-            statePort.save(instrument, outcome.nextState());
             result = outcome.snapshot();
 
             historyStore.add(instrument, result);
@@ -177,7 +165,18 @@ public class QuantGateService {
             sessionMemoryService.recordScan(instrument,
                 narration.pattern() == null ? null : narration.pattern().type());
 
-            publish(instrument, result);
+            // Compute the alert transition using the persisted prev value, not
+            // an in-memory map — survives process restarts (PR #297 follow-up).
+            int prevSignaled = outcome.nextState().lastSignaledScore();
+            int newSignaled = nextSignaledScoreFor(prevSignaled, result.score());
+
+            // Save state ONCE with the updated lastSignaledScore. Saving before
+            // the publish() emit gives at-most-once semantics on the alert: a
+            // crash between save and publish loses the alert (acceptable) but
+            // never duplicates it on restart (the painful case).
+            statePort.save(instrument, outcome.nextState().withLastSignaledScore(newSignaled));
+
+            publish(instrument, result, prevSignaled);
             notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
 
             // Decide-and-mark inside the lock so two concurrent scans can't
@@ -296,34 +295,40 @@ public class QuantGateService {
      * ARCHITECTURE_PRINCIPLES.md "Alert Evaluation Rule") and the frontend
      * contract that {@code /topic/quant/signals} is a one-shot confirmation.
      *
-     * <p>Transitions that fire:</p>
-     * <ul>
-     *   <li>score reaches 7 from anything below → fire 7/7 (covers 5→7, 6→7)</li>
-     *   <li>score reaches 6 from below 6 → fire 6/7 (does NOT fire on 7→6)</li>
-     * </ul>
-     *
-     * <p>Persistence (6→6, 7→7) does NOT re-fire. Drop below 6 resets the
-     * tracker so the next rise re-fires. Caller is expected to hold the
-     * per-instrument lock.</p>
+     * <p>{@code prevSignaledScore} is the publisher's transition tracker: the
+     * highest score for which an alert was already emitted. Caller is
+     * responsible for sourcing this value from {@link QuantState} (so it
+     * survives restarts) and persisting the {@link #nextSignaledScoreFor
+     * computed next value}.</p>
      *
      * <p>Package-private for {@code QuantGateServiceAlertTransitionTest}.</p>
      */
-    void publish(Instrument instrument, QuantSnapshot snapshot) {
+    void publish(Instrument instrument, QuantSnapshot snapshot, int prevSignaledScore) {
         notificationPort.publishSnapshot(instrument, snapshot);
 
         int score = snapshot.score();
-        int lastSignaled = lastSignaledScore.getOrDefault(instrument, 0);
-
-        if (score >= 7 && lastSignaled < 7) {
+        if (score >= 7 && prevSignaledScore < 7) {
             notificationPort.publishShortSignal7_7(instrument, snapshot);
-            lastSignaledScore.put(instrument, 7);
-        } else if (score == 6 && lastSignaled < 6) {
+        } else if (score == 6 && prevSignaledScore < 6) {
             notificationPort.publishSetupAlert6_7(instrument, snapshot);
-            lastSignaledScore.put(instrument, 6);
-        } else if (score < SIGNAL_RESET_BELOW) {
-            // Setup lost — reset so a re-entry fires fresh alerts.
-            lastSignaledScore.put(instrument, 0);
         }
+    }
+
+    /**
+     * Pure transition-state machine for the alert publisher.
+     *
+     * <ul>
+     *   <li>score ≥ 7 from anything below → return 7 (fire 7/7)</li>
+     *   <li>score = 6 from below 6 → return 6 (fire 6/7)</li>
+     *   <li>score &lt; 6 → return 0 (reset; a re-entry will fire again)</li>
+     *   <li>otherwise → return prev unchanged (persistence at 6 or 7, no fire)</li>
+     * </ul>
+     */
+    static int nextSignaledScoreFor(int prevSignaledScore, int currentScore) {
+        if (currentScore >= 7 && prevSignaledScore < 7) return 7;
+        if (currentScore == 6 && prevSignaledScore < 6) return 6;
+        if (currentScore < SIGNAL_RESET_BELOW) return 0;
+        return prevSignaledScore;
     }
 
     private void logScan(Instrument instrument, QuantSnapshot snapshot) {

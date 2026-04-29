@@ -53,6 +53,7 @@ public class QuantStateJpaAdapter implements QuantStatePort {
         entity.setDistOnlyHistoryJson(serialiseDistEntries(state.distOnlyHistory()));
         entity.setAccuOnlyHistoryJson(serialiseDistEntries(state.accuOnlyHistory()));
         entity.setAbsBullScansJson(serialiseInstants(state.absBullScans30m()));
+        entity.setLastSignaledScore(state.lastSignaledScore());
         repository.save(entity);
     }
 
@@ -63,7 +64,8 @@ public class QuantStateJpaAdapter implements QuantStatePort {
             parseDoubles(e.getDeltaHistoryJson()),
             parseDistEntries(e.getDistOnlyHistoryJson()),
             parseDistEntries(e.getAccuOnlyHistoryJson()),
-            parseInstants(e.getAbsBullScansJson())
+            parseInstants(e.getAbsBullScansJson()),
+            e.getLastSignaledScore()
         );
     }
 

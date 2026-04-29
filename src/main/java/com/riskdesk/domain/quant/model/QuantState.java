@@ -16,6 +16,13 @@ import java.util.List;
  * current ET calendar day (midnight rollover, matching the Python script),
  * the state is wiped via {@link #reset(LocalDate)} so each session starts
  * with a clean slate.
+ *
+ * <p><b>{@code lastSignaledScore}</b> tracks the highest score for which a
+ * 6/7 or 7/7 alert was published, so transition-based publish dedup survives
+ * across process restarts. The evaluator does not read this field — only the
+ * publisher writes it via {@link #withLastSignaledScore(int)}.
+ * {@link #reset(LocalDate)} sets it back to 0 so a fresh trading day re-fires
+ * legitimately.</p>
  */
 public record QuantState(
     LocalDate sessionDate,
@@ -23,7 +30,8 @@ public record QuantState(
     List<Double> deltaHistory,
     List<DistEntry> distOnlyHistory,
     List<DistEntry> accuOnlyHistory,
-    List<Instant> absBullScans30m
+    List<Instant> absBullScans30m,
+    int lastSignaledScore
 ) {
     public static final int HISTORY_CAPACITY = 3;
     public static final int ABS_BULL_WINDOW_MINUTES = 30;
@@ -37,26 +45,30 @@ public record QuantState(
 
     /** Returns a fresh state for the given trading date with no history. */
     public static QuantState reset(LocalDate sessionDate) {
-        return new QuantState(sessionDate, null, List.of(), List.of(), List.of(), List.of());
+        return new QuantState(sessionDate, null, List.of(), List.of(), List.of(), List.of(), 0);
     }
 
     public QuantState withMonitorStartPx(double px) {
-        return new QuantState(sessionDate, px, deltaHistory, distOnlyHistory, accuOnlyHistory, absBullScans30m);
+        return new QuantState(sessionDate, px, deltaHistory, distOnlyHistory, accuOnlyHistory,
+            absBullScans30m, lastSignaledScore);
     }
 
     public QuantState appendDelta(double delta) {
         List<Double> next = appendCapped(deltaHistory, delta, HISTORY_CAPACITY);
-        return new QuantState(sessionDate, monitorStartPx, next, distOnlyHistory, accuOnlyHistory, absBullScans30m);
+        return new QuantState(sessionDate, monitorStartPx, next, distOnlyHistory, accuOnlyHistory,
+            absBullScans30m, lastSignaledScore);
     }
 
     public QuantState appendDistOnly(DistEntry entry) {
         List<DistEntry> next = appendCapped(distOnlyHistory, entry, HISTORY_CAPACITY);
-        return new QuantState(sessionDate, monitorStartPx, deltaHistory, next, accuOnlyHistory, absBullScans30m);
+        return new QuantState(sessionDate, monitorStartPx, deltaHistory, next, accuOnlyHistory,
+            absBullScans30m, lastSignaledScore);
     }
 
     public QuantState appendAccuOnly(DistEntry entry) {
         List<DistEntry> next = appendCapped(accuOnlyHistory, entry, HISTORY_CAPACITY);
-        return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, next, absBullScans30m);
+        return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, next,
+            absBullScans30m, lastSignaledScore);
     }
 
     /**
@@ -71,7 +83,7 @@ public record QuantState(
         }
         if (scanTs != null && !scanTs.isBefore(cutoff)) next.add(scanTs);
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            Collections.unmodifiableList(next));
+            Collections.unmodifiableList(next), lastSignaledScore);
     }
 
     /** Prune the ABS BULL list without adding a new entry. */
@@ -83,7 +95,13 @@ public record QuantState(
         }
         if (next.size() == absBullScans30m.size()) return this;
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            Collections.unmodifiableList(next));
+            Collections.unmodifiableList(next), lastSignaledScore);
+    }
+
+    /** Returns a new state with the publisher's transition tracker updated. */
+    public QuantState withLastSignaledScore(int score) {
+        return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
+            absBullScans30m, score);
     }
 
     private static <T> List<T> appendCapped(List<T> source, T entry, int cap) {
