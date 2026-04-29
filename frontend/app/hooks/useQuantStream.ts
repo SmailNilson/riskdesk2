@@ -4,7 +4,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
-import type { QuantInstrument, QuantSnapshotView, QuantWsPayload } from '@/app/components/quant/types';
+import type {
+  AdviceView,
+  PatternView,
+  QuantInstrument,
+  QuantNarrationView,
+  QuantSnapshotView,
+  QuantWsPayload,
+} from '@/app/components/quant/types';
 
 function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined): string {
   const base = (wsBase || apiBase || '').replace(/\/$/, '');
@@ -44,6 +51,8 @@ const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 export function useQuantStream(instruments: readonly QuantInstrument[]) {
   const clientRef = useRef<Client | null>(null);
   const [snapshots, setSnapshots] = useState<Record<string, QuantSnapshotView>>({});
+  const [narrations, setNarrations] = useState<Record<string, QuantNarrationView>>({});
+  const [advice, setAdvice] = useState<Record<string, AdviceView>>({});
   const [latestSignal, setLatestSignal] = useState<QuantSnapshotView | null>(null);
   const [connected, setConnected] = useState(false);
 
@@ -60,26 +69,49 @@ export function useQuantStream(instruments: readonly QuantInstrument[]) {
     client.onConnect = () => {
       setConnected(true);
       for (const instr of instruments) {
-        const s = client.subscribe(`/topic/quant/snapshot/${instr}`, (msg: IMessage) => {
+        subs.push(client.subscribe(`/topic/quant/snapshot/${instr}`, (msg: IMessage) => {
           try {
             const payload = JSON.parse(msg.body) as QuantWsPayload;
-            const view = payloadToView(payload);
-            setSnapshots(prev => ({ ...prev, [view.instrument]: view }));
+            setSnapshots(prev => ({ ...prev, [payload.instrument]: payloadToView(payload) }));
           } catch (err) {
             console.warn('quant snapshot parse failed', err);
           }
-        });
-        subs.push(s);
+        }));
+
+        subs.push(client.subscribe(`/topic/quant/narration/${instr}`, (msg: IMessage) => {
+          try {
+            const payload = JSON.parse(msg.body) as QuantWsPayload;
+            setNarrations(prev => ({
+              ...prev,
+              [payload.instrument]: {
+                pattern: extractPattern(payload),
+                markdown: payload.markdown ?? '',
+              },
+            }));
+          } catch (err) {
+            console.warn('quant narration parse failed', err);
+          }
+        }));
+
+        subs.push(client.subscribe(`/topic/quant/advice/${instr}`, (msg: IMessage) => {
+          try {
+            const payload = JSON.parse(msg.body) as QuantWsPayload;
+            const a = payload.advice ?? null;
+            if (!a) return;
+            setAdvice(prev => ({ ...prev, [payload.instrument]: a }));
+          } catch (err) {
+            console.warn('quant advice parse failed', err);
+          }
+        }));
       }
-      const signalSub = client.subscribe('/topic/quant/signals', (msg: IMessage) => {
+      subs.push(client.subscribe('/topic/quant/signals', (msg: IMessage) => {
         try {
           const payload = JSON.parse(msg.body) as QuantWsPayload;
           setLatestSignal(payloadToView(payload));
         } catch (err) {
           console.warn('quant signal parse failed', err);
         }
-      });
-      subs.push(signalSub);
+      }));
     };
 
     client.onDisconnect = () => setConnected(false);
@@ -98,5 +130,17 @@ export function useQuantStream(instruments: readonly QuantInstrument[]) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { snapshots, latestSignal, connected, ack };
+  return { snapshots, narrations, advice, latestSignal, connected, ack };
+}
+
+function extractPattern(payload: QuantWsPayload): PatternView | null {
+  const p = payload.pattern;
+  if (!p || !p.type) return null;
+  return {
+    type: p.type,
+    label: p.label,
+    reason: p.reason,
+    confidence: p.confidence,
+    action: p.action,
+  };
 }

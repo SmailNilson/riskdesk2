@@ -25,7 +25,7 @@ export interface QuantSnapshotView {
 
 /** WebSocket payload — same shape as REST plus a `kind` discriminator. */
 export interface QuantWsPayload {
-  kind: 'SNAPSHOT' | 'SHORT_7_7' | 'SETUP_6_7';
+  kind: 'SNAPSHOT' | 'SHORT_7_7' | 'SETUP_6_7' | 'NARRATION' | 'ADVICE';
   instrument: string;
   score: number;
   price: number | null;
@@ -37,6 +37,31 @@ export interface QuantWsPayload {
   tp1: number | null;
   tp2: number | null;
   gates: Record<string, { ok: boolean; reason: string }>;
+  pattern?: PatternView | null;
+  markdown?: string | null;
+  advice?: AdviceView | null;
+}
+
+export interface PatternView {
+  type: string;
+  label: string;
+  reason: string;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  action: 'TRADE' | 'WAIT' | 'AVOID';
+}
+
+export interface AdviceView {
+  verdict: 'TRADE' | 'ATTENDRE' | 'EVITER' | 'UNAVAILABLE';
+  reasoning: string;
+  risk: string;
+  confidence: number;
+  model: string;
+  generatedAt: string | null;
+}
+
+export interface QuantNarrationView {
+  pattern: PatternView | null;
+  markdown: string;
 }
 
 export const QUANT_INSTRUMENTS = ['MNQ', 'MGC', 'MCL'] as const;

@@ -3,9 +3,12 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/app/lib/api';
 import { useQuantStream } from '@/app/hooks/useQuantStream';
+import QuantAdvisorBadge from './QuantAdvisorBadge';
+import QuantNarrationPanel from './QuantNarrationPanel';
 import {
   GATE_LABELS,
   QUANT_INSTRUMENTS,
+  type AdviceView,
   type QuantInstrument,
   type QuantSnapshotView,
 } from './types';
@@ -29,8 +32,10 @@ function formatPrice(p: number | null): string {
  */
 export default function QuantGatePanel() {
   const [active, setActive] = useState<QuantInstrument>('MNQ');
-  const { snapshots, connected } = useQuantStream(QUANT_INSTRUMENTS);
+  const { snapshots, narrations, advice: streamedAdvice, connected } = useQuantStream(QUANT_INSTRUMENTS);
   const [bootstrap, setBootstrap] = useState<Record<string, QuantSnapshotView>>({});
+  const [manualAdvice, setManualAdvice] = useState<Record<string, AdviceView>>({});
+  const [askingAi, setAskingAi] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +62,20 @@ export default function QuantGatePanel() {
   }, []);
 
   const snapshot = snapshots[active] ?? bootstrap[active] ?? null;
+  const narration = narrations[active] ?? null;
+  const advice = manualAdvice[active] ?? streamedAdvice[active] ?? null;
+
+  const askAi = async () => {
+    setAskingAi(prev => ({ ...prev, [active]: true }));
+    try {
+      const result = await api.askQuantAiAdvice(active);
+      setManualAdvice(prev => ({ ...prev, [active]: result }));
+    } catch (err) {
+      console.warn('quant Ask AI failed', err);
+    } finally {
+      setAskingAi(prev => ({ ...prev, [active]: false }));
+    }
+  };
 
   return (
     <section className="rounded-lg border border-slate-700 bg-slate-900 p-4 text-slate-100">
@@ -123,12 +142,22 @@ export default function QuantGatePanel() {
 
           {snapshot.score >= 6 && snapshot.entry !== null && snapshot.sl !== null && (
             <div className="mt-4 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm">
-              <div className="font-semibold mb-1 flex items-center gap-2">
+              <div className="font-semibold mb-2 flex items-center gap-2 flex-wrap">
                 {snapshot.shortSetup7_7 ? (
                   <span className="text-emerald-400">🔔 SHORT 7/7 — full setup</span>
                 ) : (
                   <span className="text-amber-400">⚠️ SETUP 6/7 — early warning</span>
                 )}
+                <QuantAdvisorBadge advice={advice} loading={askingAi[active]} />
+                <button
+                  type="button"
+                  onClick={askAi}
+                  disabled={askingAi[active]}
+                  className="ml-auto px-2 py-0.5 text-xs rounded bg-slate-800 hover:bg-slate-700 border border-slate-600 disabled:opacity-50"
+                  title="Demande un second avis IA basé sur la mémoire long-terme + multi-instrument"
+                >
+                  Ask AI
+                </button>
               </div>
               <div className="grid grid-cols-4 gap-2 text-xs font-mono">
                 <div><span className="text-slate-400">ENTRY</span><br />{formatPrice(snapshot.entry)}</div>
@@ -138,6 +167,15 @@ export default function QuantGatePanel() {
               </div>
             </div>
           )}
+
+          <details className="mt-3 text-xs">
+            <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
+              Narration markdown {narration?.pattern ? `· ${narration.pattern.label}` : ''}
+            </summary>
+            <div className="mt-2 p-2 bg-slate-950 rounded border border-slate-800">
+              <QuantNarrationPanel narration={narration} />
+            </div>
+          </details>
         </>
       ) : (
         <p className="text-sm text-slate-400">No snapshot yet. The scheduler runs every 60 seconds.</p>

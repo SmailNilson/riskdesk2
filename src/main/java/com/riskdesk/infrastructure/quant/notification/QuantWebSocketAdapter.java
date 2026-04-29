@@ -1,10 +1,12 @@
 package com.riskdesk.infrastructure.quant.notification;
 
-import com.riskdesk.domain.quant.port.QuantNotificationPort;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.quant.advisor.AiAdvice;
 import com.riskdesk.domain.quant.model.Gate;
 import com.riskdesk.domain.quant.model.GateResult;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
+import com.riskdesk.domain.quant.pattern.PatternAnalysis;
+import com.riskdesk.domain.quant.port.QuantNotificationPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -20,6 +22,8 @@ import java.util.Map;
  *   <li>{@code /topic/quant/snapshot/{instrument}} — every scan, full payload</li>
  *   <li>{@code /topic/quant/signals} — fires when a 7/7 setup is confirmed (audio alert)</li>
  *   <li>{@code /topic/quant/setups} — fires when score = 6/7 (early warning)</li>
+ *   <li>{@code /topic/quant/narration/{instrument}} — markdown narration + pattern verdict</li>
+ *   <li>{@code /topic/quant/advice/{instrument}} — AI advisor verdict (tier 2)</li>
  * </ul>
  */
 @Component
@@ -46,6 +50,37 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
     @Override
     public void publishSetupAlert6_7(Instrument instrument, QuantSnapshot snapshot) {
         sendSafely("/topic/quant/setups", payload(instrument, snapshot, "SETUP_6_7"));
+    }
+
+    @Override
+    public void publishNarration(Instrument instrument, QuantSnapshot snapshot,
+                                  PatternAnalysis pattern, String markdown) {
+        Map<String, Object> root = payload(instrument, snapshot, "NARRATION");
+        Map<String, Object> patternMap = new LinkedHashMap<>();
+        if (pattern != null) {
+            patternMap.put("type", pattern.type().name());
+            patternMap.put("label", pattern.label());
+            patternMap.put("reason", pattern.reason());
+            patternMap.put("confidence", pattern.confidence().name());
+            patternMap.put("action", pattern.action().name());
+        }
+        root.put("pattern", patternMap);
+        root.put("markdown", markdown);
+        sendSafely("/topic/quant/narration/" + instrument.name(), root);
+    }
+
+    @Override
+    public void publishAdvice(Instrument instrument, QuantSnapshot snapshot, AiAdvice advice) {
+        Map<String, Object> root = payload(instrument, snapshot, "ADVICE");
+        Map<String, Object> adviceMap = new LinkedHashMap<>();
+        adviceMap.put("verdict", advice.verdict().name());
+        adviceMap.put("reasoning", advice.reasoning());
+        adviceMap.put("risk", advice.risk());
+        adviceMap.put("confidence", advice.confidence());
+        adviceMap.put("model", advice.model());
+        adviceMap.put("generatedAt", advice.generatedAt() != null ? advice.generatedAt().toString() : null);
+        root.put("advice", adviceMap);
+        sendSafely("/topic/quant/advice/" + instrument.name(), root);
     }
 
     private Map<String, Object> payload(Instrument instrument, QuantSnapshot snapshot, String kind) {

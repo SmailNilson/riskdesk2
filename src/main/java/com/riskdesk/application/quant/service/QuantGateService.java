@@ -54,7 +54,13 @@ public class QuantGateService {
     private final QuantStatePort statePort;
     private final QuantNotificationPort notificationPort;
     private final QuantSnapshotHistoryStore historyStore;
+    private final QuantSetupNarrationService narrationService;
+    private final QuantSessionMemoryService sessionMemoryService;
+    private final QuantAiAdvisorService advisorService;
     private final GateEvaluator evaluator;
+
+    /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
+    private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
 
     public QuantGateService(AbsorptionPort absorptionPort,
                             DistributionPort distributionPort,
@@ -64,6 +70,9 @@ public class QuantGateService {
                             QuantStatePort statePort,
                             QuantNotificationPort notificationPort,
                             QuantSnapshotHistoryStore historyStore,
+                            QuantSetupNarrationService narrationService,
+                            QuantSessionMemoryService sessionMemoryService,
+                            QuantAiAdvisorService advisorService,
                             GateEvaluator evaluator) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
@@ -73,6 +82,9 @@ public class QuantGateService {
         this.statePort = statePort;
         this.notificationPort = notificationPort;
         this.historyStore = historyStore;
+        this.narrationService = narrationService;
+        this.sessionMemoryService = sessionMemoryService;
+        this.advisorService = advisorService;
         this.evaluator = evaluator;
     }
 
@@ -107,9 +119,51 @@ public class QuantGateService {
 
         QuantSnapshot result = outcome.snapshot();
         historyStore.add(instrument, result);
+
+        QuantSetupNarrationService.NarrationResult narration =
+            narrationService.buildNarration(instrument, result, outcome.nextState(), snap);
+        sessionMemoryService.recordScan(instrument,
+            narration.pattern() == null ? null : narration.pattern().type());
+
         publish(instrument, result);
+        notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
+
+        if (shouldAutoAdvise(instrument, result)) {
+            com.riskdesk.domain.quant.advisor.AiAdvice advice =
+                advisorService.requestAdviceIfQualified(instrument, result, narration.pattern());
+            if (advice != null
+                && advice.verdict() != com.riskdesk.domain.quant.advisor.AiAdvice.Verdict.UNAVAILABLE) {
+                notificationPort.publishAdvice(instrument, result, advice);
+            }
+        }
+
         logScan(instrument, result);
         return result;
+    }
+
+    private boolean shouldAutoAdvise(Instrument instrument, QuantSnapshot snapshot) {
+        if (snapshot.score() < advisorService.getTriggerScore()) return false;
+        Integer alreadyFired = autoAdviceFiredFor.get(instrument);
+        if (alreadyFired != null && alreadyFired >= snapshot.score()) return false;
+        autoAdviceFiredFor.put(instrument, snapshot.score());
+        return true;
+    }
+
+    /** Exposed for the on-demand "Ask AI" flow on the controller. */
+    public com.riskdesk.domain.quant.advisor.AiAdvice requestAdviceNow(Instrument instrument) {
+        QuantSnapshot snapshot = historyStore.recent(instrument, java.time.Duration.ofMinutes(2))
+            .stream().reduce((a, b) -> b)
+            .orElse(null);
+        if (snapshot == null) {
+            return com.riskdesk.domain.quant.advisor.AiAdvice.unavailable("no recent snapshot — run /snapshot first");
+        }
+        com.riskdesk.domain.quant.pattern.PatternAnalysis pattern = null;
+        com.riskdesk.domain.quant.advisor.AiAdvice advice = advisorService.requestAdvice(instrument, snapshot, pattern);
+        if (advice != null
+            && advice.verdict() != com.riskdesk.domain.quant.advisor.AiAdvice.Verdict.UNAVAILABLE) {
+            notificationPort.publishAdvice(instrument, snapshot, advice);
+        }
+        return advice;
     }
 
     private MarketSnapshot buildSnapshot(Instant now,

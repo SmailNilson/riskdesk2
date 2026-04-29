@@ -2,6 +2,76 @@
 
 Last updated: 2026-04-29
 
+## Quant 7-Gates + AI Advisor (Tier 1 / Tier 2 split)
+
+**Tier 1 — deterministic Java gates (always on).** Same engine as before:
+seven gates lifted from `mnq_monitor_v3.py`, no LLM in the loop, scanned every
+60 s for MNQ / MGC / MCL. See the section below for the gate table.
+
+**Tier 2 — AI advisor (opt-in, rare).** When tier 1 reaches the trigger score
+(6/7 by default), a single Gemini call enriches the verdict with:
+
+- **Session memory** — same-day pattern observations + win-rate + last outcome
+- **RAG** — top-5 nearest historical situations via pgvector cosine similarity (`<=>`)
+- **Multi-instrument context** — current scores / day-moves for every other futures contract
+- **Order-flow pattern** — the deterministic `OrderFlowPattern` classification
+  (`ABSORPTION_HAUSSIERE`, `DISTRIBUTION_SILENCIEUSE`, `VRAIE_VENTE`,
+  `VRAI_ACHAT`, `INDETERMINE`)
+
+Cost stays low: ~10–20 calls/day per instrument max, plus a 30 s in-memory
+cache deduplicates manual "Ask AI" double-clicks.
+
+**Failure-mode contract.** The advisor never blocks tier 1. If Gemini is down,
+if the API key is missing, or if pgvector is unavailable, the advisor adapter
+returns `AiAdvice.unavailable(...)` and the gate panel keeps publishing
+snapshots untouched.
+
+**Deviation from spec.** The original spec called for the Vertex AI Java SDK
+in `europe-west1` with context caching. RiskDesk does not yet ship the Vertex
+AI dependency — the existing `GeminiMentorClient` + `GeminiEmbeddingClient`
+talk directly to `generativelanguage.googleapis.com`. To stay shippable, the
+adapter (`GeminiQuantAdvisorAdapter`) reuses that pattern. The
+`AdvisorPort` contract stays Vertex-ready: a future swap is a single new
+adapter class. Likewise, audit logs are SLF4J (instrument, score, verdict,
+prompt-hash, latency) instead of GCP Cloud Logging.
+
+**Frontend wiring.**
+
+- `useQuantStream` now also subscribes to `/topic/quant/narration/{instr}` and
+  `/topic/quant/advice/{instr}` (one STOMP client, three subscriptions per
+  instrument)
+- `QuantAdvisorBadge` renders the verdict with a colour token + tooltip
+  (reasoning, risk, confidence, model)
+- `QuantNarrationPanel` renders the markdown emitted by `QuantNarrator`
+- A "Ask AI" button on `QuantGatePanel` triggers `POST /api/quant/ai-advice/{instr}`
+  for an on-demand call
+
+**New / extended files.**
+
+- Domain: `domain/quant/pattern/{OrderFlowPattern, PatternAnalysis, OrderFlowPatternDetector}`,
+  `domain/quant/narrative/QuantNarrator`,
+  `domain/quant/advisor/{AdvisorPort, AiAdvice, MultiInstrumentContext}`,
+  `domain/quant/memory/{SessionMemory, MemoryRecord, QuantMemoryPort}`
+- Application: `application/quant/service/{QuantSetupNarrationService,
+  QuantSessionMemoryService, QuantAiAdvisorService}`,
+  `application/quant/adapter/GeminiQuantEmbeddingAdapter`
+- Infrastructure: `infrastructure/quant/advisor/{QuantAdvisorPromptBuilder,
+  GeminiQuantAdvisorAdapter}`, `infrastructure/quant/memory/QuantMemoryJdbcAdapter`
+  (raw `JdbcTemplate` mirroring `MentorMemoryService`)
+- Resources: `src/main/resources/prompts/quant-advisor.txt` (template loaded once at startup)
+- Properties: `riskdesk.quant.advisor.enabled` (default `false`),
+  `riskdesk.quant.ai-advice-trigger-score=6`,
+  `riskdesk.quant.ai-advice-cache-seconds=30`,
+  `riskdesk.quant.memory-rag-top-k=5`,
+  `riskdesk.quant.advisor-model` (defaults to `riskdesk.mentor.model`),
+  `riskdesk.quant.advisor-temperature=0.2`
+- Tests: `OrderFlowPatternDetectorTest` (6), `QuantNarratorTest` (2),
+  `QuantAiAdvisorServiceTest` (4 — cache TTL, context wiring, trigger
+  threshold, failsafe). Integration test for the pgvector adapter is **not**
+  included (would require a testcontainers + custom pgvector image — out of
+  scope for this slice; the production code mirrors the proven
+  `MentorMemoryService` pattern).
+
 ## Quant 7-Gates Order Flow Evaluator
 
 Deterministic, framework-free SHORT-setup detector lifted verbatim from the

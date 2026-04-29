@@ -3,11 +3,14 @@ package com.riskdesk.presentation.quant;
 import com.riskdesk.application.quant.service.QuantGateService;
 import com.riskdesk.application.quant.service.QuantSnapshotHistoryStore;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.quant.advisor.AiAdvice;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
+import com.riskdesk.presentation.quant.dto.QuantAdviceResponse;
 import com.riskdesk.presentation.quant.dto.QuantSnapshotResponse;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -70,5 +73,21 @@ public class QuantGateController {
             .map(QuantSnapshotResponse::from)
             .toList();
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * Manually triggers a tier-2 AI advisor call for the latest snapshot of the
+     * instrument. Returns immediately with the cached response if one is fresh.
+     */
+    @PostMapping("/ai-advice/{instrument}")
+    public ResponseEntity<QuantAdviceResponse> aiAdvice(@PathVariable String instrument) {
+        Instrument inst;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
+        }
+        AiAdvice advice = service.requestAdviceNow(inst);
+        return ResponseEntity.ok(QuantAdviceResponse.from(inst, advice));
     }
 }

@@ -1,5 +1,5 @@
 import { API_BASE } from '@/app/lib/runtimeConfig';
-import type { QuantSnapshotView } from '@/app/components/quant/types';
+import type { AdviceView, QuantSnapshotView } from '@/app/components/quant/types';
 
 const BASE = API_BASE;
 
@@ -1253,6 +1253,10 @@ export const api = {
     get<QuantSnapshotView>(`/api/quant/snapshot/${instrument}`),
   getQuantHistory: (instrument: string, hours = 2) =>
     get<QuantSnapshotView[]>(`/api/quant/history/${instrument}?hours=${hours}`),
+  // Triggers a tier-2 AI advisor call for the latest snapshot. Returns
+  // immediately with the cached verdict if one is fresh (≤ 30 s window).
+  askQuantAiAdvice: (instrument: string) =>
+    post<AdviceView & { instrument: string }>(`/api/quant/ai-advice/${instrument}`, {}),
 };
 
 // ── External Setup types ────────────────────────────────────────────────
