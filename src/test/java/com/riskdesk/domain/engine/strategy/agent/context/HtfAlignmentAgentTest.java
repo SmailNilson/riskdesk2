@@ -54,13 +54,40 @@ class HtfAlignmentAgentTest {
     }
 
     @Test
-    void contradicted_reference_produces_negative_vote() {
-        // Reference BULL but both H4 and Daily are BEAR — net = -2
+    void contradicted_reference_produces_dampened_negative_vote() {
+        // Reference BULL but both H4 and Daily are BEAR — net = -2 (2 of 3 opposed).
+        // Asymmetric scaling: opposition magnitude is capped (35) so it dampens but
+        // does not erase the reference SMC bias.
         MtfSnapshot mtf = new MtfSnapshot(MacroBias.NEUTRAL, MacroBias.BEAR, MacroBias.BEAR);
         AgentVote vote = agent.evaluate(input(MacroBias.BULL, mtf));
 
         assertThat(vote.directionalVote()).isNegative();
-        assertThat(vote.directionalVote()).isEqualTo(-60);
+        assertThat(vote.directionalVote()).isEqualTo(-35);
+        assertThat(vote.confidence()).isCloseTo(0.55, org.assertj.core.data.Offset.offset(0.01));
+    }
+
+    @Test
+    void fully_opposed_reference_produces_capped_counter_vote() {
+        // Reference BEAR but H1=H4=Daily=BULL → 0/3 aligned, 3/3 opposed (net=-3).
+        // The pre-fix system used ±90 here, fully cancelling the SMC reference vote
+        // (−70 × 0.85 + 90 × 0.90 ≈ +21 net positive). Capping at ±45 keeps the
+        // reference signal dominant (−59.5 + 31.5 ≈ −28 net negative).
+        MtfSnapshot mtf = new MtfSnapshot(MacroBias.BULL, MacroBias.BULL, MacroBias.BULL);
+        AgentVote vote = agent.evaluate(input(MacroBias.BEAR, mtf));
+
+        // BEAR reference, opposition by all HTFs → counter-vote in the BULL direction
+        assertThat(vote.directionalVote()).isEqualTo(+45);
+        assertThat(vote.confidence()).isCloseTo(0.70, org.assertj.core.data.Offset.offset(0.01));
+    }
+
+    @Test
+    void single_opposed_reference_produces_small_counter_vote() {
+        // Reference BULL with H1=BEAR, H4=NEUTRAL, D=NEUTRAL → net = -1
+        MtfSnapshot mtf = new MtfSnapshot(MacroBias.BEAR, MacroBias.NEUTRAL, MacroBias.NEUTRAL);
+        AgentVote vote = agent.evaluate(input(MacroBias.BULL, mtf));
+
+        assertThat(vote.directionalVote()).isEqualTo(-20);
+        assertThat(vote.confidence()).isCloseTo(0.45, org.assertj.core.data.Offset.offset(0.01));
     }
 
     @Test
