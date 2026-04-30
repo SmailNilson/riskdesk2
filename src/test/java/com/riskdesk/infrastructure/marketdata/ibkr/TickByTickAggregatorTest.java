@@ -157,4 +157,60 @@ class TickByTickAggregatorTest {
         // Invalid quotes = UNCLASSIFIED
         assertEquals(UNCLASSIFIED, IbkrTickDataAdapter.classifyTrade(100.0, 0, 0));
     }
+
+    @Test
+    void snapshotWindow_includesOnlyTicksWithinWindow() {
+        // 5-min default window holds all ticks; snapshotWindow(10s) should drop the older ones
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        // Old tick: 30s ago, BUY 100
+        agg.onTick(27000.0, 100, BUY, now.minusSeconds(30));
+        // Recent ticks within 10s window
+        agg.onTick(27001.0, 50, BUY, now.minusSeconds(5));
+        agg.onTick(27002.0, 30, SELL, now.minusSeconds(2));
+
+        var full = agg.snapshot();
+        assertEquals(150, full.buyVolume());
+        assertEquals(30, full.sellVolume());
+
+        var recent = agg.snapshotWindow(10);
+        assertEquals(50, recent.buyVolume(), "old 30s tick should be excluded");
+        assertEquals(30, recent.sellVolume());
+        assertEquals(20, recent.delta());
+    }
+
+    @Test
+    void snapshotWindow_emptyWhenNoRecentTicks() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        // Only old ticks
+        agg.onTick(27000.0, 100, BUY, now.minusSeconds(120));
+
+        var recent = agg.snapshotWindow(10);
+        assertEquals(0, recent.buyVolume());
+        assertEquals(0, recent.sellVolume());
+        assertEquals(0, recent.delta());
+    }
+
+    @Test
+    void snapshotWindow_doesNotMutateTrendState() {
+        // snapshot() updates previousCumulativeDelta; snapshotWindow() must not — they
+        // observe different time horizons and would corrupt each other's trend signal.
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(27000.0, 100, BUY, now.minusSeconds(2));
+        agg.onTick(27001.0, 50, SELL, now.minusSeconds(1));
+
+        // Establish trend state via snapshot()
+        var s1 = agg.snapshot();
+        // Now call snapshotWindow several times — should not affect the next snapshot()'s trend
+        agg.snapshotWindow(5);
+        agg.snapshotWindow(5);
+
+        // The next full snapshot should compute trend relative to s1, not the window snapshots
+        var s2 = agg.snapshot();
+        assertEquals(s1.delta(), s2.delta(), "delta unchanged when no new ticks");
+        // Trend on identical delta should be FLAT (no change vs previous)
+        assertEquals("FLAT", s2.deltaTrend());
+    }
 }
