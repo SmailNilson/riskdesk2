@@ -17,6 +17,7 @@ public class OrderFlowProperties {
     private Depth depth = new Depth();
     private TickLog tickLog = new TickLog();
     private DepthLog depthLog = new DepthLog();
+    private Absorption absorption = new Absorption();
     private Distribution distribution = new Distribution();
     private Momentum momentum = new Momentum();
     private Cycle cycle = new Cycle();
@@ -29,6 +30,8 @@ public class OrderFlowProperties {
     public void setTickLog(TickLog tickLog) { this.tickLog = tickLog; }
     public DepthLog getDepthLog() { return depthLog; }
     public void setDepthLog(DepthLog depthLog) { this.depthLog = depthLog; }
+    public Absorption getAbsorption() { return absorption; }
+    public void setAbsorption(Absorption absorption) { this.absorption = absorption; }
     public Distribution getDistribution() { return distribution; }
     public void setDistribution(Distribution distribution) { this.distribution = distribution; }
     public Momentum getMomentum() { return momentum; }
@@ -90,6 +93,34 @@ public class OrderFlowProperties {
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public long getIntervalMs() { return intervalMs; }
         public void setIntervalMs(long intervalMs) { this.intervalMs = intervalMs; }
+    }
+
+    /**
+     * Per-cycle absorption detector tuning.
+     * <p>
+     * The TickByTickAggregator stores a 5 min rolling window for delta/divergence panels;
+     * absorption needs a much shorter window to detect transient passive-absorption events.
+     */
+    public static class Absorption {
+        private boolean enabled = true;
+        /** Window for absorption snapshot — short enough to detect transient absorption bursts. */
+        private int windowSeconds = 10;
+        /**
+         * Number of recent windows used to compute baseline {@code avgVolume}.
+         * 12 windows × 5s polling = 60s of history.
+         */
+        private int volumeHistorySize = 12;
+        /** Baseline delta normaliser — score = (|delta|/deltaThreshold) × stability × (vol/avgVol). */
+        private long deltaThreshold = 50;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getWindowSeconds() { return windowSeconds; }
+        public void setWindowSeconds(int v) { this.windowSeconds = v; }
+        public int getVolumeHistorySize() { return volumeHistorySize; }
+        public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
+        public long getDeltaThreshold() { return deltaThreshold; }
+        public void setDeltaThreshold(long v) { this.deltaThreshold = v; }
     }
 
     /** Institutional distribution / accumulation detector. MNQ-tuned defaults. */
