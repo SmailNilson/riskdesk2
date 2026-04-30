@@ -52,8 +52,24 @@ public final class StructuralFilterEvaluator {
     /** Minimum touch count for an equal-low pool to count as a liquidity grab risk. */
     private static final int EQUAL_LOWS_MIN_TOUCH = 2;
 
+    // ── Kill-zone override gate (high-conviction bypass of 5m-outside-kill-zone) ──
+    /** Veto-reason prefix that marks the 5m kill-zone gate firing. */
+    private static final String VETO_KILL_ZONE_PREFIX = "5m-outside-kill-zone";
+    /** Minimum 7-gate raw score required to even consider overriding the kill-zone veto. */
+    private static final int OVERRIDE_MIN_SCORE = 7;
+    /** Number of nested timeframes (out of 5) that must agree with the trade direction. */
+    private static final int OVERRIDE_MTF_FULL = 5;
+    /** Minimum CMF magnitude for the flow to count as confirming the trade direction. */
+    private static final double OVERRIDE_CMF_MAG = 0.10;
+
+    /** Trade direction used by {@link #qualifiesForKillZoneOverride(int, IndicatorsSnapshot, Direction)}. */
+    private enum Direction { LONG, SHORT }
+
     /**
-     * Evaluates the structural filters for a SHORT setup.
+     * Evaluates the structural filters for a SHORT setup. Backward-compat
+     * overload — equivalent to {@link #evaluateForShort(Double, IndicatorsSnapshot,
+     * StrategyVotes, PatternAnalysis, int)} with {@code score=0}, which means
+     * the kill-zone override (which requires {@code score >= 7}) never fires.
      *
      * @param price     current price ({@code null}-tolerant — most rules require a price)
      * @param ind       indicator projection ({@code null} → no indicator-driven block/warning)
@@ -65,6 +81,32 @@ public final class StructuralFilterEvaluator {
                                                    IndicatorsSnapshot ind,
                                                    StrategyVotes strategy,
                                                    PatternAnalysis pattern) {
+        return evaluateForShort(price, ind, strategy, pattern, 0);
+    }
+
+    /**
+     * Evaluates the structural filters for a SHORT setup, with the explicit
+     * 7-gate raw {@code score} so the kill-zone override gate can fire on
+     * high-conviction setups.
+     *
+     * <p>When the strategy decision is {@code NO_TRADE} and the ONLY critical
+     * veto is {@code 5m-outside-kill-zone}, the {@code JAVA_NO_TRADE_CRITICAL}
+     * block is demoted to a {@code JAVA_NO_TRADE_OVERRIDDEN} warning iff ALL
+     * of {@link #qualifiesForKillZoneOverride} hold:</p>
+     * <ul>
+     *   <li>{@code score >= 7} (perfect quant setup)</li>
+     *   <li>5/5 nested timeframes are BEARISH</li>
+     *   <li>{@code lastInternalBreakType} is {@code CHOCH_BEARISH} or {@code BOS_BEARISH}</li>
+     *   <li>{@code cmf <= -0.10} (selling-flow confirmation)</li>
+     * </ul>
+     * <p>Any other critical veto, or a missing condition, preserves the
+     * existing block behavior.</p>
+     */
+    public StructuralFilterResult evaluateForShort(Double price,
+                                                   IndicatorsSnapshot ind,
+                                                   StrategyVotes strategy,
+                                                   PatternAnalysis pattern,
+                                                   int score) {
         List<StructuralBlock> blocks = new ArrayList<>();
         List<StructuralWarning> warnings = new ArrayList<>();
         int scoreMod = 0;
@@ -143,9 +185,18 @@ public final class StructuralFilterEvaluator {
                 }
             }
             if (!critical.isEmpty()) {
-                blocks.add(new StructuralBlock(
-                    StructuralBlock.CODE_JAVA_NO_TRADE,
-                    "Java veto: " + truncate(critical.get(0), 80)));
+                if (isOnlyKillZoneVeto(critical)
+                    && qualifiesForKillZoneOverride(score, ind, Direction.SHORT)) {
+                    warnings.add(new StructuralWarning(
+                        StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN,
+                        "5m-outside-kill-zone overridden — score " + score
+                            + "/7, MTF 5/5, structure confirmed, CMF aligned",
+                        0));
+                } else {
+                    blocks.add(new StructuralBlock(
+                        StructuralBlock.CODE_JAVA_NO_TRADE,
+                        "Java veto: " + truncate(critical.get(0), 80)));
+                }
             } else if (!maintenance.isEmpty()) {
                 warnings.add(new StructuralWarning(
                     StructuralWarning.CODE_JAVA_MAINTENANCE,
@@ -255,6 +306,22 @@ public final class StructuralFilterEvaluator {
                                                    IndicatorsSnapshot ind,
                                                    StrategyVotes strategy,
                                                    PatternAnalysis pattern) {
+        return evaluateForLong(price, ind, strategy, pattern, 0);
+    }
+
+    /**
+     * LONG variant of {@link #evaluateForShort(Double, IndicatorsSnapshot,
+     * StrategyVotes, PatternAnalysis, int)} that also accepts the LONG raw
+     * 7-gate score so the kill-zone override may demote
+     * {@code JAVA_NO_TRADE_CRITICAL} to a warning when the LONG setup is
+     * structurally high-conviction (5/5 BULLISH MTF, CHoCH/BOS bullish, CMF
+     * &gt;= +0.10, score &gt;= 7).
+     */
+    public StructuralFilterResult evaluateForLong(Double price,
+                                                   IndicatorsSnapshot ind,
+                                                   StrategyVotes strategy,
+                                                   PatternAnalysis pattern,
+                                                   int score) {
         List<StructuralBlock> blocks = new ArrayList<>();
         List<StructuralWarning> warnings = new ArrayList<>();
         int scoreMod = 0;
@@ -321,6 +388,9 @@ public final class StructuralFilterEvaluator {
         }
 
         // JAVA_NO_TRADE_CRITICAL — same critical/maintenance split as SHORT.
+        // Mirror of the SHORT kill-zone override: if the only critical veto
+        // is "5m-outside-kill-zone" AND the LONG setup is structurally
+        // high-conviction (qualifiesForKillZoneOverride), demote to warning.
         if (strategy != null && "NO_TRADE".equalsIgnoreCase(strategy.decision())) {
             List<String> critical = new ArrayList<>();
             List<String> maintenance = new ArrayList<>();
@@ -333,9 +403,18 @@ public final class StructuralFilterEvaluator {
                 }
             }
             if (!critical.isEmpty()) {
-                blocks.add(new StructuralBlock(
-                    StructuralBlock.CODE_JAVA_NO_TRADE,
-                    "Java veto: " + truncate(critical.get(0), 80)));
+                if (isOnlyKillZoneVeto(critical)
+                    && qualifiesForKillZoneOverride(score, ind, Direction.LONG)) {
+                    warnings.add(new StructuralWarning(
+                        StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN,
+                        "5m-outside-kill-zone overridden — score " + score
+                            + "/7, MTF 5/5, structure confirmed, CMF aligned",
+                        0));
+                } else {
+                    blocks.add(new StructuralBlock(
+                        StructuralBlock.CODE_JAVA_NO_TRADE,
+                        "Java veto: " + truncate(critical.get(0), 80)));
+                }
             } else if (!maintenance.isEmpty()) {
                 warnings.add(new StructuralWarning(
                     StructuralWarning.CODE_JAVA_MAINTENANCE,
@@ -430,5 +509,67 @@ public final class StructuralFilterEvaluator {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max);
+    }
+
+    /**
+     * {@code true} when the entire critical-veto list reduces to the single
+     * {@code 5m-outside-kill-zone} reason (case-insensitive prefix match). The
+     * caller has already split out maintenance reasons; this asks "is the only
+     * thing standing between us and a TRADE the kill-zone gate?". A defensive
+     * empty-list check returns false (no veto = no override needed).
+     */
+    private static boolean isOnlyKillZoneVeto(List<String> criticalVetos) {
+        if (criticalVetos == null || criticalVetos.isEmpty()) return false;
+        for (String v : criticalVetos) {
+            if (v == null) return false;
+            String norm = v.toLowerCase(Locale.ROOT).trim();
+            if (!norm.startsWith(VETO_KILL_ZONE_PREFIX)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Strict 4-condition gate that authorises demoting the kill-zone block to
+     * a warning. Designed to fire only on genuinely high-conviction setups —
+     * deliberately conservative.
+     *
+     * <p>For SHORT all of: {@code score >= 7}, 5/5 BEARISH MTF,
+     * {@code lastInternalBreakType} contains {@code BEARISH} (CHoCH or BOS),
+     * and {@code cmf <= -0.10}. For LONG the symmetric BULLISH conditions.
+     * A null indicator snapshot or any missing field fails the gate.</p>
+     */
+    private static boolean qualifiesForKillZoneOverride(int score,
+                                                         IndicatorsSnapshot ind,
+                                                         Direction direction) {
+        if (score < OVERRIDE_MIN_SCORE) return false;
+        if (ind == null) return false;
+
+        // Condition: full 5/5 multi-resolution alignment with the trade direction.
+        Map<String, String> mtf = ind.multiResolutionBias();
+        if (mtf == null || mtf.size() < OVERRIDE_MTF_FULL) return false;
+        String wantBias = direction == Direction.SHORT ? "BEARISH" : "BULLISH";
+        int aligned = 0;
+        for (String v : mtf.values()) {
+            if (wantBias.equalsIgnoreCase(v)) aligned++;
+        }
+        if (aligned < OVERRIDE_MTF_FULL) return false;
+
+        // Condition: structure confirmed (CHoCH or BOS in the trade direction).
+        String lastBreak = ind.lastInternalBreakType();
+        if (lastBreak == null) return false;
+        String upper = lastBreak.toUpperCase(Locale.ROOT);
+        boolean structureOk = direction == Direction.SHORT
+            ? (upper.contains("BEARISH") && (upper.contains("CHOCH") || upper.contains("BOS")))
+            : (upper.contains("BULLISH") && (upper.contains("CHOCH") || upper.contains("BOS")));
+        if (!structureOk) return false;
+
+        // Condition: CMF magnitude confirms the flow direction.
+        Double cmf = ind.cmf();
+        if (cmf == null) return false;
+        if (direction == Direction.SHORT) {
+            return cmf <= -OVERRIDE_CMF_MAG;
+        } else {
+            return cmf >= OVERRIDE_CMF_MAG;
+        }
     }
 }

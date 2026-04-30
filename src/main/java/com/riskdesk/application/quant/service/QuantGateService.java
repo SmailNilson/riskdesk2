@@ -227,7 +227,8 @@ public class QuantGateService {
             // services. The per-instrument lock already serialises scans, so
             // the two structural evaluations both observe the same input.
             BiStructuralResult bi = evaluateStructuralBoth(
-                instrument, rawSnapshot.price(), preNarration.pattern());
+                instrument, rawSnapshot.price(), preNarration.pattern(),
+                rawSnapshot.score(), rawSnapshot.longScore());
             result = rawSnapshot
                 .withStructuralResult(bi.shortResult())
                 .withLongStructuralResult(bi.longResult());
@@ -330,12 +331,16 @@ public class QuantGateService {
      */
     private BiStructuralResult evaluateStructuralBoth(Instrument instrument,
                                                        Double price,
-                                                       com.riskdesk.domain.quant.pattern.PatternAnalysis pattern) {
+                                                       com.riskdesk.domain.quant.pattern.PatternAnalysis pattern,
+                                                       int shortScore,
+                                                       int longScore) {
         try {
             IndicatorsSnapshot ind = safeOpt(() -> indicatorsPort.snapshot5m(instrument)).orElse(null);
             StrategyVotes strat   = safeOpt(() -> strategyPort.votes5m(instrument)).orElse(null);
-            StructuralFilterResult shortRes = structuralEvaluator.evaluateForShort(price, ind, strat, pattern);
-            StructuralFilterResult longRes  = structuralEvaluator.evaluateForLong(price, ind, strat, pattern);
+            // Pass the raw 7-gate scores so the kill-zone override gate (which
+            // requires score >= 7) can fire on high-conviction setups.
+            StructuralFilterResult shortRes = structuralEvaluator.evaluateForShort(price, ind, strat, pattern, shortScore);
+            StructuralFilterResult longRes  = structuralEvaluator.evaluateForLong (price, ind, strat, pattern, longScore);
             return new BiStructuralResult(shortRes, longRes);
         } catch (RuntimeException e) {
             log.warn("structural filter failed instrument={}: {}", instrument, e.toString());
