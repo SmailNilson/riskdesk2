@@ -9,5 +9,12 @@ public enum ExecutionTriggerSource {
      * No mentor signal review is associated; the execution is created
      * directly from a {@code QuantSnapshot} with score &gt;= configured min.
      */
-    QUANT_AUTO_ARM
+    QUANT_AUTO_ARM,
+    /**
+     * Manual order placed by the operator from the QuantGatePanel manual
+     * trade ticket. No mentor signal review is associated; the operator
+     * supplies entry/SL/TP directly. Independent of auto-arm thresholds —
+     * the user takes responsibility for the trade.
+     */
+    MANUAL_QUANT_PANEL
 }

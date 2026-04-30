@@ -1267,7 +1267,7 @@ export const api = {
   listActiveAutoArms: () =>
     get<AutoArmStatusResponse[]>(`/api/quant/auto-arm/active`),
 
-  // ── Active Positions panel ─────────────────────────────────────────────
+  // ── Active Positions panel (PR #305) ──────────────────────────────────
   // Backend: com.riskdesk.presentation.quant.ActivePositionsController
   // /active returns every non-terminal execution (PENDING / SUBMITTED /
   // ACTIVE / VIRTUAL_EXIT_TRIGGERED / EXIT_SUBMITTED) enriched with a
@@ -1278,6 +1278,11 @@ export const api = {
     get<ActivePositionView[]>(`/api/quant/positions/active`),
   closeActivePosition: (executionId: number) =>
     post<ActivePositionView>(`/api/quant/positions/${executionId}/close`, {}),
+
+  // ── Quant manual trade ticket (PR #306) ────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantManualTradeController
+  submitManualTrade: (instrument: string, payload: import('@/app/components/quant/types').ManualTradeRequest) =>
+    post<TradeExecutionView>(`/api/quant/manual-trade/${instrument}`, payload),
 };
 
 // ── Active Positions types ──────────────────────────────────────────────
