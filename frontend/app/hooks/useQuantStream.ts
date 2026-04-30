@@ -14,6 +14,7 @@ import {
 import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
+import type { AutoArmStreamPayload } from '@/app/lib/api';
 import type {
   AdviceView,
   PatternView,
@@ -75,11 +76,26 @@ function payloadToView(p: QuantWsPayload): QuantSnapshotView {
 
 const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 
+/**
+ * Per-instrument auto-arm state surfaced to the dashboard. Mirrors the
+ * lifecycle states emitted by the backend ({@code AutoArmStateChangedEvent}).
+ * {@code armed} carries the latest ARMED payload (with entry/SL/TP) so the
+ * UI can render the badge and countdown without an extra REST hit.
+ */
+export interface AutoArmInstrumentState {
+  state: 'ARMED' | 'CANCELLED' | 'FIRED' | 'EXPIRED' | 'AUTO_SUBMITTED' | 'IDLE';
+  armed: AutoArmStreamPayload | null;
+  lastChangeAt: string | null;
+  lastReason: string | null;
+}
+
 interface QuantStreamValue {
   snapshots: Record<string, QuantSnapshotView>;
   narrations: Record<string, QuantNarrationView>;
   advice: Record<string, AdviceView>;
   latestSignal: QuantSnapshotView | null;
+  /** Per-instrument auto-arm state, keyed by instrument symbol. */
+  autoArm: Record<string, AutoArmInstrumentState>;
   connected: boolean;
   ack: () => void;
 }
@@ -105,6 +121,7 @@ export function QuantStreamProvider({ instruments, children }: ProviderProps): J
   const [advice, setAdvice] = useState<Record<string, AdviceView>>({});
   const [latestSignal, setLatestSignal] = useState<QuantSnapshotView | null>(null);
   const [connected, setConnected] = useState(false);
+  const [autoArm, setAutoArm] = useState<Record<string, AutoArmInstrumentState>>({});
 
   const ack = useCallback(() => setLatestSignal(null), []);
 
@@ -153,6 +170,40 @@ export function QuantStreamProvider({ instruments, children }: ProviderProps): J
             console.warn('quant advice parse failed', err);
           }
         }));
+
+        // PR #303 — auto-arm lifecycle. ARMED carries the full plan; the
+        // other kinds (CANCELLED / FIRED / EXPIRED / AUTO_SUBMITTED) only
+        // change the state badge.
+        subs.push(client.subscribe(`/topic/quant/auto-arm/${instr}`, (msg: IMessage) => {
+          try {
+            const payload = JSON.parse(msg.body) as AutoArmStreamPayload;
+            setAutoArm(prev => {
+              const existing = prev[payload.instrument];
+              if (payload.kind === 'ARMED') {
+                return {
+                  ...prev,
+                  [payload.instrument]: {
+                    state: 'ARMED',
+                    armed: payload,
+                    lastChangeAt: payload.armedAt ?? null,
+                    lastReason: payload.reasoning ?? null,
+                  },
+                };
+              }
+              return {
+                ...prev,
+                [payload.instrument]: {
+                  state: payload.kind,
+                  armed: existing?.armed ?? null,
+                  lastChangeAt: payload.changedAt ?? existing?.lastChangeAt ?? null,
+                  lastReason: payload.reason ?? existing?.lastReason ?? null,
+                },
+              };
+            });
+          } catch (err) {
+            console.warn('quant auto-arm parse failed', err);
+          }
+        }));
       }
       subs.push(client.subscribe('/topic/quant/signals', (msg: IMessage) => {
         try {
@@ -186,8 +237,8 @@ export function QuantStreamProvider({ instruments, children }: ProviderProps): J
   }, []);
 
   const value = useMemo<QuantStreamValue>(
-    () => ({ snapshots, narrations, advice, latestSignal, connected, ack }),
-    [snapshots, narrations, advice, latestSignal, connected, ack],
+    () => ({ snapshots, narrations, advice, latestSignal, autoArm, connected, ack }),
+    [snapshots, narrations, advice, latestSignal, autoArm, connected, ack],
   );
 
   return createElement(QuantStreamContext.Provider, { value }, children);

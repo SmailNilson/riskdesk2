@@ -43,13 +43,22 @@ public class TradeExecutionEntity {
     @Column(nullable = false, length = 128)
     private String executionKey;
 
-    @Column(nullable = false)
+    /**
+     * Nullable since PR #303 — auto-armed quant executions are NOT tied to a
+     * mentor review. The unique index {@code uk_trade_executions_review_id}
+     * still guarantees one execution per review when present (Postgres treats
+     * NULLs as distinct in unique indexes, so multiple auto-arm rows with NULL
+     * coexist freely).
+     */
+    @Column(nullable = true)
     private Long mentorSignalReviewId;
 
-    @Column(nullable = false, length = 512)
+    /** Nullable since PR #303 — see {@link #mentorSignalReviewId}. */
+    @Column(nullable = true, length = 512)
     private String reviewAlertKey;
 
-    @Column(nullable = false)
+    /** Nullable since PR #303 — see {@link #mentorSignalReviewId}. */
+    @Column(nullable = true)
     private Integer reviewRevision;
 
     @Column(nullable = false, length = 64)

@@ -4,6 +4,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
+import com.riskdesk.application.quant.automation.QuantAutoArmService;
 import com.riskdesk.domain.quant.engine.GateEvaluator;
 import com.riskdesk.domain.quant.model.DeltaSnapshot;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
@@ -70,6 +71,7 @@ public class QuantGateService {
     private final IndicatorsPort indicatorsPort;
     private final StrategyPort strategyPort;
     private final StructuralFilterEvaluator structuralEvaluator;
+    private final org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
@@ -105,6 +107,11 @@ public class QuantGateService {
      */
     private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
+    /**
+     * Backward-compatible constructor used by pre-PR-#303 tests. Wires the
+     * auto-arm provider to a no-op so the auto-arm pipeline simply does not
+     * fire when the test omits it.
+     */
     public QuantGateService(AbsorptionPort absorptionPort,
                             DistributionPort distributionPort,
                             CyclePort cyclePort,
@@ -120,6 +127,29 @@ public class QuantGateService {
                             IndicatorsPort indicatorsPort,
                             StrategyPort strategyPort,
                             StructuralFilterEvaluator structuralEvaluator) {
+        this(absorptionPort, distributionPort, cyclePort, deltaPort, livePricePort,
+            statePort, notificationPort, historyStore, narrationService, sessionMemoryService,
+            advisorService, evaluator, indicatorsPort, strategyPort, structuralEvaluator,
+            new EmptyObjectProvider<>());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public QuantGateService(AbsorptionPort absorptionPort,
+                            DistributionPort distributionPort,
+                            CyclePort cyclePort,
+                            DeltaPort deltaPort,
+                            LivePricePort livePricePort,
+                            QuantStatePort statePort,
+                            QuantNotificationPort notificationPort,
+                            QuantSnapshotHistoryStore historyStore,
+                            QuantSetupNarrationService narrationService,
+                            QuantSessionMemoryService sessionMemoryService,
+                            QuantAiAdvisorService advisorService,
+                            GateEvaluator evaluator,
+                            IndicatorsPort indicatorsPort,
+                            StrategyPort strategyPort,
+                            StructuralFilterEvaluator structuralEvaluator,
+                            org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
         this.cyclePort = cyclePort;
@@ -135,6 +165,7 @@ public class QuantGateService {
         this.indicatorsPort = indicatorsPort;
         this.strategyPort = strategyPort;
         this.structuralEvaluator = structuralEvaluator;
+        this.autoArmServiceProvider = autoArmServiceProvider;
     }
 
     /**
@@ -237,6 +268,21 @@ public class QuantGateService {
                 && advice.verdict() != com.riskdesk.domain.quant.advisor.AiAdvice.Verdict.UNAVAILABLE) {
                 notificationPort.publishAdvice(instrument, result, advice);
             }
+        }
+
+        // PR #303 — auto-arm pipeline. Side-effects (creating a TradeExecution
+        // row, publishing AutoArmFiredEvent) happen only when
+        // riskdesk.quant.auto-arm.enabled=true AND every gate in
+        // AutoArmEvaluator passes. Wrapped in try/catch so an auto-arm hiccup
+        // never breaks the scan return contract. Uses ObjectProvider so tests
+        // can omit the bean entirely.
+        try {
+            QuantAutoArmService autoArm = autoArmServiceProvider.getIfAvailable();
+            if (autoArm != null) {
+                autoArm.onSnapshot(instrument, result);
+            }
+        } catch (RuntimeException e) {
+            log.warn("auto-arm onSnapshot failed instrument={}: {}", instrument, e.toString());
         }
 
         logScan(instrument, result);
@@ -446,4 +492,15 @@ public class QuantGateService {
         }
     }
 
+    /**
+     * Minimal {@link org.springframework.beans.factory.ObjectProvider} that
+     * always reports "no bean available". Used by the legacy constructor so
+     * pre-PR-#303 tests don't need to mock the auto-arm provider.
+     */
+    private static final class EmptyObjectProvider<T> implements org.springframework.beans.factory.ObjectProvider<T> {
+        @Override public T getObject() { throw new org.springframework.beans.factory.NoSuchBeanDefinitionException("none"); }
+        @Override public T getObject(Object... args) { throw new org.springframework.beans.factory.NoSuchBeanDefinitionException("none"); }
+        @Override public T getIfAvailable() { return null; }
+        @Override public T getIfUnique() { return null; }
+    }
 }

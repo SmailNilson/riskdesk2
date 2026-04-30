@@ -1,5 +1,7 @@
 package com.riskdesk.infrastructure.persistence;
 
+import com.riskdesk.domain.model.ExecutionStatus;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.infrastructure.persistence.entity.TradeExecutionEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -24,4 +26,25 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
     Optional<TradeExecutionEntity> findByIbkrOrderId(Integer ibkrOrderId);
 
     Optional<TradeExecutionEntity> findByExecutionKey(String executionKey);
+
+    /**
+     * PR #303 — return the most recent non-terminal execution for an
+     * instrument (regardless of trigger source). Used to gate auto-arm so we
+     * never duplicate an active position. Terminal statuses (CLOSED,
+     * CANCELLED, REJECTED, FAILED) are excluded.
+     */
+    @Query("select e from TradeExecutionEntity e " +
+           "where e.instrument = :instrument " +
+           "  and e.status not in (:terminal) " +
+           "order by e.createdAt desc")
+    List<TradeExecutionEntity> findActiveByInstrumentRaw(@Param("instrument") String instrument,
+                                                          @Param("terminal") Collection<ExecutionStatus> terminalStatuses);
+
+    /**
+     * PR #303 — return all currently-pending executions for the given trigger
+     * source (e.g. {@link ExecutionTriggerSource#QUANT_AUTO_ARM}). Used by the
+     * auto-submit scheduler to find decisions whose cancel window has elapsed.
+     */
+    List<TradeExecutionEntity> findAllByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource,
+                                                                ExecutionStatus status);
 }
