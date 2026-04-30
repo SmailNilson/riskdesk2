@@ -217,6 +217,14 @@ class QuantAutoArmServiceTest {
                 .filter(r -> r.getStatus() == ExecutionStatus.PENDING_ENTRY_SUBMISSION)
                 .toList();
         }
+        @Override public List<TradeExecutionRecord> findAllActive() {
+            return byId.values().stream()
+                .filter(r -> r.getStatus() != ExecutionStatus.CLOSED
+                    && r.getStatus() != ExecutionStatus.CANCELLED
+                    && r.getStatus() != ExecutionStatus.REJECTED
+                    && r.getStatus() != ExecutionStatus.FAILED)
+                .toList();
+        }
     }
 
     private static class CapturingPublisher implements ApplicationEventPublisher {

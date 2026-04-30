@@ -47,4 +47,12 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
      */
     List<TradeExecutionEntity> findAllByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource,
                                                                 ExecutionStatus status);
+
+    /**
+     * Active Positions Panel — return every execution whose status is NOT in
+     * the supplied terminal-status set. Ordered most-recent-first so the panel
+     * naturally shows newer trades on top.
+     */
+    @Query("select e from TradeExecutionEntity e where e.status not in (:statuses) order by e.createdAt desc")
+    List<TradeExecutionEntity> findAllByStatusNotIn(@Param("statuses") Collection<ExecutionStatus> statuses);
 }

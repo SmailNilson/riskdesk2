@@ -51,4 +51,13 @@ public interface TradeExecutionRepositoryPort {
      * endpoint that lists pending arms for the UI.
      */
     List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource triggerSource);
+
+    /**
+     * Active Positions Panel — return all executions whose status is non-terminal
+     * (i.e. anything except CLOSED, CANCELLED, REJECTED, FAILED). Used by the
+     * Active Positions panel's REST snapshot endpoint and the periodic WS
+     * publisher to populate "currently in flight" trades across all instruments
+     * and all trigger sources.
+     */
+    List<TradeExecutionRecord> findAllActive();
 }
