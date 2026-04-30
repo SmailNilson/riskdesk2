@@ -142,4 +142,11 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
             .map(TradeExecutionEntityMapper::toDomain)
             .toList();
     }
+
+    @Override
+    public List<TradeExecutionRecord> findAllActive() {
+        return repository.findAllByStatusNotIn(TERMINAL_STATUSES).stream()
+            .map(TradeExecutionEntityMapper::toDomain)
+            .toList();
+    }
 }
