@@ -1,7 +1,6 @@
-package com.riskdesk.infrastructure.quant.notification;
+package com.riskdesk.application.quant.positions;
 
 import com.riskdesk.application.dto.ActivePositionView;
-import com.riskdesk.application.quant.positions.ActivePositionsService;
 import com.riskdesk.domain.quant.positions.ActivePositionChangedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,8 +12,14 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * Listens to {@link ActivePositionChangedEvent} from the application layer
- * and pushes the current active-positions snapshot to {@code /topic/positions}.
+ * Bridges {@link ActivePositionChangedEvent} (and a periodic 5s heartbeat)
+ * to the {@code /topic/positions} WebSocket destination.
+ *
+ * <p>Lives in the application layer because ArchUnit forbids
+ * infrastructure → application dependencies, and we need the snapshot
+ * computed by {@link ActivePositionsService}. Other application services
+ * already use {@link SimpMessagingTemplate} the same way (e.g.
+ * {@code MarketDataService}, {@code BehaviourAlertService}).</p>
  *
  * <p>Two trigger paths feed the same destination:
  * <ul>
@@ -34,16 +39,16 @@ import java.util.List;
  * propagate into the application service that emitted the event.</p>
  */
 @Component
-public class ActivePositionsWebSocketAdapter {
+public class ActivePositionsWebSocketPublisher {
 
-    private static final Logger log = LoggerFactory.getLogger(ActivePositionsWebSocketAdapter.class);
+    private static final Logger log = LoggerFactory.getLogger(ActivePositionsWebSocketPublisher.class);
     private static final String DESTINATION = "/topic/positions";
 
     private final SimpMessagingTemplate messagingTemplate;
     private final ActivePositionsService activePositionsService;
 
-    public ActivePositionsWebSocketAdapter(SimpMessagingTemplate messagingTemplate,
-                                           ActivePositionsService activePositionsService) {
+    public ActivePositionsWebSocketPublisher(SimpMessagingTemplate messagingTemplate,
+                                             ActivePositionsService activePositionsService) {
         this.messagingTemplate = messagingTemplate;
         this.activePositionsService = activePositionsService;
     }
@@ -54,10 +59,8 @@ public class ActivePositionsWebSocketAdapter {
     }
 
     /**
-     * Periodic 5s heartbeat. Publishes the latest snapshot so the panel sees
-     * fresh PnL even when nothing transitions on the broker side. Configurable
-     * via {@code riskdesk.positions.heartbeat-millis} if a deployment needs
-     * a different cadence; defaults to 5_000 ms.
+     * Periodic 5s heartbeat. Configurable via
+     * {@code riskdesk.positions.heartbeat-millis}; defaults to 5_000 ms.
      */
     @Scheduled(fixedDelayString = "${riskdesk.positions.heartbeat-millis:5000}")
     public void heartbeat() {
