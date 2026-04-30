@@ -71,15 +71,19 @@ public final class SessionTimingAgent implements StrategyAgent {
                 "market-closed: instrument not currently tradeable");
         }
 
-        // 5m kill-zone gate — the legacy ConfluenceBuffer enforces this for the
-        // same reason: outside kill zones a 5m setup is dominated by noise, and
-        // evaluating a Playbook there just burns Gemini budget and produces low-
-        // quality reviews. The gate is scoped to the *reference* timeframe so
-        // H1/H4 setups are never blocked by session timing alone.
+        // 5m kill-zone — DEMOTED from veto to informational signal (per operator
+        // request 2026-04-30). NY regular session 09:30–16:00 ET produces tradable
+        // 5m setups well past the original kill-zone window (08:30–11:00 ET), so
+        // a hard veto over-restricts the user. The signal still appears in
+        // evidence so downstream consumers can see the timing context, but the
+        // setup is no longer blocked. The legacy ConfluenceBuffer keeps its own
+        // gate independently for backtest-driven setups.
         String tf = input.context().referenceTimeframe();
         if (KILL_ZONE_SENSITIVE_TIMEFRAME.equalsIgnoreCase(tf) && !s.killZone()) {
-            return AgentVote.veto(ID, StrategyLayer.CONTEXT,
-                "5m-outside-kill-zone: 5m setups only permitted in London 02:00–05:00 ET or NY 08:30–11:00 ET");
+            List<String> evidence = new ArrayList<>();
+            evidence.add("5m setup outside London/NY kill zones — informational only");
+            evidence.add("Original window: London 02:00–05:00 ET or NY 08:30–11:00 ET");
+            return AgentVote.of(ID, StrategyLayer.CONTEXT, 0, 0.20, evidence);
         }
 
         // Low-liquidity (Asian / CLOSE) — discourage without blocking
