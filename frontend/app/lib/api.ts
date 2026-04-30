@@ -1257,7 +1257,58 @@ export const api = {
   // immediately with the cached verdict if one is fresh (≤ 30 s window).
   askQuantAiAdvice: (instrument: string) =>
     post<AdviceView & { instrument: string }>(`/api/quant/ai-advice/${instrument}`, {}),
+
+  // ── Quant auto-arm pipeline (PR #303) ──────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantAutoArmController
+  fireAutoArm: (executionId: number) =>
+    post<AutoArmStatusResponse>(`/api/quant/auto-arm/${executionId}/fire`, {}),
+  cancelAutoArm: (executionId: number) =>
+    post<AutoArmStatusResponse>(`/api/quant/auto-arm/${executionId}/cancel`, {}),
+  listActiveAutoArms: () =>
+    get<AutoArmStatusResponse[]>(`/api/quant/auto-arm/active`),
 };
+
+// ── Quant auto-arm types (PR #303) ──────────────────────────────────────
+export interface AutoArmStatusResponse {
+  executionId: number;
+  instrument: string;
+  /** Derived from action — "LONG" or "SHORT". */
+  direction: string;
+  /** Raw IBKR action string — "BUY" / "SELL". */
+  action: string;
+  status: string;
+  statusReason: string | null;
+  entry: string | number | null;
+  stopLoss: string | number | null;
+  takeProfit: string | number | null;
+  quantity: number | null;
+  armedAt: string | null;
+  autoSubmitAt: string | null;
+  /** Null when auto-submit is disabled. */
+  secondsUntilAutoSubmit: number | null;
+}
+
+/** Live state of an arm pushed via STOMP. */
+export type AutoArmStreamKind = 'ARMED' | 'CANCELLED' | 'FIRED' | 'EXPIRED' | 'AUTO_SUBMITTED';
+export interface AutoArmStreamPayload {
+  kind: AutoArmStreamKind;
+  instrument: string;
+  executionId: number;
+  /** Only present on ARMED. */
+  direction?: string;
+  entry?: string | null;
+  stopLoss?: string | null;
+  takeProfit1?: string | null;
+  takeProfit2?: string | null;
+  sizePercent?: number;
+  armedAt?: string;
+  expiresAt?: string;
+  autoSubmitAt?: string | null;
+  reasoning?: string;
+  /** Lifecycle events carry this. */
+  reason?: string;
+  changedAt?: string;
+}
 
 // ── External Setup types ────────────────────────────────────────────────
 export type ExternalSetupStatus =

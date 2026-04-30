@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/app/lib/api';
-import { useQuantStream } from '@/app/hooks/useQuantStream';
+import { useQuantStream, type AutoArmInstrumentState } from '@/app/hooks/useQuantStream';
 import QuantAdvisorBadge from './QuantAdvisorBadge';
 import QuantNarrationPanel from './QuantNarrationPanel';
 import {
@@ -182,10 +182,12 @@ function DirectionSection(props: DirectionSectionProps) {
  */
 export default function QuantGatePanel() {
   const [active, setActive] = useState<QuantInstrument>('MNQ');
-  const { snapshots, narrations, advice: streamedAdvice, connected } = useQuantStream();
+  const { snapshots, narrations, advice: streamedAdvice, autoArm, connected } = useQuantStream();
   const [bootstrap, setBootstrap] = useState<Record<string, QuantSnapshotView>>({});
   const [manualAdvice, setManualAdvice] = useState<Record<string, AdviceView>>({});
   const [askingAi, setAskingAi] = useState<Record<string, boolean>>({});
+  const [autoArmBusy, setAutoArmBusy] = useState<Record<number, boolean>>({});
+  const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -214,6 +216,37 @@ export default function QuantGatePanel() {
   const snapshot = snapshots[active] ?? bootstrap[active] ?? null;
   const narration = narrations[active] ?? null;
   const advice = manualAdvice[active] ?? streamedAdvice[active] ?? null;
+  const armState: AutoArmInstrumentState | null = autoArm[active] ?? null;
+
+  // Tick every 1s for the countdown — only when an arm is currently displayed
+  // so we don't waste re-renders when there's nothing to count down.
+  useEffect(() => {
+    if (armState?.state !== 'ARMED') return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [armState?.state]);
+
+  const fireAutoArm = async (executionId: number) => {
+    setAutoArmBusy(prev => ({ ...prev, [executionId]: true }));
+    try {
+      await api.fireAutoArm(executionId);
+    } catch (err) {
+      console.warn('auto-arm fire failed', err);
+    } finally {
+      setAutoArmBusy(prev => ({ ...prev, [executionId]: false }));
+    }
+  };
+
+  const cancelAutoArm = async (executionId: number) => {
+    setAutoArmBusy(prev => ({ ...prev, [executionId]: true }));
+    try {
+      await api.cancelAutoArm(executionId);
+    } catch (err) {
+      console.warn('auto-arm cancel failed', err);
+    } finally {
+      setAutoArmBusy(prev => ({ ...prev, [executionId]: false }));
+    }
+  };
 
   const askAi = async () => {
     setAskingAi((prev) => ({ ...prev, [active]: true }));
@@ -329,6 +362,16 @@ export default function QuantGatePanel() {
             />
           </div>
 
+          {armState && armState.state !== 'IDLE' && (
+            <AutoArmCard
+              state={armState}
+              now={now}
+              busy={armState.armed ? Boolean(autoArmBusy[armState.armed.executionId]) : false}
+              onFire={fireAutoArm}
+              onCancel={cancelAutoArm}
+            />
+          )}
+
           <details className="mt-3 text-xs">
             <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
               Narration markdown {narration?.pattern ? `· ${narration.pattern.label}` : ''}
@@ -342,5 +385,108 @@ export default function QuantGatePanel() {
         <p className="text-sm text-slate-400">No snapshot yet. The scheduler runs every 60 seconds.</p>
       )}
     </section>
+  );
+}
+
+/**
+ * Auto-arm state badge with countdown + Fire / Cancel buttons. Lives below
+ * the SHORT setup card. The state is driven entirely by the WebSocket
+ * stream — the buttons fire-and-forget against the REST endpoints; the
+ * actual state change comes back through the stream.
+ */
+function AutoArmCard(props: {
+  state: AutoArmInstrumentState;
+  now: number;
+  busy: boolean;
+  onFire: (executionId: number) => void;
+  onCancel: (executionId: number) => void;
+}): JSX.Element {
+  const { state, now, busy, onFire, onCancel } = props;
+  const armed = state.armed;
+
+  if (state.state !== 'ARMED' || armed === null) {
+    // Lifecycle echo (CANCELLED / FIRED / EXPIRED / AUTO_SUBMITTED).
+    const tone =
+      state.state === 'CANCELLED' ? 'border-slate-700 bg-slate-900 text-slate-300' :
+      state.state === 'EXPIRED' ? 'border-slate-700 bg-slate-900 text-slate-400' :
+      'border-emerald-700 bg-emerald-950/40 text-emerald-200';
+    return (
+      <div className={`mt-4 rounded border ${tone} p-3 text-sm`}>
+        <div className="font-semibold">Auto-arm — {state.state.replace(/_/g, ' ').toLowerCase()}</div>
+        {state.lastReason && <div className="text-xs opacity-80 mt-1">{state.lastReason}</div>}
+      </div>
+    );
+  }
+
+  const autoSubmitAtMs = armed.autoSubmitAt ? Date.parse(armed.autoSubmitAt) : null;
+  const expiresAtMs = armed.expiresAt ? Date.parse(armed.expiresAt) : null;
+  const secondsUntilSubmit = autoSubmitAtMs !== null ? Math.max(0, Math.floor((autoSubmitAtMs - now) / 1000)) : null;
+  const secondsUntilExpire = expiresAtMs !== null ? Math.max(0, Math.floor((expiresAtMs - now) / 1000)) : null;
+
+  return (
+    <div className="mt-4 rounded border border-yellow-600 bg-yellow-950/40 p-3 text-sm animate-pulse">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="text-yellow-300 text-base">🟡</span>
+          <span className="font-bold text-yellow-100">
+            ARMED — {armed.direction ?? '—'}
+          </span>
+        </div>
+        {secondsUntilSubmit !== null ? (
+          <span className="text-xs text-yellow-200">
+            Auto-submit in <span className="font-mono font-bold">{secondsUntilSubmit}s</span>
+          </span>
+        ) : (
+          <span className="text-xs text-yellow-200">
+            Manual fire required (auto-submit disabled)
+            {secondsUntilExpire !== null && (
+              <> · expires in <span className="font-mono">{secondsUntilExpire}s</span></>
+            )}
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-xs font-mono mt-2">
+        <div>
+          <span className="text-yellow-400">ENTRY</span>
+          <br />{armed.entry ?? '—'}
+        </div>
+        <div>
+          <span className="text-yellow-400">SL</span>
+          <br />{armed.stopLoss ?? '—'}
+        </div>
+        <div>
+          <span className="text-yellow-400">TP1</span>
+          <br />{armed.takeProfit1 ?? '—'}
+        </div>
+        <div>
+          <span className="text-yellow-400">TP2</span>
+          <br />{armed.takeProfit2 ?? '—'}
+        </div>
+      </div>
+
+      {armed.reasoning && (
+        <div className="text-xs text-yellow-200/80 mt-2">{armed.reasoning}</div>
+      )}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          onClick={() => onFire(armed.executionId)}
+          disabled={busy}
+          className="px-3 py-1 text-xs rounded bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-semibold"
+        >
+          🔥 FIRE NOW
+        </button>
+        <button
+          type="button"
+          onClick={() => onCancel(armed.executionId)}
+          disabled={busy}
+          className="px-3 py-1 text-xs rounded bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white font-semibold"
+        >
+          ✕ CANCEL
+        </button>
+      </div>
+    </div>
   );
 }

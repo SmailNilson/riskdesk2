@@ -1,6 +1,8 @@
 package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
+import com.riskdesk.domain.model.ExecutionStatus;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.persistence.entity.TradeExecutionEntity;
 import jakarta.persistence.EntityManager;
@@ -9,8 +11,10 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Component
 public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionRepositoryPort {
@@ -26,9 +30,18 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
 
     @Override
     public TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution) {
-        Optional<TradeExecutionEntity> existing = repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId());
-        if (existing.isPresent()) {
-            return TradeExecutionEntityMapper.toDomain(existing.get());
+        // Auto-armed quant executions (PR #303) carry a NULL mentorSignalReviewId
+        // — the de-dup key for those is executionKey only.
+        if (execution.getMentorSignalReviewId() != null) {
+            Optional<TradeExecutionEntity> existing = repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId());
+            if (existing.isPresent()) {
+                return TradeExecutionEntityMapper.toDomain(existing.get());
+            }
+        } else if (execution.getExecutionKey() != null) {
+            Optional<TradeExecutionEntity> existing = repository.findByExecutionKey(execution.getExecutionKey());
+            if (existing.isPresent()) {
+                return TradeExecutionEntityMapper.toDomain(existing.get());
+            }
         }
 
         try {
@@ -37,7 +50,12 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
             );
         } catch (DataIntegrityViolationException e) {
             entityManager.clear();
-            return repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId())
+            if (execution.getMentorSignalReviewId() != null) {
+                return repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId())
+                    .map(TradeExecutionEntityMapper::toDomain)
+                    .orElseThrow(() -> e);
+            }
+            return repository.findByExecutionKey(execution.getExecutionKey())
                 .map(TradeExecutionEntityMapper::toDomain)
                 .orElseThrow(() -> e);
         }
@@ -93,5 +111,35 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
             return Optional.empty();
         }
         return repository.findByExecutionKey(executionKey).map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    /** Statuses that indicate an execution is no longer doing any work. Mirror
+     *  of {@code AutoArmEvaluator.ACTIVE_STATUSES}'s complement — kept here so
+     *  the JPA query works without coupling to the domain evaluator. */
+    private static final Set<ExecutionStatus> TERMINAL_STATUSES = EnumSet.of(
+        ExecutionStatus.CLOSED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.REJECTED,
+        ExecutionStatus.FAILED
+    );
+
+    @Override
+    public Optional<TradeExecutionRecord> findActiveByInstrument(String instrument) {
+        if (instrument == null || instrument.isBlank()) {
+            return Optional.empty();
+        }
+        return repository.findActiveByInstrumentRaw(instrument, TERMINAL_STATUSES).stream()
+            .findFirst()
+            .map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
+    public List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource triggerSource) {
+        if (triggerSource == null) {
+            return List.of();
+        }
+        return repository.findAllByTriggerSourceAndStatus(triggerSource, ExecutionStatus.PENDING_ENTRY_SUBMISSION).stream()
+            .map(TradeExecutionEntityMapper::toDomain)
+            .toList();
     }
 }
