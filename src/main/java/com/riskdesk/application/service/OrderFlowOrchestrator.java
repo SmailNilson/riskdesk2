@@ -378,29 +378,34 @@ public class OrderFlowOrchestrator {
 
     private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
         try {
-            if (!properties.getAbsorption().isEnabled()) return;
+            boolean absorptionEnabled = properties.getAbsorption().isEnabled();
+            boolean momentumEnabled = properties.getMomentum().isEnabled();
+            if (!absorptionEnabled && !momentumEnabled) return;  // nothing to do
 
             long totalVolume = agg.buyVolume() + agg.sellVolume();
             if (totalVolume <= 0) {
-                // No trades in the short window — record a 0 in history so old spikes age out,
-                // then return. Cycle.tick() is now called outside this method.
-                recordWindowVolume(instrument, 0L);
+                // No trades in the short window — record a 0 in history (only relevant if
+                // absorption is on) so old spikes age out, then return.
+                if (absorptionEnabled) recordWindowVolume(instrument, 0L);
                 return;
             }
 
             double deltaThreshold = properties.getAbsorption().getDeltaThreshold();
-            double avgVolume = recordAndGetAvgVolume(instrument, totalVolume);
+            // Maintain the rolling avgVolume baseline only when absorption is enabled.
+            // Momentum doesn't depend on a normalised baseline the same way, so we feed it
+            // the current totalVolume as a neutral fallback (its detector handles edge cases).
+            double avgVolume = absorptionEnabled
+                ? recordAndGetAvgVolume(instrument, totalVolume)
+                : (double) totalVolume;
             if (avgVolume <= 0) return;
 
             // Real price move from tick window high/low — guard against missing data
-            double priceMovePoints;
-            double midPrice;
             if (Double.isNaN(agg.highPrice()) || Double.isNaN(agg.lowPrice())) {
-                // Cannot compute absorption without price-stability signal
+                // Cannot compute either absorption or momentum without price data
                 return;
             }
-            priceMovePoints = agg.highPrice() - agg.lowPrice();
-            midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
+            double priceMovePoints = agg.highPrice() - agg.lowPrice();
+            double midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
 
             // Signed price move: prefer cumulativeDelta sign over instantaneous delta to avoid
             // signum(0) = 0 wiping out the signal when delta lands exactly at zero.
@@ -411,10 +416,14 @@ public class OrderFlowOrchestrator {
             double atr = atrCache.getOrDefault(instrument, 1.0);
             java.time.Instant now = java.time.Instant.now();
 
-            Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
-                instrument, agg.delta(), priceMovePoints,
-                totalVolume, atr,
-                deltaThreshold, avgVolume, now);
+            // Absorption is only evaluated when its own toggle is on. Momentum is independent
+            // and runs in the else branch below regardless of the absorption toggle.
+            Optional<AbsorptionSignal> signal = absorptionEnabled
+                ? absorptionDetector.evaluate(
+                    instrument, agg.delta(), priceMovePoints,
+                    totalVolume, atr,
+                    deltaThreshold, avgVolume, now)
+                : Optional.empty();
 
             if (signal.isPresent()) {
                 AbsorptionSignal s = signal.get();
@@ -445,8 +454,8 @@ public class OrderFlowOrchestrator {
                         }
                     }
                 }
-            } else if (properties.getMomentum().isEnabled()) {
-                // Complementary path: absorption silent → check momentum burst (Detector 2)
+            } else if (momentumEnabled) {
+                // Complementary path: absorption silent (or disabled) → check momentum burst (Detector 2)
                 Optional<MomentumSignal> momentum = momentumDetectorFor(instrument).evaluate(
                     instrument, agg.delta(), signedPriceMovePoints, priceMovePoints,
                     totalVolume, atr, deltaThreshold, avgVolume, midPrice, now);
