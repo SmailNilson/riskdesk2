@@ -1266,7 +1266,46 @@ export const api = {
     post<AutoArmStatusResponse>(`/api/quant/auto-arm/${executionId}/cancel`, {}),
   listActiveAutoArms: () =>
     get<AutoArmStatusResponse[]>(`/api/quant/auto-arm/active`),
+
+  // ── Active Positions panel ─────────────────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.ActivePositionsController
+  // /active returns every non-terminal execution (PENDING / SUBMITTED /
+  // ACTIVE / VIRTUAL_EXIT_TRIGGERED / EXIT_SUBMITTED) enriched with a
+  // server-side PnL snapshot. Live updates flow through /topic/positions
+  // (see useActivePositions). The /close endpoint transitions the row to
+  // CANCELLED (if not yet at the broker) or EXIT_SUBMITTED (broker-known).
+  listActivePositions: () =>
+    get<ActivePositionView[]>(`/api/quant/positions/active`),
+  closeActivePosition: (executionId: number) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/close`, {}),
 };
+
+// ── Active Positions types ──────────────────────────────────────────────
+export interface ActivePositionView {
+  executionId: number;
+  instrument: string;
+  /** Derived from action — "LONG" or "SHORT". */
+  direction: string;
+  /** Raw broker action — "BUY" / "SELL". */
+  action: string;
+  status: string;
+  statusReason: string | null;
+  entryPrice: number | string | null;
+  /** Latest live price reading. May be null when the gateway has no recent push. */
+  currentPrice: number | string | null;
+  stopLoss: number | string | null;
+  takeProfit1: number | string | null;
+  takeProfit2: number | string | null;
+  quantity: number | null;
+  openedAt: string | null;
+  /** Server-computed PnL — clients SHOULD recompute on every WS price tick. */
+  pnlPoints: number | string | null;
+  pnlDollars: number | string | null;
+  pnlPercent: number | string | null;
+  triggerSource: string | null;
+  /** True when the row is in a state the close endpoint can act on. */
+  closable: boolean;
+}
 
 // ── Quant auto-arm types (PR #303) ──────────────────────────────────────
 export interface AutoArmStatusResponse {

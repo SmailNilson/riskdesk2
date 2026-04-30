@@ -11,6 +11,7 @@ import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
 import QuantGatePanel from './quant/QuantGatePanel';
 import QuantSetupNotification from './quant/QuantSetupNotification';
+import ActivePositionsPanel from './positions/ActivePositionsPanel';
 import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
 import { QUANT_INSTRUMENTS } from './quant/types';
 import AlertsFeed from './AlertsFeed';
@@ -283,6 +284,7 @@ export default function Dashboard() {
             selectedBrokerAccountId={selectedIbkrAccountId}
             onRefresh={refresh}
           />
+          <ActivePositionsPanel />
           <QuantGatePanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
