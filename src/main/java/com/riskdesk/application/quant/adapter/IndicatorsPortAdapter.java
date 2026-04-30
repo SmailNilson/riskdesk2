@@ -77,6 +77,12 @@ public class IndicatorsPortAdapter implements IndicatorsPort {
                 els.add(new IndicatorsSnapshot.EqualLowView(toDouble(el.price()), el.touchCount()));
             }
         }
+        List<IndicatorsSnapshot.EqualHighView> ehs = new ArrayList<>();
+        if (s.equalHighs() != null) {
+            for (IndicatorSnapshot.EqualLevelView eh : s.equalHighs()) {
+                ehs.add(new IndicatorsSnapshot.EqualHighView(toDouble(eh.price()), eh.touchCount()));
+            }
+        }
 
         // The lastPrice reference is exposed primarily so the ports can stay
         // self-sufficient if a caller ever needs it; the structural evaluator
@@ -89,6 +95,7 @@ public class IndicatorsPortAdapter implements IndicatorsPort {
         return new IndicatorsSnapshot(
             toDouble(s.vwap()),
             toDouble(s.vwapLowerBand()),
+            toDouble(s.vwapUpperBand()),
             toDouble(s.bbPct()),
             toDouble(s.cmf()),
             s.currentZone(),
@@ -96,7 +103,8 @@ public class IndicatorsPortAdapter implements IndicatorsPort {
             s.lastInternalBreakType(),
             mtf,
             obs,
-            els
+            els,
+            ehs
         );
     }
 

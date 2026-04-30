@@ -31,6 +31,7 @@ public record QuantState(
     List<DistEntry> distOnlyHistory,
     List<DistEntry> accuOnlyHistory,
     List<Instant> absBullScans30m,
+    List<Instant> absBearScans30m,
     int lastSignaledScore
 ) {
     public static final int HISTORY_CAPACITY = 3;
@@ -41,34 +42,52 @@ public record QuantState(
         distOnlyHistory = distOnlyHistory == null ? List.of() : List.copyOf(distOnlyHistory);
         accuOnlyHistory = accuOnlyHistory == null ? List.of() : List.copyOf(accuOnlyHistory);
         absBullScans30m = absBullScans30m == null ? List.of() : List.copyOf(absBullScans30m);
+        absBearScans30m = absBearScans30m == null ? List.of() : List.copyOf(absBearScans30m);
+    }
+
+    /**
+     * Backward-compatible 7-arg constructor (pre-LONG-symmetry shape) used by
+     * legacy adapters and tests. Defaults {@code absBearScans30m} to empty.
+     */
+    public QuantState(
+        LocalDate sessionDate,
+        Double monitorStartPx,
+        List<Double> deltaHistory,
+        List<DistEntry> distOnlyHistory,
+        List<DistEntry> accuOnlyHistory,
+        List<Instant> absBullScans30m,
+        int lastSignaledScore
+    ) {
+        this(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
+             absBullScans30m, List.of(), lastSignaledScore);
     }
 
     /** Returns a fresh state for the given trading date with no history. */
     public static QuantState reset(LocalDate sessionDate) {
-        return new QuantState(sessionDate, null, List.of(), List.of(), List.of(), List.of(), 0);
+        return new QuantState(sessionDate, null, List.of(), List.of(), List.of(), List.of(), List.of(), 0);
     }
 
     public QuantState withMonitorStartPx(double px) {
         return new QuantState(sessionDate, px, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            absBullScans30m, lastSignaledScore);
+            absBullScans30m, absBearScans30m, lastSignaledScore);
     }
 
     public QuantState appendDelta(double delta) {
         List<Double> next = appendCapped(deltaHistory, delta, HISTORY_CAPACITY);
         return new QuantState(sessionDate, monitorStartPx, next, distOnlyHistory, accuOnlyHistory,
-            absBullScans30m, lastSignaledScore);
+            absBullScans30m, absBearScans30m, lastSignaledScore);
     }
 
     public QuantState appendDistOnly(DistEntry entry) {
         List<DistEntry> next = appendCapped(distOnlyHistory, entry, HISTORY_CAPACITY);
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, next, accuOnlyHistory,
-            absBullScans30m, lastSignaledScore);
+            absBullScans30m, absBearScans30m, lastSignaledScore);
     }
 
     public QuantState appendAccuOnly(DistEntry entry) {
         List<DistEntry> next = appendCapped(accuOnlyHistory, entry, HISTORY_CAPACITY);
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, next,
-            absBullScans30m, lastSignaledScore);
+            absBullScans30m, absBearScans30m, lastSignaledScore);
     }
 
     /**
@@ -83,7 +102,7 @@ public record QuantState(
         }
         if (scanTs != null && !scanTs.isBefore(cutoff)) next.add(scanTs);
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            Collections.unmodifiableList(next), lastSignaledScore);
+            Collections.unmodifiableList(next), absBearScans30m, lastSignaledScore);
     }
 
     /** Prune the ABS BULL list without adding a new entry. */
@@ -95,13 +114,41 @@ public record QuantState(
         }
         if (next.size() == absBullScans30m.size()) return this;
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            Collections.unmodifiableList(next), lastSignaledScore);
+            Collections.unmodifiableList(next), absBearScans30m, lastSignaledScore);
+    }
+
+    /**
+     * LONG mirror of {@link #appendAbsBullAndPrune}. Adds a fresh ABS BEAR scan
+     * timestamp and prunes anything older than 30 minutes — used by L0 to decide
+     * whether the daily regime is bearish enough to suspend LONG setups.
+     */
+    public QuantState appendAbsBearAndPrune(Instant scanTs, Instant now) {
+        Instant cutoff = now.minusSeconds(ABS_BULL_WINDOW_MINUTES * 60L);
+        List<Instant> next = new ArrayList<>(absBearScans30m.size() + 1);
+        for (Instant t : absBearScans30m) {
+            if (!t.isBefore(cutoff)) next.add(t);
+        }
+        if (scanTs != null && !scanTs.isBefore(cutoff)) next.add(scanTs);
+        return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
+            absBullScans30m, Collections.unmodifiableList(next), lastSignaledScore);
+    }
+
+    /** Prune the ABS BEAR list without adding a new entry. */
+    public QuantState pruneAbsBearScans(Instant now) {
+        Instant cutoff = now.minusSeconds(ABS_BULL_WINDOW_MINUTES * 60L);
+        List<Instant> next = new ArrayList<>(absBearScans30m.size());
+        for (Instant t : absBearScans30m) {
+            if (!t.isBefore(cutoff)) next.add(t);
+        }
+        if (next.size() == absBearScans30m.size()) return this;
+        return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
+            absBullScans30m, Collections.unmodifiableList(next), lastSignaledScore);
     }
 
     /** Returns a new state with the publisher's transition tracker updated. */
     public QuantState withLastSignaledScore(int score) {
         return new QuantState(sessionDate, monitorStartPx, deltaHistory, distOnlyHistory, accuOnlyHistory,
-            absBullScans30m, score);
+            absBullScans30m, absBearScans30m, score);
     }
 
     private static <T> List<T> appendCapped(List<T> source, T entry, int cap) {

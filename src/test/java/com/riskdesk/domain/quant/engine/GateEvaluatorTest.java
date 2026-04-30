@@ -62,7 +62,11 @@ class GateEvaluatorTest {
 
         assertThat(snapOut.score()).isEqualTo(7);
         assertThat(snapOut.isShortSetup7_7()).isTrue();
-        assertThat(snapOut.gates().values().stream().allMatch(GateResult::ok)).isTrue();
+        // All 7 SHORT gates pass on a strong-bear snapshot.
+        for (Gate g : new Gate[] {Gate.G0_REGIME, Gate.G1_ABS_BEAR, Gate.G2_DIST_PUR,
+                Gate.G3_DELTA_NEG, Gate.G4_BUY_PCT_LOW, Gate.G5_ACCU_THRESHOLD, Gate.G6_LIVE_PUSH}) {
+            assertThat(snapOut.gates().get(g).ok()).as("SHORT gate %s", g).isTrue();
+        }
         assertThat(snapOut.suggestedSL()).isEqualTo(20_025.0);
         assertThat(snapOut.suggestedTP1()).isEqualTo(19_960.0);
         assertThat(snapOut.suggestedTP2()).isEqualTo(19_920.0);
@@ -290,7 +294,9 @@ class GateEvaluatorTest {
         QuantSnapshot snapOut = evaluator.evaluate(empty, baseState(), Instrument.MNQ).snapshot();
 
         assertThat(snapOut.score()).isLessThanOrEqualTo(2);
-        assertThat(snapOut.gates()).hasSize(7);
+        // Gate map carries both SHORT (G0–G6) and LONG (L0–L6) tracks.
+        assertThat(snapOut.gates()).hasSize(14);
+        assertThat(snapOut.longScore()).isLessThanOrEqualTo(2);
     }
 
     @Test
@@ -311,6 +317,199 @@ class GateEvaluatorTest {
         assertThat(state.distOnlyHistory()).hasSize(1);
         QuantSnapshot snapOut = evaluator.evaluate(tick, state, Instrument.MNQ).snapshot();
         assertThat(snapOut.gates().get(Gate.G2_DIST_PUR).ok()).isFalse();
+    }
+
+    // ── LONG mirror tests (LONG-symmetry slice) ─────────────────────────
+
+    @Test
+    @DisplayName("LONG full setup: delta +315, buy% 59, ACCU 87×3, ABS BULL n8=10 → LONG score 7")
+    void scoreFullLongSetup_returnsSeven() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0)
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 87, NOW.minusSeconds(300)))
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 87, NOW.minusSeconds(180)))
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 87, NOW.minusSeconds(60)));
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(315.0).buyPct(59.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.5)
+            .dist("ACCUMULATION", 87).cycleAge(2)
+            .build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.longScore()).isEqualTo(7);
+        assertThat(snapOut.isLongSetup7_7()).isTrue();
+        for (Gate g : new Gate[] {Gate.L0_REGIME, Gate.L1_ABS_BULL, Gate.L2_ACCU_PUR,
+                Gate.L3_DELTA_POS, Gate.L4_BUY_PCT_HIGH, Gate.L5_DIST_THRESHOLD, Gate.L6_LIVE_PUSH}) {
+            assertThat(snapOut.gates().get(g).ok()).as("LONG gate %s", g).isTrue();
+        }
+        assertThat(snapOut.suggestedSL_LONG()).isEqualTo(19_975.0);
+        assertThat(snapOut.suggestedTP1_LONG()).isEqualTo(20_040.0);
+        assertThat(snapOut.suggestedTP2_LONG()).isEqualTo(20_080.0);
+    }
+
+    @Test
+    @DisplayName("L0 LONG regime: bearish day move beyond -75pts blocks LONG")
+    void l0Regime_bearishDay_blocks() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_100.0);
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_010.0).priceSource("LIVE_PUSH")  // -90pts
+            .delta(200.0).buyPct(53.0)
+            .absFresh(8).absBull8(8).absBear8(0).absMaxScore(8.5)
+            .dist("ACCUMULATION", 65).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L0_REGIME).ok()).isFalse();
+        assertThat(snapOut.gates().get(Gate.L0_REGIME).reason()).contains("BAISSIER");
+    }
+
+    @Test
+    @DisplayName("L0 LONG regime: 3 ABS BEAR scans in 30min blocks LONG")
+    void l0Regime_threeRecentBearScans_blocks() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0)
+            .appendAbsBearAndPrune(NOW.minusSeconds(60), NOW)
+            .appendAbsBearAndPrune(NOW.minusSeconds(120), NOW)
+            .appendAbsBearAndPrune(NOW.minusSeconds(180), NOW);
+
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(300.0).buyPct(60.0)
+            .absFresh(8).absBull8(8).absBear8(0).absMaxScore(8.0)
+            .dist("ACCUMULATION", 70).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L0_REGIME).ok()).isFalse();
+        assertThat(snapOut.gates().get(Gate.L0_REGIME).reason()).contains("ABS BEAR");
+    }
+
+    @Test
+    @DisplayName("L1 incoherence: delta < -500 invalidates BULL-dominant absorption")
+    void l1AbsBull_strongNegativeDelta_isIncoherent() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-700.0).buyPct(55.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("ACCUMULATION", 80).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L1_ABS_BULL).ok()).isFalse();
+        assertThat(snapOut.gates().get(Gate.L1_ABS_BULL).reason()).contains("incohérent");
+    }
+
+    @Test
+    @DisplayName("L2 ACCU persistence: 2/3 ACCU ≥ 60% passes, dist does not contaminate")
+    void l2AccuPersistence_passesWithDistRouting() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0)
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 70, NOW.minusSeconds(300)))
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 75, NOW.minusSeconds(180)));
+        // Feed a DIST event — must NOT be routed into accuOnlyHistory.
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(150.0).buyPct(54.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 60).distTimestamp(NOW.minusSeconds(60)).build();
+
+        GateEvaluator.Outcome outcome = evaluator.evaluate(ms, state, Instrument.MNQ);
+
+        assertThat(outcome.snapshot().gates().get(Gate.L2_ACCU_PUR).ok()).isTrue();
+        assertThat(outcome.nextState().accuOnlyHistory())
+            .extracting(DistEntry::type)
+            .doesNotContain(DistEntry.DIST);
+    }
+
+    @Test
+    @DisplayName("L3 trend bonus: 3 strictly increasing deltas with last > +100 emits +TREND tag")
+    void l3DeltaTrend_strictlyIncreasing_addsTrendBonus() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0)
+            .appendDelta(50.0)
+            .appendDelta(120.0);
+
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(200.0).buyPct(57.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("ACCUMULATION", 80).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L3_DELTA_POS).ok()).isTrue();
+        assertThat(snapOut.gates().get(Gate.L3_DELTA_POS).reason()).contains("+TREND");
+    }
+
+    @Test
+    @DisplayName("L4 buy% boundary: 52% strict — 52.0 fails, 52.1 passes")
+    void l4BuyPctBoundary_strict() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
+        MarketSnapshot at52 = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(150.0).buyPct(52.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("ACCUMULATION", 60).build();
+        QuantSnapshot at52Out = evaluator.evaluate(at52, state, Instrument.MNQ).snapshot();
+        assertThat(at52Out.gates().get(Gate.L4_BUY_PCT_HIGH).ok()).isFalse();
+
+        MarketSnapshot at53 = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(150.0).buyPct(53.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("ACCUMULATION", 60).build();
+        QuantSnapshot at53Out = evaluator.evaluate(at53, state, Instrument.MNQ).snapshot();
+        assertThat(at53Out.gates().get(Gate.L4_BUY_PCT_HIGH).ok()).isTrue();
+    }
+
+    @Test
+    @DisplayName("L5 conditional DIST threshold: delta +600 + buy% 60 → seuil 75 (DIST @60 PASS)")
+    void l5DistThreshold_extremeBullishSignal_requires75() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(600.0).buyPct(60.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 60).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).ok()).isTrue();
+        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).reason()).contains("75");
+    }
+
+    @Test
+    @DisplayName("L5 DIST blocks LONG when DIST @80 with extreme bullish signal — threshold 75")
+    void l5DistThreshold_extremeBullishButHighDist_blocks() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(600.0).buyPct(60.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 80).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).ok()).isFalse();
+        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).reason()).contains("BLOQUE");
+    }
+
+    @Test
+    @DisplayName("Both directions independent: bullish snap → high LONG score, low SHORT score")
+    void bullishSnap_longScoreHigh_shortScoreLow() {
+        QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0)
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 80, NOW.minusSeconds(300)))
+            .appendAccuOnly(new DistEntry(DistEntry.ACCU, 80, NOW.minusSeconds(60)));
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(250.0).buyPct(58.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("ACCUMULATION", 60).build();
+
+        QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
+
+        assertThat(snapOut.longScore()).isGreaterThanOrEqualTo(6);
+        // SHORT side fails: not BEAR-dominant, delta positive, buy% > 48 etc.
+        assertThat(snapOut.score()).isLessThanOrEqualTo(2);
     }
 
     @Test
