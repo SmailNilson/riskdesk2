@@ -177,6 +177,87 @@ class DistributionCycleDetectorTest {
         assertThat(blocked).isEmpty();
     }
 
+    // -----------------------------------------------------------------------
+    // Direction-flip regression tests (Bug: PHASE_1 opposite-direction was
+    // silently swallowing the flip and never publishing the new cycle direction)
+    // -----------------------------------------------------------------------
+
+    @Test
+    void oppositeDistributionInBullPhase1_emitsBearPhase1() {
+        // Start a BULLISH_CYCLE via accumulation
+        Optional<SmartMoneyCycleSignal> bull = detector.onDistribution(
+            accumulation(26900.0, 75, t0), t0);
+        assertThat(bull).isPresent();
+        assertThat(bull.get().cycleType()).isEqualTo(CycleType.BULLISH_CYCLE);
+        assertThat(bull.get().currentPhase()).isEqualTo(CyclePhase.PHASE_1);
+
+        // Distribution arrives while still in PHASE_1 — market flipped bearish
+        Instant t1 = t0.plusSeconds(90);
+        Optional<SmartMoneyCycleSignal> bear = detector.onDistribution(
+            distribution(27050.0, 78, t1), t1);
+
+        // Must emit a new PHASE_1 signal with BEARISH direction — not swallow it
+        assertThat(bear).isPresent();
+        assertThat(bear.get().cycleType()).isEqualTo(CycleType.BEARISH_CYCLE);
+        assertThat(bear.get().currentPhase()).isEqualTo(CyclePhase.PHASE_1);
+        assertThat(bear.get().completedAt()).isNull();
+    }
+
+    @Test
+    void oppositeAccumulationInBearPhase1_emitsBullPhase1() {
+        // Start a BEARISH_CYCLE via distribution
+        Optional<SmartMoneyCycleSignal> bear = detector.onDistribution(
+            distribution(27100.0, 80, t0), t0);
+        assertThat(bear).isPresent();
+        assertThat(bear.get().cycleType()).isEqualTo(CycleType.BEARISH_CYCLE);
+
+        // Accumulation arrives — market absorbed the sell pressure, flipping bullish
+        Instant t1 = t0.plusSeconds(60);
+        Optional<SmartMoneyCycleSignal> bull = detector.onDistribution(
+            accumulation(26950.0, 72, t1), t1);
+
+        assertThat(bull).isPresent();
+        assertThat(bull.get().cycleType()).isEqualTo(CycleType.BULLISH_CYCLE);
+        assertThat(bull.get().currentPhase()).isEqualTo(CyclePhase.PHASE_1);
+        assertThat(bull.get().priceAtPhase1()).isEqualTo(26950.0);
+    }
+
+    @Test
+    void flipInPhase1_newCycleCanCompleteInOppositeDirection() {
+        // Start BULLISH_CYCLE
+        detector.onDistribution(accumulation(26900.0, 75, t0), t0);
+
+        // Flip to BEARISH_CYCLE P1
+        Instant t1 = t0.plusSeconds(90);
+        detector.onDistribution(distribution(27050.0, 78, t1), t1);
+
+        // Bearish momentum advances P1 → P2
+        Instant t2 = t1.plus(Duration.ofMinutes(3));
+        Optional<SmartMoneyCycleSignal> phase2 = detector.onMomentum(
+            bearishMomentum(-60.0, 4.5, t2), t2);
+        assertThat(phase2).isPresent();
+        assertThat(phase2.get().cycleType()).isEqualTo(CycleType.BEARISH_CYCLE);
+        assertThat(phase2.get().currentPhase()).isEqualTo(CyclePhase.PHASE_2);
+
+        // Mirror accumulation completes the cycle
+        Instant t3 = t2.plus(Duration.ofMinutes(8));
+        Optional<SmartMoneyCycleSignal> complete = detector.onDistribution(
+            accumulation(26800.0, 70, t3), t3);
+        assertThat(complete).isPresent();
+        assertThat(complete.get().currentPhase()).isEqualTo(CyclePhase.COMPLETE);
+        assertThat(complete.get().cycleType()).isEqualTo(CycleType.BEARISH_CYCLE);
+    }
+
+    @Test
+    void sameDirectionInPhase1_doesNotEmitSignal() {
+        // Same-direction refresh should stay silent (debounce)
+        detector.onDistribution(distribution(27100.0, 80, t0), t0);
+        Instant t1 = t0.plusSeconds(30);
+        Optional<SmartMoneyCycleSignal> out = detector.onDistribution(
+            distribution(27110.0, 82, t1), t1);
+        assertThat(out).isEmpty();
+    }
+
     @Test
     void confidenceStaysBounded() {
         detector.onDistribution(distribution(27100.0, 80, t0), t0);
