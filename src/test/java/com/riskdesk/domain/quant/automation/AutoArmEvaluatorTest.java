@@ -24,17 +24,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * fully controls the snapshot, config, active execution, last-arm time and
  * the {@code now} clock.
  *
- * <p>Time picks: {@link #NY_KILL_ZONE} is 13:30 UTC = 09:30 ET, inside NY
- * kill zone (08:30–11:00 ET). {@link #OUT_OF_KILL_ZONE} is 17:00 UTC = 13:00
- * ET, well outside both London and NY kill zones.</p>
+ * <p>Time picks: {@link #NY_KILL_ZONE} is kept as the canonical "now" for
+ * fixtures (any UTC instant works — the evaluator no longer gates on session
+ * windows; the kill-zone restriction is enforced upstream by the strategy
+ * engine via {@code JAVA_NO_TRADE_CRITICAL → snapshot.shortBlocked}).</p>
  */
 class AutoArmEvaluatorTest {
 
     private static final Instant NY_KILL_ZONE = ZonedDateTime
         .of(2026, 4, 30, 9, 30, 0, 0, ZoneId.of("America/New_York"))
-        .toInstant();
-    private static final Instant OUT_OF_KILL_ZONE = ZonedDateTime
-        .of(2026, 4, 30, 13, 0, 0, 0, ZoneId.of("America/New_York"))
         .toInstant();
 
     private static final AutoArmConfig CFG = AutoArmConfig.defaults();
@@ -114,9 +112,21 @@ class AutoArmEvaluatorTest {
     }
 
     @Test
-    void outside_kill_zone_blocks_arm() {
-        QuantSnapshot snap = shortReadySnapshot(7);
-        assertThat(evaluator.evaluate(snap, CFG, Optional.empty(), null, OUT_OF_KILL_ZONE)).isEmpty();
+    void shortBlocked_via_session_timing_already_prevents_arm() {
+        // The kill-zone restriction is NOT a separate gate in AutoArmEvaluator
+        // — it is enforced upstream by the strategy engine's session-timing
+        // agent, which produces a JAVA_NO_TRADE_CRITICAL block, which in turn
+        // sets shortBlocked=true on the snapshot. So shortAvailable() returns
+        // false (gate 1) and the evaluator declines without ever consulting
+        // a TradingSessionResolver. This guards against a regression where a
+        // duplicate kill-zone gate is reintroduced and breaks the H1 bypass.
+        QuantSnapshot snap = new QuantSnapshot(
+            Instrument.MNQ, allGatesPass(7), 7,
+            20000.0, "test", 0.0, ZonedDateTime.now(),
+            List.of(), List.of(), 0,
+            /*shortBlocked=*/true
+        );
+        assertThat(evaluator.evaluate(snap, CFG, Optional.empty(), null, NY_KILL_ZONE)).isEmpty();
     }
 
     @Test

@@ -3,7 +3,6 @@ package com.riskdesk.domain.quant.automation;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
-import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -29,9 +28,17 @@ import java.util.Set;
  *       (any non-terminal {@link ExecutionStatus}).</li>
  *   <li>Cooldown: caller passes {@code lastArmAt} — if {@code now - lastArmAt}
  *       is less than {@link AutoArmConfig#cooldownDuration()}, skip.</li>
- *   <li>Kill-zone: {@link TradingSessionResolver#isWithinKillZone(Instant)}
- *       must return true (London 02:00–05:00 ET or NY 08:30–11:00 ET).</li>
  * </ol>
+ *
+ * <p><b>No kill-zone gate here.</b> The Java strategy engine's {@code session-timing}
+ * agent already vetoes 5m setups outside London / NY kill zones via the
+ * {@code 5m-outside-kill-zone} reason, which {@code StructuralFilterEvaluator}
+ * (PR #299) catches as the {@code JAVA_NO_TRADE_CRITICAL} block — that block
+ * already sets {@code shortBlocked=true} / {@code longBlocked=true} on the
+ * snapshot, so {@code shortAvailable() || longAvailable()} (gate 1) already
+ * returns false outside kill zones. A duplicate hardcoded check here would
+ * also break the H1 bypass (CLAUDE.md §"Confluence Buffer") and drift if Java
+ * session rules change.</p>
  *
  * <p>When all gates pass, the evaluator builds an {@link AutoArmDecision} with
  * Entry/SL/TP from the snapshot's per-direction suggestions and a
@@ -90,8 +97,7 @@ public final class AutoArmEvaluator {
             return Optional.empty();
         }
 
-        // Gate: kill-zone active.
-        if (!TradingSessionResolver.isWithinKillZone(now)) return Optional.empty();
+        // No kill-zone gate — already enforced upstream via JAVA_NO_TRADE_CRITICAL → snapshot.{short,long}Blocked.
 
         // Build the decision.
         Double entry = view.suggestedEntry(direction);
