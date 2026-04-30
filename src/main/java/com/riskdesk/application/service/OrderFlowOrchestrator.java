@@ -40,7 +40,9 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +91,15 @@ public class OrderFlowOrchestrator {
 
     /** Cached ATR(14) per instrument from 5m candles — refreshed every 60s. */
     private final ConcurrentHashMap<Instrument, Double> atrCache = new ConcurrentHashMap<>();
+
+    /**
+     * Rolling history of recent absorption-window total volumes per instrument.
+     * Used to compute a meaningful {@code avgVolume} baseline for the absorption score.
+     * <p>
+     * Previous bug: {@code avgVolume = totalVolume / 2} made the volume component
+     * a constant 2.0, breaking the score's volume-spike sensitivity.
+     */
+    private final ConcurrentHashMap<Instrument, Deque<Long>> volumeHistory = new ConcurrentHashMap<>();
 
     /**
      * Per-instrument tick-by-tick subscription tracking.
@@ -322,8 +333,23 @@ public class OrderFlowOrchestrator {
 
             messagingTemplate.convertAndSend("/topic/order-flow", payload);
 
-            // Evaluate absorption on each cycle (UC-OF-004)
-            evaluateAbsorption(instrument, a);
+            // Evaluate absorption on a SHORT window (transient detection), not the 5 min snapshot
+            int absWindowSec = properties.getAbsorption().getWindowSeconds();
+            Optional<TickAggregation> shortAgg = tickDataPort.recentAggregation(instrument, absWindowSec);
+            if (shortAgg.isPresent()) {
+                evaluateAbsorption(instrument, shortAgg.get());
+            }
+
+            // Always tick cycle state machine (timeouts must run even on quiet windows).
+            // Previously this was inside evaluateAbsorption() but skipped by the
+            // {@code avgVolume <= 0} early return — cycles never timed out during quiet periods.
+            if (properties.getCycle().isEnabled()) {
+                try {
+                    cycleDetectorFor(instrument).tick(java.time.Instant.now());
+                } catch (Exception e) {
+                    log.debug("cycle.tick() failed for {}: {}", instrument, e.toString());
+                }
+            }
         }
     }
 
@@ -352,30 +378,42 @@ public class OrderFlowOrchestrator {
 
     private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
         try {
-            double deltaThreshold = 50;
-            double totalVolume = agg.buyVolume() + agg.sellVolume();
-            double avgVolume = totalVolume / 2.0;
-            if (avgVolume <= 0) return;
+            if (!properties.getAbsorption().isEnabled()) return;
 
-            // Real price move from tick window high/low
-            double priceMoveTicks = 0;
-            double midPrice = Double.NaN;
-            if (!Double.isNaN(agg.highPrice()) && !Double.isNaN(agg.lowPrice())) {
-                priceMoveTicks = agg.highPrice() - agg.lowPrice();
-                midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
+            long totalVolume = agg.buyVolume() + agg.sellVolume();
+            if (totalVolume <= 0) {
+                // No trades in the short window — record a 0 in history so old spikes age out,
+                // then return. Cycle.tick() is now called outside this method.
+                recordWindowVolume(instrument, 0L);
+                return;
             }
 
-            // Signed price move: sign inferred from delta direction as a best-effort proxy
-            // (real directional candle-close requires tick timestamps we do not plumb here).
-            double priceMovePoints = priceMoveTicks * Math.signum((double) agg.delta());
+            double deltaThreshold = properties.getAbsorption().getDeltaThreshold();
+            double avgVolume = recordAndGetAvgVolume(instrument, totalVolume);
+            if (avgVolume <= 0) return;
+
+            // Real price move from tick window high/low — guard against missing data
+            double priceMovePoints;
+            double midPrice;
+            if (Double.isNaN(agg.highPrice()) || Double.isNaN(agg.lowPrice())) {
+                // Cannot compute absorption without price-stability signal
+                return;
+            }
+            priceMovePoints = agg.highPrice() - agg.lowPrice();
+            midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
+
+            // Signed price move: prefer cumulativeDelta sign over instantaneous delta to avoid
+            // signum(0) = 0 wiping out the signal when delta lands exactly at zero.
+            long signSource = agg.delta() != 0 ? agg.delta() : agg.cumulativeDelta();
+            double signedPriceMovePoints = priceMovePoints * Math.signum((double) signSource);
 
             // Real ATR from cache (falls back to 1.0 only before first cache refresh)
             double atr = atrCache.getOrDefault(instrument, 1.0);
             java.time.Instant now = java.time.Instant.now();
 
             Optional<AbsorptionSignal> signal = absorptionDetector.evaluate(
-                instrument, agg.delta(), priceMoveTicks,
-                (long) totalVolume, atr,
+                instrument, agg.delta(), priceMovePoints,
+                totalVolume, atr,
                 deltaThreshold, avgVolume, now);
 
             if (signal.isPresent()) {
@@ -387,7 +425,7 @@ public class OrderFlowOrchestrator {
                 eventPayload.put("side", s.side().name());
                 eventPayload.put("score", s.absorptionScore());
                 eventPayload.put("delta", s.aggressiveDelta());
-                eventPayload.put("priceMove", priceMoveTicks);
+                eventPayload.put("priceMove", priceMovePoints);
                 eventPayload.put("atr", atr);
                 eventPayload.put("timestamp", now.toString());
                 messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
@@ -409,10 +447,9 @@ public class OrderFlowOrchestrator {
                 }
             } else if (properties.getMomentum().isEnabled()) {
                 // Complementary path: absorption silent → check momentum burst (Detector 2)
-                double debouncePrice = Double.isNaN(midPrice) ? 0.0 : midPrice;
                 Optional<MomentumSignal> momentum = momentumDetectorFor(instrument).evaluate(
-                    instrument, agg.delta(), priceMovePoints, priceMoveTicks,
-                    (long) totalVolume, atr, deltaThreshold, avgVolume, debouncePrice, now);
+                    instrument, agg.delta(), signedPriceMovePoints, priceMovePoints,
+                    totalVolume, atr, deltaThreshold, avgVolume, midPrice, now);
                 if (momentum.isPresent()) {
                     publishMomentumSignal(instrument, momentum.get(), atr, now);
 
@@ -424,13 +461,35 @@ public class OrderFlowOrchestrator {
                     }
                 }
             }
-
-            // Advance cycle state machine for timeouts even on quiet ticks
-            if (properties.getCycle().isEnabled()) {
-                cycleDetectorFor(instrument).tick(now);
-            }
         } catch (Exception e) {
-            // swallow — order flow evaluation is best-effort
+            // Order flow evaluation is best-effort but log so we can debug stalls
+            log.debug("evaluateAbsorption failed for {}: {}", instrument, e.toString());
+        }
+    }
+
+    /**
+     * Append the current-window total volume to the per-instrument history and return
+     * the rolling mean. This is the baseline {@code avgVolume} for the absorption score.
+     * <p>
+     * Replaces the old {@code avgVolume = totalVolume / 2} which made {@code volume / avgVolume}
+     * a constant 2.0 regardless of market conditions.
+     */
+    private double recordAndGetAvgVolume(Instrument instrument, long currentWindowVolume) {
+        recordWindowVolume(instrument, currentWindowVolume);
+        Deque<Long> hist = volumeHistory.get(instrument);
+        synchronized (hist) {
+            long sum = 0;
+            for (Long v : hist) sum += v;
+            return hist.isEmpty() ? currentWindowVolume : (double) sum / hist.size();
+        }
+    }
+
+    private void recordWindowVolume(Instrument instrument, long vol) {
+        int maxSize = Math.max(1, properties.getAbsorption().getVolumeHistorySize());
+        Deque<Long> hist = volumeHistory.computeIfAbsent(instrument, k -> new ArrayDeque<>());
+        synchronized (hist) {
+            hist.addLast(vol);
+            while (hist.size() > maxSize) hist.pollFirst();
         }
     }
 

@@ -52,12 +52,36 @@ public class TickByTickAggregator {
     }
 
     /**
-     * Get the current aggregation snapshot. Thread-safe read.
+     * Get the current aggregation snapshot over the full rolling window (default 5 min). Thread-safe read.
+     * <p>
+     * Updates the {@code previousCumulativeDelta} state used for the deltaTrend calculation —
+     * call only from a single scheduler thread.
      */
     public TickAggregation snapshot() {
         Instant now = Instant.now();
         evictExpired(now);
+        return aggregateSince(null, now, true);
+    }
 
+    /**
+     * Get an aggregation snapshot over only the last {@code windowSeconds} of ticks.
+     * Used for short-window detectors (e.g. absorption needs a tight window to detect
+     * transient events; the default 5 min snapshot dilutes them).
+     * <p>
+     * Does NOT mutate {@code previousCumulativeDelta} — that belongs to the long-window snapshot.
+     */
+    public TickAggregation snapshotWindow(long windowSeconds) {
+        Instant now = Instant.now();
+        evictExpired(now);
+        Instant cutoff = now.minusSeconds(windowSeconds);
+        return aggregateSince(cutoff, now, false);
+    }
+
+    /**
+     * Iterate ticks newer than {@code cutoff} (or all ticks if cutoff is null) and build an aggregation.
+     * @param updateTrendState if true, mutates {@code previousCumulativeDelta} for deltaTrend tracking.
+     */
+    private TickAggregation aggregateSince(Instant cutoff, Instant now, boolean updateTrendState) {
         long buyVol = 0;
         long sellVol = 0;
         double firstPrice = Double.NaN;
@@ -68,6 +92,7 @@ public class TickByTickAggregator {
         Instant windowEnd = null;
 
         for (ClassifiedTick tick : ticks) {
+            if (cutoff != null && tick.timestamp().isBefore(cutoff)) continue;
             if (windowStart == null) {
                 windowStart = tick.timestamp();
                 firstPrice = tick.price();
@@ -96,11 +121,9 @@ public class TickByTickAggregator {
         long delta = buyVol - sellVol;
         long cumulativeDelta = delta; // cumulative within the window
 
-        // Buy ratio
         double totalVol = buyVol + sellVol;
         double buyRatio = totalVol > 0 ? (buyVol * 100.0 / totalVol) : 50.0;
 
-        // Delta trend (compare current vs previous snapshot)
         String deltaTrend;
         if (previousCumulativeDelta == 0 || Math.abs(delta - previousCumulativeDelta) < Math.abs(previousCumulativeDelta * DELTA_TREND_THRESHOLD)) {
             deltaTrend = TickAggregation.TREND_FLAT;
@@ -109,9 +132,10 @@ public class TickByTickAggregator {
         } else {
             deltaTrend = TickAggregation.TREND_FALLING;
         }
-        previousCumulativeDelta = delta;
+        if (updateTrendState) {
+            previousCumulativeDelta = delta;
+        }
 
-        // Divergence detection: price up but delta down (bearish) or price down but delta up (bullish)
         boolean divergenceDetected = false;
         String divergenceType = null;
         if (!Double.isNaN(firstPrice) && !Double.isNaN(latestPrice) && totalVol > 0) {
@@ -130,7 +154,7 @@ public class TickByTickAggregator {
         }
 
         return new TickAggregation(instrument, buyVol, sellVol, delta, cumulativeDelta,
-            Math.round(buyRatio * 10.0) / 10.0, // round to 1 decimal
+            Math.round(buyRatio * 10.0) / 10.0,
             deltaTrend, divergenceDetected, divergenceType,
             windowStart, windowEnd, TickAggregation.SOURCE_REAL_TICKS,
             highPrice, lowPrice);

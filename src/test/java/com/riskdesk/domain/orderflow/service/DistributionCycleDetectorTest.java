@@ -259,6 +259,28 @@ class DistributionCycleDetectorTest {
     }
 
     @Test
+    void sameSideDistributionInPhase2_emitsNewPhase1() {
+        // Build a BEARISH_CYCLE up to PHASE_2
+        detector.onDistribution(distribution(27100.0, 80, t0), t0);
+        Instant t1 = t0.plus(Duration.ofMinutes(5));
+        Optional<SmartMoneyCycleSignal> p2 = detector.onMomentum(
+            bearishMomentum(-50.0, 4.0, t1), t1);
+        assertThat(p2).isPresent();
+        assertThat(p2.get().currentPhase()).isEqualTo(CyclePhase.PHASE_2);
+
+        // Another DISTRIBUTION arrives in PHASE_2 (same side, not the expected ACCUMULATION mirror)
+        Instant t2 = t1.plus(Duration.ofMinutes(3));
+        Optional<SmartMoneyCycleSignal> reset = detector.onDistribution(
+            distribution(27050.0, 78, t2), t2);
+
+        // Cycle invalidated, fresh BEARISH_CYCLE PHASE_1 emitted (was previously silent)
+        assertThat(reset).isPresent();
+        assertThat(reset.get().currentPhase()).isEqualTo(CyclePhase.PHASE_1);
+        assertThat(reset.get().cycleType()).isEqualTo(CycleType.BEARISH_CYCLE);
+        assertThat(reset.get().completedAt()).isNull();
+    }
+
+    @Test
     void confidenceStaysBounded() {
         detector.onDistribution(distribution(27100.0, 80, t0), t0);
         Instant t1 = t0.plus(Duration.ofMinutes(5));
