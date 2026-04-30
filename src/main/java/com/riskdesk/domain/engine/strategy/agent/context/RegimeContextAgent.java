@@ -35,6 +35,7 @@ public final class RegimeContextAgent implements StrategyAgent {
     public AgentVote evaluate(StrategyInput input) {
         MarketRegime regime = input.context().regime();
         MacroBias bias = input.context().macroBias();
+        MacroBias momentumHint = input.context().momentumHint();
 
         if (regime == MarketRegime.UNKNOWN) {
             return AgentVote.abstain(ID, StrategyLayer.CONTEXT, "Regime unknown");
@@ -52,6 +53,23 @@ public final class RegimeContextAgent implements StrategyAgent {
             case CHOPPY   -> 10;
             case UNKNOWN  -> 0;
         };
+
+        // Fast-path fallback: when the regime is TRENDING but the lagging
+        // swing-derived macro bias is still NEUTRAL (a common state during a
+        // fresh cassure — swing pivots haven't been revised yet), use the
+        // ATR-based momentum hint to recover a directional sign. The vote is
+        // intentionally weaker than the macro-aligned case (±35 vs ±50, conf
+        // 0.5 vs 0.75) because the hint comes from raw price action, not
+        // structurally confirmed bias.
+        if (regime == MarketRegime.TRENDING
+            && bias == MacroBias.NEUTRAL
+            && momentumHint != MacroBias.NEUTRAL) {
+            int hintSign = momentumHint == MacroBias.BULL ? +1 : -1;
+            int hintVote = hintSign * 35;
+            String hintEvidence = "Regime TRENDING + MacroBias NEUTRAL → momentum hint " + momentumHint
+                + " (fast-path fallback)";
+            return AgentVote.of(ID, StrategyLayer.CONTEXT, hintVote, 0.5, List.of(hintEvidence));
+        }
 
         int vote = sign * magnitude;
         double confidence = regime == MarketRegime.CHOPPY ? 0.4 : 0.75;
