@@ -146,3 +146,15 @@ export const LONG_GATES: string[] = [
   'L0_REGIME', 'L1_ABS_BULL', 'L2_ACCU_PUR', 'L3_DELTA_POS',
   'L4_BUY_PCT_HIGH', 'L5_DIST_THRESHOLD', 'L6_LIVE_PUSH',
 ];
+
+// Manual trade ticket payload (PR #305) — POST /api/quant/manual-trade/{instrument}.
+export interface ManualTradeRequest {
+  direction: 'LONG' | 'SHORT';
+  entryType: 'MARKET' | 'LIMIT';
+  /** Required when entryType=LIMIT. Server uses live price for MARKET. */
+  entryPrice: number | null;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number | null;
+  quantity: number;
+}

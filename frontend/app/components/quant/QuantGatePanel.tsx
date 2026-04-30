@@ -5,6 +5,7 @@ import { api } from '@/app/lib/api';
 import { useQuantStream, type AutoArmInstrumentState } from '@/app/hooks/useQuantStream';
 import QuantAdvisorBadge from './QuantAdvisorBadge';
 import QuantNarrationPanel from './QuantNarrationPanel';
+import QuantManualTradeModal from './QuantManualTradeModal';
 import {
   GATE_LABELS,
   LONG_GATES,
@@ -188,6 +189,9 @@ export default function QuantGatePanel() {
   const [askingAi, setAskingAi] = useState<Record<string, boolean>>({});
   const [autoArmBusy, setAutoArmBusy] = useState<Record<number, boolean>>({});
   const [now, setNow] = useState<number>(() => Date.now());
+  // PR #305 — manual trade ticket modal state. Independent of auto-arm.
+  const [manualModalDirection, setManualModalDirection] = useState<'LONG' | 'SHORT' | null>(null);
+  const [lastManualExecutionId, setLastManualExecutionId] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -312,6 +316,30 @@ export default function QuantGatePanel() {
             <span className="text-xs text-slate-500">{snapshot.scanTime ?? '—'}</span>
           </div>
 
+          <div className="mb-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setManualModalDirection('LONG')}
+              className="px-3 py-1.5 text-xs font-semibold rounded bg-emerald-700 hover:bg-emerald-600 text-white"
+              title="Place a manual LONG order — independent of auto-arm threshold"
+            >
+              🟢 BUY
+            </button>
+            <button
+              type="button"
+              onClick={() => setManualModalDirection('SHORT')}
+              className="px-3 py-1.5 text-xs font-semibold rounded bg-red-700 hover:bg-red-600 text-white"
+              title="Place a manual SHORT order — independent of auto-arm threshold"
+            >
+              🔴 SELL
+            </button>
+            {lastManualExecutionId !== null && (
+              <span className="ml-2 text-xs text-emerald-300">
+                Order placed — execution #{lastManualExecutionId}
+              </span>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <DirectionSection
               label="SHORT"
@@ -384,6 +412,14 @@ export default function QuantGatePanel() {
       ) : (
         <p className="text-sm text-slate-400">No snapshot yet. The scheduler runs every 60 seconds.</p>
       )}
+      <QuantManualTradeModal
+        open={manualModalDirection !== null}
+        instrument={active}
+        direction={manualModalDirection ?? 'LONG'}
+        snapshot={snapshot}
+        onClose={() => setManualModalDirection(null)}
+        onPlaced={(executionId) => setLastManualExecutionId(executionId)}
+      />
     </section>
   );
 }
