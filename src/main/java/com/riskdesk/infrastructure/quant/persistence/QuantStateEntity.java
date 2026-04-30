@@ -48,6 +48,11 @@ public class QuantStateEntity {
     @Column(name = "abs_bull_scans_json", columnDefinition = "text")
     private String absBullScansJson;
 
+    /** LONG-symmetry mirror — JSON array of ISO-8601 timestamps for ABS BEAR scans. */
+    @Lob
+    @Column(name = "abs_bear_scans_json", columnDefinition = "text")
+    private String absBearScansJson;
+
     /** Persists publisher transition state across restarts (PR #297 follow-up review). */
     @Column(name = "last_signaled_score", nullable = false)
     private int lastSignaledScore = 0;
@@ -72,6 +77,8 @@ public class QuantStateEntity {
     public void setAccuOnlyHistoryJson(String s) { this.accuOnlyHistoryJson = s; }
     public String getAbsBullScansJson() { return absBullScansJson; }
     public void setAbsBullScansJson(String s) { this.absBullScansJson = s; }
+    public String getAbsBearScansJson() { return absBearScansJson; }
+    public void setAbsBearScansJson(String s) { this.absBearScansJson = s; }
     public int getLastSignaledScore() { return lastSignaledScore; }
     public void setLastSignaledScore(int v) { this.lastSignaledScore = v; }
 }

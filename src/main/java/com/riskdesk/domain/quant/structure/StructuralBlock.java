@@ -27,4 +27,13 @@ public record StructuralBlock(String code, String evidence) {
     public static final String CODE_JAVA_NO_TRADE       = "JAVA_NO_TRADE_CRITICAL";
     /** CMF &gt; +0.15 — very strong structural buying flow. */
     public static final String CODE_CMF_VERY_BULL       = "CMF_VERY_BULL";
+
+    // ── LONG mirrors (LONG-symmetry slice) ────────────────────────────────
+
+    /** ANY active bearish order block whose range contains the current price (blocks LONG). */
+    public static final String CODE_OB_BEAR_FRESH       = "OB_BEAR_FRESH";
+    /** ≥ 4/5 nested timeframes are BEARISH (blocks LONG). */
+    public static final String CODE_MTF_BEAR            = "MTF_BEAR";
+    /** CMF &lt; -0.15 — very strong structural selling flow (blocks LONG). */
+    public static final String CODE_CMF_VERY_BEAR       = "CMF_VERY_BEAR";
 }

@@ -92,6 +92,7 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
         root.put("kind", kind);
         root.put("instrument", instrument.name());
         root.put("score", snapshot.score());
+        root.put("longScore", snapshot.longScore());
         root.put("price", snapshot.price());
         root.put("priceSource", snapshot.priceSource());
         root.put("dayMove", snapshot.dayMove());
@@ -100,6 +101,10 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
         root.put("sl", snapshot.suggestedSL());
         root.put("tp1", snapshot.suggestedTP1());
         root.put("tp2", snapshot.suggestedTP2());
+        root.put("longEntry", snapshot.suggestedEntry());
+        root.put("longSl", snapshot.suggestedSL_LONG());
+        root.put("longTp1", snapshot.suggestedTP1_LONG());
+        root.put("longTp2", snapshot.suggestedTP2_LONG());
         Map<String, Map<String, Object>> gateMap = new LinkedHashMap<>();
         for (Gate g : Gate.values()) {
             GateResult r = snapshot.gates().get(g);
@@ -111,29 +116,45 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
         }
         root.put("gates", gateMap);
 
-        // ── Structural filters (PR #299) ────────────────────────────────
-        List<Map<String, Object>> blocks = new ArrayList<>(snapshot.structuralBlocks().size());
-        for (StructuralBlock b : snapshot.structuralBlocks()) {
-            Map<String, Object> e = new LinkedHashMap<>();
-            e.put("code", b.code());
-            e.put("evidence", b.evidence());
-            blocks.add(e);
-        }
-        List<Map<String, Object>> warnings = new ArrayList<>(snapshot.structuralWarnings().size());
-        for (StructuralWarning w : snapshot.structuralWarnings()) {
-            Map<String, Object> e = new LinkedHashMap<>();
-            e.put("code", w.code());
-            e.put("evidence", w.evidence());
-            e.put("scoreModifier", w.scoreModifier());
-            warnings.add(e);
-        }
-        root.put("structuralBlocks", blocks);
-        root.put("structuralWarnings", warnings);
+        // ── SHORT structural filters (PR #299) ──────────────────────────
+        root.put("structuralBlocks", serialiseBlocks(snapshot.structuralBlocks()));
+        root.put("structuralWarnings", serialiseWarnings(snapshot.structuralWarnings()));
         root.put("structuralScoreModifier", snapshot.structuralScoreModifier());
         root.put("finalScore", snapshot.finalScore());
         root.put("shortBlocked", snapshot.shortBlocked());
         root.put("shortAvailable", snapshot.shortAvailable());
+
+        // ── LONG structural filters (LONG-symmetry slice) ───────────────
+        root.put("longStructuralBlocks", serialiseBlocks(snapshot.longStructuralBlocks()));
+        root.put("longStructuralWarnings", serialiseWarnings(snapshot.longStructuralWarnings()));
+        root.put("longStructuralScoreModifier", snapshot.longStructuralScoreModifier());
+        root.put("longFinalScore", snapshot.longFinalScore());
+        root.put("longBlocked", snapshot.longBlocked());
+        root.put("longAvailable", snapshot.longAvailable());
         return root;
+    }
+
+    private static List<Map<String, Object>> serialiseBlocks(List<StructuralBlock> source) {
+        List<Map<String, Object>> out = new ArrayList<>(source.size());
+        for (StructuralBlock b : source) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("code", b.code());
+            e.put("evidence", b.evidence());
+            out.add(e);
+        }
+        return out;
+    }
+
+    private static List<Map<String, Object>> serialiseWarnings(List<StructuralWarning> source) {
+        List<Map<String, Object>> out = new ArrayList<>(source.size());
+        for (StructuralWarning w : source) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("code", w.code());
+            e.put("evidence", w.evidence());
+            e.put("scoreModifier", w.scoreModifier());
+            out.add(e);
+        }
+        return out;
     }
 
     private void sendSafely(String destination, Object payload) {

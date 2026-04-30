@@ -12,16 +12,19 @@ import java.util.List;
  * Wire representation of one Quant evaluation tick. Field names are part of
  * the public API contract — the frontend dashboard reads them by name.
  *
- * <p>Since PR #299 the response also exposes the structural filter result
- * ({@code structuralBlocks}, {@code structuralWarnings}, {@code structuralScoreModifier},
- * {@code finalScore}, {@code shortAvailable}). When the structural evaluator
- * has nothing to say (no indicator data, no blocks, no warnings) the
- * additional fields default to empty / 0 / true, preserving the pre-#299
- * frontend contract.</p>
+ * <p>Since PR #299 the response also exposes the SHORT structural filter
+ * result. Since the LONG-symmetry slice the response also exposes the LONG
+ * track ({@code longScore}, {@code longEntry/sl/tp1/tp2}, {@code longGates}
+ * implicitly through the same {@link #gates} list with {@code L*} entries,
+ * {@code longStructuralBlocks/Warnings/ScoreModifier/finalScore}, {@code longBlocked},
+ * {@code longAvailable}). When the structural evaluator has nothing to say
+ * the additional fields default to empty / 0 / false, preserving the
+ * pre-LONG-symmetry frontend contract.</p>
  */
 public record QuantSnapshotResponse(
     String instrument,
     int score,
+    int longScore,
     Double price,
     String priceSource,
     double dayMove,
@@ -30,16 +33,29 @@ public record QuantSnapshotResponse(
     Double sl,
     Double tp1,
     Double tp2,
+    Double longEntry,
+    Double longSl,
+    Double longTp1,
+    Double longTp2,
     boolean shortSetup7_7,
     boolean shortAlert6_7,
+    boolean longSetup7_7,
+    boolean longAlert6_7,
     List<QuantGateView> gates,
-    // ── Structural filters (PR #299) ────────────────────────────────────
+    // ── SHORT structural filters (PR #299) ──────────────────────────────
     List<StructuralBlockView> structuralBlocks,
     List<StructuralWarningView> structuralWarnings,
     int structuralScoreModifier,
     int finalScore,
     boolean shortBlocked,
-    boolean shortAvailable
+    boolean shortAvailable,
+    // ── LONG structural filters (LONG-symmetry slice) ───────────────────
+    List<StructuralBlockView> longStructuralBlocks,
+    List<StructuralWarningView> longStructuralWarnings,
+    int longStructuralScoreModifier,
+    int longFinalScore,
+    boolean longBlocked,
+    boolean longAvailable
 ) {
 
     public static QuantSnapshotResponse from(QuantSnapshot snapshot) {
@@ -57,9 +73,18 @@ public record QuantSnapshotResponse(
         for (StructuralWarning w : snapshot.structuralWarnings()) {
             warnings.add(new StructuralWarningView(w.code(), w.evidence(), w.scoreModifier()));
         }
+        List<StructuralBlockView> longBlocks = new ArrayList<>(snapshot.longStructuralBlocks().size());
+        for (StructuralBlock b : snapshot.longStructuralBlocks()) {
+            longBlocks.add(new StructuralBlockView(b.code(), b.evidence()));
+        }
+        List<StructuralWarningView> longWarnings = new ArrayList<>(snapshot.longStructuralWarnings().size());
+        for (StructuralWarning w : snapshot.longStructuralWarnings()) {
+            longWarnings.add(new StructuralWarningView(w.code(), w.evidence(), w.scoreModifier()));
+        }
         return new QuantSnapshotResponse(
             snapshot.instrument().name(),
             snapshot.score(),
+            snapshot.longScore(),
             snapshot.price(),
             snapshot.priceSource(),
             snapshot.dayMove(),
@@ -68,15 +93,27 @@ public record QuantSnapshotResponse(
             snapshot.suggestedSL(),
             snapshot.suggestedTP1(),
             snapshot.suggestedTP2(),
+            snapshot.suggestedEntry(),
+            snapshot.suggestedSL_LONG(),
+            snapshot.suggestedTP1_LONG(),
+            snapshot.suggestedTP2_LONG(),
             snapshot.isShortSetup7_7(),
             snapshot.isShortAlert6_7(),
+            snapshot.isLongSetup7_7(),
+            snapshot.isLongAlert6_7(),
             gateList,
             blocks,
             warnings,
             snapshot.structuralScoreModifier(),
             snapshot.finalScore(),
             snapshot.shortBlocked(),
-            snapshot.shortAvailable()
+            snapshot.shortAvailable(),
+            longBlocks,
+            longWarnings,
+            snapshot.longStructuralScoreModifier(),
+            snapshot.longFinalScore(),
+            snapshot.longBlocked(),
+            snapshot.longAvailable()
         );
     }
 

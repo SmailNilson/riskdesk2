@@ -191,9 +191,15 @@ public class QuantGateService {
             // with the structural blocks/warnings attached.
             QuantSetupNarrationService.NarrationResult preNarration =
                 narrationService.buildNarration(instrument, rawSnapshot, outcome.nextState(), snap);
-            StructuralFilterResult structural = evaluateStructural(
+            // Both directions are evaluated in a single fetch of the indicator
+            // / strategy projections so we don't double-hit the upstream
+            // services. The per-instrument lock already serialises scans, so
+            // the two structural evaluations both observe the same input.
+            BiStructuralResult bi = evaluateStructuralBoth(
                 instrument, rawSnapshot.price(), preNarration.pattern());
-            result = rawSnapshot.withStructuralResult(structural);
+            result = rawSnapshot
+                .withStructuralResult(bi.shortResult())
+                .withLongStructuralResult(bi.longResult());
 
             historyStore.add(instrument, result);
             narration = narrationService.buildNarration(instrument, result, outcome.nextState(), snap);
@@ -268,6 +274,31 @@ public class QuantGateService {
             return StructuralFilterResult.empty();
         }
     }
+
+    /**
+     * Runs both SHORT and LONG structural filters in one go. Single fetch of
+     * the indicator + strategy projections — feeds both directions of the
+     * evaluator. On any failure we degrade to {@link StructuralFilterResult#empty()}
+     * for both (consistent with the SHORT-only path so a glitch never blocks
+     * either direction artificially).
+     */
+    private BiStructuralResult evaluateStructuralBoth(Instrument instrument,
+                                                       Double price,
+                                                       com.riskdesk.domain.quant.pattern.PatternAnalysis pattern) {
+        try {
+            IndicatorsSnapshot ind = safeOpt(() -> indicatorsPort.snapshot5m(instrument)).orElse(null);
+            StrategyVotes strat   = safeOpt(() -> strategyPort.votes5m(instrument)).orElse(null);
+            StructuralFilterResult shortRes = structuralEvaluator.evaluateForShort(price, ind, strat, pattern);
+            StructuralFilterResult longRes  = structuralEvaluator.evaluateForLong(price, ind, strat, pattern);
+            return new BiStructuralResult(shortRes, longRes);
+        } catch (RuntimeException e) {
+            log.warn("structural filter failed instrument={}: {}", instrument, e.toString());
+            return new BiStructuralResult(StructuralFilterResult.empty(), StructuralFilterResult.empty());
+        }
+    }
+
+    /** Holds both directions' structural verdicts so the orchestrator can attach both in one shot. */
+    private record BiStructuralResult(StructuralFilterResult shortResult, StructuralFilterResult longResult) {}
 
     private boolean shouldAutoAdvise(Instrument instrument, QuantSnapshot snapshot) {
         if (snapshot.score() < advisorService.getTriggerScore()) return false;

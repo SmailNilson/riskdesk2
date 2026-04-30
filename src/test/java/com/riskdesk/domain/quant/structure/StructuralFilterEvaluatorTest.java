@@ -264,18 +264,239 @@ class StructuralFilterEvaluatorTest {
         assertThat(r.shortBlocked()).isFalse();
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // LONG mirror tests (LONG-symmetry slice)
+    // ──────────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("LONG BLOCK: OB_BEAR_FRESH")
+    class LongOrderBlockTests {
+
+        @Test
+        @DisplayName("Active bearish OB containing the price → block LONG")
+        void activeBearishObContainingPrice_blocksLong() {
+            IndicatorsSnapshot ind = indicators().withOrderBlocks(
+                new IndicatorsSnapshot.OrderBlockView("BEARISH", "ACTIVE", 19_990.0, 20_010.0)
+            ).build();
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+            assertThat(r.shortBlocked()).isTrue();  // "this direction is blocked"
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .containsExactly(StructuralBlock.CODE_OB_BEAR_FRESH);
+        }
+
+        @Test
+        @DisplayName("Active bullish OB containing the price → no LONG block")
+        void activeBullishObContainingPrice_doesNotBlockLong() {
+            IndicatorsSnapshot ind = indicators().withOrderBlocks(
+                new IndicatorsSnapshot.OrderBlockView("BULLISH", "ACTIVE", 19_990.0, 20_010.0)
+            ).build();
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+            assertThat(r.blocks()).isEmpty();
+        }
+
+        @Test
+        @DisplayName("OB bear + recent CHoCH bull → demoted to LONG WARNING")
+        void recentChochBull_demotesObBearToWarning() {
+            IndicatorsSnapshot ind = indicators()
+                .withLastInternalBreak("CHOCH_BULLISH")
+                .withOrderBlocks(new IndicatorsSnapshot.OrderBlockView(
+                    "BEARISH", "ACTIVE", 19_990.0, 20_010.0))
+                .build();
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+            assertThat(r.blocks()).isEmpty();
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .contains(StructuralWarning.CODE_OB_BEAR_OVERRIDDEN);
+        }
+
+        @Test
+        @DisplayName("OB bear + high-confidence VRAI_ACHAT → demoted to LONG WARNING")
+        void vraiAchatHigh_demotesObBearToWarning() {
+            IndicatorsSnapshot ind = indicators().withOrderBlocks(
+                new IndicatorsSnapshot.OrderBlockView("BEARISH", "ACTIVE", 19_990.0, 20_010.0)
+            ).build();
+            PatternAnalysis pattern = new PatternAnalysis(
+                OrderFlowPattern.VRAI_ACHAT, "Vrai achat", "delta up + price up",
+                PatternAnalysis.Confidence.HIGH, PatternAnalysis.Action.AVOID);
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, pattern);
+            assertThat(r.blocks()).isEmpty();
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .contains(StructuralWarning.CODE_OB_BEAR_OVERRIDDEN);
+        }
+    }
+
+    @Test
+    @DisplayName("LONG BLOCK: regime-context CHOPPY also blocks LONG")
+    void regimeChoppy_blocksLong() {
+        StrategyVotes strat = new StrategyVotes("TRADE", List.of(
+            new StrategyVotes.Vote("regime-context", List.of("regime=CHOPPY"))
+        ), List.of());
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, null, strat, null);
+        assertThat(r.blocks()).extracting(StructuralBlock::code)
+            .containsExactly(StructuralBlock.CODE_REGIME_CHOPPY);
+    }
+
+    @Test
+    @DisplayName("LONG BLOCK: 4/5 timeframes BEARISH → MTF_BEAR")
+    void mtfFourBearish_blocksLong() {
+        Map<String, String> mtf = new LinkedHashMap<>();
+        mtf.put("swing50", "BEARISH"); mtf.put("swing25", "BEARISH");
+        mtf.put("swing9",  "BEARISH"); mtf.put("internal5", "BEARISH");
+        mtf.put("micro1",  "BULLISH");
+        IndicatorsSnapshot ind = indicators().withMtf(mtf).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.blocks()).extracting(StructuralBlock::code)
+            .contains(StructuralBlock.CODE_MTF_BEAR);
+    }
+
+    @Test
+    @DisplayName("LONG BLOCK: 3/5 BEARISH → no MTF_BEAR block")
+    void mtfThreeBearish_doesNotBlockLong() {
+        Map<String, String> mtf = new LinkedHashMap<>();
+        mtf.put("swing50", "BEARISH"); mtf.put("swing25", "BEARISH");
+        mtf.put("swing9",  "BEARISH"); mtf.put("internal5", "BULLISH");
+        mtf.put("micro1",  "BULLISH");
+        IndicatorsSnapshot ind = indicators().withMtf(mtf).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.blocks()).extracting(StructuralBlock::code)
+            .doesNotContain(StructuralBlock.CODE_MTF_BEAR);
+    }
+
+    @Test
+    @DisplayName("LONG BLOCK: cmf < -0.15 → CMF_VERY_BEAR")
+    void cmfVeryBear_blocksLong() {
+        IndicatorsSnapshot ind = indicators().withCmf(-0.20).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.blocks()).extracting(StructuralBlock::code)
+            .contains(StructuralBlock.CODE_CMF_VERY_BEAR);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: -0.15 ≤ cmf < -0.05 → CMF_NEGATIVE")
+    void cmfNegative_warnsLong() {
+        IndicatorsSnapshot ind = indicators().withCmf(-0.10).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.blocks()).isEmpty();
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_CMF_NEGATIVE);
+        assertThat(r.scoreModifier()).isLessThanOrEqualTo(-1);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: price > 1σ above VWAP upper → VWAP_FAR_ABOVE (-2)")
+    void vwapFarAbove_warnsLong() {
+        // vwap=20_000, upper=20_010, σ=10. price=20_025 → distance=25 → 2.5σ
+        IndicatorsSnapshot ind = indicators().withVwapBoth(20_000.0, 19_990.0, 20_010.0).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_025.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_VWAP_FAR_ABOVE);
+        assertThat(r.scoreModifier()).isLessThanOrEqualTo(-2);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: bbPct > 0.85 → BB_UPPER (-1)")
+    void bbUpper_warnsLong() {
+        IndicatorsSnapshot ind = indicators().withBbPct(0.92).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_BB_UPPER);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: currentZone=PREMIUM → PRICE_IN_PREMIUM (-2)")
+    void priceInPremium_warnsLong() {
+        IndicatorsSnapshot ind = indicators().withZone("PREMIUM").build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_PRICE_IN_PREMIUM);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: swingBias=BEARISH → SWING_BEAR (-1)")
+    void swingBearish_warnsLong() {
+        IndicatorsSnapshot ind = indicators().withSwingBias("BEARISH").build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_SWING_BEAR);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: equal-high within 15pts and touchCount >= 2 → EQUAL_HIGHS_NEAR")
+    void equalHighsNear_warnsLong() {
+        IndicatorsSnapshot ind = indicators().withEqualHighs(
+            new IndicatorsSnapshot.EqualHighView(20_010.0, 3)).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .contains(StructuralWarning.CODE_EQUAL_HIGHS_NEAR);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: equal-high too far → no warning")
+    void equalHighsFar_doesNotWarnLong() {
+        IndicatorsSnapshot ind = indicators().withEqualHighs(
+            new IndicatorsSnapshot.EqualHighView(20_100.0, 3)).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .doesNotContain(StructuralWarning.CODE_EQUAL_HIGHS_NEAR);
+    }
+
+    @Test
+    @DisplayName("LONG WARNING: equal-high low touchCount → no warning")
+    void equalHighsLowTouch_doesNotWarnLong() {
+        IndicatorsSnapshot ind = indicators().withEqualHighs(
+            new IndicatorsSnapshot.EqualHighView(20_005.0, 1)).build();
+        StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, null, null);
+        assertThat(r.warnings()).extracting(StructuralWarning::code)
+            .doesNotContain(StructuralWarning.CODE_EQUAL_HIGHS_NEAR);
+    }
+
+    @Test
+    @DisplayName("LONG: All inputs null → empty result, not blocked")
+    void longAllNull_emptyResult() {
+        StructuralFilterResult r = evaluator.evaluateForLong(null, null, null, null);
+        assertThat(r.blocks()).isEmpty();
+        assertThat(r.warnings()).isEmpty();
+        assertThat(r.scoreModifier()).isZero();
+        assertThat(r.shortBlocked()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Symmetry sanity: bullish snapshot → SHORT no block, LONG flagged with bear blocks")
+    void bullishSnapshot_shortAvailable_longBlocked() {
+        Map<String, String> mtfBull = new LinkedHashMap<>();
+        mtfBull.put("swing50", "BULLISH"); mtfBull.put("swing25", "BULLISH");
+        mtfBull.put("swing9",  "BULLISH"); mtfBull.put("internal5", "BULLISH");
+        mtfBull.put("micro1",  "BEARISH");
+        IndicatorsSnapshot indBull = indicators().withMtf(mtfBull).withCmf(0.20).build();
+
+        StructuralFilterResult shortRes = evaluator.evaluateForShort(20_000.0, indBull, null, null);
+        StructuralFilterResult longRes  = evaluator.evaluateForLong (20_000.0, indBull, null, null);
+
+        assertThat(shortRes.shortBlocked()).isTrue();  // bullish env vetoes SHORT
+        // No bearish blocks fire on a bullish-leaning environment.
+        assertThat(longRes.blocks()).extracting(StructuralBlock::code)
+            .doesNotContain(StructuralBlock.CODE_CMF_VERY_BEAR,
+                            StructuralBlock.CODE_MTF_BEAR,
+                            StructuralBlock.CODE_OB_BEAR_FRESH);
+    }
+
     // ── Test fixture builder ──────────────────────────────────────────────
 
     private static IndicatorsBuilder indicators() { return new IndicatorsBuilder(); }
 
     private static final class IndicatorsBuilder {
-        private Double vwap, vwapLo, bbPct, cmf;
+        private Double vwap, vwapLo, vwapHi, bbPct, cmf;
         private String zone, swingBias, lastInternalBreak;
         private Map<String, String> mtf = Map.of();
         private List<IndicatorsSnapshot.OrderBlockView> obs = List.of();
         private List<IndicatorsSnapshot.EqualLowView> els = List.of();
+        private List<IndicatorsSnapshot.EqualHighView> ehs = List.of();
 
-        IndicatorsBuilder withVwap(double vwap, double lower) { this.vwap = vwap; this.vwapLo = lower; return this; }
+        IndicatorsBuilder withVwap(double vwap, double lower) {
+            this.vwap = vwap; this.vwapLo = lower; return this;
+        }
+        IndicatorsBuilder withVwapBoth(double vwap, double lower, double upper) {
+            this.vwap = vwap; this.vwapLo = lower; this.vwapHi = upper; return this;
+        }
         IndicatorsBuilder withBbPct(double v)                  { this.bbPct = v; return this; }
         IndicatorsBuilder withCmf(double v)                    { this.cmf = v; return this; }
         IndicatorsBuilder withZone(String v)                   { this.zone = v; return this; }
@@ -284,10 +505,11 @@ class StructuralFilterEvaluatorTest {
         IndicatorsBuilder withMtf(Map<String, String> v)       { this.mtf = v; return this; }
         IndicatorsBuilder withOrderBlocks(IndicatorsSnapshot.OrderBlockView... v) { this.obs = List.of(v); return this; }
         IndicatorsBuilder withEqualLows(IndicatorsSnapshot.EqualLowView... v)     { this.els = List.of(v); return this; }
+        IndicatorsBuilder withEqualHighs(IndicatorsSnapshot.EqualHighView... v)   { this.ehs = List.of(v); return this; }
 
         IndicatorsSnapshot build() {
-            return new IndicatorsSnapshot(vwap, vwapLo, bbPct, cmf,
-                zone, swingBias, lastInternalBreak, mtf, obs, els);
+            return new IndicatorsSnapshot(vwap, vwapLo, vwapHi, bbPct, cmf,
+                zone, swingBias, lastInternalBreak, mtf, obs, els, ehs);
         }
     }
 }

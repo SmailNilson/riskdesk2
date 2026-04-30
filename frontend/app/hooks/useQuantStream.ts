@@ -30,9 +30,11 @@ function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined): st
 }
 
 function payloadToView(p: QuantWsPayload): QuantSnapshotView {
+  const longScore = p.longScore ?? 0;
   return {
     instrument: p.instrument,
     score: p.score,
+    longScore,
     price: p.price,
     priceSource: p.priceSource,
     dayMove: p.dayMove,
@@ -41,20 +43,33 @@ function payloadToView(p: QuantWsPayload): QuantSnapshotView {
     sl: p.sl,
     tp1: p.tp1,
     tp2: p.tp2,
+    longEntry: p.longEntry ?? p.entry,
+    longSl: p.longSl ?? null,
+    longTp1: p.longTp1 ?? null,
+    longTp2: p.longTp2 ?? null,
     shortSetup7_7: p.score >= 7,
     shortAlert6_7: p.score === 6,
+    longSetup7_7: longScore >= 7,
+    longAlert6_7: longScore === 6,
     gates: Object.entries(p.gates).map(([gate, value]) => ({
       gate,
       ok: value.ok,
       reason: value.reason,
     })),
-    // Structural filters (PR #299)
+    // SHORT structural filters (PR #299)
     structuralBlocks: p.structuralBlocks ?? [],
     structuralWarnings: p.structuralWarnings ?? [],
     structuralScoreModifier: p.structuralScoreModifier ?? 0,
     finalScore: p.finalScore ?? p.score,
     shortBlocked: p.shortBlocked ?? false,
     shortAvailable: p.shortAvailable ?? p.score >= 6,
+    // LONG structural filters (LONG-symmetry slice)
+    longStructuralBlocks: p.longStructuralBlocks ?? [],
+    longStructuralWarnings: p.longStructuralWarnings ?? [],
+    longStructuralScoreModifier: p.longStructuralScoreModifier ?? 0,
+    longFinalScore: p.longFinalScore ?? longScore,
+    longBlocked: p.longBlocked ?? false,
+    longAvailable: p.longAvailable ?? longScore >= 6,
   };
 }
 
