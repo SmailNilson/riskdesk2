@@ -36,6 +36,14 @@ public record StructuralWarning(String code, String evidence, int scoreModifier)
     public static final String CODE_JAVA_MAINTENANCE    = "JAVA_MAINTENANCE";
     /** OB_BULL block was demoted by an override (recent CHoCH bear or strong VRAIE_VENTE). */
     public static final String CODE_OB_BULL_OVERRIDDEN  = "OB_BULL_OVERRIDDEN";
+    /**
+     * JAVA_NO_TRADE_CRITICAL block was demoted because the only critical veto
+     * was {@code 5m-outside-kill-zone} AND the setup is structurally
+     * high-conviction (score 7/7, MTF 5/5, structure aligned, CMF aligned).
+     * Informational — the trader still sees that the kill-zone gate fired,
+     * but the trade is not vetoed. See {@link StructuralFilterEvaluator}.
+     */
+    public static final String CODE_JAVA_NO_TRADE_OVERRIDDEN = "JAVA_NO_TRADE_OVERRIDDEN";
 
     // ── LONG mirrors (LONG-symmetry slice) ────────────────────────────────
 

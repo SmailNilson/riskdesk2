@@ -479,6 +479,222 @@ class StructuralFilterEvaluatorTest {
                             StructuralBlock.CODE_OB_BEAR_FRESH);
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Kill-zone override (high-conviction bypass of 5m-outside-kill-zone)
+    // ──────────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Kill-zone override")
+    class KillZoneOverrideTests {
+
+        private static final String KILL_ZONE_VETO =
+            "5m-outside-kill-zone: 5m setups only permitted in London 02:00–05:00 ET or NY 08:30–11:00 ET";
+
+        // ── SHORT side ──
+
+        @Test
+        @DisplayName("SHORT score 7 + MTF 5/5 BEAR + CHoCH bear + CMF -0.15 → demote to JAVA_NO_TRADE_OVERRIDDEN warning")
+        void shortFullConviction_killZoneOnly_demotesToWarning() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .doesNotContain(StructuralBlock.CODE_JAVA_NO_TRADE);
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .contains(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+            // Override warning is informational — modifier 0.
+            assertThat(r.warnings().stream()
+                .filter(w -> w.code().equals(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN))
+                .findFirst().orElseThrow().scoreModifier()).isZero();
+        }
+
+        @Test
+        @DisplayName("SHORT score 6 → block stays (score gate)")
+        void shortScoreBelow7_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 6);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .doesNotContain(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+        }
+
+        @Test
+        @DisplayName("SHORT MTF only 4/5 BEAR → block stays (MTF gate)")
+        void shortMtfNotFull_blockKept() {
+            Map<String, String> mtf = new LinkedHashMap<>();
+            mtf.put("swing50", "BEARISH"); mtf.put("swing25", "BEARISH");
+            mtf.put("swing9",  "BEARISH"); mtf.put("internal5", "BEARISH");
+            mtf.put("micro1",  "BULLISH");
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(mtf)
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .doesNotContain(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+        }
+
+        @Test
+        @DisplayName("SHORT structure not aligned (CHoCH_BULLISH) → block stays (structure gate)")
+        void shortStructureMisaligned_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BULLISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+        }
+
+        @Test
+        @DisplayName("SHORT BOS_BEARISH also satisfies the structure gate")
+        void shortBosBearish_structureSatisfied() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("BOS_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .contains(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .doesNotContain(StructuralBlock.CODE_JAVA_NO_TRADE);
+        }
+
+        @Test
+        @DisplayName("SHORT CMF -0.05 (above -0.10 threshold) → block stays (CMF gate)")
+        void shortCmfTooWeak_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.05)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+        }
+
+        @Test
+        @DisplayName("SHORT additional critical veto (drawdown) alongside kill-zone → block stays")
+        void shortMultipleCriticalVetos_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(),
+                List.of(KILL_ZONE_VETO, "drawdown breach: -3R today"));
+
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .doesNotContain(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+        }
+
+        // ── LONG mirror ──
+
+        @Test
+        @DisplayName("LONG score 7 + MTF 5/5 BULL + CHoCH bull + CMF +0.15 → demote to JAVA_NO_TRADE_OVERRIDDEN warning")
+        void longFullConviction_killZoneOnly_demotesToWarning() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBullish())
+                .withLastInternalBreak("CHOCH_BULLISH")
+                .withCmf(0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .doesNotContain(StructuralBlock.CODE_JAVA_NO_TRADE);
+            assertThat(r.warnings()).extracting(StructuralWarning::code)
+                .contains(StructuralWarning.CODE_JAVA_NO_TRADE_OVERRIDDEN);
+        }
+
+        @Test
+        @DisplayName("LONG CMF +0.05 (below +0.10 threshold) → block stays")
+        void longCmfTooWeak_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBullish())
+                .withLastInternalBreak("CHOCH_BULLISH")
+                .withCmf(0.05)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            StructuralFilterResult r = evaluator.evaluateForLong(20_000.0, ind, strat, null, 7);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+        }
+
+        // ── Backward-compat: 4-arg overload never fires the override ──
+
+        @Test
+        @DisplayName("Backward-compat 4-arg overload (no score) → kill-zone block stays")
+        void legacyOverloadWithoutScore_blockKept() {
+            IndicatorsSnapshot ind = indicators()
+                .withMtf(allBearish())
+                .withLastInternalBreak("CHOCH_BEARISH")
+                .withCmf(-0.15)
+                .build();
+            StrategyVotes strat = new StrategyVotes("NO_TRADE", List.of(), List.of(KILL_ZONE_VETO));
+
+            // 4-arg overload defaults score to 0 → override never qualifies.
+            StructuralFilterResult r = evaluator.evaluateForShort(20_000.0, ind, strat, null);
+
+            assertThat(r.blocks()).extracting(StructuralBlock::code)
+                .contains(StructuralBlock.CODE_JAVA_NO_TRADE);
+        }
+
+        private Map<String, String> allBearish() {
+            Map<String, String> mtf = new LinkedHashMap<>();
+            mtf.put("swing50", "BEARISH"); mtf.put("swing25", "BEARISH");
+            mtf.put("swing9",  "BEARISH"); mtf.put("internal5", "BEARISH");
+            mtf.put("micro1",  "BEARISH");
+            return mtf;
+        }
+
+        private Map<String, String> allBullish() {
+            Map<String, String> mtf = new LinkedHashMap<>();
+            mtf.put("swing50", "BULLISH"); mtf.put("swing25", "BULLISH");
+            mtf.put("swing9",  "BULLISH"); mtf.put("internal5", "BULLISH");
+            mtf.put("micro1",  "BULLISH");
+            return mtf;
+        }
+    }
+
     // ── Test fixture builder ──────────────────────────────────────────────
 
     private static IndicatorsBuilder indicators() { return new IndicatorsBuilder(); }
