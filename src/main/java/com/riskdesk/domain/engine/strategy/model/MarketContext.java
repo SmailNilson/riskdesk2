@@ -43,7 +43,18 @@ public record MarketContext(
      * agents. Never null — defaults to {@link IndicatorContext#empty()} so agents abstain
      * gracefully when no indicator data is wired in (tests, legacy call sites).
      */
-    IndicatorContext indicators
+    IndicatorContext indicators,
+    /**
+     * Fast-path momentum hint derived from the last few candles vs the ATR noise
+     * envelope (see {@link com.riskdesk.domain.engine.indicators.MarketRegimeDetector#fastPathDirection}).
+     * BULL / BEAR when a clear directional cassure is in progress, NEUTRAL otherwise.
+     *
+     * <p>Used by {@link com.riskdesk.domain.engine.strategy.agent.context.RegimeContextAgent}
+     * to recover a directional sign when the lagging swing-derived {@link #macroBias} is
+     * still NEUTRAL during a fresh breakout. Never null — defaults to NEUTRAL so legacy
+     * call sites and tests that don't wire candles produce no behavioural change.
+     */
+    MacroBias momentumHint
 ) {
     public MarketContext {
         if (instrument == null) throw new IllegalArgumentException("instrument required");
@@ -57,6 +68,7 @@ public record MarketContext(
         if (portfolio == null) portfolio = PortfolioState.unknown();
         if (session == null) session = SessionInfo.unknown();
         if (indicators == null) indicators = IndicatorContext.empty();
+        if (momentumHint == null) momentumHint = MacroBias.NEUTRAL;
     }
 
     /**
@@ -71,7 +83,7 @@ public record MarketContext(
                           BigDecimal lastPrice, BigDecimal atr, Instant asOf) {
         this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
             lastPrice, atr, MtfSnapshot.neutral(), PortfolioState.unknown(),
-            SessionInfo.unknown(), asOf, IndicatorContext.empty());
+            SessionInfo.unknown(), asOf, IndicatorContext.empty(), MacroBias.NEUTRAL);
     }
 
     /**
@@ -86,7 +98,7 @@ public record MarketContext(
                           MtfSnapshot mtf, Instant asOf) {
         this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
             lastPrice, atr, mtf, PortfolioState.unknown(), SessionInfo.unknown(), asOf,
-            IndicatorContext.empty());
+            IndicatorContext.empty(), MacroBias.NEUTRAL);
     }
 
     /**
@@ -102,7 +114,26 @@ public record MarketContext(
                           MtfSnapshot mtf, PortfolioState portfolio,
                           SessionInfo session, Instant asOf) {
         this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
-            lastPrice, atr, mtf, portfolio, session, asOf, IndicatorContext.empty());
+            lastPrice, atr, mtf, portfolio, session, asOf, IndicatorContext.empty(),
+            MacroBias.NEUTRAL);
+    }
+
+    /**
+     * S4a-era constructor with indicators but no momentum hint. Kept so the
+     * {@link com.riskdesk.application.service.strategy.MarketContextBuilder} call
+     * sites that build the indicator context but don't have recent candles plumbed
+     * (tests, legacy adapters) keep working — momentum hint defaults to NEUTRAL,
+     * which is the same behaviour as before the fast-path was added.
+     */
+    public MarketContext(Instrument instrument, String referenceTimeframe,
+                          MacroBias macroBias, MarketRegime regime,
+                          PriceLocation priceLocation, PdZone pdZone,
+                          BigDecimal lastPrice, BigDecimal atr,
+                          MtfSnapshot mtf, PortfolioState portfolio,
+                          SessionInfo session, Instant asOf,
+                          IndicatorContext indicators) {
+        this(instrument, referenceTimeframe, macroBias, regime, priceLocation, pdZone,
+            lastPrice, atr, mtf, portfolio, session, asOf, indicators, MacroBias.NEUTRAL);
     }
 
     /** True when every context fact is known — tighter setups can require this. */
