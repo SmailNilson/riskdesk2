@@ -48,13 +48,23 @@ export function useSetupStream(instrument: string): SetupView[] {
   const [setups, setSetups] = useState<SetupView[]>([]);
   const clientRef = useRef<Client | null>(null);
 
-  // Seed from REST on instrument change
+  // Seed from REST on instrument change.
+  // Uses AbortController to drop in-flight responses when the user switches
+  // instruments quickly — without this, an older fetch could resolve after
+  // a newer one and overwrite the state with the wrong instrument's setups.
   useEffect(() => {
     const lower = instrument.toLowerCase();
-    fetch(`${API_URL}/api/quant/setups/${lower}`)
+    const controller = new AbortController();
+    fetch(`${API_URL}/api/quant/setups/${lower}`, { signal: controller.signal })
       .then(r => (r.ok ? r.json() : []))
-      .then((data: SetupView[]) => setSetups(data))
-      .catch(() => setSetups([]));
+      .then((data: SetupView[]) => {
+        if (!controller.signal.aborted) setSetups(data);
+      })
+      .catch((err) => {
+        // AbortError on cleanup is expected — only reset on real failures
+        if (err?.name !== 'AbortError') setSetups([]);
+      });
+    return () => controller.abort();
   }, [instrument]);
 
   // Subscribe to live updates

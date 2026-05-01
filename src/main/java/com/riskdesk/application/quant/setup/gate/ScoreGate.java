@@ -27,8 +27,11 @@ public class ScoreGate implements SetupGate {
 
     @Override
     public GateCheckResult check(SetupEvaluationContext ctx) {
-        int shortScore = ctx.snapshot().score();
-        int longScore  = ctx.snapshot().longScore();
+        // Use the structurally-adjusted scores (finalScore / longFinalScore)
+        // so a raw 5/7 reduced to 3/7 by structural warnings does NOT pass —
+        // setup quality must reflect the structural penalty.
+        int shortScore = ctx.snapshot().finalScore();
+        int longScore  = ctx.snapshot().longFinalScore();
         if (shortScore >= minScore || longScore >= minScore) {
             return GateCheckResult.pass("SCORE",
                 "short=" + shortScore + " long=" + longScore + " min=" + minScore);

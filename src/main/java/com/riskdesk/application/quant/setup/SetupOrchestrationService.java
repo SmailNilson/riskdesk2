@@ -190,10 +190,14 @@ public class SetupOrchestrationService {
     // ── Helper methods ──────────────────────────────────────────────────────
 
     private Direction resolveDirection(QuantSnapshot snapshot) {
-        boolean shortOk = !snapshot.shortBlocked() && snapshot.score() >= 5;
-        boolean longOk  = !snapshot.longBlocked()  && snapshot.longScore() >= 5;
+        // Compare against structurally-adjusted scores so raw 5/7 reduced to
+        // 3/7 by warnings does NOT qualify; tie-break by adjusted score too.
+        int shortAdj = snapshot.finalScore();
+        int longAdj  = snapshot.longFinalScore();
+        boolean shortOk = !snapshot.shortBlocked() && shortAdj >= 5;
+        boolean longOk  = !snapshot.longBlocked()  && longAdj  >= 5;
         if (shortOk && longOk) {
-            return snapshot.score() >= snapshot.longScore() ? Direction.SHORT : Direction.LONG;
+            return shortAdj >= longAdj ? Direction.SHORT : Direction.LONG;
         }
         if (shortOk) return Direction.SHORT;
         if (longOk)  return Direction.LONG;
