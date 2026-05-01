@@ -52,12 +52,16 @@ public class SetupController {
     @GetMapping("/{instrument}/{id}")
     public ResponseEntity<SetupView> byId(@PathVariable String instrument,
                                            @PathVariable UUID id) {
+        Instrument inst;
         try {
-            Instrument.valueOf(instrument.toUpperCase());
+            inst = Instrument.valueOf(instrument.toUpperCase());
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().build();
         }
+        // Filter by both id AND instrument so /api/quant/setups/MGC/{mcl-id}
+        // returns 404 instead of leaking the MCL row across the URL contract.
         return repositoryPort.findById(id)
+            .filter(s -> s.instrument() == inst)
             .map(SetupView::from)
             .map(ResponseEntity::ok)
             .orElse(ResponseEntity.notFound().build());

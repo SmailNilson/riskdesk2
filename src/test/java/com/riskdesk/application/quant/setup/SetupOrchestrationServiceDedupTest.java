@@ -27,12 +27,16 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -90,6 +94,41 @@ class SetupOrchestrationServiceDedupTest {
     }
 
     @Test
+    @DisplayName("concurrent scans never produce duplicate DETECTED rows for same direction")
+    void concurrent_scans_no_duplicates() throws Exception {
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        CountDownLatch go    = new CountDownLatch(1);
+        CountDownLatch done  = new CountDownLatch(threads);
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    ready.countDown();
+                    go.await();
+                    service.onSnapshot(Instrument.MCL, snapshotShortSetup());
+                } catch (InterruptedException ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        ready.await();
+        go.countDown();
+        assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+        pool.shutdownNow();
+
+        long shortDetected = repo.store.values().stream()
+            .filter(s -> s.direction() == Direction.SHORT)
+            .filter(s -> s.phase() == SetupPhase.DETECTED)
+            .count();
+        assertThat(shortDetected).isEqualTo(1);
+        assertThat(notifier.published).hasSize(1);
+    }
+
+    @Test
     @DisplayName("stale DETECTED beyond TTL is invalidated and a fresh one is born")
     void stale_detected_invalidated() {
         // Seed a stale DETECTED row directly (older than TTL)
@@ -119,7 +158,7 @@ class SetupOrchestrationServiceDedupTest {
     // ── Test fakes ─────────────────────────────────────────────────────────
 
     private static class FakeRepo implements SetupRepositoryPort {
-        final Map<UUID, SetupRecommendation> store = new HashMap<>();
+        final Map<UUID, SetupRecommendation> store = new ConcurrentHashMap<>();
 
         @Override public void save(SetupRecommendation r) { store.put(r.id(), r); }
 
@@ -150,7 +189,7 @@ class SetupOrchestrationServiceDedupTest {
     }
 
     private static class RecordingNotifier implements SetupNotificationPort {
-        final List<SetupRecommendation> published = new ArrayList<>();
+        final List<SetupRecommendation> published = new CopyOnWriteArrayList<>();
         @Override public void publish(Instrument instrument, SetupRecommendation r) {
             published.add(r);
         }

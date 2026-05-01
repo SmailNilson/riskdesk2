@@ -27,9 +27,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Receives a {@link QuantSnapshot} from {@code QuantGateService} and
@@ -60,6 +63,16 @@ public class SetupOrchestrationService {
     private final SetupNotificationPort notificationPort;
     private final IndicatorsPort indicatorsPort;
     private final StrategyPort strategyPort;
+
+    /**
+     * Per-instrument lock guarding the read-modify-write block in
+     * {@link #evaluate}. Without it, two concurrent {@code onSnapshot}
+     * invocations could both see "no fresh DETECTED row" and both insert,
+     * producing duplicate active rows and duplicate WS notifications.
+     * {@code QuantGateService} releases its own per-instrument lock before
+     * invoking us, so we cannot rely on upstream serialisation.
+     */
+    private final Map<Instrument, ReentrantLock> instrumentLocks = new EnumMap<>(Instrument.class);
 
     @org.springframework.beans.factory.annotation.Value(ENABLED_PROP)
     private boolean enabled;
@@ -127,36 +140,51 @@ public class SetupOrchestrationService {
         //      stale-row growth even when phase advancement isn't wired up.
         //   2) If a fresh DETECTED row already covers this direction, skip
         //      the insert. The existing row remains the canonical reference.
-        Instant now = Instant.now();
-        List<SetupRecommendation> active = repositoryPort.findActiveByInstrument(instrument);
-        for (SetupRecommendation existing : active) {
-            if (existing.phase() == SetupPhase.DETECTED
-                && Duration.between(existing.detectedAt(), now).compareTo(DETECTED_TTL) > 0) {
-                repositoryPort.updatePhase(existing.id(), SetupPhase.INVALIDATED, now);
+        //
+        // The whole read-modify-write block runs under a per-instrument lock
+        // because QuantGateService releases its scan lock before calling us
+        // — without this lock, two concurrent scans could both observe
+        // "no fresh DETECTED" and both insert duplicates.
+        ReentrantLock lock = lockFor(instrument);
+        lock.lock();
+        try {
+            Instant now = Instant.now();
+            List<SetupRecommendation> active = repositoryPort.findActiveByInstrument(instrument);
+            for (SetupRecommendation existing : active) {
+                if (existing.phase() == SetupPhase.DETECTED
+                    && Duration.between(existing.detectedAt(), now).compareTo(DETECTED_TTL) > 0) {
+                    repositoryPort.updatePhase(existing.id(), SetupPhase.INVALIDATED, now);
+                }
             }
-        }
-        boolean alreadyDetected = active.stream().anyMatch(s ->
-            s.phase() == SetupPhase.DETECTED
-            && s.direction() == direction
-            && Duration.between(s.detectedAt(), now).compareTo(DETECTED_TTL) <= 0
-        );
-        if (alreadyDetected) {
-            if (log.isDebugEnabled()) {
-                log.debug("setup dedup skip — fresh DETECTED already exists instrument={} direction={}",
-                    instrument, direction);
+            boolean alreadyDetected = active.stream().anyMatch(s ->
+                s.phase() == SetupPhase.DETECTED
+                && s.direction() == direction
+                && Duration.between(s.detectedAt(), now).compareTo(DETECTED_TTL) <= 0
+            );
+            if (alreadyDetected) {
+                if (log.isDebugEnabled()) {
+                    log.debug("setup dedup skip — fresh DETECTED already exists instrument={} direction={}",
+                        instrument, direction);
+                }
+                return;
             }
-            return;
+
+            SetupRecommendation recommendation = buildRecommendation(
+                instrument, snapshot, direction, regime, style, template, gateResults
+            );
+
+            repositoryPort.save(recommendation);
+            notificationPort.publish(instrument, recommendation);
+
+            log.info("setup detected instrument={} template={} direction={} score={}",
+                instrument, template, direction, recommendation.finalScore());
+        } finally {
+            lock.unlock();
         }
+    }
 
-        SetupRecommendation recommendation = buildRecommendation(
-            instrument, snapshot, direction, regime, style, template, gateResults
-        );
-
-        repositoryPort.save(recommendation);
-        notificationPort.publish(instrument, recommendation);
-
-        log.info("setup detected instrument={} template={} direction={} score={}",
-            instrument, template, direction, recommendation.finalScore());
+    private synchronized ReentrantLock lockFor(Instrument instrument) {
+        return instrumentLocks.computeIfAbsent(instrument, k -> new ReentrantLock());
     }
 
     // ── Helper methods ──────────────────────────────────────────────────────
