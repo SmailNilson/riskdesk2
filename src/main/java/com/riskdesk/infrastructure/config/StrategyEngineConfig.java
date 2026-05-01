@@ -7,7 +7,6 @@ import com.riskdesk.domain.engine.strategy.agent.context.BollingerPositionAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.CmfFlowAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.HtfAlignmentAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.RegimeContextAgent;
-import com.riskdesk.domain.engine.strategy.agent.context.RiskGateAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.SessionTimingAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.SmcMacroBiasAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.VolumeProfileContextAgent;
@@ -50,7 +49,9 @@ public class StrategyEngineConfig {
     @Bean public VolumeProfileContextAgent volumeProfileContextAgent() { return new VolumeProfileContextAgent(); }
     @Bean public RegimeContextAgent regimeContextAgent() { return new RegimeContextAgent(); }
     @Bean public HtfAlignmentAgent htfAlignmentAgent() { return new HtfAlignmentAgent(); }
-    @Bean public RiskGateAgent strategyRiskGateAgent() { return new RiskGateAgent(); }
+    // RiskGateAgent removed by user request — drawdown / margin / correlated-position
+    // safety checks are no longer enforced inside LSAR. If this needs to be restored,
+    // re-instantiate `new RiskGateAgent()` here and revert the file deletion.
     // Deliberately named `strategySessionTimingAgent` — the legacy
     // TradingAgentConfig already contributes a bean named `sessionTimingAgent`
     // (the pre-hexagonal playbook agent of the same short name). Spring rejects

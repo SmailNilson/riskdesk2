@@ -13,10 +13,12 @@ import org.springframework.stereotype.Component;
  * {@link PortfolioState}. Lives in application-layer because it imports an app
  * DTO; the strategy package stays independent.
  *
- * <p>Returns {@link PortfolioState#unknown()} on any failure — the
- * {@code RiskGateAgent} abstains on unknown state, so a broker outage doesn't
- * forcibly block trading. If you want a fail-closed posture, wrap this builder
- * in a supervisor that turns repeated failures into a veto.
+ * <p>Returns {@link PortfolioState#unknown()} on any failure. The strategy
+ * engine no longer ships a built-in risk gate (the legacy {@code RiskGateAgent}
+ * was removed); broker outages therefore don't forcibly block trading. If you
+ * want a fail-closed posture, wrap this builder in a supervisor that turns
+ * repeated failures into a veto, or reintroduce a context-layer agent that
+ * vetoes on {@code !PortfolioState.isKnown()}.
  */
 @Component
 public class PortfolioStateBuilder {

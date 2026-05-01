@@ -12,14 +12,15 @@ import java.util.List;
 /**
  * CONTEXT agent — enforces session / liquidity discipline.
  *
- * <p>Does NOT vote on direction. Like {@link RiskGateAgent} it either
- * abstains (normal operation) or emits hard vetoes when the market environment
- * is structurally unsuitable for trading.
+ * <p>Does NOT vote on direction. It either abstains (normal operation) or
+ * emits hard vetoes when the market environment is structurally unsuitable
+ * for trading.
  *
  * <p><b>Decisions</b>
  * <ul>
- *   <li>Session data unavailable → abstain (reliability over safety, same as
- *       {@link RiskGateAgent})</li>
+ *   <li>Session data unavailable → abstain (reliability over safety —
+ *       refusing to trade because session probe failed would be a reliability
+ *       bug, not a safety guarantee)</li>
  *   <li>Maintenance window active → veto "maintenance-window"</li>
  *   <li>Market closed for this instrument → veto "market-closed"</li>
  *   <li>Reference timeframe {@code 5m} AND not in a kill zone → veto
