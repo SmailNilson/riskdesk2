@@ -10,6 +10,7 @@ import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
 import QuantGatePanel from './quant/QuantGatePanel';
+import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
 import QuantSetupNotification from './quant/QuantSetupNotification';
 import ActivePositionsPanel from './positions/ActivePositionsPanel';
 import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
@@ -286,6 +287,7 @@ export default function Dashboard() {
           />
           <ActivePositionsPanel />
           <QuantGatePanel />
+          <SetupRecommendationPanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
         </CollapsibleZone>
