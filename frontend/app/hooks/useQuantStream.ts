@@ -268,5 +268,9 @@ function extractPattern(payload: QuantWsPayload): PatternView | null {
     reason: p.reason,
     confidence: p.confidence,
     action: p.action,
+    // PR #310 — present from backends that emit the LONG mirror. Consumers
+    // can read it directly; if absent (older backend), patternActionFor() in
+    // QuantGatePanel falls back to flipping `action` (TRADE↔AVOID).
+    longAction: p.longAction,
   };
 }

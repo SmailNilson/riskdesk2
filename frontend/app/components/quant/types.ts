@@ -98,7 +98,11 @@ export interface PatternView {
   label: string;
   reason: string;
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  /** SHORT-trader recommendation (legacy default — populated for every pattern). */
   action: 'TRADE' | 'WAIT' | 'AVOID';
+  /** LONG-trader mirror — added in PR #310. Optional so older backends still parse;
+   *  consumers should fall back to flipping `action` (TRADE↔AVOID, WAIT stays WAIT). */
+  longAction?: 'TRADE' | 'WAIT' | 'AVOID';
 }
 
 export interface AdviceView {
