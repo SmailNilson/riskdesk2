@@ -1,4 +1,4 @@
-package com.riskdesk.infrastructure.quant.setup;
+package com.riskdesk.application.quant.setup;
 
 import com.riskdesk.application.quant.setup.gate.LiveDataGate;
 import com.riskdesk.application.quant.setup.gate.RegimeGate;
@@ -13,12 +13,12 @@ import org.springframework.context.annotation.Configuration;
 import java.util.List;
 
 /**
- * Wires the setup gate chain and related beans.
- * Kept in the infrastructure layer so domain / application classes stay
- * free of Spring annotations.
+ * Wires the setup gate chain. Lives in the application layer because the
+ * gates themselves are application classes — instantiating them from
+ * infrastructure would violate the hexagonal layering rule.
  */
 @Configuration
-public class SetupConfiguration {
+public class SetupGateChainConfiguration {
 
     @Bean
     public SetupGateChain setupGateChain() {

@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
@@ -32,8 +33,9 @@ public class WeightOptimizerService {
 
     private static final Logger log = LoggerFactory.getLogger(WeightOptimizerService.class);
 
-    private static final double LEARNING_RATE = 0.02;
-    private static final int    MIN_SAMPLE    = 20;
+    private static final double LEARNING_RATE   = 0.02;
+    private static final int    MIN_SAMPLE      = 20;
+    private static final Duration LOOKBACK_WINDOW = Duration.ofDays(7);
 
     @Value("${riskdesk.setup.weight-optimizer.enabled:false}")
     private boolean enabled;
@@ -66,10 +68,11 @@ public class WeightOptimizerService {
     }
 
     private void runForInstrument(Instrument instrument) {
-        List<SetupRecommendation> closed = repositoryPort.findActiveByInstrument(instrument)
-            .stream()
-            .filter(s -> s.phase() == SetupPhase.CLOSED)
-            .toList();
+        Instant since = Instant.now().minus(LOOKBACK_WINDOW);
+        // findActiveByInstrument excludes terminal phases by design — closed
+        // setups have to be fetched via the dedicated phase-aware query.
+        List<SetupRecommendation> closed =
+            repositoryPort.findByInstrumentAndPhaseSince(instrument, SetupPhase.CLOSED, since);
 
         if (closed.size() < MIN_SAMPLE) {
             log.debug("weight-optimizer instrument={} insufficient sample={} (need {})",
@@ -85,8 +88,8 @@ public class WeightOptimizerService {
             .average()
             .orElse(0.0);
 
-        log.info("weight-optimizer instrument={} closedSetups={} avgScore={:.2f} weights={}",
-            instrument, closed.size(), avgScore, current);
+        log.info("weight-optimizer instrument={} closedSetups={} avgScore={} weights={}",
+            instrument, closed.size(), String.format("%.2f", avgScore), current);
 
         // TODO: Implement gradient step — compare WIN vs LOSS gate profiles
         // to identify which gates are most predictive, then nudge weights

@@ -12,37 +12,53 @@ class DefaultRegimeSwitchPolicyTest {
     private final DefaultRegimeSwitchPolicy policy = new DefaultRegimeSwitchPolicy();
 
     @Test
-    @DisplayName("RANGING + low BB + low ATR → SCALP")
-    void ranging_lowBb_lowAtr_scalp() {
-        SetupStyle style = policy.determineStyle(MarketRegime.RANGING, 20.0, 20.0);
+    @DisplayName("RANGING + tight bands + small day-move → SCALP")
+    void ranging_tight_quiet_scalp() {
+        SetupStyle style = policy.determineStyle(MarketRegime.RANGING, 0.30, 0.20);
         assertThat(style).isEqualTo(SetupStyle.SCALP);
     }
 
     @Test
-    @DisplayName("RANGING + high BB → DAY (too volatile for scalp)")
-    void ranging_highBb_day() {
-        SetupStyle style = policy.determineStyle(MarketRegime.RANGING, 60.0, 20.0);
+    @DisplayName("RANGING + wide bands → DAY (too volatile for scalp)")
+    void ranging_wideBands_day() {
+        SetupStyle style = policy.determineStyle(MarketRegime.RANGING, 0.80, 0.20);
+        assertThat(style).isEqualTo(SetupStyle.DAY);
+    }
+
+    @Test
+    @DisplayName("RANGING + big day-move → DAY (session already trending)")
+    void ranging_bigMove_day() {
+        SetupStyle style = policy.determineStyle(MarketRegime.RANGING, 0.30, 0.50);
         assertThat(style).isEqualTo(SetupStyle.DAY);
     }
 
     @Test
     @DisplayName("TRENDING regime always → DAY")
     void trending_day() {
-        SetupStyle style = policy.determineStyle(MarketRegime.TRENDING, 10.0, 10.0);
+        SetupStyle style = policy.determineStyle(MarketRegime.TRENDING, 0.10, 0.05);
         assertThat(style).isEqualTo(SetupStyle.DAY);
     }
 
     @Test
-    @DisplayName("CHOPPY regime → DAY (not scalp — no clear structure)")
+    @DisplayName("CHOPPY regime → DAY")
     void choppy_day() {
-        SetupStyle style = policy.determineStyle(MarketRegime.CHOPPY, 10.0, 10.0);
+        SetupStyle style = policy.determineStyle(MarketRegime.CHOPPY, 0.10, 0.05);
         assertThat(style).isEqualTo(SetupStyle.DAY);
     }
 
     @Test
-    @DisplayName("UNKNOWN regime → DAY (default safe fallback)")
+    @DisplayName("UNKNOWN regime → DAY (safe fallback)")
     void unknown_day() {
-        SetupStyle style = policy.determineStyle(MarketRegime.UNKNOWN, 20.0, 20.0);
+        SetupStyle style = policy.determineStyle(MarketRegime.UNKNOWN, 0.10, 0.05);
         assertThat(style).isEqualTo(SetupStyle.DAY);
+    }
+
+    @Test
+    @DisplayName("RANGING + NaN signals → DAY (data unavailable)")
+    void ranging_nan_day() {
+        assertThat(policy.determineStyle(MarketRegime.RANGING, Double.NaN, 0.10))
+            .isEqualTo(SetupStyle.DAY);
+        assertThat(policy.determineStyle(MarketRegime.RANGING, 0.10, Double.NaN))
+            .isEqualTo(SetupStyle.DAY);
     }
 }

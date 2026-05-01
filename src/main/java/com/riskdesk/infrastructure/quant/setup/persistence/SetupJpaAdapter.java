@@ -79,6 +79,19 @@ public class SetupJpaAdapter implements SetupRepositoryPort {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public List<SetupRecommendation> findByInstrumentAndPhaseSince(Instrument instrument,
+                                                                    SetupPhase phase,
+                                                                    Instant since) {
+        return repository
+            .findByInstrumentAndPhaseAndUpdatedAtGreaterThanEqual(
+                instrument.name(), phase.name(), since)
+            .stream()
+            .map(this::toDomain)
+            .toList();
+    }
+
+    @Override
     @Transactional
     public void updatePhase(UUID id, SetupPhase phase, Instant updatedAt) {
         repository.findById(id).ifPresent(e -> {

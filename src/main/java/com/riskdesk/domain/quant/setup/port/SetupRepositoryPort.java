@@ -18,5 +18,14 @@ public interface SetupRepositoryPort {
 
     List<SetupRecommendation> findActiveByInstrument(Instrument instrument);
 
+    /**
+     * Returns setups in the requested phase whose {@code updatedAt} is on or
+     * after {@code since}. Used by the weight optimizer to inspect closed
+     * setups (which {@link #findActiveByInstrument} excludes by design).
+     */
+    List<SetupRecommendation> findByInstrumentAndPhaseSince(Instrument instrument,
+                                                            SetupPhase phase,
+                                                            Instant since);
+
     void updatePhase(UUID id, SetupPhase phase, Instant updatedAt);
 }

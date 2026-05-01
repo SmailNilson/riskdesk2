@@ -105,7 +105,9 @@ public class SetupOrchestrationService {
         if (direction == null) return;
 
         MarketRegime regime = resolveRegime(indicators);
-        SetupStyle   style  = regimeSwitchPolicy.determineStyle(regime, 50.0, 50.0);
+        double bbWidthPct    = computeBbWidthPct(indicators, snapshot.price());
+        double dayMoveAbsPct = computeDayMoveAbsPct(snapshot);
+        SetupStyle   style  = regimeSwitchPolicy.determineStyle(regime, bbWidthPct, dayMoveAbsPct);
         SetupTemplate template = classifyTemplate(snapshot, indicators, regime, direction);
 
         SetupRecommendation recommendation = buildRecommendation(
@@ -135,6 +137,30 @@ public class SetupOrchestrationService {
     private MarketRegime resolveRegime(IndicatorsSnapshot indicators) {
         if (indicators == null || indicators.swingBias() == null) return MarketRegime.UNKNOWN;
         return MarketRegime.fromDetectorLabel(indicators.swingBias());
+    }
+
+    /**
+     * VWAP band spread as a percent of price. Returns {@link Double#NaN}
+     * when the upstream indicator snapshot does not yet carry the bands
+     * (cold start, no candle yet).
+     */
+    private double computeBbWidthPct(IndicatorsSnapshot indicators, Double price) {
+        if (indicators == null || price == null || price <= 0) return Double.NaN;
+        Double upper = indicators.vwapUpperBand();
+        Double lower = indicators.vwapLowerBand();
+        if (upper == null || lower == null) return Double.NaN;
+        return Math.abs(upper - lower) / price * 100.0;
+    }
+
+    /**
+     * Absolute session move as a percent of current price. {@code dayMove}
+     * is in points, so dividing by price gives a percent. Returns
+     * {@link Double#NaN} when price is missing.
+     */
+    private double computeDayMoveAbsPct(QuantSnapshot snapshot) {
+        Double price = snapshot.price();
+        if (price == null || price <= 0) return Double.NaN;
+        return Math.abs(snapshot.dayMove()) / price * 100.0;
     }
 
     private SetupTemplate classifyTemplate(QuantSnapshot snapshot,
