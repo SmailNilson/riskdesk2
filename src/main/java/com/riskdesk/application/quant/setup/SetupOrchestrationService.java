@@ -25,6 +25,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -44,6 +45,14 @@ public class SetupOrchestrationService {
     private static final Logger log = LoggerFactory.getLogger(SetupOrchestrationService.class);
 
     private static final String ENABLED_PROP = "${riskdesk.setup.enabled:true}";
+
+    /**
+     * A {@link SetupPhase#DETECTED} row is considered "fresh" for this long
+     * after creation. While fresh, repeat scans for the same instrument+
+     * direction reuse the existing row instead of inserting a new one.
+     * Once stale, the row is invalidated and a fresh one may be born.
+     */
+    static final Duration DETECTED_TTL = Duration.ofMinutes(30);
 
     private final SetupGateChain gateChain;
     private final RegimeSwitchPolicy regimeSwitchPolicy;
@@ -109,6 +118,35 @@ public class SetupOrchestrationService {
         double dayMoveAbsPct = computeDayMoveAbsPct(snapshot);
         SetupStyle   style  = regimeSwitchPolicy.determineStyle(regime, bbWidthPct, dayMoveAbsPct);
         SetupTemplate template = classifyTemplate(snapshot, indicators, regime, direction);
+
+        // Dedup + cleanup. Without this every qualifying scan would mint a
+        // new DETECTED row, so a sustained signal would accumulate dozens of
+        // identical rows (none of which the engine yet advances out of
+        // DETECTED). Two passes:
+        //   1) Invalidate DETECTED rows older than DETECTED_TTL — bounds
+        //      stale-row growth even when phase advancement isn't wired up.
+        //   2) If a fresh DETECTED row already covers this direction, skip
+        //      the insert. The existing row remains the canonical reference.
+        Instant now = Instant.now();
+        List<SetupRecommendation> active = repositoryPort.findActiveByInstrument(instrument);
+        for (SetupRecommendation existing : active) {
+            if (existing.phase() == SetupPhase.DETECTED
+                && Duration.between(existing.detectedAt(), now).compareTo(DETECTED_TTL) > 0) {
+                repositoryPort.updatePhase(existing.id(), SetupPhase.INVALIDATED, now);
+            }
+        }
+        boolean alreadyDetected = active.stream().anyMatch(s ->
+            s.phase() == SetupPhase.DETECTED
+            && s.direction() == direction
+            && Duration.between(s.detectedAt(), now).compareTo(DETECTED_TTL) <= 0
+        );
+        if (alreadyDetected) {
+            if (log.isDebugEnabled()) {
+                log.debug("setup dedup skip — fresh DETECTED already exists instrument={} direction={}",
+                    instrument, direction);
+            }
+            return;
+        }
 
         SetupRecommendation recommendation = buildRecommendation(
             instrument, snapshot, direction, regime, style, template, gateResults

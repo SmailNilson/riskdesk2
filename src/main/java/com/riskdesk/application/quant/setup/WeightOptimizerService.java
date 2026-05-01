@@ -54,7 +54,7 @@ public class WeightOptimizerService {
      * 7 days and logs a recommendation. Does NOT write weights unless the
      * stub is replaced with the gradient step.
      */
-    @Scheduled(cron = "0 0 7 * * *", zone = "America/New_York")
+    @Scheduled(cron = "0 0 2 * * *", zone = "America/New_York")
     public void optimise() {
         if (!enabled) return;
         log.info("weight-optimizer starting daily run");
