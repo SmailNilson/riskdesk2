@@ -66,7 +66,12 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
             patternMap.put("label", pattern.label());
             patternMap.put("reason", pattern.reason());
             patternMap.put("confidence", pattern.confidence().name());
+            // SHORT view (legacy). The frontend's SHORT setup panel reads this.
             patternMap.put("action", pattern.action().name());
+            // LONG mirror — the LONG setup panel reads this. Symmetric to action()
+            // (TRADE↔AVOID, WAIT stays WAIT). See PatternAnalysis#actionFor.
+            patternMap.put("longAction",
+                pattern.actionFor(PatternAnalysis.TradeBias.LONG).name());
         }
         root.put("pattern", patternMap);
         root.put("markdown", markdown);

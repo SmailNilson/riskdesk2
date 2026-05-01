@@ -12,6 +12,7 @@ import {
   QUANT_INSTRUMENTS,
   SHORT_GATES,
   type AdviceView,
+  type PatternView,
   type QuantGateView,
   type QuantInstrument,
   type QuantSnapshotView,
@@ -31,6 +32,42 @@ function formatPrice(p: number | null | undefined): string {
   return p.toFixed(2);
 }
 
+type PatternAction = 'TRADE' | 'WAIT' | 'AVOID';
+
+/** Pattern action seen from {@code direction}. Reads {@code longAction} when
+ *  the backend supplies it (PR #310); otherwise mirrors {@code action} on the
+ *  fly so older backends still render correctly (TRADE↔AVOID, WAIT stays WAIT). */
+function patternActionFor(
+  pattern: PatternView | null | undefined,
+  direction: 'SHORT' | 'LONG',
+): PatternAction | null {
+  if (!pattern) return null;
+  if (direction === 'SHORT') return pattern.action;
+  if (pattern.longAction) return pattern.longAction;
+  switch (pattern.action) {
+    case 'TRADE': return 'AVOID';
+    case 'AVOID': return 'TRADE';
+    case 'WAIT':  return 'WAIT';
+    default:      return null;
+  }
+}
+
+function patternActionClass(action: PatternAction): string {
+  switch (action) {
+    case 'TRADE': return 'bg-emerald-700 text-emerald-100 border-emerald-600';
+    case 'AVOID': return 'bg-red-800 text-red-100 border-red-700';
+    case 'WAIT':  return 'bg-slate-700 text-slate-300 border-slate-600';
+  }
+}
+
+function patternActionGlyph(action: PatternAction): string {
+  switch (action) {
+    case 'TRADE': return '✅';
+    case 'AVOID': return '🚫';
+    case 'WAIT':  return '⏸';
+  }
+}
+
 interface DirectionSectionProps {
   label: 'SHORT' | 'LONG';
   score: number;
@@ -47,6 +84,13 @@ interface DirectionSectionProps {
   tp1: number | null;
   tp2: number | null;
   advisorSlot?: React.ReactNode;
+  /** Order-flow pattern action seen FROM this direction's perspective.
+   *  SHORT reads {@code pattern.action}; LONG reads {@code pattern.longAction}
+   *  (PR #310 mirror). Resolved by {@link patternActionFor} so backends that
+   *  pre-date PR #310 still render via the SHORT→LONG flip. */
+  patternAction?: PatternAction | null;
+  /** Human-readable label for the pattern badge tooltip (e.g. "Absorption haussière"). */
+  patternLabel?: string | null;
 }
 
 /**
@@ -59,7 +103,7 @@ function DirectionSection(props: DirectionSectionProps) {
   const warnings = props.warnings ?? [];
   return (
     <div>
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
         <span className={`px-2 py-1 rounded text-xs font-bold ${scoreClass(props.score)}`}>
           {props.label} {props.score}/7
         </span>
@@ -71,6 +115,18 @@ function DirectionSection(props: DirectionSectionProps) {
               ({props.scoreModifier >= 0 ? '+' : ''}
               {props.scoreModifier})
             </span>
+          </span>
+        )}
+        {props.patternAction && (
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold border ${patternActionClass(props.patternAction)}`}
+            title={
+              props.patternLabel
+                ? `Pattern order-flow: ${props.patternLabel} → ${props.patternAction} (${props.label} side)`
+                : `Pattern order-flow → ${props.patternAction} (${props.label} side)`
+            }
+          >
+            {patternActionGlyph(props.patternAction)} flow {props.patternAction}
           </span>
         )}
       </div>
@@ -356,6 +412,8 @@ export default function QuantGatePanel() {
               sl={snapshot.sl}
               tp1={snapshot.tp1}
               tp2={snapshot.tp2}
+              patternAction={patternActionFor(narration?.pattern, 'SHORT')}
+              patternLabel={narration?.pattern?.label ?? null}
               advisorSlot={
                 <>
                   <QuantAdvisorBadge advice={advice} loading={askingAi[active]} />
@@ -387,6 +445,8 @@ export default function QuantGatePanel() {
               sl={snapshot.longSl}
               tp1={snapshot.longTp1}
               tp2={snapshot.longTp2}
+              patternAction={patternActionFor(narration?.pattern, 'LONG')}
+              patternLabel={narration?.pattern?.label ?? null}
             />
           </div>
 
