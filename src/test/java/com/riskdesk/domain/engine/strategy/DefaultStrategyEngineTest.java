@@ -4,7 +4,7 @@ import com.riskdesk.domain.engine.strategy.agent.StrategyAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.RegimeContextAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.SmcMacroBiasAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.VolumeProfileContextAgent;
-import com.riskdesk.domain.engine.strategy.agent.trigger.DeltaFlowTriggerAgent;
+import com.riskdesk.domain.engine.strategy.agent.trigger.QuantFlowPatternAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.OrderBlockZoneAgent;
 import com.riskdesk.domain.engine.strategy.model.AgentVote;
 import com.riskdesk.domain.engine.strategy.model.DecisionType;
@@ -27,6 +27,8 @@ import com.riskdesk.domain.engine.strategy.playbook.PlaybookSelector;
 import com.riskdesk.domain.engine.strategy.playbook.SbdrPlaybook;
 import com.riskdesk.domain.engine.strategy.policy.StrategyScoringPolicy;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.quant.pattern.OrderFlowPattern;
+import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -61,7 +63,7 @@ class DefaultStrategyEngineTest {
             new VolumeProfileContextAgent(),
             new RegimeContextAgent(),
             new OrderBlockZoneAgent(),
-            new DeltaFlowTriggerAgent()
+            new QuantFlowPatternAgent()
         );
         PlaybookSelector selector = new PlaybookSelector(List.of(new SbdrPlaybook(), new LsarPlaybook()));
         return new DefaultStrategyEngine(selector, agents, policy, clock);
@@ -84,14 +86,26 @@ class DefaultStrategyEngineTest {
             new BigDecimal("2001.00"), new BigDecimal("1998.00"),
             new BigDecimal("1999.50"), 75.0);
         ZoneContext zones = new ZoneContext(List.of(bullOb), List.of(), List.of());
-        // Trigger: heavy sell delta but price holds → absorption (bullish)
+        // Trigger: heavy sell delta but price holds → bullish absorption pattern.
+        // The QuantFlowPatternAgent reads the precomputed PatternAnalysis from
+        // the TriggerContext (which TriggerContextBuilder builds via the Quant
+        // OrderFlowPatternDetector in production); here we hand-craft the
+        // ABSORPTION_HAUSSIERE / HIGH equivalent the detector would emit.
+        PatternAnalysis bullAbsorption = new PatternAnalysis(
+            OrderFlowPattern.ABSORPTION_HAUSSIERE,
+            "Absorption haussière",
+            "Δ=-1500 mais prix stable → acheteurs absorbent",
+            PatternAnalysis.Confidence.HIGH,
+            PatternAnalysis.Action.AVOID  // SHORT-side action; LONG side gets TRADE via actionFor
+        );
         TriggerContext trig = new TriggerContext(
             DeltaSignature.ABSORPTION,
             new BigDecimal("0.30"),           // 30% buys → heavy sellers
             new BigDecimal("-1500"),          // strongly negative cumulative delta
             com.riskdesk.domain.engine.strategy.model.DomSignal.UNAVAILABLE,
             ReactionPattern.NONE,
-            TickDataQuality.CLV_ESTIMATED
+            TickDataQuality.CLV_ESTIMATED,
+            bullAbsorption
         );
 
         StrategyDecision d = buildEngine().evaluate(new StrategyInput(ctx, zones, trig, null));
@@ -176,6 +190,6 @@ class DefaultStrategyEngineTest {
         long trigVotes = d.votes().stream().filter(v -> v.layer() == StrategyLayer.TRIGGER).count();
         assertThat(ctxVotes).isEqualTo(3);  // smc-bias + vp-context + regime
         assertThat(zoneVotes).isEqualTo(1); // ob-zone
-        assertThat(trigVotes).isEqualTo(1); // delta-flow
+        assertThat(trigVotes).isEqualTo(1); // quant-flow-pattern (replaces delta-flow)
     }
 }

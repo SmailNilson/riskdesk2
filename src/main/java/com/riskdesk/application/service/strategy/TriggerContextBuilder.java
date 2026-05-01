@@ -12,6 +12,10 @@ import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.quant.model.MarketSnapshot;
+import com.riskdesk.domain.quant.model.QuantState;
+import com.riskdesk.domain.quant.pattern.OrderFlowPatternDetector;
+import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +23,9 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -58,22 +65,49 @@ public class TriggerContextBuilder {
     /** buyRatioPct (0..100) below this threshold = "heavy selling". */
     private static final double HEAVY_SELL_PCT = 35.0;
 
+    /** Number of recent candle closes fed to the order-flow pattern detector. Matches
+     *  the {@code QuantSetupNarrationService.PRICE_HISTORY_DEPTH} default so both
+     *  systems see the same 3-tick window when classifying the regime. */
+    private static final int PATTERN_PRICE_HISTORY_DEPTH = 3;
+
+    /** Trading-day projection used by the pattern detector — the 4-quadrant
+     *  classifier itself ignores the date, but {@link QuantState#reset(LocalDate)}
+     *  insists on a non-null value, so we just pin to America/New_York like the
+     *  rest of the system. */
+    private static final ZoneId NY = ZoneId.of("America/New_York");
+
     private final CandleRepositoryPort candleRepository;
     private final TickDataPort tickDataPort;
+    private final OrderFlowPatternDetector patternDetector;
 
     @Autowired
-    public TriggerContextBuilder(CandleRepositoryPort candleRepository, TickDataPort tickDataPort) {
+    public TriggerContextBuilder(CandleRepositoryPort candleRepository,
+                                  TickDataPort tickDataPort,
+                                  OrderFlowPatternDetector patternDetector) {
         this.candleRepository = candleRepository;
         this.tickDataPort = tickDataPort;
+        this.patternDetector = patternDetector;
+    }
+
+    /**
+     * Test/back-compat constructor — wires the candle repository and tick port,
+     * defaults the pattern detector to a fresh {@link OrderFlowPatternDetector}.
+     * Pre-existing tests that constructed the builder before the pattern field
+     * was added keep working without modification.
+     */
+    public TriggerContextBuilder(CandleRepositoryPort candleRepository, TickDataPort tickDataPort) {
+        this(candleRepository, tickDataPort, new OrderFlowPatternDetector());
     }
 
     /**
      * Test/back-compat constructor — wires only the candle repository. Real-tick
-     * lookups are skipped (port is null) so the builder behaves exactly like the
-     * pre-tick implementation.
+     * lookups are skipped (port is null) and the pattern detector is the default,
+     * so the builder behaves exactly like the pre-tick implementation but still
+     * publishes a precomputed {@link PatternAnalysis} on the resulting
+     * {@link TriggerContext}.
      */
     public TriggerContextBuilder(CandleRepositoryPort candleRepository) {
-        this(candleRepository, null);
+        this(candleRepository, null, new OrderFlowPatternDetector());
     }
 
     public TriggerContext build(Instrument instrument, String timeframe,
@@ -83,20 +117,27 @@ public class TriggerContextBuilder {
         // DOM is not yet on the snapshot — report UNAVAILABLE. A later slice wires
         // MarketDepthPort here.
         DomSignal dom = DomSignal.UNAVAILABLE;
+        // Pattern is computed from delta + recent close prices (same window the
+        // Quant scheduler uses), so it survives the real-tick / CLV / unavailable
+        // branches identically.
+        PatternAnalysis pattern = computeOrderFlowPattern(instrument, timeframe, snapshot, realAgg);
 
         if (realAgg.isPresent()) {
-            return fromRealTicks(realAgg.get(), reaction, dom);
+            return fromRealTicks(realAgg.get(), reaction, dom, pattern);
         }
-        return fromSnapshot(snapshot, reaction, dom);
+        return fromSnapshot(snapshot, reaction, dom, pattern);
     }
 
     /**
      * Back-compat shim — keeps the old 1-arg signature so tests / callers that
      * don't need reaction detection still work. The shim reports no reaction
      * (equivalent to {@link ReactionPattern#NONE}) and does not consult ticks.
+     * Pattern computation is skipped (no instrument/timeframe context to fetch
+     * candles from) so the resulting context carries a null pattern; downstream
+     * agents abstain accordingly.
      */
     public TriggerContext build(IndicatorSnapshot snapshot) {
-        return fromSnapshot(snapshot, ReactionPattern.NONE, DomSignal.UNAVAILABLE);
+        return fromSnapshot(snapshot, ReactionPattern.NONE, DomSignal.UNAVAILABLE, null);
     }
 
     private Optional<TickAggregation> lookupRealTicks(Instrument instrument) {
@@ -132,22 +173,96 @@ public class TriggerContextBuilder {
         return (agg.buyVolume() + agg.sellVolume()) > 0L;
     }
 
-    private TriggerContext fromRealTicks(TickAggregation agg, ReactionPattern reaction, DomSignal dom) {
+    private TriggerContext fromRealTicks(TickAggregation agg, ReactionPattern reaction, DomSignal dom,
+                                          PatternAnalysis pattern) {
         BigDecimal buyRatio = BigDecimal.valueOf(agg.buyRatioPct() / 100.0)
             .setScale(4, RoundingMode.HALF_UP);
         BigDecimal cumulative = BigDecimal.valueOf(agg.cumulativeDelta());
         DeltaSignature signature = classifyFromTicks(agg);
         return new TriggerContext(signature, buyRatio, cumulative, dom, reaction,
-            TickDataQuality.REAL_TICKS);
+            TickDataQuality.REAL_TICKS, pattern);
     }
 
     private TriggerContext fromSnapshot(IndicatorSnapshot snapshot, ReactionPattern reaction,
-                                         DomSignal dom) {
+                                         DomSignal dom, PatternAnalysis pattern) {
         BigDecimal buyRatio = snapshot.buyRatio();
         BigDecimal cumulativeDelta = snapshot.cumulativeDelta();
         TickDataQuality quality = inferClvQuality(snapshot);
         DeltaSignature signature = classifyFromSnapshot(snapshot, buyRatio);
-        return new TriggerContext(signature, buyRatio, cumulativeDelta, dom, reaction, quality);
+        return new TriggerContext(signature, buyRatio, cumulativeDelta, dom, reaction, quality, pattern);
+    }
+
+    /**
+     * Builds the {@link PatternAnalysis} from the same data the legacy
+     * {@code DeltaFlowTriggerAgent} consumed (cumulative delta + last price)
+     * but routed through the Quant 4-quadrant classifier so the result is
+     * stable across consecutive scans.
+     *
+     * <p>Returns {@code null} when essential inputs are missing — the new
+     * {@code QuantFlowPatternAgent} treats null as abstain rather than failing.
+     */
+    private PatternAnalysis computeOrderFlowPattern(Instrument instrument, String timeframe,
+                                                     IndicatorSnapshot snapshot,
+                                                     Optional<TickAggregation> realAgg) {
+        Double delta = pickDelta(snapshot, realAgg);
+        if (delta == null) return null;
+
+        List<Double> recent = recentCloses(instrument, timeframe);
+        // Resolved via if/else rather than a ternary — mixing a primitive double
+        // (snapshot.lastPrice().doubleValue()) with a possibly-null Double
+        // (recent.get(...)) triggers Java auto-unboxing on the result type, which
+        // NPEs when the snapshot has no price AND no candles are available.
+        final Double currentPrice;
+        if (snapshot != null && snapshot.lastPrice() != null) {
+            currentPrice = snapshot.lastPrice().doubleValue();
+        } else if (!recent.isEmpty()) {
+            currentPrice = recent.get(recent.size() - 1);
+        } else {
+            currentPrice = null;
+        }
+
+        MarketSnapshot ms = new MarketSnapshot.Builder()
+            .now(Instant.now())
+            .price(currentPrice)
+            .delta(delta)
+            .build();
+        QuantState state = QuantState.reset(LocalDate.now(NY));
+        try {
+            return patternDetector.detect(ms, state, recent);
+        } catch (RuntimeException e) {
+            log.debug("Pattern detection failed for {} {}: {}", instrument, timeframe, e.getMessage());
+            return null;
+        }
+    }
+
+    private static Double pickDelta(IndicatorSnapshot snapshot, Optional<TickAggregation> realAgg) {
+        if (realAgg.isPresent()) {
+            return (double) realAgg.get().cumulativeDelta();
+        }
+        if (snapshot != null && snapshot.cumulativeDelta() != null) {
+            return snapshot.cumulativeDelta().doubleValue();
+        }
+        return null;
+    }
+
+    private List<Double> recentCloses(Instrument instrument, String timeframe) {
+        try {
+            List<Candle> candles = candleRepository.findRecentCandles(
+                instrument, timeframe, PATTERN_PRICE_HISTORY_DEPTH);
+            // findRecentCandles returns newest-first; the pattern detector wants
+            // newest-last (oldest → newest), same convention as classifyReaction.
+            List<Candle> ascending = new ArrayList<>(candles);
+            Collections.reverse(ascending);
+            List<Double> closes = new ArrayList<>(ascending.size());
+            for (Candle c : ascending) {
+                if (c.getClose() != null) closes.add(c.getClose().doubleValue());
+            }
+            return closes;
+        } catch (Exception e) {
+            log.debug("Recent-close lookup failed for {} {}: {}",
+                instrument, timeframe, e.getMessage());
+            return List.of();
+        }
     }
 
     private ReactionPattern classifyReaction(Instrument instrument, String timeframe) {

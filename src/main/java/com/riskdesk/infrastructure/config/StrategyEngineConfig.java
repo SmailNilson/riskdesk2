@@ -12,7 +12,7 @@ import com.riskdesk.domain.engine.strategy.agent.context.SessionTimingAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.SmcMacroBiasAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.VolumeProfileContextAgent;
 import com.riskdesk.domain.engine.strategy.agent.context.VwapDistanceAgent;
-import com.riskdesk.domain.engine.strategy.agent.trigger.DeltaFlowTriggerAgent;
+import com.riskdesk.domain.engine.strategy.agent.trigger.QuantFlowPatternAgent;
 import com.riskdesk.domain.engine.strategy.agent.trigger.ReactionTriggerAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.LiquidityZoneAgent;
 import com.riskdesk.domain.engine.strategy.agent.zone.OrderBlockZoneAgent;
@@ -61,7 +61,11 @@ public class StrategyEngineConfig {
     @Bean public CmfFlowAgent cmfFlowAgent() { return new CmfFlowAgent(); }
     @Bean public OrderBlockZoneAgent orderBlockZoneAgent() { return new OrderBlockZoneAgent(); }
     @Bean public LiquidityZoneAgent liquidityZoneAgent() { return new LiquidityZoneAgent(); }
-    @Bean public DeltaFlowTriggerAgent deltaFlowTriggerAgent() { return new DeltaFlowTriggerAgent(); }
+    // Replaces the legacy DeltaFlowTriggerAgent (raw divergenceDetected + signum
+    // sign check, no hysteresis → flip-flopped between scans). Reads the
+    // precomputed PatternAnalysis from TriggerContext, which is built by
+    // TriggerContextBuilder via the Quant 4-quadrant OrderFlowPatternDetector.
+    @Bean public QuantFlowPatternAgent quantFlowPatternAgent() { return new QuantFlowPatternAgent(); }
     @Bean public ReactionTriggerAgent reactionTriggerAgent() { return new ReactionTriggerAgent(); }
 
     // ── Playbooks ───────────────────────────────────────────────────────────
