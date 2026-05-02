@@ -158,6 +158,8 @@ public class OrderFlowProperties {
         private double atrDistanceThreshold = 0.5;
         /** Safety rate cap: max fires per rolling 60-second window (both sides combined). */
         private int maxFiresPerMinute = 2;
+        /** REST history cutoff (minutes). Events older than this are not returned by the history endpoint. */
+        private int historyMaxAgeMinutes = 120;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -169,6 +171,8 @@ public class OrderFlowProperties {
         public void setAtrDistanceThreshold(double v) { this.atrDistanceThreshold = v; }
         public int getMaxFiresPerMinute() { return maxFiresPerMinute; }
         public void setMaxFiresPerMinute(int v) { this.maxFiresPerMinute = v; }
+        public int getHistoryMaxAgeMinutes() { return historyMaxAgeMinutes; }
+        public void setHistoryMaxAgeMinutes(int v) { this.historyMaxAgeMinutes = v; }
     }
 
     /** Smart-money cycle meta-detector (chains distribution → momentum → accumulation). MNQ-tuned. */
@@ -177,6 +181,8 @@ public class OrderFlowProperties {
         private int momentumWindowMinutes = 10;
         private int mirrorWindowMinutes = 20;
         private int cooldownMinutes = 5;
+        /** Minimum confidence (0-100) for a cycle signal to be exposed (REST history + WebSocket). State machine is unaffected. */
+        private int minConfidence = 70;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -186,5 +192,7 @@ public class OrderFlowProperties {
         public void setMirrorWindowMinutes(int v) { this.mirrorWindowMinutes = v; }
         public int getCooldownMinutes() { return cooldownMinutes; }
         public void setCooldownMinutes(int v) { this.cooldownMinutes = v; }
+        public int getMinConfidence() { return minConfidence; }
+        public void setMinConfidence(int v) { this.minConfidence = v; }
     }
 }

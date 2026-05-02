@@ -148,7 +148,8 @@ class TriggerContextBuilderTest {
             Instrument.MGC, 0, 0, 0L, 0L, 50.0,
             TickAggregation.TREND_FLAT, false, null,
             Instant.parse("2026-04-17T11:55:00Z"), Instant.parse("2026-04-17T12:00:00Z"),
-            TickAggregation.SOURCE_CLV_ESTIMATED, Double.NaN, Double.NaN);
+            TickAggregation.SOURCE_CLV_ESTIMATED, Double.NaN, Double.NaN,
+            Double.NaN, Double.NaN);
         StubTickDataPort port = new StubTickDataPort(Instrument.MGC, clvAgg);
         TriggerContextBuilder builder = new TriggerContextBuilder(
             new DescendingOrderCandleRepo(List.of()), port);
@@ -170,6 +171,7 @@ class TriggerContextBuilderTest {
             Instant.parse("2026-04-17T12:00:00Z"),
             Instant.parse("2026-04-17T12:00:00Z"),
             TickAggregation.SOURCE_REAL_TICKS,
+            Double.NaN, Double.NaN,
             Double.NaN, Double.NaN);
         StubTickDataPort port = new StubTickDataPort(Instrument.MGC, emptyWindow);
         TriggerContextBuilder builder = new TriggerContextBuilder(
@@ -193,7 +195,8 @@ class TriggerContextBuilderTest {
             Instant.parse("2026-04-17T11:55:00Z"),
             Instant.parse("2026-04-17T12:00:00Z"),
             TickAggregation.SOURCE_REAL_TICKS,
-            100.5, 99.5);
+            100.5, 99.5,
+            100.0, 99.7);
         StubTickDataPort port = new StubTickDataPort(Instrument.MGC, allSells);
         TriggerContextBuilder builder = new TriggerContextBuilder(
             new DescendingOrderCandleRepo(List.of()), port);
@@ -232,7 +235,8 @@ class TriggerContextBuilderTest {
             Instant.parse("2026-04-17T11:55:00Z"),
             Instant.parse("2026-04-17T12:00:00Z"),
             TickAggregation.SOURCE_REAL_TICKS,
-            100.5, 99.5
+            100.5, 99.5,
+            100.0, 100.0
         );
     }
 
