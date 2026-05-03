@@ -36,6 +36,10 @@ export interface AbsorptionEvent {
   score: number;
   delta: number;
   timestamp: string;
+  // Backend-emitted fields (optional for forward/backward compatibility with legacy rows
+  // and pre-fix WebSocket payloads).
+  absorptionType?: 'CLASSIC' | 'DIVERGENCE';
+  explanation?: string;
 }
 
 export interface SpoofingEvent {

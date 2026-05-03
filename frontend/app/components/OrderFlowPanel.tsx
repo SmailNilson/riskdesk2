@@ -193,16 +193,26 @@ function AbsorptionRowView({ event }: { event: AbsorptionRow }) {
   // REST history uses `absorptionScore`, live WS payload uses `score`.
   const score = event.absorptionScore ?? event.score;
   const delta = event.delta ?? event.aggressiveDelta;
+  // Tolerate undefined for legacy rows / pre-fix WS payloads.
+  const type = event.absorptionType ?? 'CLASSIC';
+  const isDivergence = type === 'DIVERGENCE';
+  const explanation = event.explanation ?? '';
   return (
     <div className="flex items-center gap-2 px-2 py-1 text-[11px] rounded bg-zinc-800/40 hover:bg-zinc-800/70 transition-colors">
       <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-900/60 text-purple-300">
         ABS
+      </span>
+      <span className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-semibold ${
+        isDivergence ? 'bg-violet-900/60 text-violet-200' : 'bg-indigo-900/40 text-indigo-300'
+      }`} title={isDivergence ? 'Delta and price oppose — strongest absorption signal' : 'Delta and price agree — trend confirmation'}>
+        {isDivergence ? 'DIVERG' : 'CLASSIC'}
       </span>
       <span className="text-zinc-400 shrink-0">{event.instrument}</span>
       <span className={`shrink-0 ${isBull ? 'text-emerald-400' : 'text-red-400'}`}>
         {isBull ? 'BULL' : 'BEAR'}
       </span>
       <span className="text-zinc-500 truncate">
+        {explanation ? <span className="text-zinc-400">{explanation} · </span> : null}
         score: {score?.toFixed(1) ?? '—'} · delta: {delta?.toLocaleString() ?? '—'}
       </span>
       <span className="ml-auto text-zinc-600 shrink-0" title={event.timestamp}>
@@ -322,8 +332,8 @@ function CycleRowView({ event }: { event: CycleRow }) {
   const isBearish = event.cycleType === 'BEARISH_CYCLE';
   const complete = event.currentPhase === 'COMPLETE';
   const confColor =
-    event.confidence >= 80 ? 'text-emerald-300'
-    : event.confidence >= 60 ? 'text-lime-300'
+    event.confidence >= 90 ? 'text-red-300'
+    : event.confidence >= 80 ? 'text-orange-300'
     : 'text-yellow-300';
   const move = Math.round(event.totalPriceMove);
 
@@ -537,6 +547,7 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
       <div>
         <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
           Smart Money Cycle{selectedInstrument ? ` — ${selectedInstrument}` : ''}
+          <span className="text-zinc-600 normal-case tracking-normal"> (conf ≥ 70)</span>
         </h4>
         <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
           {cycleHistory.length > 0
@@ -578,7 +589,7 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
                 <MomentumRowView key={`mom-${e.timestamp}-${i}`} event={e} />
               ))
             : <p className="text-xs text-zinc-600 italic">
-                {selectedInstrument ? 'No momentum bursts yet' : 'Select an instrument'}
+                {selectedInstrument ? 'No recent momentum bursts' : 'Select an instrument'}
               </p>
           }
         </div>

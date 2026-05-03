@@ -25,7 +25,9 @@ public record TickAggregation(
     Instant windowEnd,
     String source,              // REAL_TICKS or CLV_ESTIMATED
     double highPrice,           // highest trade price in window (NaN if no data)
-    double lowPrice             // lowest trade price in window (NaN if no data)
+    double lowPrice,            // lowest trade price in window (NaN if no data)
+    double firstPrice,          // first trade price in window (NaN if no data) — signed-move baseline
+    double lastPrice            // last trade price in window (NaN if no data) — signed-move endpoint
 ) {
 
     /** Delta trend: cumulative delta is increasing. */

@@ -45,7 +45,9 @@ public class AbsorptionPortAdapter implements AbsorptionPort {
                 e.getAggressiveDelta(),
                 e.getPriceMoveTicks(),
                 e.getTotalVolume(),
-                e.getTimestamp()
+                e.getTimestamp(),
+                parseType(e.getAbsorptionType()),
+                e.getExplanation() != null ? e.getExplanation() : ""
             ));
         }
         return out;
@@ -57,6 +59,16 @@ public class AbsorptionPortAdapter implements AbsorptionPort {
             return AbsorptionSignal.AbsorptionSide.valueOf(raw);
         } catch (IllegalArgumentException ex) {
             return AbsorptionSignal.AbsorptionSide.BULLISH_ABSORPTION;
+        }
+    }
+
+    private static AbsorptionSignal.AbsorptionType parseType(String raw) {
+        // Legacy rows are written without a type → assume CLASSIC.
+        if (raw == null) return AbsorptionSignal.AbsorptionType.CLASSIC;
+        try {
+            return AbsorptionSignal.AbsorptionType.valueOf(raw);
+        } catch (IllegalArgumentException ex) {
+            return AbsorptionSignal.AbsorptionType.CLASSIC;
         }
     }
 }

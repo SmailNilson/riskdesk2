@@ -115,6 +115,7 @@ public class TickByTickAggregator {
             return new TickAggregation(instrument, 0, 0, 0, 0, 0.0,
                 TickAggregation.TREND_FLAT, false, null,
                 now, now, TickAggregation.SOURCE_REAL_TICKS,
+                Double.NaN, Double.NaN,
                 Double.NaN, Double.NaN);
         }
 
@@ -157,7 +158,8 @@ public class TickByTickAggregator {
             Math.round(buyRatio * 10.0) / 10.0,
             deltaTrend, divergenceDetected, divergenceType,
             windowStart, windowEnd, TickAggregation.SOURCE_REAL_TICKS,
-            highPrice, lowPrice);
+            highPrice, lowPrice,
+            firstPrice, latestPrice);
     }
 
     /**

@@ -407,10 +407,12 @@ public class OrderFlowOrchestrator {
             double priceMovePoints = agg.highPrice() - agg.lowPrice();
             double midPrice = (agg.highPrice() + agg.lowPrice()) / 2.0;
 
-            // Signed price move: prefer cumulativeDelta sign over instantaneous delta to avoid
-            // signum(0) = 0 wiping out the signal when delta lands exactly at zero.
-            long signSource = agg.delta() != 0 ? agg.delta() : agg.cumulativeDelta();
-            double signedPriceMovePoints = priceMovePoints * Math.signum((double) signSource);
+            // True signed price move from first→last trade in the window. Necessary for absorption's
+            // 4-quadrant (delta sign × price sign) classification. NaN-safe: fall back to 0 (which
+            // makes the absorption detector return NEUTRAL while leaving momentum on its own).
+            double signedPriceMovePoints = (Double.isNaN(agg.firstPrice()) || Double.isNaN(agg.lastPrice()))
+                ? 0.0
+                : agg.lastPrice() - agg.firstPrice();
 
             // Real ATR from cache (falls back to 1.0 only before first cache refresh)
             double atr = atrCache.getOrDefault(instrument, 1.0);
@@ -420,7 +422,7 @@ public class OrderFlowOrchestrator {
             // and runs in the else branch below regardless of the absorption toggle.
             Optional<AbsorptionSignal> signal = absorptionEnabled
                 ? absorptionDetector.evaluate(
-                    instrument, agg.delta(), priceMovePoints,
+                    instrument, agg.delta(), signedPriceMovePoints,
                     totalVolume, atr,
                     deltaThreshold, avgVolume, now)
                 : Optional.empty();
@@ -432,9 +434,12 @@ public class OrderFlowOrchestrator {
                 Map<String, Object> eventPayload = new LinkedHashMap<>();
                 eventPayload.put("instrument", instrument.name());
                 eventPayload.put("side", s.side().name());
+                eventPayload.put("absorptionType", s.absorptionType() != null ? s.absorptionType().name() : null);
+                eventPayload.put("explanation", s.explanation());
                 eventPayload.put("score", s.absorptionScore());
                 eventPayload.put("delta", s.aggressiveDelta());
                 eventPayload.put("priceMove", priceMovePoints);
+                eventPayload.put("signedPriceMove", signedPriceMovePoints);
                 eventPayload.put("atr", atr);
                 eventPayload.put("timestamp", now.toString());
                 messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
@@ -533,7 +538,16 @@ public class OrderFlowOrchestrator {
     }
 
     private void publishCycleSignal(Instrument instrument, SmartMoneyCycleSignal c, java.time.Instant now) {
+        // Domain event always fires — keeps state machine + DB persistence consistent regardless of confidence.
         eventPublisher.publishEvent(new SmartMoneyCycleDetected(instrument, c, now));
+
+        // /topic/cycle (live UI) is gated by min-confidence. Partial cycles still land in the DB
+        // for analytical back-testing but never pollute the panel.
+        int minConfidence = properties.getCycle().getMinConfidence();
+        if (c.confidence() < minConfidence) {
+            return;
+        }
+
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instrument", instrument.name());
         payload.put("cycleType", c.cycleType() != null ? c.cycleType().name() : null);
