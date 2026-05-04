@@ -74,11 +74,11 @@ function EnrichmentSection({ e }: { e: WtxEnrichmentView }) {
           )}
           {/* Bollinger Bands */}
           <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">Bollinger Bands</div>
-          <EnrichmentRow label="%B" value={e.bbPct.toFixed(2)} />
+          <EnrichmentRow label="%B" value={e.bbPct != null ? e.bbPct.toFixed(2) : null} />
           <EnrichmentRow label="BB" value={e.bbExpanding ? 'Expanding' : 'Contracting'} />
           {/* VWAP */}
           <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">VWAP</div>
-          <EnrichmentRow label="Position" value={`${e.priceVsVwap} (${e.vwapDistancePct.toFixed(2)}%)`} />
+          <EnrichmentRow label="Position" value={e.priceVsVwap != null ? `${e.priceVsVwap}${e.vwapDistancePct != null ? ` (${e.vwapDistancePct.toFixed(2)}%)` : ''}` : null} />
           {/* SMC */}
           <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">SMC</div>
           <EnrichmentRow label="Internal" value={e.smcInternalBias} />
@@ -95,8 +95,8 @@ function EnrichmentSection({ e }: { e: WtxEnrichmentView }) {
           )}
           {/* CMF */}
           <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">CMF / Session</div>
-          <EnrichmentRow label="CMF" value={e.cmf.toFixed(3)} />
-          <EnrichmentRow label="Session" value={`${e.sessionPhase}${e.inKillZone ? ' [KILL ZONE]' : ''}`} />
+          <EnrichmentRow label="CMF" value={e.cmf != null ? e.cmf.toFixed(3) : null} />
+          <EnrichmentRow label="Session" value={e.sessionPhase != null ? `${e.sessionPhase}${e.inKillZone ? ' [KILL ZONE]' : ''}` : null} />
         </div>
       )}
     </div>

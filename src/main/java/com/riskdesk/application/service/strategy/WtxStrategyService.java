@@ -72,7 +72,10 @@ public class WtxStrategyService {
             return;
         }
 
-        List<Candle> candles = candlePort.findRecentCandles(instrument, event.timeframe(), WARMUP_BARS);
+        // findRecentCandles returns DESC (newest first) — reverse to chronological for WT computation
+        List<Candle> candles = new java.util.ArrayList<>(
+                candlePort.findRecentCandles(instrument, event.timeframe(), WARMUP_BARS));
+        java.util.Collections.reverse(candles);
         if (candles.size() < 2) return;
 
         WaveTrendIndicator wt = new WaveTrendIndicator(config.n1(), config.n2(), config.signalPeriod());

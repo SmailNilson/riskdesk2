@@ -33,7 +33,7 @@ public class WtxNySessionCloseScheduler {
     }
 
     /** Checks every minute during the 15h–16h59 ET window (Mon–Fri). */
-    @Scheduled(cron = "0 * 15,16 * * MON-FRI")
+    @Scheduled(cron = "0 * 15,16 * * MON-FRI", zone = "America/New_York")
     public void checkNyClose() {
         WtxConfig config = properties.toConfig();
         if (!config.forceCloseNy()) return;
