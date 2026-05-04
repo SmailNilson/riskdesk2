@@ -3,7 +3,6 @@ package com.riskdesk.presentation.controller;
 import com.riskdesk.application.service.strategy.WtxStrategyService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
-import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -21,12 +20,9 @@ import java.util.Map;
 public class WtxStrategyController {
 
     private final WtxStrategyService wtxStrategyService;
-    private final WtxStrategyProperties properties;
 
-    public WtxStrategyController(WtxStrategyService wtxStrategyService,
-                                  WtxStrategyProperties properties) {
+    public WtxStrategyController(WtxStrategyService wtxStrategyService) {
         this.wtxStrategyService = wtxStrategyService;
-        this.properties = properties;
     }
 
     @GetMapping("/state/{instrument}")
@@ -53,7 +49,7 @@ public class WtxStrategyController {
                 "dailyPnl", state.dailyPnl(),
                 "dayStartEquity", state.dayStartEquity(),
                 "currentEquity", state.currentEquity(),
-                "maxDailyLossUsd", properties.getMaxDailyLossUsd(),
+                "maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd(),
                 "maxLossHit", state.maxLossHit(),
                 "canTrade", !state.maxLossHit()
         );
@@ -64,9 +60,9 @@ public class WtxStrategyController {
                 "instrument", instrument,
                 "currentDirection", "FLAT",
                 "dailyPnl", 0,
-                "dayStartEquity", properties.getInitialEquity(),
-                "currentEquity", properties.getInitialEquity(),
-                "maxDailyLossUsd", properties.getMaxDailyLossUsd(),
+                "dayStartEquity", wtxStrategyService.getInitialEquity(),
+                "currentEquity", wtxStrategyService.getInitialEquity(),
+                "maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd(),
                 "maxLossHit", false,
                 "canTrade", true
         );

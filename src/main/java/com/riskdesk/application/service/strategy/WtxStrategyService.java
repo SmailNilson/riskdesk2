@@ -165,6 +165,14 @@ public class WtxStrategyService {
         return historyPort.findRecent(instrument, limit);
     }
 
+    public java.math.BigDecimal getMaxDailyLossUsd() {
+        return properties.getMaxDailyLossUsd();
+    }
+
+    public java.math.BigDecimal getInitialEquity() {
+        return properties.getInitialEquity();
+    }
+
     // ── private helpers ────────────────────────────────────────────────────
 
     private WtxStrategyState applyAction(WtxAction action, WtxStrategyState state,
