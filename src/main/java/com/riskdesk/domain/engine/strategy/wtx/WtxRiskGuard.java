@@ -1,9 +1,8 @@
 package com.riskdesk.domain.engine.strategy.wtx;
 
-import com.riskdesk.domain.shared.TradingSessionResolver;
-
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 
@@ -39,13 +38,14 @@ public final class WtxRiskGuard {
 
     /**
      * True when the candle's NY calendar date differs from the previous candle's date.
-     * Mirrors Pine Script: ta.change(time("D", "America/New_York"))
+     * Mirrors Pine Script: ta.change(time("D", "America/New_York")) — fires at midnight ET,
+     * NOT at the CME 17:00 ET session boundary.
      */
     public static boolean isNewTradingDay(Instant prevTs, Instant currTs) {
         if (prevTs == null) return false;
-        Instant prevStart = TradingSessionResolver.dailySessionStart(prevTs);
-        Instant currStart = TradingSessionResolver.dailySessionStart(currTs);
-        return !prevStart.equals(currStart);
+        LocalDate prevDate = prevTs.atZone(NY).toLocalDate();
+        LocalDate currDate = currTs.atZone(NY).toLocalDate();
+        return !prevDate.equals(currDate);
     }
 
     /**
