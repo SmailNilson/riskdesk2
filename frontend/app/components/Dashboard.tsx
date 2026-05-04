@@ -12,7 +12,6 @@ import AiMentorDesk from './AiMentorDesk';
 import QuantGatePanel from './quant/QuantGatePanel';
 import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
 import QuantSetupNotification from './quant/QuantSetupNotification';
-import ActivePositionsPanel from './positions/ActivePositionsPanel';
 import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
 import { QUANT_INSTRUMENTS } from './quant/types';
 import AlertsFeed from './AlertsFeed';
@@ -20,7 +19,6 @@ import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
 import { LiveAnalysisPanel } from './LiveAnalysisPanel';
-import { AnalysisReplayPanel } from './AnalysisReplayPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
@@ -259,7 +257,6 @@ export default function Dashboard() {
             livePrice={prices[instrument]}
           />
           <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
-          <AnalysisReplayPanel instrument={instrument} timeframe={timeframe} />
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
@@ -273,6 +270,9 @@ export default function Dashboard() {
           collapsed={rightZone.collapsed}
           onCollapsedChange={rightZone.setCollapsed}
         >
+          <WtxStrategyPanel liveSignals={wtxSignals} />
+          <SetupRecommendationPanel />
+          <QuantGatePanel />
           <AiMentorDesk
             instrument={instrument}
             timeframe={timeframe}
@@ -286,12 +286,8 @@ export default function Dashboard() {
             selectedBrokerAccountId={selectedIbkrAccountId}
             onRefresh={refresh}
           />
-          <ActivePositionsPanel />
-          <QuantGatePanel />
-          <SetupRecommendationPanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
-          <WtxStrategyPanel liveSignals={wtxSignals} />
         </CollapsibleZone>
       </div>
 
