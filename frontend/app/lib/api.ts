@@ -1590,3 +1590,60 @@ export interface TradeDecision {
   status: TradeDecisionStatus;
   errorMessage: string | null;
 }
+
+// ── WTX Strategy ──────────────────────────────────────────────────────────────
+
+export interface WtxStrategyStateView {
+  instrument: string;
+  currentDirection: 'FLAT' | 'LONG' | 'SHORT';
+  dailyPnl: number;
+  dayStartEquity: number;
+  currentEquity: number;
+  maxDailyLossUsd: number;
+  maxLossHit: boolean;
+  canTrade: boolean;
+}
+
+export interface WtxEnrichmentView {
+  deltaDirection: 'BUYING' | 'SELLING' | null;
+  deltaValue: number | null;
+  orderFlowSource: 'REAL_TICKS' | 'CLV_ESTIMATED' | null;
+  absorptionSignal: 'BULLISH_ABSORPTION' | 'BEARISH_ABSORPTION' | null;
+  absorptionScore: number | null;
+  bbPct: number;
+  bbExpanding: boolean;
+  priceVsVwap: 'ABOVE' | 'BELOW' | 'AT';
+  vwapDistancePct: number;
+  smcInternalBias: 'BULLISH' | 'BEARISH' | null;
+  smcSwingBias: 'BULLISH' | 'BEARISH' | null;
+  nearestObType: 'BULLISH' | 'BEARISH' | null;
+  nearestObDistancePct: number | null;
+  cmf: number;
+  sessionPhase: string;
+  inKillZone: boolean;
+}
+
+export interface WtxSignalView {
+  instrument: string;
+  timeframe: string;
+  signalType: 'COMPRA' | 'COMPRA_1' | 'VENTA' | 'VENTA_1';
+  direction: 'LONG' | 'SHORT';
+  wt1Value: number;
+  wt2Value: number;
+  canTrade: boolean;
+  actionTaken: 'OPEN_LONG' | 'OPEN_SHORT' | 'REVERSE_TO_LONG' | 'REVERSE_TO_SHORT' | 'CLOSE_ALL' | 'NONE';
+  enrichment: WtxEnrichmentView | null;
+  signalTs: string;
+}
+
+export async function getWtxState(instrument: string): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function getWtxRecentSignals(instrument: string, limit = 20): Promise<WtxSignalView[]> {
+  const res = await fetch(`${BASE}/api/wtx/signals/recent?instrument=${instrument}&limit=${limit}`);
+  if (!res.ok) return [];
+  return res.json();
+}

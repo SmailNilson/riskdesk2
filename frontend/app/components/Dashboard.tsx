@@ -26,6 +26,7 @@ import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
+import WtxStrategyPanel from './WtxStrategyPanel';
 import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -71,7 +72,7 @@ export default function Dashboard() {
     }
   }, [instrument, purging]);
 
-  const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
+  const { prices, alerts, mentorSignalReviews, wtxSignals, connected, refresh } = useWebSocket();
 
   // Zone collapse state is hoisted so the grid's track widths follow the
   // actual zone state — without this, the `auto` tracks would shrink below
@@ -290,6 +291,7 @@ export default function Dashboard() {
           <SetupRecommendationPanel />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
+          <WtxStrategyPanel liveSignals={wtxSignals} />
         </CollapsibleZone>
       </div>
 
