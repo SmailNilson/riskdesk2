@@ -165,7 +165,7 @@ export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-cyan-300">WTX STRATEGY</span>
-          <span className="text-[10px] text-zinc-500">{instrument} · 5m</span>
+          <span className="text-[10px] text-zinc-500">{instrument} · 5m / 10m</span>
         </div>
         {state && (
           <div className="flex items-center gap-1.5">
