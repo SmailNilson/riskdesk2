@@ -61,7 +61,7 @@ public class WtxStrategyService {
     public void onCandleClosed(CandleClosed event) {
         WtxConfig config = properties.toConfig();
         if (!config.instruments().contains(event.instrument())) return;
-        if (!config.timeframe().equals(event.timeframe())) return;
+        if (!config.timeframes().contains(event.timeframe())) return;
 
         String instrumentName = event.instrument();
 
@@ -108,7 +108,7 @@ public class WtxStrategyService {
         }
 
         // Evaluate signal
-        Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(prev, curr, config, state, event.timestamp());
+        Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(prev, curr, config, state, event.timestamp(), event.timeframe());
 
         if (maybeSignal.isPresent()) {
             WtxSignal signal = maybeSignal.get();
@@ -142,7 +142,9 @@ public class WtxStrategyService {
                 if (state.currentPosition() != WtxPosition.FLAT) {
                     try {
                         Instrument instrument = Instrument.valueOf(instrumentName);
-                        List<Candle> candles = candlePort.findRecentCandles(instrument, config.timeframe(), 1);
+                        // Use shortest timeframe for the most recent exit price
+                        String shortestTf = config.timeframes().get(0);
+                        List<Candle> candles = candlePort.findRecentCandles(instrument, shortestTf, 1);
                         BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
                                 : candles.get(0).getClose();
                         WtxStrategyState closed = closePosition(state, instrument, exitPrice);

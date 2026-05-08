@@ -10,7 +10,7 @@ import java.util.List;
  */
 public record WtxConfig(
         List<String> instruments,
-        String timeframe,
+        List<String> timeframes,
 
         // WaveTrend indicator params
         int n1,
@@ -41,7 +41,7 @@ public record WtxConfig(
     public static WtxConfig defaults() {
         return new WtxConfig(
                 List.of("MNQ", "MCL", "MGC", "6E"),
-                "5m",
+                List.of("5m", "10m"),
                 10, 21, 4,
                 BigDecimal.valueOf(53),
                 BigDecimal.valueOf(-53),

@@ -270,7 +270,6 @@ export default function Dashboard() {
           collapsed={rightZone.collapsed}
           onCollapsedChange={rightZone.setCollapsed}
         >
-          <WtxStrategyPanel liveSignals={wtxSignals} />
           <SetupRecommendationPanel />
           <QuantGatePanel />
           <AiMentorDesk
@@ -288,6 +287,7 @@ export default function Dashboard() {
           />
           <ExternalSetupPanel />
           <TrailingStopStatsPanel />
+          <WtxStrategyPanel instrument={instrument} liveSignals={wtxSignals} />
         </CollapsibleZone>
       </div>
 

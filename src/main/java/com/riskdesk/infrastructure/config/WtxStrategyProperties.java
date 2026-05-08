@@ -11,7 +11,7 @@ public class WtxStrategyProperties {
 
     private boolean enabled = false;
     private List<String> instruments = List.of("MNQ", "MCL", "MGC");
-    private String timeframe = "5m";
+    private List<String> timeframes = List.of("5m", "10m");
     private int n1 = 10;
     private int n2 = 21;
     private int signalPeriod = 4;
@@ -32,7 +32,7 @@ public class WtxStrategyProperties {
 
     public WtxConfig toConfig() {
         return new WtxConfig(
-                instruments, timeframe,
+                instruments, timeframes,
                 n1, n2, signalPeriod, nsc, nsv,
                 useCompra, useCompra1, useVenta, useVenta1,
                 reverseOnOpp, fixedQty,
@@ -47,8 +47,8 @@ public class WtxStrategyProperties {
     public List<String> getInstruments() { return instruments; }
     public void setInstruments(List<String> instruments) { this.instruments = instruments; }
 
-    public String getTimeframe() { return timeframe; }
-    public void setTimeframe(String timeframe) { this.timeframe = timeframe; }
+    public List<String> getTimeframes() { return timeframes; }
+    public void setTimeframes(List<String> timeframes) { this.timeframes = timeframes; }
 
     public int getN1() { return n1; }
     public void setN1(int n1) { this.n1 = n1; }

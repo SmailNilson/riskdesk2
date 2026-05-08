@@ -36,7 +36,8 @@ public final class WtxBarEvaluator {
             WaveTrendResult curr,
             WtxConfig config,
             WtxStrategyState state,
-            Instant candleTs
+            Instant candleTs,
+            String candleTimeframe
     ) {
         if (prev == null || curr == null) return Optional.empty();
 
@@ -92,7 +93,7 @@ public final class WtxBarEvaluator {
 
         return Optional.of(new WtxSignal(
                 state.instrument(),
-                config.timeframe(),
+                candleTimeframe,
                 signalType,
                 direction,
                 curr.wt1(),

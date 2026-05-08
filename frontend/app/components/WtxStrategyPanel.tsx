@@ -4,7 +4,6 @@ import { useEffect, useState, useCallback } from 'react';
 import { getWtxState, getWtxRecentSignals } from '@/app/lib/api';
 import type { WtxStrategyStateView, WtxSignalView, WtxEnrichmentView } from '@/app/lib/api';
 
-const INSTRUMENT = 'MNQ';
 const POLL_MS = 5000;
 
 function DirectionChip({ dir }: { dir: 'FLAT' | 'LONG' | 'SHORT' }) {
@@ -128,22 +127,24 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
 }
 
 interface Props {
+  instrument: string;
   liveSignals: WtxSignalView[];
 }
 
-export default function WtxStrategyPanel({ liveSignals }: Props) {
+export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
   const [state, setState] = useState<WtxStrategyStateView | null>(null);
   const [signals, setSignals] = useState<WtxSignalView[]>([]);
 
   const loadState = useCallback(async () => {
-    const s = await getWtxState(INSTRUMENT);
+    const s = await getWtxState(instrument);
     if (s) setState(s);
-  }, []);
+    else setState(null);
+  }, [instrument]);
 
   const loadSignals = useCallback(async () => {
-    const s = await getWtxRecentSignals(INSTRUMENT, 20);
+    const s = await getWtxRecentSignals(instrument, 20);
     setSignals(s);
-  }, []);
+  }, [instrument]);
 
   useEffect(() => {
     loadState();
@@ -154,7 +155,7 @@ export default function WtxStrategyPanel({ liveSignals }: Props) {
 
   // Merge live WS signals on top
   const merged = [
-    ...liveSignals.filter(s => s.instrument === INSTRUMENT),
+    ...liveSignals.filter(s => s.instrument === instrument),
     ...signals,
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
@@ -164,7 +165,7 @@ export default function WtxStrategyPanel({ liveSignals }: Props) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-cyan-300">WTX STRATEGY</span>
-          <span className="text-[10px] text-zinc-500">{INSTRUMENT} · 5m</span>
+          <span className="text-[10px] text-zinc-500">{instrument} · 5m / 10m</span>
         </div>
         {state && (
           <div className="flex items-center gap-1.5">
