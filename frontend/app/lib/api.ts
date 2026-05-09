@@ -1642,8 +1642,9 @@ export async function getWtxState(instrument: string): Promise<WtxStrategyStateV
   return res.json();
 }
 
-export async function getWtxRecentSignals(instrument: string, limit = 20): Promise<WtxSignalView[]> {
-  const res = await fetch(`${BASE}/api/wtx/signals/recent?instrument=${instrument}&limit=${limit}`);
+export async function getWtxRecentSignals(instrument: string, limit = 20, timeframe?: string): Promise<WtxSignalView[]> {
+  const tf = timeframe ? `&timeframe=${timeframe}` : '';
+  const res = await fetch(`${BASE}/api/wtx/signals/recent?instrument=${instrument}&limit=${limit}${tf}`);
   if (!res.ok) return [];
   return res.json();
 }

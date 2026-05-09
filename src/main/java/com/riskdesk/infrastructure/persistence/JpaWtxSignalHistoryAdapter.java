@@ -55,6 +55,15 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 .toList();
     }
 
+    @Override
+    public List<WtxSignal> findRecent(String instrument, String timeframe, int limit) {
+        return repository
+                .findByInstrumentAndTimeframeOrderBySignalTsDesc(instrument, timeframe, PageRequest.of(0, limit))
+                .stream()
+                .map(this::toDomain)
+                .toList();
+    }
+
     private String serializeEnrichment(WtxEnrichmentSnapshot enrichment) {
         if (enrichment == null) return null;
         try {

@@ -7,4 +7,5 @@ import java.util.List;
 public interface WtxSignalHistoryPort {
     void save(WtxSignal signal);
     List<WtxSignal> findRecent(String instrument, int limit);
+    List<WtxSignal> findRecent(String instrument, String timeframe, int limit);
 }

@@ -155,6 +155,10 @@ public class WtxStrategyService {
         return historyPort.findRecent(instrument, limit);
     }
 
+    public List<WtxSignal> getRecentSignals(String instrument, String timeframe, int limit) {
+        return historyPort.findRecent(instrument, timeframe, limit);
+    }
+
     public java.math.BigDecimal getMaxDailyLossUsd() {
         return properties.getMaxDailyLossUsd();
     }
