@@ -270,7 +270,8 @@ export default function Dashboard() {
           collapsed={rightZone.collapsed}
           onCollapsedChange={rightZone.setCollapsed}
         >
-          <WtxStrategyPanel instrument={instrument} liveSignals={wtxSignals} />
+          <WtxStrategyPanel instrument={instrument} timeframe="5m" liveSignals={wtxSignals} />
+          <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
           <SetupRecommendationPanel />
           <QuantGatePanel />
           <AiMentorDesk

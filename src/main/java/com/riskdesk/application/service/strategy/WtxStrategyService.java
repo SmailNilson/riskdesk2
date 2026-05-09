@@ -95,18 +95,6 @@ public class WtxStrategyService {
             log.info("WTX [{}] new trading day — equity reset to {}", instrumentName, equity);
         }
 
-        // Max daily loss check
-        if (WtxRiskGuard.isMaxLossHit(state, config.maxDailyLossUsd())) {
-            if (state.currentPosition() != WtxPosition.FLAT) {
-                state = closePosition(state, instrument, candles.get(candles.size() - 1).getClose());
-                log.warn("WTX [{}] max daily loss hit — position closed", instrumentName);
-            }
-            state = state.withMaxLossHit();
-            statePort.save(state.withLastCandleTs(event.timestamp()));
-            publishState(state, config);
-            return;
-        }
-
         // Evaluate signal
         Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(prev, curr, config, state, event.timestamp(), event.timeframe());
 
@@ -236,7 +224,7 @@ public class WtxStrategyService {
                 "dayStartEquity", state.dayStartEquity(),
                 "maxDailyLossUsd", config.maxDailyLossUsd(),
                 "maxLossHit", state.maxLossHit(),
-                "canTrade", !state.maxLossHit()
+                "canTrade", true
         );
     }
 }

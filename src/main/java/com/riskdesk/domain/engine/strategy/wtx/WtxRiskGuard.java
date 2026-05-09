@@ -50,8 +50,9 @@ public final class WtxRiskGuard {
 
     /**
      * True when a position can be opened.
+     * maxLossHit is kept as a parameter for compatibility but no longer blocks trading.
      */
     public static boolean canTrade(boolean maxLossHit, boolean forceCloseWindow) {
-        return !maxLossHit && !forceCloseWindow;
+        return !forceCloseWindow;
     }
 }
