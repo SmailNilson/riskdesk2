@@ -128,10 +128,11 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
 
 interface Props {
   instrument: string;
+  timeframe: string;
   liveSignals: WtxSignalView[];
 }
 
-export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
+export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }: Props) {
   const [state, setState] = useState<WtxStrategyStateView | null>(null);
   const [signals, setSignals] = useState<WtxSignalView[]>([]);
 
@@ -142,7 +143,7 @@ export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
   }, [instrument]);
 
   const loadSignals = useCallback(async () => {
-    const s = await getWtxRecentSignals(instrument, 20);
+    const s = await getWtxRecentSignals(instrument, 40);
     setSignals(s);
   }, [instrument]);
 
@@ -153,10 +154,10 @@ export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
     return () => clearInterval(id);
   }, [loadState, loadSignals]);
 
-  // Merge live WS signals on top
+  // Merge live WS signals on top, filtered by timeframe
   const merged = [
-    ...liveSignals.filter(s => s.instrument === instrument),
-    ...signals,
+    ...liveSignals.filter(s => s.instrument === instrument && s.timeframe === timeframe),
+    ...signals.filter(s => s.timeframe === timeframe),
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
   return (
@@ -165,7 +166,7 @@ export default function WtxStrategyPanel({ instrument, liveSignals }: Props) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-cyan-300">WTX STRATEGY</span>
-          <span className="text-[10px] text-zinc-500">{instrument} · 5m / 10m</span>
+          <span className="text-[10px] text-zinc-500">{instrument} · {timeframe}</span>
         </div>
         {state && (
           <div className="flex items-center gap-1.5">

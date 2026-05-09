@@ -51,7 +51,7 @@ public class WtxStrategyController {
                 "currentEquity", state.currentEquity(),
                 "maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd(),
                 "maxLossHit", state.maxLossHit(),
-                "canTrade", !state.maxLossHit()
+                "canTrade", true
         );
     }
 
