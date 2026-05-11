@@ -144,7 +144,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
 
   const loadSignals = useCallback(async () => {
     const s = await getWtxRecentSignals(instrument, 20, timeframe);
-    setSignals(s);
+    setSignals(s.filter(sig => sig.timeframe === timeframe));
   }, [instrument, timeframe]);
 
   useEffect(() => {
