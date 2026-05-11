@@ -506,8 +506,10 @@ What changed:
 - manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
 - images are published to `ghcr.io/smailnilson/riskdesk2`
 - stable tags also refresh the `latest` container tag
-- tagged releases can now also be deployed from GitHub Actions over SSH via `docker-compose.release.yml` on the server
-- the deploy workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- tagged releases are now deployed by the `Tag & Deploy` workflow to the GCE VM through an IAP SSH tunnel after images are pushed to GCP Artifact Registry
+- the deploy workflow expects GitHub Actions variables `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_ZONE`, `GCP_ARTIFACT_REGISTRY_REPOSITORY`, `GCP_INSTANCE_NAME`, `GCP_CONFIG_BUCKET`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, and `GCP_DEPLOY_SSH_USER`
+- the deploy workflow expects GitHub Actions secret `DEPLOY_SSH_PRIVATE_KEY`
+- `GCP_DEPLOY_SSH_USER` must be a VM user with the deploy public key in `~/.ssh/authorized_keys` and passwordless `sudo`; do not hardcode `root` in workflows
 - the private IBKR `tws-api` dependency is vendored in `vendor/maven-repo` so Docker and GitHub Actions builds can resolve it without a developer-local Maven cache
 
 Why:

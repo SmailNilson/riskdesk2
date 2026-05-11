@@ -66,25 +66,32 @@ curl http://localhost:8080/actuator/info
 ```
 
 ### Tag deployment via GitHub Actions
-Release tags are published to GHCR by GitHub Actions, and production deployment
-can be driven by the `Deploy Tagged Release` workflow using
-`docker-compose.release.yml`.
+The `Tag & Deploy` workflow builds immutable images, pushes them to GCP
+Artifact Registry, uploads the runtime config bundle to GCS, then refreshes the
+GCE VM through an IAP SSH tunnel.
 
-Required GitHub Actions secrets:
+Required GitHub Actions variables:
 
-- `DEPLOY_HOST`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
-- `DEPLOY_PATH`
-- `GHCR_USERNAME`
-- `GHCR_TOKEN`
+- `GCP_PROJECT_ID`
+- `GCP_REGION`
+- `GCP_ZONE`
+- `GCP_ARTIFACT_REGISTRY_REPOSITORY`
+- `GCP_INSTANCE_NAME`
+- `GCP_CONFIG_BUCKET`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_DEPLOY_SERVICE_ACCOUNT`
+- `GCP_DEPLOY_SSH_USER`
+
+Required GitHub Actions secret:
+
+- `DEPLOY_SSH_PRIVATE_KEY`
 
 Server expectation:
 
-- the repo is checked out on the server at `DEPLOY_PATH`
-- Docker Compose V2 is installed
-- deployment runs with `docker compose -f docker-compose.release.yml up -d`
-- the workflow sets `RISKDESK_API_IMAGE=ghcr.io/smailnilson/riskdesk2:<tag>` remotely before compose starts
+- the public half of `DEPLOY_SSH_PRIVATE_KEY` is installed in `~/.ssh/authorized_keys` for `GCP_DEPLOY_SSH_USER`
+- `GCP_DEPLOY_SSH_USER` has passwordless `sudo`
+- Docker Compose V2 and `gcloud` are installed on the VM
+- runtime files live under `/opt/riskdesk`
 
 ### Option 3: Named profile `local-ibkr-gcp`
 Use this when the local SaaS must run against the IBKR Gateway hosted on the

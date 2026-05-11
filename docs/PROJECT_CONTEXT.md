@@ -285,12 +285,11 @@ mvn -q -DskipTests compile
 
 ## Container Release Workflow
 
-- Docker image validation now runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
-- Docker image publication now runs in GitHub Actions on Git tag pushes
-- published images are pushed to `ghcr.io/smailnilson/riskdesk2`
-- if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
-- release deployment can now run from GitHub Actions over SSH using `docker-compose.release.yml` on the target server
-- the deployment workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- Docker image validation runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
+- the `Tag & Deploy` workflow builds immutable release images, pushes them to GCP Artifact Registry, uploads the runtime config bundle to GCS, and refreshes the GCE VM through an IAP SSH tunnel
+- the deploy job expects GitHub Actions variables `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_ZONE`, `GCP_ARTIFACT_REGISTRY_REPOSITORY`, `GCP_INSTANCE_NAME`, `GCP_CONFIG_BUCKET`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, and `GCP_DEPLOY_SSH_USER`
+- the deploy job expects GitHub Actions secret `DEPLOY_SSH_PRIVATE_KEY`
+- `GCP_DEPLOY_SSH_USER` must identify the VM user that owns the public half of `DEPLOY_SSH_PRIVATE_KEY`; that user must have passwordless `sudo` because runtime refresh writes under `/opt/riskdesk` and controls Docker
 - local Docker is no longer required for the standard image release path
 - the private IBKR `tws-api` dependency is vendored under `vendor/maven-repo` so Docker/CI builds do not depend on a developer-local `~/.m2`
 
