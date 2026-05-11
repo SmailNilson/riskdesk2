@@ -190,20 +190,52 @@ jobs:
           gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" &
           wait
 
-      # Deploy + health-check share one SSH session to stay within the ephemeral
-      # OS Login SSH key's ~5 min TTL. Splitting them caused the second ssh to
-      # fail with "Permission denied (publickey)" once `docker compose pull +
-      # up --force-recreate` outlasted the first key's lifetime (v1.10.48–50).
+      # SSH access strategy:
+      # The VM's Google Guest Agent does not apply metadata SSH keys reliably
+      # (consistent "Permission denied" after 60 s+ of retries, no matter
+      # whether the key is in project or instance metadata).
+      # Solution: use a static deploy key stored as a GitHub secret
+      # (DEPLOY_SSH_PRIVATE_KEY). The corresponding public key must be added
+      # once to /root/.ssh/authorized_keys on the VM — see SETUP below.
+      #
+      # SETUP (one-time, done from GCP Cloud Shell):
+      #   1. ssh-keygen -t ed25519 -f /tmp/deploy_key -N "" -C "github-deploy"
+      #   2. PUBKEY=$(cat /tmp/deploy_key.pub) && gcloud compute ssh riskdesk-prod-v2 \
+      #        --zone=us-central1-a --tunnel-through-iap \
+      #        --command="sudo bash -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+      #          echo \"$PUBKEY\" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'"
+      #   3. cat /tmp/deploy_key   → copy and add as GitHub secret DEPLOY_SSH_PRIVATE_KEY
+      #
+      # Deploy + health-check run in one SSH session to stay inside the
+      # connection TTL (docker compose pull+up can exceed 5 min otherwise).
       - name: Deploy on VM and wait for healthy backend
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
-          # OS Login ephemeral keys sometimes take up to 30s to propagate on
-          # the VM side. Retry up to 4 times (total ~90s window) before failing.
-          for attempt in 1 2 3 4; do
-            gcloud compute ssh "${INSTANCE_NAME}" \
-              --zone "${ZONE}" \
-              --tunnel-through-iap \
-              --command "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
+          mkdir -p ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Open IAP TCP tunnel in background, wait for it to bind
+          gcloud compute start-iap-tunnel "${INSTANCE_NAME}" 22 \
+            --zone "${ZONE}" \
+            --local-host-port=localhost:2222 \
+            --project "${PROJECT_ID}" &
+          IAP_PID=$!
+          echo "IAP tunnel PID=${IAP_PID} — waiting for it to bind..."
+          sleep 8
+
+          SSH="ssh -i ~/.ssh/deploy_key
+                   -o StrictHostKeyChecking=no
+                   -o UserKnownHostsFile=/dev/null
+                   -o ConnectTimeout=15
+                   -p 2222 root@localhost"
+
+          for attempt in 1 2 3; do
+            $SSH "bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
               && break
-            echo "SSH attempt ${attempt}/4 failed — waiting 30s for OS Login key propagation..."
-            [ "${attempt}" -lt 4 ] && sleep 30
+            echo "SSH attempt ${attempt}/3 failed — retrying in 15s..."
+            [ "${attempt}" -lt 3 ] && sleep 15
           done
+
+          kill "${IAP_PID}" 2>/dev/null || true
