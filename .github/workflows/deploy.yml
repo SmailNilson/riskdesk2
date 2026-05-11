@@ -212,9 +212,9 @@ jobs:
         env:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
 
           # Open IAP TCP tunnel in background, wait for it to bind
           gcloud compute start-iap-tunnel "${INSTANCE_NAME}" 22 \
@@ -225,17 +225,19 @@ jobs:
           echo "IAP tunnel PID=${IAP_PID} — waiting for it to bind..."
           sleep 8
 
-          SSH="ssh -i ~/.ssh/deploy_key
+          SSH="ssh -i $HOME/.ssh/deploy_key
                    -o StrictHostKeyChecking=no
                    -o UserKnownHostsFile=/dev/null
                    -o ConnectTimeout=15
                    -p 2222 root@localhost"
 
+          DEPLOY_OK=false
           for attempt in 1 2 3; do
             $SSH "bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
-              && break
+              && DEPLOY_OK=true && break
             echo "SSH attempt ${attempt}/3 failed — retrying in 15s..."
             [ "${attempt}" -lt 3 ] && sleep 15
           done
 
           kill "${IAP_PID}" 2>/dev/null || true
+          $DEPLOY_OK || { echo "All SSH attempts failed — deploy aborted"; exit 1; }
