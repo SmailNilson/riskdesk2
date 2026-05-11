@@ -164,6 +164,7 @@ If a change touches several layers:
 - prefer GitHub Container Registry for repository-scoped image publishing because `GITHUB_TOKEN` can publish without storing an extra Docker registry secret
 - keep the Docker build context minimal with `.dockerignore` so CI does not upload local agent/runtime artifacts
 - if a required build dependency is not published to Maven Central, vendor it in a repo-local Maven repository so Docker and CI builds stay reproducible
+- GCE deploy workflows must use a named, least-privileged deploy user with explicit passwordless `sudo`; do not hardcode direct `root` SSH access in CI
 
 ### Frontend Workflow Rule
 

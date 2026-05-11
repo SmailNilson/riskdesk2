@@ -195,26 +195,39 @@ jobs:
       # (consistent "Permission denied" after 60 s+ of retries, no matter
       # whether the key is in project or instance metadata).
       # Solution: use a static deploy key stored as a GitHub secret
-      # (DEPLOY_SSH_PRIVATE_KEY). The corresponding public key must be added
-      # once to /root/.ssh/authorized_keys on the VM — see SETUP below.
+      # (DEPLOY_SSH_PRIVATE_KEY), and connect as the configured VM user
+      # (GCP_DEPLOY_SSH_USER repo variable or DEPLOY_SSH_USER secret).
+      # That user must have passwordless sudo because the runtime refresh writes
+      # under /opt/riskdesk and controls Docker.
       #
       # SETUP (one-time, done from GCP Cloud Shell):
       #   1. ssh-keygen -t ed25519 -f /tmp/deploy_key -N "" -C "github-deploy"
       #   2. PUBKEY=$(cat /tmp/deploy_key.pub) && gcloud compute ssh riskdesk-prod-v2 \
       #        --zone=us-central1-a --tunnel-through-iap \
-      #        --command="sudo bash -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
-      #          echo \"$PUBKEY\" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'"
-      #   3. cat /tmp/deploy_key   → copy and add as GitHub secret DEPLOY_SSH_PRIVATE_KEY
+      #        --command="sudo useradd -m -s /bin/bash github-deploy 2>/dev/null || true; \
+      #          echo 'github-deploy ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/github-deploy >/dev/null; \
+      #          sudo install -d -m 700 -o github-deploy -g github-deploy /home/github-deploy/.ssh; \
+      #          echo \"$PUBKEY\" | sudo tee -a /home/github-deploy/.ssh/authorized_keys >/dev/null; \
+      #          sudo chown github-deploy:github-deploy /home/github-deploy/.ssh/authorized_keys; \
+      #          sudo chmod 600 /home/github-deploy/.ssh/authorized_keys"
+      #   3. Set repo variable GCP_DEPLOY_SSH_USER=github-deploy
+      #   4. cat /tmp/deploy_key   → copy and add as GitHub secret DEPLOY_SSH_PRIVATE_KEY
       #
       # Deploy + health-check run in one SSH session to stay inside the
       # connection TTL (docker compose pull+up can exceed 5 min otherwise).
       - name: Deploy on VM and wait for healthy backend
         env:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_USER: ${{ vars.GCP_DEPLOY_SSH_USER || secrets.DEPLOY_SSH_USER }}
         run: |
+          : "${DEPLOY_SSH_PRIVATE_KEY:?DEPLOY_SSH_PRIVATE_KEY secret is required}"
+          : "${DEPLOY_SSH_USER:?Set GCP_DEPLOY_SSH_USER repository variable or DEPLOY_SSH_USER secret to the VM user that owns the deploy key}"
+
           mkdir -p "$HOME/.ssh"
-          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" | tr -d '\r' > "$HOME/.ssh/deploy_key"
           chmod 600 "$HOME/.ssh/deploy_key"
+          ssh-keygen -y -f "$HOME/.ssh/deploy_key" > "$HOME/.ssh/deploy_key.pub"
+          echo "Using deploy SSH user ${DEPLOY_SSH_USER}"
 
           # Open IAP TCP tunnel in background, wait for it to bind
           gcloud compute start-iap-tunnel "${INSTANCE_NAME}" 22 \
@@ -226,14 +239,15 @@ jobs:
           sleep 8
 
           SSH="ssh -i $HOME/.ssh/deploy_key
+                   -o IdentitiesOnly=yes
                    -o StrictHostKeyChecking=no
                    -o UserKnownHostsFile=/dev/null
                    -o ConnectTimeout=15
-                   -p 2222 root@localhost"
+                   -p 2222 ${DEPLOY_SSH_USER}@localhost"
 
           DEPLOY_OK=false
           for attempt in 1 2 3; do
-            $SSH "bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
+            $SSH "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.build-and-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.build-and-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.build-and-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
               && DEPLOY_OK=true && break
             echo "SSH attempt ${attempt}/3 failed — retrying in 15s..."
             [ "${attempt}" -lt 3 ] && sleep 15
