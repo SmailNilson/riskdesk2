@@ -35,9 +35,12 @@ public class WtxStrategyController {
     @GetMapping("/signals/recent")
     public ResponseEntity<List<Map<String, Object>>> getRecentSignals(
             @RequestParam String instrument,
+            @RequestParam(required = false) String timeframe,
             @RequestParam(defaultValue = "20") int limit
     ) {
-        List<WtxSignal> signals = wtxStrategyService.getRecentSignals(instrument, limit);
+        List<WtxSignal> signals = timeframe != null
+                ? wtxStrategyService.getRecentSignals(instrument, timeframe, limit)
+                : wtxStrategyService.getRecentSignals(instrument, limit);
         List<Map<String, Object>> views = signals.stream().map(this::toSignalView).toList();
         return ResponseEntity.ok(views);
     }

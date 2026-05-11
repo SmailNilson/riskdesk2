@@ -260,16 +260,35 @@ jobs:
           gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" &
           wait
 
-      - name: Deploy on VM
+      - name: Deploy on VM and wait for healthy backend
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         run: |
-          gcloud compute ssh "${INSTANCE_NAME}" \
-            --zone "${ZONE}" \
-            --tunnel-through-iap \
-            --command "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.tag-build-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.tag-build-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.tag-build-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh'"
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
 
-      - name: Health check
-        run: |
-          gcloud compute ssh "${INSTANCE_NAME}" \
+          gcloud compute start-iap-tunnel "${INSTANCE_NAME}" 22 \
             --zone "${ZONE}" \
-            --tunnel-through-iap \
-            --command "timeout 480 bash -c 'until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done' && echo 'Deploy ${{ needs.version.outputs.tag }} OK'"
+            --local-host-port=localhost:2222 \
+            --project "${PROJECT_ID}" &
+          IAP_PID=$!
+          echo "IAP tunnel PID=${IAP_PID} — waiting for it to bind..."
+          sleep 8
+
+          SSH="ssh -i $HOME/.ssh/deploy_key
+                   -o StrictHostKeyChecking=no
+                   -o UserKnownHostsFile=/dev/null
+                   -o ConnectTimeout=15
+                   -p 2222 root@localhost"
+
+          DEPLOY_OK=false
+          for attempt in 1 2 3; do
+            $SSH "bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.tag-build-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.tag-build-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.tag-build-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
+              && DEPLOY_OK=true && break
+            echo "SSH attempt ${attempt}/3 failed — retrying in 15s..."
+            [ "${attempt}" -lt 3 ] && sleep 15
+          done
+
+          kill "${IAP_PID}" 2>/dev/null || true
+          $DEPLOY_OK || { echo "All SSH attempts failed — deploy aborted"; exit 1; }

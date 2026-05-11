@@ -143,9 +143,9 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   }, [instrument]);
 
   const loadSignals = useCallback(async () => {
-    const s = await getWtxRecentSignals(instrument, 40);
-    setSignals(s);
-  }, [instrument]);
+    const s = await getWtxRecentSignals(instrument, 20, timeframe);
+    setSignals(s.filter(sig => sig.timeframe === timeframe));
+  }, [instrument, timeframe]);
 
   useEffect(() => {
     loadState();
@@ -154,10 +154,10 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     return () => clearInterval(id);
   }, [loadState, loadSignals]);
 
-  // Merge live WS signals on top, filtered by timeframe
+  // Merge live WS signals (already filtered by TF) on top of server-side filtered history
   const merged = [
     ...liveSignals.filter(s => s.instrument === instrument && s.timeframe === timeframe),
-    ...signals.filter(s => s.timeframe === timeframe),
+    ...signals,
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
   return (
