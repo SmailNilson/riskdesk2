@@ -1,6 +1,51 @@
 # AI Handoff
 
-Last updated: 2026-04-29
+Last updated: 2026-05-13
+
+## WTX Strategy — Pine Script profile parity (2026-05-13)
+
+The WTX (WaveTrend XT) runtime now mirrors the four profiles of the reference Pine
+Script `RiskDesk WT_X MNQ Filtered - TV v1`. Profile is stored **per instrument** in
+`wtx_strategy_states.active_profile` and is switchable live from the WTX panel.
+
+| Profile | Behaviour |
+|---|---|
+| `BASELINE` | Raw WT crossover + zone signals only. Preserves the legacy behaviour — no max-loss gating beyond NY force-close. |
+| `SESSION_ATR` | Adds the daily max-loss kill switch (fixes a regression where `canTrade` ignored `maxLossHit`) and ATR trailing exits. |
+| `HTF` | Above + 60m EMA21/55 bias filter (configurable). A bearish HTF blocks longs; bullish HTF blocks shorts. |
+| `STRICT` | Above + structure proxy (sweep-and-reclaim / break-and-reclaim) ported bar-for-bar from Pine. |
+
+### What changed
+- `WtxProfile` enum + `state.activeProfile` field, default `BASELINE` (no regression for existing users).
+- `WtxRiskGuard.canTradeForProfile(profile, maxLossHit, forceCloseWindow)` — the daily-loss flag now blocks new trades from `SESSION_ATR` upward.
+- `WtxTrailingExitEvaluator` — fixed initial stop at `slAtrMult × ATR`, switches to trailing at `bestFavorablePrice ± trailingAtrMult × ATR` once the position is in profit by `trailingActivationR × slAtrMult × ATR`. Exits emit synthetic `CLOSE_LONG` / `CLOSE_SHORT` signals on `/topic/wtx-signals`.
+- `WtxHtfBiasFilter` (pure function) + HTF candle fetch in `WtxStrategyService.buildHtfContext`.
+- `WtxStructureFilter` (pure function) — rolling priorLow/priorHigh over `structureLookback` bars, sweep buffer `sweepBufferAtr × ATR`, reclaim buffer `0.25 × ATR`.
+- `WtxEnrichmentSnapshot` now carries `htfBias`, `structurePassed`, `structureReason` so the panel can show *why* a signal was blocked.
+- `WtxExecutionBridge` (opt-in per instrument) routes WTX actions to IBKR via the existing `IbkrOrderService`. Idempotence is keyed by `wtx:<instrument>:<signalTs>:<action>` in `trade_executions`. Trigger source: new `ExecutionTriggerSource.WTX_AUTO`.
+- Two new endpoints — `PUT /api/wtx/state/{instrument}/profile` and `PUT /api/wtx/state/{instrument}/auto-execution`.
+- UI: profile dropdown + Auto-IBKR toggle with confirmation modal. Panel border turns red while auto-IBKR is ON.
+
+### Safety defaults
+- `autoExecutionEnabled = false` for every instrument on first contact. The user must opt in explicitly via the modal-confirmed toggle.
+- `activeProfile = BASELINE` for every instrument on first contact.
+- HTF fetch failures (insufficient 1h history) fall back to permissive — never silently block.
+
+### Configuration
+New properties under `riskdesk.wtx.*` in `application.properties`:
+```
+riskdesk.wtx.atr-length=14
+riskdesk.wtx.sl-atr-mult=1.4
+riskdesk.wtx.tp-atr-mult=2.1
+riskdesk.wtx.trailing-atr-mult=2.0
+riskdesk.wtx.trailing-activation-r=0.5
+riskdesk.wtx.htf-timeframe=1h
+riskdesk.wtx.htf-fast-len=21
+riskdesk.wtx.htf-slow-len=55
+riskdesk.wtx.structure-lookback=12
+riskdesk.wtx.sweep-buffer-atr=0.05
+riskdesk.wtx.broker-account-id=<your IBKR account or "wtx-default">
+```
 
 ## Quant 7-Gates + AI Advisor (Tier 1 / Tier 2 split)
 

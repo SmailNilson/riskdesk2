@@ -122,7 +122,9 @@ public class WtxEnrichmentBuilder {
                 smcInternalBias, smcSwingBias,
                 nearestObType, nearestObDistancePct,
                 cmf,
-                sessionPhase, inKillZone
+                sessionPhase, inKillZone,
+                null,
+                null, null
         );
     }
 }

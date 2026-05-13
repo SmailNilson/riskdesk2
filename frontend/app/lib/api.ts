@@ -1593,6 +1593,8 @@ export interface TradeDecision {
 
 // ── WTX Strategy ──────────────────────────────────────────────────────────────
 
+export type WtxProfile = 'BASELINE' | 'SESSION_ATR' | 'HTF' | 'STRICT';
+
 export interface WtxStrategyStateView {
   instrument: string;
   currentDirection: 'FLAT' | 'LONG' | 'SHORT';
@@ -1602,6 +1604,8 @@ export interface WtxStrategyStateView {
   maxDailyLossUsd: number;
   maxLossHit: boolean;
   canTrade: boolean;
+  activeProfile: WtxProfile;
+  autoExecutionEnabled: boolean;
 }
 
 export interface WtxEnrichmentView {
@@ -1621,6 +1625,9 @@ export interface WtxEnrichmentView {
   cmf: number;
   sessionPhase: string;
   inKillZone: boolean;
+  htfBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' | null;
+  structurePassed: boolean | null;
+  structureReason: 'LOW_SWEEP_RECLAIM' | 'BULLISH_RECLAIM' | 'HIGH_SWEEP_REJECT' | 'BEARISH_REJECT' | 'BLOCKED' | 'UNAVAILABLE' | null;
 }
 
 export interface WtxSignalView {
@@ -1631,7 +1638,7 @@ export interface WtxSignalView {
   wt1Value: number;
   wt2Value: number;
   canTrade: boolean;
-  actionTaken: 'OPEN_LONG' | 'OPEN_SHORT' | 'REVERSE_TO_LONG' | 'REVERSE_TO_SHORT' | 'CLOSE_ALL' | 'NONE';
+  actionTaken: 'OPEN_LONG' | 'OPEN_SHORT' | 'REVERSE_TO_LONG' | 'REVERSE_TO_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'CLOSE_ALL' | 'NONE';
   enrichment: WtxEnrichmentView | null;
   signalTs: string;
 }
@@ -1646,5 +1653,25 @@ export async function getWtxRecentSignals(instrument: string, limit = 20, timefr
   const tf = timeframe ? `&timeframe=${timeframe}` : '';
   const res = await fetch(`${BASE}/api/wtx/signals/recent?instrument=${instrument}&limit=${limit}${tf}`);
   if (!res.ok) return [];
+  return res.json();
+}
+
+export async function updateWtxProfile(instrument: string, profile: WtxProfile): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxAutoExecution(instrument: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/auto-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
   return res.json();
 }

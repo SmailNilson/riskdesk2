@@ -1,16 +1,20 @@
 package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.strategy.WtxStrategyService;
+import com.riskdesk.domain.engine.strategy.wtx.WtxProfile;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -45,44 +49,92 @@ public class WtxStrategyController {
         return ResponseEntity.ok(views);
     }
 
+    @PutMapping("/state/{instrument}/profile")
+    public ResponseEntity<Map<String, Object>> updateProfile(
+            @PathVariable String instrument,
+            @RequestBody Map<String, String> body
+    ) {
+        String raw = body == null ? null : body.get("profile");
+        if (raw == null || raw.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'profile' field"));
+        }
+        WtxProfile profile;
+        try {
+            profile = WtxProfile.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "Unknown profile: " + raw,
+                    "allowed", List.of("BASELINE", "SESSION_ATR", "HTF", "STRICT")
+            ));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateProfile(instrument, profile);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
+    @PutMapping("/state/{instrument}/auto-execution")
+    public ResponseEntity<Map<String, Object>> updateAutoExecution(
+            @PathVariable String instrument,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null || !body.containsKey("enabled")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'enabled' boolean field"));
+        }
+        boolean enabled;
+        Object raw = body.get("enabled");
+        if (raw instanceof Boolean b) {
+            enabled = b;
+        } else if (raw instanceof String s) {
+            enabled = Boolean.parseBoolean(s);
+        } else {
+            return ResponseEntity.badRequest().body(Map.of("error", "'enabled' must be boolean"));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateAutoExecution(instrument, enabled);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
     private Map<String, Object> toStateView(WtxStrategyState state) {
-        return Map.of(
-                "instrument", state.instrument(),
-                "currentDirection", state.currentPosition().name(),
-                "dailyPnl", state.dailyPnl(),
-                "dayStartEquity", state.dayStartEquity(),
-                "currentEquity", state.currentEquity(),
-                "maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd(),
-                "maxLossHit", state.maxLossHit(),
-                "canTrade", true
-        );
+        Map<String, Object> view = new HashMap<>();
+        view.put("instrument", state.instrument());
+        view.put("currentDirection", state.currentPosition().name());
+        view.put("dailyPnl", state.dailyPnl());
+        view.put("dayStartEquity", state.dayStartEquity());
+        view.put("currentEquity", state.currentEquity());
+        view.put("maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd());
+        view.put("maxLossHit", state.maxLossHit());
+        WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
+        view.put("activeProfile", profile.name());
+        view.put("autoExecutionEnabled", state.autoExecutionEnabled());
+        view.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
+        return view;
     }
 
     private Map<String, Object> defaultStateView(String instrument) {
-        return Map.of(
-                "instrument", instrument,
-                "currentDirection", "FLAT",
-                "dailyPnl", 0,
-                "dayStartEquity", wtxStrategyService.getInitialEquity(),
-                "currentEquity", wtxStrategyService.getInitialEquity(),
-                "maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd(),
-                "maxLossHit", false,
-                "canTrade", true
-        );
+        Map<String, Object> view = new HashMap<>();
+        view.put("instrument", instrument);
+        view.put("currentDirection", "FLAT");
+        view.put("dailyPnl", 0);
+        view.put("dayStartEquity", wtxStrategyService.getInitialEquity());
+        view.put("currentEquity", wtxStrategyService.getInitialEquity());
+        view.put("maxDailyLossUsd", wtxStrategyService.getMaxDailyLossUsd());
+        view.put("maxLossHit", false);
+        view.put("activeProfile", WtxProfile.BASELINE.name());
+        view.put("autoExecutionEnabled", false);
+        view.put("canTrade", true);
+        return view;
     }
 
     private Map<String, Object> toSignalView(WtxSignal signal) {
-        return Map.of(
-                "instrument", signal.instrument(),
-                "timeframe", signal.timeframe(),
-                "signalType", signal.signalType().name(),
-                "direction", signal.direction(),
-                "wt1Value", signal.wt1Value(),
-                "wt2Value", signal.wt2Value(),
-                "canTrade", signal.canTrade(),
-                "actionTaken", signal.suggestedAction().name(),
-                "enrichment", signal.enrichment(),
-                "signalTs", signal.signalTs().toString()
-        );
+        Map<String, Object> view = new HashMap<>();
+        view.put("instrument", signal.instrument());
+        view.put("timeframe", signal.timeframe());
+        view.put("signalType", signal.signalType().name());
+        view.put("direction", signal.direction());
+        view.put("wt1Value", signal.wt1Value());
+        view.put("wt2Value", signal.wt2Value());
+        view.put("canTrade", signal.canTrade());
+        view.put("actionTaken", signal.suggestedAction().name());
+        view.put("enrichment", signal.enrichment());
+        view.put("signalTs", signal.signalTs().toString());
+        return view;
     }
 }

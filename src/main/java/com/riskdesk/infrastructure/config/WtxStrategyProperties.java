@@ -30,6 +30,25 @@ public class WtxStrategyProperties {
     private int closeBeforeMin = 12;
     private BigDecimal initialEquity = BigDecimal.valueOf(10000);
 
+    // ATR trailing exits — Pine "Session + ATR Risk" profile
+    private int atrLength = 14;
+    private BigDecimal slAtrMult = BigDecimal.valueOf(1.4);
+    private BigDecimal tpAtrMult = BigDecimal.valueOf(2.1);
+    private BigDecimal trailingAtrMult = BigDecimal.valueOf(2.0);
+    private BigDecimal trailingActivationR = BigDecimal.valueOf(0.5);
+
+    // HTF bias — Pine "HTF" profile
+    private String htfTimeframe = "1h";
+    private int htfFastLen = 21;
+    private int htfSlowLen = 55;
+
+    // Structure proxy — Pine "Strict" profile
+    private int structureLookback = 12;
+    private BigDecimal sweepBufferAtr = BigDecimal.valueOf(0.05);
+
+    // IBKR auto-execution — used by WtxExecutionBridge when state.autoExecutionEnabled is true
+    private String brokerAccountId = "wtx-default";
+
     public WtxConfig toConfig() {
         return new WtxConfig(
                 instruments, timeframes,
@@ -37,7 +56,10 @@ public class WtxStrategyProperties {
                 useCompra, useCompra1, useVenta, useVenta1,
                 reverseOnOpp, fixedQty,
                 maxDailyLossUsd,
-                forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin
+                forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen,
+                structureLookback, sweepBufferAtr
         );
     }
 
@@ -100,4 +122,37 @@ public class WtxStrategyProperties {
 
     public BigDecimal getInitialEquity() { return initialEquity; }
     public void setInitialEquity(BigDecimal initialEquity) { this.initialEquity = initialEquity; }
+
+    public int getAtrLength() { return atrLength; }
+    public void setAtrLength(int atrLength) { this.atrLength = atrLength; }
+
+    public BigDecimal getSlAtrMult() { return slAtrMult; }
+    public void setSlAtrMult(BigDecimal slAtrMult) { this.slAtrMult = slAtrMult; }
+
+    public BigDecimal getTpAtrMult() { return tpAtrMult; }
+    public void setTpAtrMult(BigDecimal tpAtrMult) { this.tpAtrMult = tpAtrMult; }
+
+    public BigDecimal getTrailingAtrMult() { return trailingAtrMult; }
+    public void setTrailingAtrMult(BigDecimal trailingAtrMult) { this.trailingAtrMult = trailingAtrMult; }
+
+    public BigDecimal getTrailingActivationR() { return trailingActivationR; }
+    public void setTrailingActivationR(BigDecimal trailingActivationR) { this.trailingActivationR = trailingActivationR; }
+
+    public String getHtfTimeframe() { return htfTimeframe; }
+    public void setHtfTimeframe(String htfTimeframe) { this.htfTimeframe = htfTimeframe; }
+
+    public int getHtfFastLen() { return htfFastLen; }
+    public void setHtfFastLen(int htfFastLen) { this.htfFastLen = htfFastLen; }
+
+    public int getHtfSlowLen() { return htfSlowLen; }
+    public void setHtfSlowLen(int htfSlowLen) { this.htfSlowLen = htfSlowLen; }
+
+    public int getStructureLookback() { return structureLookback; }
+    public void setStructureLookback(int structureLookback) { this.structureLookback = structureLookback; }
+
+    public BigDecimal getSweepBufferAtr() { return sweepBufferAtr; }
+    public void setSweepBufferAtr(BigDecimal sweepBufferAtr) { this.sweepBufferAtr = sweepBufferAtr; }
+
+    public String getBrokerAccountId() { return brokerAccountId; }
+    public void setBrokerAccountId(String brokerAccountId) { this.brokerAccountId = brokerAccountId; }
 }

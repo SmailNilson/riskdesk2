@@ -2,7 +2,6 @@ package com.riskdesk.domain.engine.strategy.wtx;
 
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator.WaveTrendResult;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -15,22 +14,14 @@ import java.util.Optional;
  *   venta    = crossunder(wt1, wt2) AND wt1 >= nsc  (from overbought)
  *   venta_1  = crossunder(wt1, wt2) AND !ventas_en_sobre_compra
  *
- * No Spring, no JPA — safe to unit-test without a Spring context.
+ * When the active profile requires HTF or Structure filters, the caller must pass the pre-computed
+ * decisions. If a required filter disallows the signal, the signal is still emitted (informative)
+ * with action=NONE so the UI can surface why the trade was blocked.
  */
 public final class WtxBarEvaluator {
 
     private WtxBarEvaluator() {}
 
-    /**
-     * Evaluates the transition from {@code prev} to {@code curr} WT bars.
-     *
-     * @param prev      previous bar's WaveTrend result (used to detect crossover)
-     * @param curr      current (just-closed) bar's WaveTrend result
-     * @param config    strategy configuration
-     * @param state     current strategy state (position direction, risk flags)
-     * @param candleTs  close timestamp of the current candle (UTC)
-     * @return a signal if a compra/venta triggers, otherwise empty
-     */
     public static Optional<WtxSignal> evaluate(
             WaveTrendResult prev,
             WaveTrendResult curr,
@@ -38,6 +29,23 @@ public final class WtxBarEvaluator {
             WtxStrategyState state,
             Instant candleTs,
             String candleTimeframe
+    ) {
+        return evaluate(prev, curr, config, state, candleTs, candleTimeframe, null, null);
+    }
+
+    /**
+     * Filter-aware evaluation. {@code htfDecision} / {@code structureDecision} may be null when the
+     * active profile doesn't require them; otherwise their {@code allows()} flag gates the action.
+     */
+    public static Optional<WtxSignal> evaluate(
+            WaveTrendResult prev,
+            WaveTrendResult curr,
+            WtxConfig config,
+            WtxStrategyState state,
+            Instant candleTs,
+            String candleTimeframe,
+            WtxHtfBiasFilter.Decision htfDecision,
+            WtxStructureFilter.Decision structureDecision
     ) {
         if (prev == null || curr == null) return Optional.empty();
 
@@ -57,9 +65,17 @@ public final class WtxBarEvaluator {
 
         if (!longSignal && !shortSignal) return Optional.empty();
 
+        WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
         boolean maxLossHit     = state.maxLossHit();
         boolean forceCloseWin  = WtxRiskGuard.isForceCloseWindow(candleTs, config);
-        boolean canTrade       = WtxRiskGuard.canTrade(maxLossHit, forceCloseWin);
+        boolean canTrade       = WtxRiskGuard.canTradeForProfile(profile, maxLossHit, forceCloseWin);
+
+        boolean htfBlocked = profile.requiresHtfFilter()
+                && htfDecision != null
+                && !htfDecision.allows();
+        boolean structureBlocked = profile.requiresStructureFilter()
+                && structureDecision != null
+                && !structureDecision.allows();
 
         WtxSignalType signalType;
         String direction;
@@ -68,7 +84,7 @@ public final class WtxBarEvaluator {
         if (longSignal) {
             signalType = compra ? WtxSignalType.COMPRA : WtxSignalType.COMPRA_1;
             direction  = "LONG";
-            if (!canTrade) {
+            if (!canTrade || htfBlocked || structureBlocked) {
                 action = WtxAction.NONE;
             } else if (state.currentPosition() == WtxPosition.SHORT && config.reverseOnOpp()) {
                 action = WtxAction.REVERSE_TO_LONG;
@@ -80,7 +96,7 @@ public final class WtxBarEvaluator {
         } else {
             signalType = venta ? WtxSignalType.VENTA : WtxSignalType.VENTA_1;
             direction  = "SHORT";
-            if (!canTrade) {
+            if (!canTrade || htfBlocked || structureBlocked) {
                 action = WtxAction.NONE;
             } else if (state.currentPosition() == WtxPosition.LONG && config.reverseOnOpp()) {
                 action = WtxAction.REVERSE_TO_SHORT;

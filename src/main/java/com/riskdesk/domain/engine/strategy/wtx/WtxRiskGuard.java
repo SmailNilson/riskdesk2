@@ -49,10 +49,21 @@ public final class WtxRiskGuard {
     }
 
     /**
-     * True when a position can be opened.
-     * maxLossHit is kept as a parameter for compatibility but no longer blocks trading.
+     * Legacy gate: only blocks on NY force-close window.
+     * Preserved for BASELINE profile to keep existing behaviour bit-for-bit identical.
      */
     public static boolean canTrade(boolean maxLossHit, boolean forceCloseWindow) {
         return !forceCloseWindow;
+    }
+
+    /**
+     * Profile-aware gate. SESSION_ATR / HTF / STRICT all block on daily max-loss.
+     * BASELINE keeps the legacy behaviour (only force-close blocks).
+     * Mirrors Pine Script: canTrade = !maxLossHit && !forceCloseWindow.
+     */
+    public static boolean canTradeForProfile(WtxProfile profile, boolean maxLossHit, boolean forceCloseWindow) {
+        if (forceCloseWindow) return false;
+        if (profile != null && profile.blocksOnMaxLoss() && maxLossHit) return false;
+        return true;
     }
 }

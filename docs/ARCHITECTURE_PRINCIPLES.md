@@ -282,6 +282,17 @@ When introducing real-order execution:
 - freeze execution quantity on the execution aggregate itself before any broker submission
 - when submitting an entry order, lock the execution row before the external broker side effect so two concurrent triggers cannot place two orders
 
+### WTX Auto-Execution Rule
+
+WTX is paper-trading by default. Routing to IBKR is opt-in per instrument:
+
+- `autoExecutionEnabled` lives on `WtxStrategyState` and defaults to `false` for every instrument.
+- The UI must confirm activation via a modal that names the instrument and the active profile before flipping the toggle.
+- Idempotence: `WtxExecutionBridge` builds an executionKey `wtx:<instrument>:<signalTs.epochSeconds>:<action>` and uses `TradeExecutionRepositoryPort.createIfAbsent` so a replay of the same bar can't double-submit.
+- Trigger source is the dedicated `ExecutionTriggerSource.WTX_AUTO` — never reuse mentor/quant trigger sources for WTX-originated orders.
+- WTX executions are written with `mentorSignalReviewId=null`; the unique constraint allows multiple nulls so this never collides with mentor-arming.
+- REVERSE actions submit a single double-quantity order; IBKR transparently flattens the opposing side and opens the new direction in one fill.
+
 ## Tier 1 deterministic / Tier 2 AI advisory split
 
 For real-time decision systems we apply a strict split between deterministic
