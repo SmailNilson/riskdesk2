@@ -1,10 +1,21 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { getWtxState, getWtxRecentSignals } from '@/app/lib/api';
-import type { WtxStrategyStateView, WtxSignalView, WtxEnrichmentView } from '@/app/lib/api';
+import {
+  getWtxState,
+  getWtxRecentSignals,
+  updateWtxProfile,
+  updateWtxAutoExecution,
+} from '@/app/lib/api';
+import type {
+  WtxStrategyStateView,
+  WtxSignalView,
+  WtxEnrichmentView,
+  WtxProfile,
+} from '@/app/lib/api';
 
 const POLL_MS = 5000;
+const PROFILE_OPTIONS: WtxProfile[] = ['BASELINE', 'SESSION_ATR', 'HTF', 'STRICT'];
 
 function DirectionChip({ dir }: { dir: 'FLAT' | 'LONG' | 'SHORT' }) {
   const style =
@@ -63,7 +74,19 @@ function EnrichmentSection({ e }: { e: WtxEnrichmentView }) {
       </button>
       {open && (
         <div className="px-2 pb-2 space-y-0.5">
-          {/* Order Flow — first */}
+          {/* Filter results — shown first when profile uses filters */}
+          {(e.htfBias || e.structureReason) && (
+            <>
+              <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">Filtres profil</div>
+              <EnrichmentRow label="HTF bias" value={e.htfBias} accent />
+              <EnrichmentRow
+                label="Structure"
+                value={e.structureReason ? `${e.structurePassed === false ? '✗ ' : ''}${e.structureReason.replace(/_/g, ' ')}` : null}
+                accent={e.structurePassed !== false}
+              />
+            </>
+          )}
+          {/* Order Flow */}
           <div className="text-[9px] text-zinc-600 uppercase tracking-wider pt-1 pb-0.5">Order Flow</div>
           <EnrichmentRow label="Delta" value={e.deltaDirection ? `${e.deltaDirection}${e.deltaValue != null ? ` Δ${e.deltaValue > 0 ? '+' : ''}${e.deltaValue.toFixed(0)}` : ''}` : null} accent />
           <EnrichmentRow label="Source" value={e.orderFlowSource} />
@@ -136,6 +159,8 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [state, setState] = useState<WtxStrategyStateView | null>(null);
   const [signals, setSignals] = useState<WtxSignalView[]>([]);
   const [collapsed, setCollapsed] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [autoExecBusy, setAutoExecBusy] = useState(false);
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument);
@@ -155,14 +180,47 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     return () => clearInterval(id);
   }, [loadState, loadSignals]);
 
+  const onProfileChange = useCallback(async (next: WtxProfile) => {
+    if (!state || state.activeProfile === next) return;
+    setProfileBusy(true);
+    try {
+      const updated = await updateWtxProfile(instrument, next);
+      if (updated) setState(updated);
+    } finally {
+      setProfileBusy(false);
+    }
+  }, [instrument, state]);
+
+  const onToggleAutoExec = useCallback(async () => {
+    if (!state) return;
+    const turningOn = !state.autoExecutionEnabled;
+    if (turningOn) {
+      const confirmed = window.confirm(
+        `⚠️ Activer l'exécution auto IBKR pour ${instrument} ?\n\n` +
+        `Chaque signal WTX (${state.activeProfile}) qui passe les filtres déclenchera un ordre RÉEL sur IBKR.\n\n` +
+        `Le toggle reste actif jusqu'à désactivation manuelle.`
+      );
+      if (!confirmed) return;
+    }
+    setAutoExecBusy(true);
+    try {
+      const updated = await updateWtxAutoExecution(instrument, turningOn);
+      if (updated) setState(updated);
+    } finally {
+      setAutoExecBusy(false);
+    }
+  }, [instrument, state]);
+
   // Merge live WS signals (already filtered by TF) on top of server-side filtered history
   const merged = [
     ...liveSignals.filter(s => s.instrument === instrument && s.timeframe === timeframe),
     ...signals,
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
+  const autoExecOn = state?.autoExecutionEnabled === true;
+
   return (
-    <div className="border border-cyan-900/40 bg-zinc-900/80 rounded-lg p-3 space-y-2">
+    <div className={`border rounded-lg p-3 space-y-2 ${autoExecOn ? 'border-red-700/70 bg-red-950/10' : 'border-cyan-900/40 bg-zinc-900/80'}`}>
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -194,6 +252,39 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
 
       {!collapsed && (
         <>
+          {/* Profile + Auto-IBKR controls */}
+          {state && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                <span className="text-zinc-500">Profil</span>
+                <select
+                  value={state.activeProfile}
+                  onChange={e => onProfileChange(e.target.value as WtxProfile)}
+                  disabled={profileBusy}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                >
+                  {PROFILE_OPTIONS.map(p => (
+                    <option key={p} value={p}>{p.replace('_', ' ')}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={onToggleAutoExec}
+                disabled={autoExecBusy}
+                aria-pressed={autoExecOn}
+                title={autoExecOn ? 'Désactiver le routage IBKR' : 'Activer le routage IBKR (confirmation requise)'}
+                className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                  autoExecOn
+                    ? 'border-red-600/70 bg-red-950/40 text-red-300 hover:bg-red-950/60'
+                    : 'border-zinc-700 text-zinc-400 hover:border-emerald-700 hover:text-emerald-300'
+                }`}
+              >
+                Auto-IBKR : {autoExecOn ? 'ON' : 'OFF'}
+              </button>
+            </div>
+          )}
+
           {/* P&L bar */}
           {state && (
             <div>

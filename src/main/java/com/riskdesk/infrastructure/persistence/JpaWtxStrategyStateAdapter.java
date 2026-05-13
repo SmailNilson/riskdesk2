@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.engine.strategy.wtx.WtxPosition;
+import com.riskdesk.domain.engine.strategy.wtx.WtxProfile;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import com.riskdesk.domain.engine.strategy.wtx.port.WtxStrategyStatePort;
 import com.riskdesk.infrastructure.persistence.entity.WtxStrategyStateEntity;
@@ -33,6 +34,12 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
     }
 
     private WtxStrategyState toDomain(WtxStrategyStateEntity e) {
+        WtxProfile profile;
+        try {
+            profile = e.getActiveProfile() != null ? WtxProfile.valueOf(e.getActiveProfile()) : WtxProfile.BASELINE;
+        } catch (IllegalArgumentException ex) {
+            profile = WtxProfile.BASELINE;
+        }
         return new WtxStrategyState(
                 e.getInstrument(),
                 WtxPosition.valueOf(e.getCurrentDirection()),
@@ -43,7 +50,12 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 e.getDailyRealizedPnl() != null ? e.getDailyRealizedPnl() : BigDecimal.ZERO,
                 e.isMaxLossHit(),
                 e.getLastCandleTs(),
-                e.getUpdatedAt()
+                e.getUpdatedAt(),
+                profile,
+                e.isAutoExecutionEnabled(),
+                e.getEntryAtr(),
+                e.getBestFavorablePrice(),
+                e.getTrailingStopPrice()
         );
     }
 
@@ -58,5 +70,10 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         e.setMaxLossHit(s.maxLossHit());
         e.setLastCandleTs(s.lastCandleTs());
         e.setUpdatedAt(Instant.now());
+        e.setActiveProfile(s.activeProfile() != null ? s.activeProfile().name() : WtxProfile.BASELINE.name());
+        e.setAutoExecutionEnabled(s.autoExecutionEnabled());
+        e.setEntryAtr(s.entryAtr());
+        e.setBestFavorablePrice(s.bestFavorablePrice());
+        e.setTrailingStopPrice(s.trailingStopPrice());
     }
 }

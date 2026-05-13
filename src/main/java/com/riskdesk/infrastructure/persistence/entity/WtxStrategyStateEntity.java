@@ -43,6 +43,21 @@ public class WtxStrategyStateEntity {
     @Column(nullable = false)
     private Instant updatedAt;
 
+    @Column(length = 20)
+    private String activeProfile; // BASELINE | SESSION_ATR | HTF | STRICT
+
+    @Column(nullable = false)
+    private boolean autoExecutionEnabled;
+
+    @Column(precision = 20, scale = 8)
+    private BigDecimal entryAtr;
+
+    @Column(precision = 20, scale = 8)
+    private BigDecimal bestFavorablePrice;
+
+    @Column(precision = 20, scale = 8)
+    private BigDecimal trailingStopPrice;
+
     public WtxStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -74,4 +89,19 @@ public class WtxStrategyStateEntity {
 
     public Instant getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+
+    public String getActiveProfile() { return activeProfile; }
+    public void setActiveProfile(String activeProfile) { this.activeProfile = activeProfile; }
+
+    public boolean isAutoExecutionEnabled() { return autoExecutionEnabled; }
+    public void setAutoExecutionEnabled(boolean autoExecutionEnabled) { this.autoExecutionEnabled = autoExecutionEnabled; }
+
+    public BigDecimal getEntryAtr() { return entryAtr; }
+    public void setEntryAtr(BigDecimal entryAtr) { this.entryAtr = entryAtr; }
+
+    public BigDecimal getBestFavorablePrice() { return bestFavorablePrice; }
+    public void setBestFavorablePrice(BigDecimal bestFavorablePrice) { this.bestFavorablePrice = bestFavorablePrice; }
+
+    public BigDecimal getTrailingStopPrice() { return trailingStopPrice; }
+    public void setTrailingStopPrice(BigDecimal trailingStopPrice) { this.trailingStopPrice = trailingStopPrice; }
 }

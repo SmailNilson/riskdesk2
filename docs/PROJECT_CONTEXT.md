@@ -110,6 +110,14 @@ These should stay transport-oriented only.
 - `application/service/MentorIntermarketService.java`
 - `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
 - `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/strategy/WtxStrategyService.java` — WaveTrend XT strategy orchestrator. Listens to `CandleClosed` per instrument/timeframe, evaluates the configured profile (`BASELINE` / `SESSION_ATR` / `HTF` / `STRICT`), applies trailing-ATR exits, attaches filter decisions to the enrichment snapshot, and optionally routes through `WtxExecutionBridge` for IBKR.
+- `application/service/strategy/WtxExecutionBridge.java` — opt-in IBKR routing for WTX. Writes a `TradeExecutionRecord` (mentorSignalReviewId = null, triggerSource = WTX_AUTO) keyed by `wtx:<instrument>:<signalTs>:<action>`, then calls `IbkrOrderService.submitEntryOrder`. Disabled when `state.autoExecutionEnabled = false` (default).
+- Domain helpers in `domain/engine/strategy/wtx/`:
+  - `WtxBarEvaluator` — filter-aware bar evaluation, returns the candidate `WtxSignal`.
+  - `WtxTrailingExitEvaluator` — fixed initial stop, then ATR trailing stop above an activation threshold.
+  - `WtxHtfBiasFilter` — 60m EMA stack bias (close ≥ fast ≥ slow → bullish, mirror for bearish).
+  - `WtxStructureFilter` — Pine `sweep + reclaim` / `break + reclaim` proxy over a rolling lookback.
+  - `WtxRiskGuard` — `canTradeForProfile`, `isForceCloseWindow`, `isNewTradingDay`, `isMaxLossHit`.
 - `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
 - `application/quant/service/QuantGateService.java` — runs the 7-gate SHORT-setup evaluator every 60 s (MNQ, MGC, MCL). Pure orchestration: parallel port fetch (Absorption, Distribution, Cycle, Delta, LivePrice) → `GateEvaluator.evaluate()` → state save → narration → optional tier-2 advisor → WebSocket publish. State persists in the `quant_state` table; recent snapshots in an in-memory ring buffer (`QuantSnapshotHistoryStore`).
 - `application/quant/service/QuantSetupNarrationService.java` — combines the gate snapshot with the deterministic `OrderFlowPatternDetector` and the `QuantNarrator` to produce the markdown surfaced in `/topic/quant/narration/{instr}`.

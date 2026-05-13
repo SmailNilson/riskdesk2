@@ -1,6 +1,8 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.engine.indicators.AtrCalculator;
+import com.riskdesk.domain.engine.indicators.EMAIndicator;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator.WaveTrendResult;
 import com.riskdesk.domain.engine.strategy.wtx.*;
@@ -13,13 +15,16 @@ import com.riskdesk.domain.model.Side;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -40,6 +45,7 @@ public class WtxStrategyService {
     private final WtxEnrichmentBuilder enrichmentBuilder;
     private final SimpMessagingTemplate ws;
     private final WtxStrategyProperties properties;
+    private final ObjectProvider<WtxExecutionBridge> executionBridgeProvider;
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -47,7 +53,8 @@ public class WtxStrategyService {
             CandleRepositoryPort candlePort,
             WtxEnrichmentBuilder enrichmentBuilder,
             SimpMessagingTemplate ws,
-            WtxStrategyProperties properties
+            WtxStrategyProperties properties,
+            ObjectProvider<WtxExecutionBridge> executionBridgeProvider
     ) {
         this.statePort = statePort;
         this.historyPort = historyPort;
@@ -55,6 +62,7 @@ public class WtxStrategyService {
         this.enrichmentBuilder = enrichmentBuilder;
         this.ws = ws;
         this.properties = properties;
+        this.executionBridgeProvider = executionBridgeProvider;
     }
 
     @EventListener
@@ -95,27 +103,91 @@ public class WtxStrategyService {
             log.info("WTX [{}] new trading day — equity reset to {}", instrumentName, equity);
         }
 
-        // Evaluate signal
-        Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(prev, curr, config, state, event.timestamp(), event.timeframe());
+        WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
+        Candle currentCandle = candles.get(candles.size() - 1);
+
+        // ── 1. Trailing exit check (profile >= SESSION_ATR) ───────────────────
+        if (profile.requiresAtrExits() && state.currentPosition() != WtxPosition.FLAT) {
+            WtxTrailingExitEvaluator.Decision exit =
+                    WtxTrailingExitEvaluator.evaluate(state, currentCandle, config);
+            if (exit.shouldExit()) {
+                state = applyExit(state, instrument, exit, event, profile);
+            } else {
+                state = state.withTrailing(exit.updatedBestFavorablePrice(), exit.updatedTrailingStopPrice());
+            }
+        }
+
+        // ── 2. Filter contexts (HTF + Structure) ──────────────────────────────
+        WtxHtfBiasFilter.HtfBiasContext htfCtx = null;
+        WtxHtfBiasFilter.Decision htfDecision = null;
+        if (profile.requiresHtfFilter()) {
+            htfCtx = buildHtfContext(instrument, config);
+            htfDecision = WtxHtfBiasFilter.evaluate("LONG", htfCtx); // placeholder — recomputed per direction below
+        }
+
+        WtxStructureFilter.Decision structureDecision = null;
+        if (profile.requiresStructureFilter()) {
+            BigDecimal atr = AtrCalculator.compute(candles, config.atrLength());
+            structureDecision = WtxStructureFilter.evaluate(
+                    "LONG", candles, atr, config.structureLookback(), config.sweepBufferAtr()); // also placeholder
+        }
+
+        // Re-evaluate per direction after detecting it
+        Optional<WtxSignal> prelim = WtxBarEvaluator.evaluate(
+                prev, curr, config, state, event.timestamp(), event.timeframe(), null, null);
+
+        if (prelim.isPresent()) {
+            WtxSignal probe = prelim.get();
+            String dir = probe.direction();
+            if (profile.requiresHtfFilter()) {
+                htfDecision = WtxHtfBiasFilter.evaluate(dir, htfCtx);
+            }
+            if (profile.requiresStructureFilter()) {
+                BigDecimal atr = AtrCalculator.compute(candles, config.atrLength());
+                structureDecision = WtxStructureFilter.evaluate(
+                        dir, candles, atr, config.structureLookback(), config.sweepBufferAtr());
+            }
+        }
+
+        // ── 3. Final signal evaluation with filter decisions ──────────────────
+        Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(
+                prev, curr, config, state, event.timestamp(), event.timeframe(),
+                htfDecision, structureDecision);
 
         if (maybeSignal.isPresent()) {
             WtxSignal signal = maybeSignal.get();
 
-            // Attach enrichment (informative only)
             WtxEnrichmentSnapshot enrichment = enrichmentBuilder.build(instrumentName, event.timeframe());
+            String htfBiasLabel = htfDecision != null ? htfDecision.bias().name() : null;
+            Boolean structurePassed = structureDecision != null ? structureDecision.allows() : null;
+            String structureReason = structureDecision != null ? structureDecision.reason().name() : null;
+            enrichment = enrichment.withFilters(htfBiasLabel, structurePassed, structureReason);
             signal = signal.withEnrichment(enrichment);
 
-            // Apply action if canTrade
-            if (signal.canTrade()) {
+            if (signal.canTrade() && signal.suggestedAction() != WtxAction.NONE) {
+                BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
                 state = applyAction(signal.suggestedAction(), state, instrument, config,
-                        candles.get(candles.size() - 1).getClose());
+                        currentCandle.getClose(), entryAtr);
+                routeToExecution(signal, state, currentCandle.getClose());
             }
 
             historyPort.save(signal);
             ws.convertAndSend("/topic/wtx-signals", toWsPayload(signal, state));
-            log.info("WTX [{}] signal={} action={} canTrade={} wt1={}",
+            log.info("WTX [{}] signal={} action={} canTrade={} wt1={} htf={} struct={}",
                     instrumentName, signal.signalType(), signal.suggestedAction(),
-                    signal.canTrade(), signal.wt1Value());
+                    signal.canTrade(), signal.wt1Value(),
+                    htfBiasLabel, structureReason);
+        }
+
+        // ── 4. Max-loss enforcement (profile >= SESSION_ATR) ──────────────────
+        if (profile.blocksOnMaxLoss()
+                && !state.maxLossHit()
+                && WtxRiskGuard.isMaxLossHit(state, config.maxDailyLossUsd())) {
+            log.warn("WTX [{}] daily max-loss hit (dailyPnl={}), flattening + halting", instrumentName, state.dailyPnl());
+            if (state.currentPosition() != WtxPosition.FLAT) {
+                state = closePosition(state, instrument, currentCandle.getClose());
+            }
+            state = state.withMaxLossHit();
         }
 
         statePort.save(state.withLastCandleTs(event.timestamp()));
@@ -130,7 +202,6 @@ public class WtxStrategyService {
                 if (state.currentPosition() != WtxPosition.FLAT) {
                     try {
                         Instrument instrument = Instrument.valueOf(instrumentName);
-                        // Use shortest timeframe for the most recent exit price
                         String shortestTf = config.timeframes().get(0);
                         List<Candle> candles = candlePort.findRecentCandles(instrument, shortestTf, 1);
                         BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
@@ -159,32 +230,78 @@ public class WtxStrategyService {
         return historyPort.findRecent(instrument, timeframe, limit);
     }
 
-    public java.math.BigDecimal getMaxDailyLossUsd() {
+    public BigDecimal getMaxDailyLossUsd() {
         return properties.getMaxDailyLossUsd();
     }
 
-    public java.math.BigDecimal getInitialEquity() {
+    public BigDecimal getInitialEquity() {
         return properties.getInitialEquity();
+    }
+
+    public WtxStrategyState updateProfile(String instrument, WtxProfile profile) {
+        WtxStrategyState state = statePort.load(instrument)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withProfile(profile);
+        statePort.save(updated);
+        log.info("WTX [{}] profile updated to {}", instrument, profile);
+        publishState(updated, properties.toConfig());
+        return updated;
+    }
+
+    public WtxStrategyState updateAutoExecution(String instrument, boolean enabled) {
+        WtxStrategyState state = statePort.load(instrument)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withAutoExecution(enabled);
+        statePort.save(updated);
+        log.warn("WTX [{}] auto-execution {} — IBKR routing is now {}",
+                instrument, enabled ? "ENABLED" : "DISABLED",
+                enabled ? "LIVE" : "off");
+        publishState(updated, properties.toConfig());
+        return updated;
     }
 
     // ── private helpers ────────────────────────────────────────────────────
 
     private WtxStrategyState applyAction(WtxAction action, WtxStrategyState state,
                                          Instrument instrument, WtxConfig config,
-                                         BigDecimal currentPrice) {
+                                         BigDecimal currentPrice, BigDecimal entryAtr) {
         return switch (action) {
-            case OPEN_LONG -> state.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty());
-            case OPEN_SHORT -> state.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty());
+            case OPEN_LONG -> state.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty(), entryAtr);
+            case OPEN_SHORT -> state.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty(), entryAtr);
             case REVERSE_TO_LONG -> {
                 WtxStrategyState closed = closePosition(state, instrument, currentPrice);
-                yield closed.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty());
+                yield closed.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty(), entryAtr);
             }
             case REVERSE_TO_SHORT -> {
                 WtxStrategyState closed = closePosition(state, instrument, currentPrice);
-                yield closed.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty());
+                yield closed.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty(), entryAtr);
             }
+            case CLOSE_LONG, CLOSE_SHORT, CLOSE_ALL -> closePosition(state, instrument, currentPrice);
             default -> state;
         };
+    }
+
+    private WtxStrategyState applyExit(WtxStrategyState state, Instrument instrument,
+                                       WtxTrailingExitEvaluator.Decision exit, CandleClosed event,
+                                       WtxProfile profile) {
+        WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
+        WtxSignal exitSignal = new WtxSignal(
+                state.instrument(),
+                event.timeframe(),
+                state.currentPosition() == WtxPosition.LONG ? WtxSignalType.VENTA : WtxSignalType.COMPRA,
+                state.currentPosition() == WtxPosition.LONG ? "SHORT" : "LONG",
+                BigDecimal.ZERO, BigDecimal.ZERO,
+                true,
+                exit.exitAction(),
+                WtxEnrichmentSnapshot.empty().withFilters(null, null, exit.reason().name()),
+                event.timestamp()
+        );
+        historyPort.save(exitSignal);
+        ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
+        routeToExecution(exitSignal, closed, exit.exitPrice());
+        log.info("WTX [{}] trailing exit fired — reason={} exitPrice={} mfe={}",
+                state.instrument(), exit.reason(), exit.exitPrice(), exit.updatedBestFavorablePrice());
+        return closed;
     }
 
     private WtxStrategyState closePosition(WtxStrategyState state, Instrument instrument, BigDecimal exitPrice) {
@@ -197,6 +314,39 @@ public class WtxStrategyService {
         return state.withFlat(pnl);
     }
 
+    private WtxHtfBiasFilter.HtfBiasContext buildHtfContext(Instrument instrument, WtxConfig config) {
+        try {
+            int needed = Math.max(config.htfFastLen(), config.htfSlowLen()) + 10;
+            List<Candle> htfCandles = new java.util.ArrayList<>(
+                    candlePort.findRecentCandles(instrument, config.htfTimeframe(), needed));
+            java.util.Collections.reverse(htfCandles);
+            if (htfCandles.size() < config.htfSlowLen() + 1) {
+                return new WtxHtfBiasFilter.HtfBiasContext(null, null, null);
+            }
+            BigDecimal htfClose = htfCandles.get(htfCandles.size() - 1).getClose();
+            BigDecimal fastEma = new EMAIndicator(config.htfFastLen()).current(htfCandles);
+            BigDecimal slowEma = new EMAIndicator(config.htfSlowLen()).current(htfCandles);
+            return new WtxHtfBiasFilter.HtfBiasContext(htfClose, fastEma, slowEma);
+        } catch (Exception e) {
+            log.debug("WTX HTF fetch failed for {}: {}", instrument, e.getMessage());
+            return new WtxHtfBiasFilter.HtfBiasContext(null, null, null);
+        }
+    }
+
+    private void routeToExecution(WtxSignal signal, WtxStrategyState state, BigDecimal referencePrice) {
+        if (!state.autoExecutionEnabled()) return;
+        WtxExecutionBridge bridge = executionBridgeProvider.getIfAvailable();
+        if (bridge == null) {
+            log.debug("WTX [{}] auto-execution enabled but bridge not wired", state.instrument());
+            return;
+        }
+        try {
+            bridge.submit(signal, state, referencePrice);
+        } catch (Exception e) {
+            log.error("WTX [{}] execution bridge failure: {}", state.instrument(), e.getMessage(), e);
+        }
+    }
+
     private void publishState(WtxStrategyState state, WtxConfig config) {
         try {
             ws.convertAndSend("/topic/wtx-state/" + state.instrument(), toStatePayload(state, config));
@@ -205,30 +355,33 @@ public class WtxStrategyService {
         }
     }
 
-    private java.util.Map<String, Object> toWsPayload(WtxSignal signal, WtxStrategyState state) {
-        return java.util.Map.of(
-                "instrument", signal.instrument(),
-                "timeframe", signal.timeframe(),
-                "signalType", signal.signalType().name(),
-                "direction", signal.direction(),
-                "wt1Value", signal.wt1Value(),
-                "wt2Value", signal.wt2Value(),
-                "canTrade", signal.canTrade(),
-                "actionTaken", signal.suggestedAction().name(),
-                "enrichment", signal.enrichment(),
-                "signalTs", signal.signalTs().toString()
-        );
+    private Map<String, Object> toWsPayload(WtxSignal signal, WtxStrategyState state) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("instrument", signal.instrument());
+        payload.put("timeframe", signal.timeframe());
+        payload.put("signalType", signal.signalType().name());
+        payload.put("direction", signal.direction());
+        payload.put("wt1Value", signal.wt1Value());
+        payload.put("wt2Value", signal.wt2Value());
+        payload.put("canTrade", signal.canTrade());
+        payload.put("actionTaken", signal.suggestedAction().name());
+        payload.put("enrichment", signal.enrichment());
+        payload.put("signalTs", signal.signalTs().toString());
+        return payload;
     }
 
-    private java.util.Map<String, Object> toStatePayload(WtxStrategyState state, WtxConfig config) {
-        return java.util.Map.of(
-                "instrument", state.instrument(),
-                "currentDirection", state.currentPosition().name(),
-                "dailyPnl", state.dailyPnl(),
-                "dayStartEquity", state.dayStartEquity(),
-                "maxDailyLossUsd", config.maxDailyLossUsd(),
-                "maxLossHit", state.maxLossHit(),
-                "canTrade", true
-        );
+    private Map<String, Object> toStatePayload(WtxStrategyState state, WtxConfig config) {
+        WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("instrument", state.instrument());
+        payload.put("currentDirection", state.currentPosition().name());
+        payload.put("dailyPnl", state.dailyPnl());
+        payload.put("dayStartEquity", state.dayStartEquity());
+        payload.put("maxDailyLossUsd", config.maxDailyLossUsd());
+        payload.put("maxLossHit", state.maxLossHit());
+        payload.put("activeProfile", profile.name());
+        payload.put("autoExecutionEnabled", state.autoExecutionEnabled());
+        payload.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
+        return payload;
     }
 }

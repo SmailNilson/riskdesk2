@@ -4,8 +4,8 @@ import java.math.BigDecimal;
 
 /**
  * Contextual market data collected at the moment a WTX signal fires.
- * All fields are INFORMATIONAL — none of them block or modify the signal decision.
- * Order Flow fields are placed first as they represent the most time-sensitive data.
+ * All fields are INFORMATIONAL for the UI — but htfBias and structureReason ALSO reflect
+ * the gating result when the active profile uses those filters.
  */
 public record WtxEnrichmentSnapshot(
         // ── Order Flow (most time-sensitive, shown first) ──────────────
@@ -49,7 +49,18 @@ public record WtxEnrichmentSnapshot(
         // ── Session ───────────────────────────────────────────────────
         /** e.g. "NY_AM", "LONDON", "ASIAN", "CLOSE" */
         String sessionPhase,
-        boolean inKillZone
+        boolean inKillZone,
+
+        // ── HTF bias (HTF / STRICT profiles) ──────────────────────────
+        /** "BULLISH" | "BEARISH" | "NEUTRAL" | "UNAVAILABLE" | null */
+        String htfBias,
+
+        // ── Structure proxy (STRICT profile) ──────────────────────────
+        /** True when the structure filter let this signal through. Null when not evaluated. */
+        Boolean structurePassed,
+        /** Reason label — "LOW_SWEEP_RECLAIM" / "BULLISH_RECLAIM" / "HIGH_SWEEP_REJECT"
+         *  / "BEARISH_REJECT" / "BLOCKED" / "UNAVAILABLE" / null */
+        String structureReason
 ) {
     public static WtxEnrichmentSnapshot empty() {
         return new WtxEnrichmentSnapshot(
@@ -59,7 +70,23 @@ public record WtxEnrichmentSnapshot(
                 null, null,
                 null, null,
                 null,
-                "UNKNOWN", false
+                "UNKNOWN", false,
+                null,
+                null, null
+        );
+    }
+
+    public WtxEnrichmentSnapshot withFilters(String htfBias, Boolean structurePassed, String structureReason) {
+        return new WtxEnrichmentSnapshot(
+                deltaDirection, deltaValue, orderFlowSource, absorptionSignal, absorptionScore,
+                bbPct, bbExpanding,
+                priceVsVwap, vwapDistancePct,
+                smcInternalBias, smcSwingBias,
+                nearestObType, nearestObDistancePct,
+                cmf,
+                sessionPhase, inKillZone,
+                htfBias,
+                structurePassed, structureReason
         );
     }
 }

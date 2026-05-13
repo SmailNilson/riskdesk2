@@ -16,5 +16,10 @@ public enum ExecutionTriggerSource {
      * supplies entry/SL/TP directly. Independent of auto-arm thresholds —
      * the user takes responsibility for the trade.
      */
-    MANUAL_QUANT_PANEL
+    MANUAL_QUANT_PANEL,
+    /**
+     * Auto-routed execution from the WTX strategy ({@link com.riskdesk.application.service.strategy.WtxExecutionBridge}).
+     * Opt-in per instrument via the WTX panel "Auto-IBKR" toggle. No mentor review is involved.
+     */
+    WTX_AUTO
 }
