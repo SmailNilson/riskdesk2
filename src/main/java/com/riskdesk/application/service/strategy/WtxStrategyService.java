@@ -185,7 +185,15 @@ public class WtxStrategyService {
                 && WtxRiskGuard.isMaxLossHit(state, config.maxDailyLossUsd())) {
             log.warn("WTX [{}] daily max-loss hit (dailyPnl={}), flattening + halting", instrumentName, state.dailyPnl());
             if (state.currentPosition() != WtxPosition.FLAT) {
+                WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                        ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
+                        "MAX_LOSS_HALT", event.timestamp());
+                // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
+                routeToExecution(haltSignal, state, currentCandle.getClose());
                 state = closePosition(state, instrument, currentCandle.getClose());
+                historyPort.save(haltSignal);
+                ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
             }
             state = state.withMaxLossHit();
         }
@@ -206,8 +214,16 @@ public class WtxStrategyService {
                         List<Candle> candles = candlePort.findRecentCandles(instrument, shortestTf, 1);
                         BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
                                 : candles.get(0).getClose();
+                        WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                                ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                        WtxSignal forceCloseSignal = buildCloseSignal(state, shortestTf, closeAction,
+                                "FORCE_CLOSE:" + reason, java.time.Instant.now());
+                        // Route to IBKR with the pre-close state so the open quantity is preserved.
+                        routeToExecution(forceCloseSignal, state, exitPrice);
                         WtxStrategyState closed = closePosition(state, instrument, exitPrice);
+                        historyPort.save(forceCloseSignal);
                         statePort.save(closed);
+                        ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
                         log.info("WTX [{}] force-closed — {}", instrumentName, reason);
                         publishState(closed, config);
                     } catch (Exception e) {
@@ -284,24 +300,33 @@ public class WtxStrategyService {
     private WtxStrategyState applyExit(WtxStrategyState state, Instrument instrument,
                                        WtxTrailingExitEvaluator.Decision exit, CandleClosed event,
                                        WtxProfile profile) {
+        WtxSignal exitSignal = buildCloseSignal(state, event.timeframe(), exit.exitAction(),
+                exit.reason().name(), event.timestamp());
+        // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
+        // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)
+        routeToExecution(exitSignal, state, exit.exitPrice());
         WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
-        WtxSignal exitSignal = new WtxSignal(
-                state.instrument(),
-                event.timeframe(),
-                state.currentPosition() == WtxPosition.LONG ? WtxSignalType.VENTA : WtxSignalType.COMPRA,
-                state.currentPosition() == WtxPosition.LONG ? "SHORT" : "LONG",
-                BigDecimal.ZERO, BigDecimal.ZERO,
-                true,
-                exit.exitAction(),
-                WtxEnrichmentSnapshot.empty().withFilters(null, null, exit.reason().name()),
-                event.timestamp()
-        );
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
-        routeToExecution(exitSignal, closed, exit.exitPrice());
         log.info("WTX [{}] trailing exit fired — reason={} exitPrice={} mfe={}",
                 state.instrument(), exit.reason(), exit.exitPrice(), exit.updatedBestFavorablePrice());
         return closed;
+    }
+
+    private WtxSignal buildCloseSignal(WtxStrategyState state, String timeframe, WtxAction action,
+                                       String reason, java.time.Instant ts) {
+        boolean wasLong = state.currentPosition() == WtxPosition.LONG;
+        return new WtxSignal(
+                state.instrument(),
+                timeframe,
+                wasLong ? WtxSignalType.VENTA : WtxSignalType.COMPRA,
+                wasLong ? "SHORT" : "LONG",
+                BigDecimal.ZERO, BigDecimal.ZERO,
+                true,
+                action,
+                WtxEnrichmentSnapshot.empty().withFilters(null, null, reason),
+                ts
+        );
     }
 
     private WtxStrategyState closePosition(WtxStrategyState state, Instrument instrument, BigDecimal exitPrice) {
