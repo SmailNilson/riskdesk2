@@ -135,6 +135,7 @@ interface Props {
 export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }: Props) {
   const [state, setState] = useState<WtxStrategyStateView | null>(null);
   const [signals, setSignals] = useState<WtxSignalView[]>([]);
+  const [collapsed, setCollapsed] = useState(false);
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument);
@@ -163,44 +164,58 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   return (
     <div className="border border-cyan-900/40 bg-zinc-900/80 rounded-lg p-3 space-y-2">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-cyan-300">WTX STRATEGY</span>
           <span className="text-[10px] text-zinc-500">{instrument} · {timeframe}</span>
         </div>
-        {state && (
-          <div className="flex items-center gap-1.5">
-            <DirectionChip dir={state.currentDirection} />
-            <span className="flex items-center gap-1 text-[10px]">
-              <span className={`w-1.5 h-1.5 rounded-full ${state.canTrade ? 'bg-emerald-400' : 'bg-red-500'}`} />
-              <span className={state.canTrade ? 'text-emerald-400' : 'text-red-400'}>
-                {state.canTrade ? 'ACTIF' : 'BLOQUÉ'}
+        <div className="flex items-center gap-2">
+          {state && (
+            <div className="flex items-center gap-1.5">
+              <DirectionChip dir={state.currentDirection} />
+              <span className="flex items-center gap-1 text-[10px]">
+                <span className={`w-1.5 h-1.5 rounded-full ${state.canTrade ? 'bg-emerald-400' : 'bg-red-500'}`} />
+                <span className={state.canTrade ? 'text-emerald-400' : 'text-red-400'}>
+                  {state.canTrade ? 'ACTIF' : 'BLOQUÉ'}
+                </span>
               </span>
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* P&L bar */}
-      {state && (
-        <div>
-          <div className="flex justify-between text-[10px] text-zinc-500">
-            <span>Daily P&L</span>
-            <span>max -{state.maxDailyLossUsd.toFixed(0)}$</span>
-          </div>
-          <PnlBar pnl={state.dailyPnl} max={state.maxDailyLossUsd} />
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setCollapsed(isCollapsed => !isCollapsed)}
+            aria-expanded={!collapsed}
+            className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-400 hover:border-cyan-700 hover:text-cyan-300 transition-colors"
+          >
+            {collapsed ? 'Afficher' : 'Cacher'}
+          </button>
         </div>
-      )}
-
-      {/* Signals list */}
-      <div className="space-y-1.5">
-        <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Signaux récents</span>
-        {merged.length === 0 ? (
-          <p className="text-[10px] text-zinc-600 italic">Aucun signal</p>
-        ) : (
-          merged.map(sig => <SignalCard key={sig.signalTs + sig.instrument} sig={sig} />)
-        )}
       </div>
+
+      {!collapsed && (
+        <>
+          {/* P&L bar */}
+          {state && (
+            <div>
+              <div className="flex justify-between text-[10px] text-zinc-500">
+                <span>Daily P&L</span>
+                <span>max -{state.maxDailyLossUsd.toFixed(0)}$</span>
+              </div>
+              <PnlBar pnl={state.dailyPnl} max={state.maxDailyLossUsd} />
+            </div>
+          )}
+
+          {/* Signals list */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Signaux récents</span>
+            {merged.length === 0 ? (
+              <p className="text-[10px] text-zinc-600 italic">Aucun signal</p>
+            ) : (
+              merged.map(sig => <SignalCard key={sig.signalTs + sig.instrument} sig={sig} />)
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
