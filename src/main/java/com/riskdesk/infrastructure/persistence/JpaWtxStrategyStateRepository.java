@@ -1,7 +1,13 @@
 package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.infrastructure.persistence.entity.WtxStrategyStateEntity;
+import com.riskdesk.infrastructure.persistence.entity.WtxStrategyStateId;
 import org.springframework.data.jpa.repository.JpaRepository;
 
-public interface JpaWtxStrategyStateRepository extends JpaRepository<WtxStrategyStateEntity, String> {
+import java.util.Optional;
+
+public interface JpaWtxStrategyStateRepository
+        extends JpaRepository<WtxStrategyStateEntity, WtxStrategyStateId> {
+
+    Optional<WtxStrategyStateEntity> findByInstrumentAndTimeframe(String instrument, String timeframe);
 }

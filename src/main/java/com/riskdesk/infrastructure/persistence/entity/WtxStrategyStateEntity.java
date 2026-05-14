@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.persistence.entity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
@@ -10,11 +11,16 @@ import java.time.Instant;
 
 @Entity
 @Table(name = "wtx_strategy_states")
+@IdClass(WtxStrategyStateId.class)
 public class WtxStrategyStateEntity {
 
     @Id
     @Column(nullable = false, length = 20)
     private String instrument;
+
+    @Id
+    @Column(nullable = false, length = 10)
+    private String timeframe;
 
     @Column(nullable = false, length = 10)
     private String currentDirection; // FLAT, LONG, SHORT
@@ -70,6 +76,9 @@ public class WtxStrategyStateEntity {
 
     public String getInstrument() { return instrument; }
     public void setInstrument(String instrument) { this.instrument = instrument; }
+
+    public String getTimeframe() { return timeframe; }
+    public void setTimeframe(String timeframe) { this.timeframe = timeframe; }
 
     public String getCurrentDirection() { return currentDirection; }
     public void setCurrentDirection(String currentDirection) { this.currentDirection = currentDirection; }

@@ -1597,6 +1597,7 @@ export type WtxProfile = 'BASELINE' | 'SESSION_ATR' | 'HTF' | 'STRICT';
 
 export interface WtxStrategyStateView {
   instrument: string;
+  timeframe: string;
   currentDirection: 'FLAT' | 'LONG' | 'SHORT';
   dailyPnl: number;
   dayStartEquity: number;
@@ -1607,6 +1608,17 @@ export interface WtxStrategyStateView {
   activeProfile: WtxProfile;
   autoExecutionEnabled: boolean;
 }
+
+export type WtxRoutingOutcome =
+  | 'ROUTED'
+  | 'SKIPPED_AUTO_OFF'
+  | 'SKIPPED_BRIDGE_UNAVAILABLE'
+  | 'SKIPPED_IBKR_DISABLED'
+  | 'SKIPPED_DUPLICATE'
+  | 'SKIPPED_NO_PRICE'
+  | 'SKIPPED_NO_QTY'
+  | 'SKIPPED_NO_OPEN_ROW'
+  | 'FAILED';
 
 export interface WtxEnrichmentView {
   deltaDirection: 'BUYING' | 'SELLING' | null;
@@ -1641,10 +1653,11 @@ export interface WtxSignalView {
   actionTaken: 'OPEN_LONG' | 'OPEN_SHORT' | 'REVERSE_TO_LONG' | 'REVERSE_TO_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'CLOSE_ALL' | 'NONE';
   enrichment: WtxEnrichmentView | null;
   signalTs: string;
+  routingOutcome: WtxRoutingOutcome | null;
 }
 
-export async function getWtxState(instrument: string): Promise<WtxStrategyStateView | null> {
-  const res = await fetch(`${BASE}/api/wtx/state/${instrument}`);
+export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -1656,8 +1669,8 @@ export async function getWtxRecentSignals(instrument: string, limit = 20, timefr
   return res.json();
 }
 
-export async function updateWtxProfile(instrument: string, profile: WtxProfile): Promise<WtxStrategyStateView | null> {
-  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/profile`, {
+export async function updateWtxProfile(instrument: string, timeframe: string, profile: WtxProfile): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/profile`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profile }),
@@ -1666,8 +1679,8 @@ export async function updateWtxProfile(instrument: string, profile: WtxProfile):
   return res.json();
 }
 
-export async function updateWtxAutoExecution(instrument: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
-  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/auto-execution`, {
+export async function updateWtxAutoExecution(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/auto-execution`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),

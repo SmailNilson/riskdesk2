@@ -5,6 +5,7 @@ import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.engine.strategy.wtx.WtxEnrichmentSnapshot;
 import com.riskdesk.domain.engine.strategy.wtx.WtxPosition;
+import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignalType;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
@@ -260,23 +261,86 @@ class WtxExecutionBridgeTest {
         assertEquals(1, repo.all().size());
     }
 
+    // ── routing-outcome reporting ──────────────────────────────────────────
+
+    @Test
+    void openLong_returnsRouted() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        assertEquals(WtxRoutingOutcome.ROUTED, bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+    }
+
+    @Test
+    void autoExecutionDisabled_returnsSkippedAutoOff() {
+        WtxStrategyState state = flatState() // autoExecutionEnabled defaults to false
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        assertEquals(WtxRoutingOutcome.SKIPPED_AUTO_OFF, bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+    }
+
+    @Test
+    void ibkrDisabled_returnsSkippedIbkrDisabled() {
+        ibkrProperties.setEnabled(false);
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        assertEquals(WtxRoutingOutcome.SKIPPED_IBKR_DISABLED,
+                bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+    }
+
+    @Test
+    void duplicateEntryKey_returnsSkippedDuplicate() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxSignal sig = signal(WtxAction.OPEN_LONG);
+        bridge.submit(sig, state, bd(100));
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, bridge.submit(sig, state, bd(100)));
+    }
+
+    @Test
+    void closeLong_noOpenRow_returnsSkippedNoOpenRow() {
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105)));
+    }
+
+    @Test
+    void close_isScopedToTimeframe_doesNotTargetAnotherTimeframeRow() {
+        // An open WTX long row exists on 5m only.
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE, "5m"));
+
+        // A 10m close must NOT flatten the 5m row — there is no 10m open row.
+        WtxStrategyState state10m = WtxStrategyState.initial("MCL", "10m", bd(10_000)).withAutoExecution(true);
+        WtxRoutingOutcome outcome = bridge.submit(signal(WtxAction.CLOSE_LONG, "10m"), state10m, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, outcome);
+        assertEquals(ExecutionStatus.ACTIVE, repo.all().get(0).getStatus(), "the 5m row must be untouched");
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────
 
     private WtxSignal signal(WtxAction action) {
-        return new WtxSignal("MCL", "10m", WtxSignalType.COMPRA, "LONG",
+        return signal(action, "10m");
+    }
+
+    private WtxSignal signal(WtxAction action, String timeframe) {
+        return new WtxSignal("MCL", timeframe, WtxSignalType.COMPRA, "LONG",
                 bd(1), bd(0), true, action, WtxEnrichmentSnapshot.empty(),
-                Instant.parse("2026-05-13T14:00:00Z"));
+                Instant.parse("2026-05-13T14:00:00Z"), null);
     }
 
     private WtxStrategyState flatState() {
-        return WtxStrategyState.initial("MCL", bd(10_000));
+        return WtxStrategyState.initial("MCL", "10m", bd(10_000));
     }
 
     private TradeExecutionRecord wtxRow(String action, int qty, ExecutionStatus status) {
+        return wtxRow(action, qty, status, "10m");
+    }
+
+    private TradeExecutionRecord wtxRow(String action, int qty, ExecutionStatus status, String timeframe) {
         TradeExecutionRecord r = new TradeExecutionRecord();
-        r.setExecutionKey("wtx:MCL:1:OPEN");
+        r.setExecutionKey("wtx:MCL:" + timeframe + ":1:OPEN");
         r.setInstrument("MCL");
-        r.setTimeframe("10m");
+        r.setTimeframe(timeframe);
         r.setAction(action);
         r.setQuantity(qty);
         r.setTriggerSource(ExecutionTriggerSource.WTX_AUTO);
@@ -340,6 +404,16 @@ class WtxExecutionBridgeTest {
                 String instrument, ExecutionTriggerSource src) {
             return byId.values().stream()
                     .filter(r -> instrument.equals(r.getInstrument()))
+                    .filter(r -> r.getTriggerSource() == src)
+                    .filter(r -> !terminal(r.getStatus()))
+                    .reduce((a, b) -> b);
+        }
+
+        @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSource(
+                String instrument, String timeframe, ExecutionTriggerSource src) {
+            return byId.values().stream()
+                    .filter(r -> instrument.equals(r.getInstrument()))
+                    .filter(r -> timeframe.equals(r.getTimeframe()))
                     .filter(r -> r.getTriggerSource() == src)
                     .filter(r -> !terminal(r.getStatus()))
                     .reduce((a, b) -> b);

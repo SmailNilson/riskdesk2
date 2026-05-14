@@ -2,6 +2,36 @@
 
 Last updated: 2026-05-14
 
+## WTX — per-(instrument, timeframe) state + routing visibility (2026-05-14)
+
+Fixes the "Auto-IBKR : ON but no order" report. Two root causes:
+
+- **WTX state was keyed by `instrument` only**, so the 5m and 10m candle-close events for the
+  same instrument loaded/mutated/saved the *same* row. A position opened by one timeframe made
+  same-direction signals on the other return `NONE` (which never routes), and `REVERSE` legs
+  thrashed each other's `entryQty`/`entryPrice`/P&L.
+- **Routing failures were silent** (DEBUG/WARN only) — nothing on the signal told you whether a
+  routed signal reached IBKR or was dropped at a gate.
+
+What changed:
+- `WtxStrategyState` now carries `timeframe`; `wtx_strategy_states` has a **composite primary
+  key `(instrument, timeframe)`** (`@IdClass WtxStrategyStateId`). Profile, auto-execution,
+  position, equity and daily max-loss are all per-timeframe now — `maxDailyLossUsd` applies
+  **per timeframe** (effective per-instrument budget is 5m + 10m).
+- **DB migration:** Hibernate `ddl-auto=update` cannot alter a primary key. Before deploying,
+  run `DROP TABLE IF EXISTS wtx_strategy_states;` on the prod DB (market closed, no live
+  position) — the table is pure runtime state and is recreated with the new PK on startup.
+- REST routes are now `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`,
+  `/auto-execution`). WS state topic is `/topic/wtx-state/{instrument}/{timeframe}`.
+- `WtxExecutionBridge` lookups (`findActiveByInstrumentAndTimeframeAndTriggerSource`) and the
+  `executionKey` (`wtx:<instrument>:<timeframe>:<signalTs>:<action>`) are timeframe-scoped — a
+  10m close/reverse can no longer target a 5m execution row.
+- New `WtxRoutingOutcome` enum (`ROUTED`, `SKIPPED_AUTO_OFF`, `SKIPPED_BRIDGE_UNAVAILABLE`,
+  `SKIPPED_IBKR_DISABLED`, `SKIPPED_DUPLICATE`, `SKIPPED_NO_PRICE`, `SKIPPED_NO_QTY`,
+  `SKIPPED_NO_OPEN_ROW`, `FAILED`). `WtxExecutionBridge.submit` returns it, every gate logs the
+  reason at INFO, and it is persisted on `wtx_signal_history.routing_outcome`, broadcast on
+  `/topic/wtx-signals`, and rendered as a chip on each signal card in the WTX panel.
+
 ## WTX auto-execution — lifecycle correctness fix (2026-05-14)
 
 Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:

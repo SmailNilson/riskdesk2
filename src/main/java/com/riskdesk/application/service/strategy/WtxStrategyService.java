@@ -93,8 +93,9 @@ public class WtxStrategyService {
         WaveTrendResult prev = WtxBarEvaluator.prev(results);
         WaveTrendResult curr = WtxBarEvaluator.curr(results);
 
-        WtxStrategyState state = statePort.load(instrumentName)
-                .orElseGet(() -> WtxStrategyState.initial(instrumentName, properties.getInitialEquity()));
+        WtxStrategyState state = statePort.load(instrumentName, event.timeframe())
+                .orElseGet(() -> WtxStrategyState.initial(instrumentName, event.timeframe(),
+                        properties.getInitialEquity()));
 
         // Day-change detection (America/New_York)
         if (WtxRiskGuard.isNewTradingDay(state.lastCandleTs(), event.timestamp())) {
@@ -168,7 +169,8 @@ public class WtxStrategyService {
                 BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
                 state = applyAction(signal.suggestedAction(), state, instrument, config,
                         currentCandle.getClose(), entryAtr);
-                routeToExecution(signal, state, currentCandle.getClose());
+                signal = signal.withRoutingOutcome(
+                        routeToExecution(signal, state, currentCandle.getClose()));
             }
 
             historyPort.save(signal);
@@ -190,7 +192,8 @@ public class WtxStrategyService {
                 WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
                         "MAX_LOSS_HALT", event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
-                routeToExecution(haltSignal, state, currentCandle.getClose());
+                haltSignal = haltSignal.withRoutingOutcome(
+                        routeToExecution(haltSignal, state, currentCandle.getClose()));
                 state = closePosition(state, instrument, currentCandle.getClose());
                 historyPort.save(haltSignal);
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
@@ -202,40 +205,42 @@ public class WtxStrategyService {
         publishState(state, config);
     }
 
-    /** Called by the NY close scheduler — closes all open WTX positions. */
+    /** Called by the NY close scheduler — closes all open WTX positions across every timeframe. */
     public void forceCloseAll(String reason) {
         WtxConfig config = properties.toConfig();
         for (String instrumentName : config.instruments()) {
-            statePort.load(instrumentName).ifPresent(state -> {
-                if (state.currentPosition() != WtxPosition.FLAT) {
-                    try {
-                        Instrument instrument = Instrument.valueOf(instrumentName);
-                        String shortestTf = config.timeframes().get(0);
-                        List<Candle> candles = candlePort.findRecentCandles(instrument, shortestTf, 1);
-                        BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
-                                : candles.get(0).getClose();
-                        WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
-                                ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
-                        WtxSignal forceCloseSignal = buildCloseSignal(state, shortestTf, closeAction,
-                                "FORCE_CLOSE:" + reason, java.time.Instant.now());
-                        // Route to IBKR with the pre-close state so the open quantity is preserved.
-                        routeToExecution(forceCloseSignal, state, exitPrice);
-                        WtxStrategyState closed = closePosition(state, instrument, exitPrice);
-                        historyPort.save(forceCloseSignal);
-                        statePort.save(closed);
-                        ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
-                        log.info("WTX [{}] force-closed — {}", instrumentName, reason);
-                        publishState(closed, config);
-                    } catch (Exception e) {
-                        log.error("WTX force-close failed for {}", instrumentName, e);
+            for (String timeframe : config.timeframes()) {
+                statePort.load(instrumentName, timeframe).ifPresent(state -> {
+                    if (state.currentPosition() != WtxPosition.FLAT) {
+                        try {
+                            Instrument instrument = Instrument.valueOf(instrumentName);
+                            List<Candle> candles = candlePort.findRecentCandles(instrument, timeframe, 1);
+                            BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
+                                    : candles.get(0).getClose();
+                            WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                                    ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                            WtxSignal forceCloseSignal = buildCloseSignal(state, timeframe, closeAction,
+                                    "FORCE_CLOSE:" + reason, java.time.Instant.now());
+                            // Route to IBKR with the pre-close state so the open quantity is preserved.
+                            forceCloseSignal = forceCloseSignal.withRoutingOutcome(
+                                    routeToExecution(forceCloseSignal, state, exitPrice));
+                            WtxStrategyState closed = closePosition(state, instrument, exitPrice);
+                            historyPort.save(forceCloseSignal);
+                            statePort.save(closed);
+                            ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
+                            log.info("WTX [{} {}] force-closed — {}", instrumentName, timeframe, reason);
+                            publishState(closed, config);
+                        } catch (Exception e) {
+                            log.error("WTX force-close failed for {} {}", instrumentName, timeframe, e);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
     }
 
-    public Optional<WtxStrategyState> getState(String instrument) {
-        return statePort.load(instrument);
+    public Optional<WtxStrategyState> getState(String instrument, String timeframe) {
+        return statePort.load(instrument, timeframe);
     }
 
     public List<WtxSignal> getRecentSignals(String instrument, int limit) {
@@ -254,23 +259,23 @@ public class WtxStrategyService {
         return properties.getInitialEquity();
     }
 
-    public WtxStrategyState updateProfile(String instrument, WtxProfile profile) {
-        WtxStrategyState state = statePort.load(instrument)
-                .orElseGet(() -> WtxStrategyState.initial(instrument, properties.getInitialEquity()));
+    public WtxStrategyState updateProfile(String instrument, String timeframe, WtxProfile profile) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
         WtxStrategyState updated = state.withProfile(profile);
         statePort.save(updated);
-        log.info("WTX [{}] profile updated to {}", instrument, profile);
+        log.info("WTX [{} {}] profile updated to {}", instrument, timeframe, profile);
         publishState(updated, properties.toConfig());
         return updated;
     }
 
-    public WtxStrategyState updateAutoExecution(String instrument, boolean enabled) {
-        WtxStrategyState state = statePort.load(instrument)
-                .orElseGet(() -> WtxStrategyState.initial(instrument, properties.getInitialEquity()));
+    public WtxStrategyState updateAutoExecution(String instrument, String timeframe, boolean enabled) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
         WtxStrategyState updated = state.withAutoExecution(enabled);
         statePort.save(updated);
-        log.warn("WTX [{}] auto-execution {} — IBKR routing is now {}",
-                instrument, enabled ? "ENABLED" : "DISABLED",
+        log.warn("WTX [{} {}] auto-execution {} — IBKR routing is now {}",
+                instrument, timeframe, enabled ? "ENABLED" : "DISABLED",
                 enabled ? "LIVE" : "off");
         publishState(updated, properties.toConfig());
         return updated;
@@ -304,7 +309,7 @@ public class WtxStrategyService {
                 exit.reason().name(), event.timestamp());
         // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
         // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)
-        routeToExecution(exitSignal, state, exit.exitPrice());
+        exitSignal = exitSignal.withRoutingOutcome(routeToExecution(exitSignal, state, exit.exitPrice()));
         WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
@@ -325,7 +330,8 @@ public class WtxStrategyService {
                 true,
                 action,
                 WtxEnrichmentSnapshot.empty().withFilters(null, null, reason),
-                ts
+                ts,
+                null
         );
     }
 
@@ -358,23 +364,30 @@ public class WtxStrategyService {
         }
     }
 
-    private void routeToExecution(WtxSignal signal, WtxStrategyState state, BigDecimal referencePrice) {
-        if (!state.autoExecutionEnabled()) return;
+    private WtxRoutingOutcome routeToExecution(WtxSignal signal, WtxStrategyState state,
+                                               BigDecimal referencePrice) {
+        if (!state.autoExecutionEnabled()) {
+            return WtxRoutingOutcome.SKIPPED_AUTO_OFF;
+        }
         WtxExecutionBridge bridge = executionBridgeProvider.getIfAvailable();
         if (bridge == null) {
-            log.debug("WTX [{}] auto-execution enabled but bridge not wired", state.instrument());
-            return;
+            log.info("WTX [{} {}] auto-execution enabled but bridge not wired",
+                    state.instrument(), state.timeframe());
+            return WtxRoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE;
         }
         try {
-            bridge.submit(signal, state, referencePrice);
+            return bridge.submit(signal, state, referencePrice);
         } catch (Exception e) {
-            log.error("WTX [{}] execution bridge failure: {}", state.instrument(), e.getMessage(), e);
+            log.error("WTX [{} {}] execution bridge failure: {}",
+                    state.instrument(), state.timeframe(), e.getMessage(), e);
+            return WtxRoutingOutcome.FAILED;
         }
     }
 
     private void publishState(WtxStrategyState state, WtxConfig config) {
         try {
-            ws.convertAndSend("/topic/wtx-state/" + state.instrument(), toStatePayload(state, config));
+            ws.convertAndSend("/topic/wtx-state/" + state.instrument() + "/" + state.timeframe(),
+                    toStatePayload(state, config));
         } catch (Exception e) {
             log.debug("WTX WebSocket publish failed", e);
         }
@@ -392,6 +405,7 @@ public class WtxStrategyService {
         payload.put("actionTaken", signal.suggestedAction().name());
         payload.put("enrichment", signal.enrichment());
         payload.put("signalTs", signal.signalTs().toString());
+        payload.put("routingOutcome", signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         return payload;
     }
 
@@ -399,6 +413,7 @@ public class WtxStrategyService {
         WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
         Map<String, Object> payload = new HashMap<>();
         payload.put("instrument", state.instrument());
+        payload.put("timeframe", state.timeframe());
         payload.put("currentDirection", state.currentPosition().name());
         payload.put("dailyPnl", state.dailyPnl());
         payload.put("dayStartEquity", state.dayStartEquity());

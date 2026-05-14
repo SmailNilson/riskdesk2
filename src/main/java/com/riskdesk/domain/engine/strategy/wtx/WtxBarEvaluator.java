@@ -117,7 +117,8 @@ public final class WtxBarEvaluator {
                 canTrade,
                 action,
                 WtxEnrichmentSnapshot.empty(),
-                candleTs
+                candleTs,
+                null
         ));
     }
 

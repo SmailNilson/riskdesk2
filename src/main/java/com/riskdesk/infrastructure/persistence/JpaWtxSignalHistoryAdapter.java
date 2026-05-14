@@ -3,7 +3,7 @@ package com.riskdesk.infrastructure.persistence;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.engine.strategy.wtx.WtxEnrichmentSnapshot;
-import com.riskdesk.domain.engine.strategy.wtx.WtxPosition;
+import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignalType;
 import com.riskdesk.domain.engine.strategy.wtx.port.WtxSignalHistoryPort;
@@ -41,6 +41,7 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         e.setCanTrade(signal.canTrade());
         e.setActionTaken(signal.suggestedAction().name());
         e.setEnrichmentJson(serializeEnrichment(signal.enrichment()));
+        e.setRoutingOutcome(signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         e.setSignalTs(signal.signalTs());
         e.setCreatedAt(Instant.now());
         repository.save(e);
@@ -86,8 +87,18 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 e.isCanTrade(),
                 com.riskdesk.domain.engine.strategy.wtx.WtxAction.valueOf(e.getActionTaken()),
                 enrichment != null ? enrichment : WtxEnrichmentSnapshot.empty(),
-                e.getSignalTs()
+                e.getSignalTs(),
+                parseRoutingOutcome(e.getRoutingOutcome())
         );
+    }
+
+    private WtxRoutingOutcome parseRoutingOutcome(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            return WtxRoutingOutcome.valueOf(raw);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private WtxEnrichmentSnapshot deserializeEnrichment(String json) {

@@ -104,7 +104,7 @@ class WtxBarEvaluatorTest {
     }
 
     private static WtxStrategyState state(WtxProfile profile, WtxPosition pos) {
-        WtxStrategyState s = WtxStrategyState.initial("MCL", BigDecimal.valueOf(10000)).withProfile(profile);
+        WtxStrategyState s = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000)).withProfile(profile);
         return pos == WtxPosition.FLAT
                 ? s
                 : s.withPosition(pos, BigDecimal.valueOf(100), BigDecimal.valueOf(1), BigDecimal.valueOf(1));

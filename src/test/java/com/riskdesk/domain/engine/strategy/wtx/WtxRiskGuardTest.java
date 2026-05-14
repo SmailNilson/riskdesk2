@@ -55,7 +55,7 @@ class WtxRiskGuardTest {
 
     @Test
     void maxLossHit_detectsBreach() {
-        WtxStrategyState state = WtxStrategyState.initial("MCL", BigDecimal.valueOf(10_000));
+        WtxStrategyState state = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10_000));
         // Lose $500 — should trigger
         WtxStrategyState losing = state.withFlat(BigDecimal.valueOf(-500));
         assertTrue(WtxRiskGuard.isMaxLossHit(losing, BigDecimal.valueOf(500)));

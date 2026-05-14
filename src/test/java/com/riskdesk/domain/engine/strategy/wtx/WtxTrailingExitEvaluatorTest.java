@@ -18,7 +18,7 @@ class WtxTrailingExitEvaluatorTest {
 
     @Test
     void flatPosition_returnsNoExit() {
-        WtxStrategyState flat = WtxStrategyState.initial("MCL", BigDecimal.valueOf(10000));
+        WtxStrategyState flat = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000));
         WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(
                 flat, candle(100, 101, 99, 100), CONFIG);
         assertFalse(d.shouldExit());
@@ -75,7 +75,7 @@ class WtxTrailingExitEvaluatorTest {
 
     @Test
     void nullEntryAtr_returnsNoExit() {
-        WtxStrategyState state = WtxStrategyState.initial("MCL", BigDecimal.valueOf(10000))
+        WtxStrategyState state = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
                 .withPosition(WtxPosition.LONG, BigDecimal.valueOf(100), BigDecimal.valueOf(1));
         // entryAtr is null because we used the 3-arg withPosition (legacy)
         // Strictly, this branch shouldn't trip because the service always passes ATR — but the guard exists
@@ -85,13 +85,13 @@ class WtxTrailingExitEvaluatorTest {
     }
 
     private static WtxStrategyState openLong(double entry, double atr) {
-        return WtxStrategyState.initial("MCL", BigDecimal.valueOf(10000))
+        return WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
                 .withPosition(WtxPosition.LONG, BigDecimal.valueOf(entry), BigDecimal.valueOf(1),
                         BigDecimal.valueOf(atr));
     }
 
     private static WtxStrategyState openShort(double entry, double atr) {
-        return WtxStrategyState.initial("MCL", BigDecimal.valueOf(10000))
+        return WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
                 .withPosition(WtxPosition.SHORT, BigDecimal.valueOf(entry), BigDecimal.valueOf(1),
                         BigDecimal.valueOf(atr));
     }

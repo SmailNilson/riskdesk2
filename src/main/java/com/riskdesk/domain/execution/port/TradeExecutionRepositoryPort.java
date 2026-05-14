@@ -53,6 +53,15 @@ public interface TradeExecutionRepositoryPort {
                                                                           ExecutionTriggerSource triggerSource);
 
     /**
+     * WTX auto-execution — most recent non-terminal execution for the given
+     * (instrument, timeframe) filtered to a single trigger source. WTX state is
+     * per-timeframe, so the bridge must scope its open-row lookup to the timeframe
+     * too — otherwise a 10m reverse/close could target a 5m execution row.
+     */
+    Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSource(
+            String instrument, String timeframe, ExecutionTriggerSource triggerSource);
+
+    /**
      * PR #303 — auto-arm pipeline.
      * Returns all currently-armed (PENDING_ENTRY_SUBMISSION) executions whose
      * {@code triggerSource} matches the supplied source. Used by the
