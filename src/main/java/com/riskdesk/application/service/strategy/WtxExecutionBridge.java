@@ -29,11 +29,22 @@ import java.util.Optional;
  * Only invoked when {@link WtxStrategyState#autoExecutionEnabled()} is true for the instrument.
  * The user opts in per instrument via the WTX panel; the default is OFF for safety.
  *
- * Idempotence: a {@link TradeExecutionRecord} is created with executionKey {@code wtx:<instrument>:<signalTs>:<action>}.
- * The repository's createIfAbsent honours the unique constraint on the key.
+ * Lifecycle contract — every {@link TradeExecutionRecord} the bridge writes mirrors the
+ * convention of the rest of the execution stack:
+ * <ul>
+ *   <li>{@code action} carries the broker-side {@code BUY}/{@code SELL} string, NOT the WTX
+ *       enum name — {@code ActivePositionView} derives direction + PnL sign from it.</li>
+ *   <li>OPEN / REVERSE create one entry row (status {@code ENTRY_SUBMITTED}); the
+ *       {@code quantity} is the resulting position size, while the IBKR order quantity is
+ *       doubled for a REVERSE so the broker flattens the opposite side in one fill.</li>
+ *   <li>CLOSE actions never create a new row — they locate the bridge's own open WTX
+ *       execution and transition it to {@code CLOSED}. REVERSE also closes the prior row
+ *       before opening the new one. This keeps the Active Positions feed in sync with the
+ *       WTX position state instead of leaking phantom "active" close orders.</li>
+ * </ul>
  *
- * REVERSE_* actions are submitted as a single double-quantity order — IBKR transparently flattens the
- * opposite side and opens the new direction in one fill.
+ * Idempotence: entry rows use executionKey {@code wtx:<instrument>:<signalTs>:<action>} and
+ * {@code createIfAbsent} honours the unique constraint on the key.
  */
 @Service
 @ConditionalOnProperty(name = "riskdesk.wtx.enabled", havingValue = "true")
@@ -71,13 +82,6 @@ public class WtxExecutionBridge {
         WtxAction action = signal.suggestedAction();
         if (action == null || action == WtxAction.NONE) return;
 
-        String ibkrAction = mapToIbkrSide(action);
-        int qty = orderQuantity(action, state);
-        if (qty <= 0) {
-            log.debug("WTX [{}] non-positive quantity {} — skipping", state.instrument(), qty);
-            return;
-        }
-
         Instrument instrument;
         try {
             instrument = Instrument.valueOf(state.instrument());
@@ -86,9 +90,30 @@ public class WtxExecutionBridge {
             return;
         }
 
+        switch (action) {
+            case CLOSE_LONG, CLOSE_SHORT, CLOSE_ALL -> handleClose(signal, state, instrument, action, referencePrice);
+            case OPEN_LONG, OPEN_SHORT, REVERSE_TO_LONG, REVERSE_TO_SHORT ->
+                    handleEntry(signal, state, instrument, action, referencePrice);
+            default -> log.debug("WTX [{}] no IBKR routing for action {}", state.instrument(), action);
+        }
+    }
+
+    /**
+     * OPEN / REVERSE — create a single entry row and submit the broker order.
+     * For a REVERSE, the prior WTX execution is closed first so the broker net
+     * position and the Active Positions feed stay consistent.
+     */
+    private void handleEntry(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                             WtxAction action, BigDecimal referencePrice) {
+        boolean isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
+
+        if (isReverse) {
+            findOpenWtxExecution(state.instrument()).ifPresent(prior ->
+                    closeExecutionRow(prior, "WTX reversed by " + action.name()));
+        }
+
         String executionKey = "wtx:" + state.instrument() + ":" + signal.signalTs().getEpochSecond() + ":" + action.name();
-        Optional<TradeExecutionRecord> existing = executionRepository.findByExecutionKey(executionKey);
-        if (existing.isPresent()) {
+        if (executionRepository.findByExecutionKey(executionKey).isPresent()) {
             log.debug("WTX [{}] duplicate execution for {} — skipping", state.instrument(), executionKey);
             return;
         }
@@ -99,6 +124,15 @@ public class WtxExecutionBridge {
             return;
         }
 
+        int positionQty = positionQuantity(state);
+        if (positionQty <= 0) {
+            log.debug("WTX [{}] non-positive quantity {} — skipping", state.instrument(), positionQty);
+            return;
+        }
+        // REVERSE flips the book in one fill: close opposite (positionQty) + open new (positionQty).
+        int orderQty = positionQty * (isReverse ? 2 : 1);
+        String ibkrSide = mapToIbkrSide(action);
+
         TradeExecutionRecord candidate = new TradeExecutionRecord();
         candidate.setExecutionKey(executionKey);
         candidate.setMentorSignalReviewId(null);
@@ -107,12 +141,14 @@ public class WtxExecutionBridge {
         candidate.setBrokerAccountId(firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default"));
         candidate.setInstrument(state.instrument());
         candidate.setTimeframe(signal.timeframe());
-        candidate.setAction(action.name());
-        candidate.setQuantity(qty);
+        // Broker-side action so ActivePositionView derives the correct direction + PnL sign.
+        candidate.setAction(ibkrSide);
+        // Resulting position size — not the (possibly doubled) broker order quantity.
+        candidate.setQuantity(positionQty);
         candidate.setTriggerSource(ExecutionTriggerSource.WTX_AUTO);
         candidate.setRequestedBy("wtx-strategy");
         candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
-        candidate.setStatusReason("WTX auto-execution armed");
+        candidate.setStatusReason("WTX " + action.name() + " armed");
         candidate.setNormalizedEntryPrice(normalizeToTick(price, instrument));
         candidate.setVirtualStopLoss(state.trailingStopPrice());
         candidate.setVirtualTakeProfit(null);
@@ -127,26 +163,101 @@ public class WtxExecutionBridge {
                     persisted.getExecutionKey(),
                     persisted.getBrokerAccountId(),
                     persisted.getInstrument(),
-                    ibkrAction,
-                    qty,
+                    ibkrSide,
+                    orderQty,
                     persisted.getNormalizedEntryPrice()
             ));
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("WTX entry submitted: " + submission.brokerOrderStatus());
+            persisted.setStatusReason("WTX " + action.name() + " submitted: " + submission.brokerOrderStatus());
             persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("WTX [{}] IBKR order submitted — action={} qty={} ibkrSide={} brokerOrderId={}",
-                    state.instrument(), action, qty, ibkrAction, submission.brokerOrderId());
+            log.info("WTX [{}] IBKR entry submitted — action={} positionQty={} orderQty={} ibkrSide={} brokerOrderId={}",
+                    state.instrument(), action, positionQty, orderQty, ibkrSide, submission.brokerOrderId());
         } catch (RuntimeException e) {
             persisted.setStatus(ExecutionStatus.FAILED);
-            persisted.setStatusReason("WTX entry failed: " + truncate(e.getMessage(), 200));
+            persisted.setStatusReason("WTX " + action.name() + " failed: " + truncate(e.getMessage(), 200));
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
             log.error("WTX [{}] IBKR submission failed for {} — {}",
                     state.instrument(), action, e.getMessage(), e);
         }
+    }
+
+    /**
+     * CLOSE — submit the broker-side flatten order against the bridge's own open WTX
+     * execution row and transition that row to {@code CLOSED}. Never creates a new row,
+     * so an ATR / max-loss / NY-force exit can't leak a phantom "active" close order.
+     * When no open WTX row exists the close is logged and skipped — submitting a naked
+     * order would risk opening an unintended position.
+     */
+    private void handleClose(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                             WtxAction action, BigDecimal referencePrice) {
+        Optional<TradeExecutionRecord> open = findOpenWtxExecution(state.instrument());
+        if (open.isEmpty()) {
+            log.warn("WTX [{}] close requested ({}) but no open WTX execution row found — "
+                    + "skipping IBKR submission to avoid a naked order", state.instrument(), action);
+            return;
+        }
+        TradeExecutionRecord row = open.get();
+        int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : positionQuantity(state);
+        if (qty <= 0) {
+            log.debug("WTX [{}] non-positive close quantity {} — skipping", state.instrument(), qty);
+            return;
+        }
+        String ibkrSide = mapToIbkrSide(action);
+        BigDecimal price = referencePrice != null ? referencePrice : row.getNormalizedEntryPrice();
+        if (price == null) {
+            log.warn("WTX [{}] missing reference price for {} — cannot submit close", state.instrument(), action);
+            return;
+        }
+
+        try {
+            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
+                    row.getId(),
+                    row.getExecutionKey(),
+                    row.getBrokerAccountId(),
+                    row.getInstrument(),
+                    ibkrSide,
+                    qty,
+                    normalizeToTick(price, instrument)
+            ));
+            Instant now = Instant.now();
+            row.setStatus(ExecutionStatus.CLOSED);
+            row.setStatusReason("WTX " + action.name() + " — IBKR close submitted: " + submission.brokerOrderStatus());
+            row.setExitSubmittedAt(now);
+            row.setClosedAt(now);
+            row.setUpdatedAt(now);
+            executionRepository.save(row);
+            log.info("WTX [{}] IBKR close submitted — action={} qty={} ibkrSide={} closedExecutionId={} brokerOrderId={}",
+                    state.instrument(), action, qty, ibkrSide, row.getId(), submission.brokerOrderId());
+        } catch (RuntimeException e) {
+            // Keep the row non-terminal so the open position stays visible and the close is retryable.
+            row.setStatusReason("WTX " + action.name() + " close failed: " + truncate(e.getMessage(), 200));
+            row.setUpdatedAt(Instant.now());
+            executionRepository.save(row);
+            log.error("WTX [{}] IBKR close submission failed for {} — {}",
+                    state.instrument(), action, e.getMessage(), e);
+        }
+    }
+
+    /** Transitions an existing WTX execution row to CLOSED without touching the broker. */
+    private void closeExecutionRow(TradeExecutionRecord row, String reason) {
+        Instant now = Instant.now();
+        row.setStatus(ExecutionStatus.CLOSED);
+        row.setStatusReason(reason);
+        row.setExitSubmittedAt(now);
+        row.setClosedAt(now);
+        row.setUpdatedAt(now);
+        executionRepository.save(row);
+        log.info("WTX [{}] execution row {} closed — {}", row.getInstrument(), row.getId(), reason);
+    }
+
+    /** The bridge's own (WTX_AUTO) most-recent non-terminal execution for an instrument. */
+    private Optional<TradeExecutionRecord> findOpenWtxExecution(String instrument) {
+        return executionRepository.findActiveByInstrumentAndTriggerSource(
+                instrument, ExecutionTriggerSource.WTX_AUTO);
     }
 
     private String mapToIbkrSide(WtxAction action) {
@@ -157,14 +268,13 @@ public class WtxExecutionBridge {
         };
     }
 
-    private int orderQuantity(WtxAction action, WtxStrategyState state) {
+    /** Resulting WTX position size (contracts). Never the doubled REVERSE order quantity. */
+    private int positionQuantity(WtxStrategyState state) {
         BigDecimal baseQty = state.entryQty();
         if (baseQty == null || baseQty.signum() <= 0) {
             baseQty = BigDecimal.ONE;
         }
-        // REVERSE: close opposite (qty) + open new (qty) = 2x
-        boolean isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
-        return baseQty.intValue() * (isReverse ? 2 : 1);
+        return baseQty.intValue();
     }
 
     private BigDecimal normalizeToTick(BigDecimal price, Instrument instrument) {

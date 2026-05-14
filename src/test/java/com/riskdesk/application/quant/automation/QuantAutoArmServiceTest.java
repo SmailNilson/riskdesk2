@@ -211,6 +211,10 @@ class QuantAutoArmServiceTest {
         @Override public Optional<TradeExecutionRecord> findActiveByInstrument(String instrument) {
             return Optional.ofNullable(activeByInstrument.get(instrument));
         }
+        @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTriggerSource(String instrument, ExecutionTriggerSource src) {
+            return Optional.ofNullable(activeByInstrument.get(instrument))
+                .filter(r -> r.getTriggerSource() == src);
+        }
         @Override public List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource src) {
             return byId.values().stream()
                 .filter(r -> r.getTriggerSource() == src)
