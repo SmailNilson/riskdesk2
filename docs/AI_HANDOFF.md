@@ -18,9 +18,13 @@ What changed:
   key `(instrument, timeframe)`** (`@IdClass WtxStrategyStateId`). Profile, auto-execution,
   position, equity and daily max-loss are all per-timeframe now — `maxDailyLossUsd` applies
   **per timeframe** (effective per-instrument budget is 5m + 10m).
-- **DB migration:** Hibernate `ddl-auto=update` cannot alter a primary key. Before deploying,
-  run `DROP TABLE IF EXISTS wtx_strategy_states;` on the prod DB (market closed, no live
-  position) — the table is pure runtime state and is recreated with the new PK on startup.
+- **DB migration is automatic.** Hibernate `ddl-auto=update` cannot alter a primary key, so
+  `WtxStrategyStateSchemaMigration` runs *before* the JPA `EntityManagerFactory` (ordered via
+  `WtxStrategyStateSchemaMigrationDependsOnPostProcessor`): if it detects the legacy
+  instrument-only `wtx_strategy_states` table (no `timeframe` column) it drops it so Hibernate
+  recreates it with the composite key. The guard is idempotent — a fresh DB or an
+  already-migrated table is a no-op. The table is pure runtime state (rebuilt from candles on
+  the next close), so no manual `DROP TABLE` step is needed anymore.
 - REST routes are now `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`,
   `/auto-execution`). WS state topic is `/topic/wtx-state/{instrument}/{timeframe}`.
 - `WtxExecutionBridge` lookups (`findActiveByInstrumentAndTimeframeAndTriggerSource`) and the
