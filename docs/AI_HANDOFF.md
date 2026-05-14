@@ -4,19 +4,25 @@ Last updated: 2026-05-14
 
 ## WTX auto-execution — lifecycle correctness fix (2026-05-14)
 
-Follow-up to PR #325, addressing two Codex review findings on `WtxExecutionBridge`:
+Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:
 
-- **Broker-side action.** Execution rows now store `action = "BUY"/"SELL"` (broker convention)
-  instead of the WTX enum name. `ActivePositionView` derives direction + PnL sign from `BUY`/`SELL`,
-  so the previous `OPEN_LONG`-style value rendered WTX longs with an unknown direction and inverted PnL.
-  The WTX semantic action is preserved in `statusReason`.
-- **Exit lifecycle.** `CLOSE_LONG` / `CLOSE_SHORT` no longer create a fresh `ENTRY_SUBMITTED` row
-  (which the fill tracker would promote to `ACTIVE`, leaving a phantom position next to the stale
-  entry). The bridge now locates its own open `WTX_AUTO` execution row via the new
+- **Broker-side action token.** Execution rows store `action = "LONG"/"SHORT"` instead of the
+  WTX enum name. This is the token `IbGatewayBrokerGateway` interprets correctly (only `"SHORT"`
+  maps to `Action.SELL`; anything else is a BUY — so `"BUY"`/`"SELL"` would both be misread as
+  buys) and which `ActivePositionView` also resolves to direction + PnL sign. The WTX semantic
+  action is preserved in `statusReason`.
+- **Exit lifecycle.** `CLOSE_LONG` / `CLOSE_SHORT` no longer create a fresh `ENTRY_SUBMITTED`
+  row. The bridge locates its own open `WTX_AUTO` execution row via the new
   `TradeExecutionRepositoryPort.findActiveByInstrumentAndTriggerSource(...)`, submits the flatten
-  order against it, and transitions that row to `CLOSED`. `REVERSE_*` closes the prior row before
-  opening the new one. Row `quantity` is the resulting position size; the IBKR order quantity is
-  doubled only for a REVERSE.
+  order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal). `REVERSE_*`
+  retires the prior row to `EXIT_SUBMITTED` — only **after** the new reverse order is accepted —
+  before opening the new one. Row `quantity` is the resulting position size; the IBKR order
+  quantity is doubled only for a REVERSE.
+- **Exit-fill reconciliation.** `ExecutionFillTrackingService.onOrderStatus` now transitions an
+  `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback (located via the `executionKey`
+  orderRef). Without it an `EXIT_SUBMITTED` row would stay non-terminal forever, leaving a phantom
+  open position. `handleClose` also skips submission when the open row is already `EXIT_SUBMITTED`
+  — no duplicate flatten while a close is in flight.
 - When a CLOSE finds no open WTX row, it logs a warning and skips submission — never fires a naked order.
 
 ## WTX Strategy — Pine Script profile parity (2026-05-13)

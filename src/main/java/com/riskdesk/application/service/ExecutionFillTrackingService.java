@@ -20,9 +20,11 @@ import java.util.Optional;
  *
  * <p>Receives raw broker feedback from the IBKR adapter (via the
  * {@link ExecutionFillListener} domain port) and persists it on the matching
- * {@link TradeExecutionRecord}. Only updates fill-specific fields and the
- * domain lifecycle on {@code Filled} (transition to {@link ExecutionStatus#ACTIVE});
- * it DOES NOT place any IBKR child orders — bracket / virtual exit orchestration
+ * {@link TradeExecutionRecord}. Updates fill-specific fields and the domain
+ * lifecycle on {@code Filled}: an entry fill transitions to
+ * {@link ExecutionStatus#ACTIVE}, while a fill on an {@link ExecutionStatus#EXIT_SUBMITTED}
+ * row (e.g. a WTX auto-routed close) transitions to {@link ExecutionStatus#CLOSED}.
+ * It DOES NOT place any IBKR child orders — bracket / virtual exit orchestration
  * is future slice 3c.</p>
  *
  * <p>Idempotence:</p>
@@ -148,6 +150,18 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
 
         // Domain lifecycle transitions based on IBKR status.
         if (IBKR_STATUS_FILLED.equalsIgnoreCase(status)
+            && execution.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            // A submitted exit/close order filled — the position is now flat. Without this
+            // branch an EXIT_SUBMITTED row would stay non-terminal forever (still in
+            // findAllActive / findActiveByInstrument*), so the position would look open and
+            // a later close signal could submit another flatten order.
+            execution.setStatus(ExecutionStatus.CLOSED);
+            execution.setStatusReason("IBKR exit order fully filled");
+            if (execution.getClosedAt() == null) {
+                execution.setClosedAt(lastFillTime == null ? Instant.now() : lastFillTime);
+            }
+            dirty = true;
+        } else if (IBKR_STATUS_FILLED.equalsIgnoreCase(status)
             && execution.getStatus() != ExecutionStatus.ACTIVE
             && execution.getStatus() != ExecutionStatus.CLOSED
             && execution.getStatus() != ExecutionStatus.EXIT_SUBMITTED

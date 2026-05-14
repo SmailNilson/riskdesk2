@@ -32,8 +32,9 @@ import java.util.Optional;
  * Lifecycle contract — every {@link TradeExecutionRecord} the bridge writes mirrors the
  * convention of the rest of the execution stack:
  * <ul>
- *   <li>{@code action} carries the broker-side {@code BUY}/{@code SELL} string, NOT the WTX
- *       enum name — {@code ActivePositionView} derives direction + PnL sign from it.</li>
+ *   <li>{@code action} carries the broker-side direction token {@code LONG}/{@code SHORT},
+ *       NOT the WTX enum name — this is what {@code IbGatewayBrokerGateway} interprets
+ *       correctly and what {@code ActivePositionView} resolves to direction + PnL sign.</li>
  *   <li>OPEN / REVERSE create one entry row (status {@code ENTRY_SUBMITTED}); the
  *       {@code quantity} is the resulting position size, while the IBKR order quantity is
  *       doubled for a REVERSE so the broker flattens the opposite side in one fill.</li>
@@ -134,7 +135,7 @@ public class WtxExecutionBridge {
         }
         // REVERSE flips the book in one fill: close opposite (positionQty) + open new (positionQty).
         int orderQty = positionQty * (isReverse ? 2 : 1);
-        String ibkrSide = mapToIbkrSide(action);
+        String orderAction = mapToOrderAction(action);
 
         TradeExecutionRecord candidate = new TradeExecutionRecord();
         candidate.setExecutionKey(executionKey);
@@ -144,8 +145,10 @@ public class WtxExecutionBridge {
         candidate.setBrokerAccountId(firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default"));
         candidate.setInstrument(state.instrument());
         candidate.setTimeframe(signal.timeframe());
-        // Broker-side action so ActivePositionView derives the correct direction + PnL sign.
-        candidate.setAction(ibkrSide);
+        // Broker-side direction token: "LONG"/"SHORT" — the value IbGatewayBrokerGateway
+        // understands (only "SHORT" maps to Action.SELL; anything else is a BUY) and which
+        // ActivePositionView also resolves to the correct direction + PnL sign.
+        candidate.setAction(orderAction);
         // Resulting position size — not the (possibly doubled) broker order quantity.
         candidate.setQuantity(positionQty);
         candidate.setTriggerSource(ExecutionTriggerSource.WTX_AUTO);
@@ -166,7 +169,7 @@ public class WtxExecutionBridge {
                     persisted.getExecutionKey(),
                     persisted.getBrokerAccountId(),
                     persisted.getInstrument(),
-                    ibkrSide,
+                    orderAction,
                     orderQty,
                     persisted.getNormalizedEntryPrice()
             ));
@@ -176,8 +179,8 @@ public class WtxExecutionBridge {
             persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("WTX [{}] IBKR entry submitted — action={} positionQty={} orderQty={} ibkrSide={} brokerOrderId={}",
-                    state.instrument(), action, positionQty, orderQty, ibkrSide, submission.brokerOrderId());
+            log.info("WTX [{}] IBKR entry submitted — action={} positionQty={} orderQty={} orderAction={} brokerOrderId={}",
+                    state.instrument(), action, positionQty, orderQty, orderAction, submission.brokerOrderId());
             // Reverse order accepted by the broker — only now retire the prior position's row.
             priorForReverse.ifPresent(prior -> markPriorRowExitSubmitted(prior,
                     "WTX reversed by " + action.name() + " (broker order " + submission.brokerOrderId() + ")"));
@@ -212,12 +215,19 @@ public class WtxExecutionBridge {
             return;
         }
         TradeExecutionRecord row = open.get();
+        // Guard against a second flatten while the first close is still in flight. The fill
+        // tracker reconciles EXIT_SUBMITTED -> CLOSED once the broker confirms the fill.
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            log.debug("WTX [{}] close requested ({}) but execution {} is already EXIT_SUBMITTED — "
+                    + "skipping duplicate flatten", state.instrument(), action, row.getId());
+            return;
+        }
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : positionQuantity(state);
         if (qty <= 0) {
             log.debug("WTX [{}] non-positive close quantity {} — skipping", state.instrument(), qty);
             return;
         }
-        String ibkrSide = mapToIbkrSide(action);
+        String orderAction = mapToOrderAction(action);
         BigDecimal price = referencePrice != null ? referencePrice : row.getNormalizedEntryPrice();
         if (price == null) {
             log.warn("WTX [{}] missing reference price for {} — cannot submit close", state.instrument(), action);
@@ -230,22 +240,22 @@ public class WtxExecutionBridge {
                     row.getExecutionKey(),
                     row.getBrokerAccountId(),
                     row.getInstrument(),
-                    ibkrSide,
+                    orderAction,
                     qty,
                     normalizeToTick(price, instrument)
             ));
             Instant now = Instant.now();
             // Non-terminal: the broker has only ACCEPTED the close, not confirmed the fill.
-            // EXIT_SUBMITTED keeps the row visible in Active Positions until the fill is
-            // reconciled downstream (same contract as ActivePositionsService.closePosition).
+            // EXIT_SUBMITTED keeps the row visible in Active Positions; ExecutionFillTrackingService
+            // transitions it to CLOSED on the Filled callback (located via the executionKey orderRef).
             row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
             row.setStatusReason("WTX " + action.name() + " — IBKR close submitted: " + submission.brokerOrderStatus()
                     + " (broker order " + submission.brokerOrderId() + ")");
             row.setExitSubmittedAt(now);
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("WTX [{}] IBKR close submitted — action={} qty={} ibkrSide={} executionId={} brokerOrderId={}",
-                    state.instrument(), action, qty, ibkrSide, row.getId(), submission.brokerOrderId());
+            log.info("WTX [{}] IBKR close submitted — action={} qty={} orderAction={} executionId={} brokerOrderId={}",
+                    state.instrument(), action, qty, orderAction, row.getId(), submission.brokerOrderId());
         } catch (RuntimeException e) {
             // Keep the row non-terminal so the open position stays visible and the close is retryable.
             row.setStatusReason("WTX " + action.name() + " close failed: " + truncate(e.getMessage(), 200));
@@ -279,10 +289,19 @@ public class WtxExecutionBridge {
                 instrument, ExecutionTriggerSource.WTX_AUTO);
     }
 
-    private String mapToIbkrSide(WtxAction action) {
+    /**
+     * Maps a WTX action to the broker-side direction token carried on {@code TradeExecutionRecord.action}
+     * and {@code BrokerEntryOrderRequest.action}.
+     *
+     * Returns "LONG" / "SHORT" — the convention {@code IbGatewayBrokerGateway} understands
+     * (only "SHORT" maps to {@code Action.SELL}; anything else is a BUY) and which mentor
+     * reviews already use. "BUY"/"SELL" would be silently treated as a BUY by the native
+     * gateway, so a CLOSE_LONG would increase the long instead of flattening it.
+     */
+    private String mapToOrderAction(WtxAction action) {
         return switch (action) {
-            case OPEN_LONG, REVERSE_TO_LONG, CLOSE_SHORT -> "BUY";
-            case OPEN_SHORT, REVERSE_TO_SHORT, CLOSE_LONG -> "SELL";
+            case OPEN_LONG, REVERSE_TO_LONG, CLOSE_SHORT -> "LONG";   // buy side
+            case OPEN_SHORT, REVERSE_TO_SHORT, CLOSE_LONG -> "SHORT"; // sell side
             default -> "";
         };
     }

@@ -57,32 +57,33 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void openLong_persistsBuyAction_notWtxEnum() {
+    void openLong_persistsLongAction_notWtxEnum() {
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
         bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
 
         assertEquals(1, repo.all().size());
         TradeExecutionRecord row = repo.all().get(0);
-        assertEquals("BUY", row.getAction(), "action must be the broker-side string, not OPEN_LONG");
+        // "LONG" — the token IbGatewayBrokerGateway reads as a BUY; "BUY" would be misread.
+        assertEquals("LONG", row.getAction(), "action must be the broker-side direction token, not OPEN_LONG");
         assertEquals(2, row.getQuantity());
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus());
         assertEquals(ExecutionTriggerSource.WTX_AUTO, row.getTriggerSource());
     }
 
     @Test
-    void openShort_persistsSellAction() {
+    void openShort_persistsShortAction() {
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
         bridge.submit(signal(WtxAction.OPEN_SHORT), state, bd(100));
 
-        assertEquals("SELL", repo.all().get(0).getAction());
+        assertEquals("SHORT", repo.all().get(0).getAction());
     }
 
     @Test
     void closeLong_marksExistingRowExitSubmitted_andCreatesNoNewRow() {
         // Seed an open WTX long entry row
-        TradeExecutionRecord open = wtxRow("BUY", 2, ExecutionStatus.ACTIVE);
+        TradeExecutionRecord open = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(open);
 
         WtxStrategyState state = flatState().withAutoExecution(true); // position already flattened by the service
@@ -94,9 +95,22 @@ class WtxExecutionBridgeTest {
         assertEquals(ExecutionStatus.EXIT_SUBMITTED, row.getStatus());
         assertNotNull(row.getExitSubmittedAt());
         assertNull(row.getClosedAt(), "closedAt must stay null until the broker fill is reconciled");
-        // The flatten order is a SELL of the original 2 contracts
+        // The flatten order is a SHORT (sell) of the original 2 contracts
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
-                "SELL".equals(r.action()) && r.quantity() == 2));
+                "SHORT".equals(r.action()) && r.quantity() == 2));
+    }
+
+    @Test
+    void closeLong_alreadyExitSubmitted_skipsDuplicateFlatten() {
+        // An exit is already in flight on the open row
+        TradeExecutionRecord exiting = wtxRow("LONG", 2, ExecutionStatus.EXIT_SUBMITTED);
+        repo.createIfAbsent(exiting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(1, repo.all().size());
     }
 
     @Test
@@ -109,9 +123,9 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void reverseToLong_retiresPriorRow_andOpensNewBuyRow_withDoubledOrderQty() {
+    void reverseToLong_retiresPriorRow_andOpensNewLongRow_withDoubledOrderQty() {
         // Seed an open WTX short row that the reverse must flatten
-        TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
+        TradeExecutionRecord priorShort = wtxRow("SHORT", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorShort);
 
         // After applyAction the service hands the bridge the NEW long position state
@@ -129,16 +143,16 @@ class WtxExecutionBridgeTest {
         TradeExecutionRecord fresh = repo.all().stream()
                 .filter(r -> r.getStatus() == ExecutionStatus.ENTRY_SUBMITTED)
                 .findFirst().orElseThrow();
-        assertEquals("BUY", fresh.getAction());
+        assertEquals("LONG", fresh.getAction());
         assertEquals(2, fresh.getQuantity(), "row quantity is the resulting position size");
         // IBKR order is doubled: flatten 2 short + open 2 long = 4
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
-                "BUY".equals(r.action()) && r.quantity() == 4));
+                "LONG".equals(r.action()) && r.quantity() == 4));
     }
 
     @Test
     void reverseToLong_submissionFails_leavesPriorRowUntouched() {
-        TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
+        TradeExecutionRecord priorShort = wtxRow("SHORT", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorShort);
         when(ibkrOrderService.submitEntryOrder(any()))
                 .thenThrow(new IllegalStateException("IBKR rejected"));
@@ -160,7 +174,7 @@ class WtxExecutionBridgeTest {
 
     @Test
     void reverseToLong_duplicateSignal_isCleanNoOpOnSecondCall() {
-        TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
+        TradeExecutionRecord priorShort = wtxRow("SHORT", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorShort);
 
         WtxStrategyState state = flatState().withAutoExecution(true)
