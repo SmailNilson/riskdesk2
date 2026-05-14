@@ -29,11 +29,12 @@ public class WtxStrategyController {
         this.wtxStrategyService = wtxStrategyService;
     }
 
-    @GetMapping("/state/{instrument}")
-    public ResponseEntity<Map<String, Object>> getState(@PathVariable String instrument) {
-        return wtxStrategyService.getState(instrument)
+    @GetMapping("/state/{instrument}/{timeframe}")
+    public ResponseEntity<Map<String, Object>> getState(@PathVariable String instrument,
+                                                        @PathVariable String timeframe) {
+        return wtxStrategyService.getState(instrument, timeframe)
                 .map(state -> ResponseEntity.ok(toStateView(state)))
-                .orElseGet(() -> ResponseEntity.ok(defaultStateView(instrument)));
+                .orElseGet(() -> ResponseEntity.ok(defaultStateView(instrument, timeframe)));
     }
 
     @GetMapping("/signals/recent")
@@ -49,9 +50,10 @@ public class WtxStrategyController {
         return ResponseEntity.ok(views);
     }
 
-    @PutMapping("/state/{instrument}/profile")
+    @PutMapping("/state/{instrument}/{timeframe}/profile")
     public ResponseEntity<Map<String, Object>> updateProfile(
             @PathVariable String instrument,
+            @PathVariable String timeframe,
             @RequestBody Map<String, String> body
     ) {
         String raw = body == null ? null : body.get("profile");
@@ -67,13 +69,14 @@ public class WtxStrategyController {
                     "allowed", List.of("BASELINE", "SESSION_ATR", "HTF", "STRICT")
             ));
         }
-        WtxStrategyState updated = wtxStrategyService.updateProfile(instrument, profile);
+        WtxStrategyState updated = wtxStrategyService.updateProfile(instrument, timeframe, profile);
         return ResponseEntity.ok(toStateView(updated));
     }
 
-    @PutMapping("/state/{instrument}/auto-execution")
+    @PutMapping("/state/{instrument}/{timeframe}/auto-execution")
     public ResponseEntity<Map<String, Object>> updateAutoExecution(
             @PathVariable String instrument,
+            @PathVariable String timeframe,
             @RequestBody Map<String, Object> body
     ) {
         if (body == null || !body.containsKey("enabled")) {
@@ -88,13 +91,14 @@ public class WtxStrategyController {
         } else {
             return ResponseEntity.badRequest().body(Map.of("error", "'enabled' must be boolean"));
         }
-        WtxStrategyState updated = wtxStrategyService.updateAutoExecution(instrument, enabled);
+        WtxStrategyState updated = wtxStrategyService.updateAutoExecution(instrument, timeframe, enabled);
         return ResponseEntity.ok(toStateView(updated));
     }
 
     private Map<String, Object> toStateView(WtxStrategyState state) {
         Map<String, Object> view = new HashMap<>();
         view.put("instrument", state.instrument());
+        view.put("timeframe", state.timeframe());
         view.put("currentDirection", state.currentPosition().name());
         view.put("dailyPnl", state.dailyPnl());
         view.put("dayStartEquity", state.dayStartEquity());
@@ -108,9 +112,10 @@ public class WtxStrategyController {
         return view;
     }
 
-    private Map<String, Object> defaultStateView(String instrument) {
+    private Map<String, Object> defaultStateView(String instrument, String timeframe) {
         Map<String, Object> view = new HashMap<>();
         view.put("instrument", instrument);
+        view.put("timeframe", timeframe);
         view.put("currentDirection", "FLAT");
         view.put("dailyPnl", 0);
         view.put("dayStartEquity", wtxStrategyService.getInitialEquity());
@@ -135,6 +140,7 @@ public class WtxStrategyController {
         view.put("actionTaken", signal.suggestedAction().name());
         view.put("enrichment", signal.enrichment());
         view.put("signalTs", signal.signalTs().toString());
+        view.put("routingOutcome", signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         return view;
     }
 }

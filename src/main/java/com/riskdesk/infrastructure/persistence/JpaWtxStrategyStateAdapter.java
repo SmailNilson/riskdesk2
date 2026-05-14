@@ -21,13 +21,14 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
     }
 
     @Override
-    public Optional<WtxStrategyState> load(String instrument) {
-        return repository.findById(instrument).map(this::toDomain);
+    public Optional<WtxStrategyState> load(String instrument, String timeframe) {
+        return repository.findByInstrumentAndTimeframe(instrument, timeframe).map(this::toDomain);
     }
 
     @Override
     public void save(WtxStrategyState state) {
-        WtxStrategyStateEntity entity = repository.findById(state.instrument())
+        WtxStrategyStateEntity entity = repository
+                .findByInstrumentAndTimeframe(state.instrument(), state.timeframe())
                 .orElseGet(WtxStrategyStateEntity::new);
         fromDomain(state, entity);
         repository.save(entity);
@@ -42,6 +43,7 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         }
         return new WtxStrategyState(
                 e.getInstrument(),
+                e.getTimeframe(),
                 WtxPosition.valueOf(e.getCurrentDirection()),
                 e.getEntryPrice(),
                 e.getEntryQty() != null ? e.getEntryQty() : BigDecimal.ZERO,
@@ -61,6 +63,7 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
 
     private void fromDomain(WtxStrategyState s, WtxStrategyStateEntity e) {
         e.setInstrument(s.instrument());
+        e.setTimeframe(s.timeframe());
         e.setCurrentDirection(s.currentPosition().name());
         e.setEntryPrice(s.entryPrice());
         e.setEntryQty(s.entryQty());

@@ -12,6 +12,7 @@ import type {
   WtxSignalView,
   WtxEnrichmentView,
   WtxProfile,
+  WtxRoutingOutcome,
 } from '@/app/lib/api';
 
 const POLL_MS = 5000;
@@ -33,6 +34,23 @@ function SignalChip({ type }: { type: WtxSignalView['signalType'] }) {
     : 'bg-red-950/70 text-red-300 border-red-800/60';
   return (
     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{type}</span>
+  );
+}
+
+function RoutingChip({ outcome }: { outcome: WtxRoutingOutcome | null }) {
+  if (!outcome) return null;
+  const style =
+    outcome === 'ROUTED' ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' :
+    outcome === 'FAILED' ? 'bg-red-950/70 text-red-300 border-red-800/60' :
+                           'bg-amber-950/70 text-amber-300 border-amber-800/60';
+  const label = outcome === 'ROUTED' ? 'IBKR ✓' : outcome.replace(/^SKIPPED_/, '').replace(/_/g, ' ');
+  return (
+    <span
+      title={`Routage IBKR : ${outcome}`}
+      className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${style}`}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -140,9 +158,12 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
         <span className="font-mono text-zinc-200">{sig.wt1Value.toFixed(2)}</span>
         <span className="text-zinc-500">action</span>
         <span className="text-zinc-300">{sig.actionTaken.replace(/_/g, ' ')}</span>
-        {!sig.canTrade && (
-          <span className="ml-auto text-rose-400 text-[9px]">BLOQUÉ</span>
-        )}
+        <span className="ml-auto flex items-center gap-1.5">
+          <RoutingChip outcome={sig.routingOutcome} />
+          {!sig.canTrade && (
+            <span className="text-rose-400 text-[9px]">BLOQUÉ</span>
+          )}
+        </span>
       </div>
       {sig.enrichment && <EnrichmentSection e={sig.enrichment} />}
     </div>
@@ -163,10 +184,10 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [autoExecBusy, setAutoExecBusy] = useState(false);
 
   const loadState = useCallback(async () => {
-    const s = await getWtxState(instrument);
+    const s = await getWtxState(instrument, timeframe);
     if (s) setState(s);
     else setState(null);
-  }, [instrument]);
+  }, [instrument, timeframe]);
 
   const loadSignals = useCallback(async () => {
     const s = await getWtxRecentSignals(instrument, 20, timeframe);
@@ -184,32 +205,32 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     if (!state || state.activeProfile === next) return;
     setProfileBusy(true);
     try {
-      const updated = await updateWtxProfile(instrument, next);
+      const updated = await updateWtxProfile(instrument, timeframe, next);
       if (updated) setState(updated);
     } finally {
       setProfileBusy(false);
     }
-  }, [instrument, state]);
+  }, [instrument, timeframe, state]);
 
   const onToggleAutoExec = useCallback(async () => {
     if (!state) return;
     const turningOn = !state.autoExecutionEnabled;
     if (turningOn) {
       const confirmed = window.confirm(
-        `⚠️ Activer l'exécution auto IBKR pour ${instrument} ?\n\n` +
-        `Chaque signal WTX (${state.activeProfile}) qui passe les filtres déclenchera un ordre RÉEL sur IBKR.\n\n` +
-        `Le toggle reste actif jusqu'à désactivation manuelle.`
+        `⚠️ Activer l'exécution auto IBKR pour ${instrument} ${timeframe} ?\n\n` +
+        `Chaque signal WTX ${timeframe} (${state.activeProfile}) qui passe les filtres déclenchera un ordre RÉEL sur IBKR.\n\n` +
+        `Ce réglage est propre au timeframe ${timeframe} et reste actif jusqu'à désactivation manuelle.`
       );
       if (!confirmed) return;
     }
     setAutoExecBusy(true);
     try {
-      const updated = await updateWtxAutoExecution(instrument, turningOn);
+      const updated = await updateWtxAutoExecution(instrument, timeframe, turningOn);
       if (updated) setState(updated);
     } finally {
       setAutoExecBusy(false);
     }
-  }, [instrument, state]);
+  }, [instrument, timeframe, state]);
 
   // Merge live WS signals (already filtered by TF) on top of server-side filtered history
   const merged = [

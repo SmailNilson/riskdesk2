@@ -56,6 +56,23 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
             @Param("terminal") Collection<ExecutionStatus> terminalStatuses);
 
     /**
+     * WTX auto-execution — same as {@link #findActiveByInstrumentAndTriggerSourceRaw}
+     * but scoped to a single timeframe, since WTX state (and therefore its open
+     * execution rows) is per (instrument, timeframe).
+     */
+    @Query("select e from TradeExecutionEntity e " +
+           "where e.instrument = :instrument " +
+           "  and e.timeframe = :timeframe " +
+           "  and e.triggerSource = :triggerSource " +
+           "  and e.status not in (:terminal) " +
+           "order by e.createdAt desc")
+    List<TradeExecutionEntity> findActiveByInstrumentAndTimeframeAndTriggerSourceRaw(
+            @Param("instrument") String instrument,
+            @Param("timeframe") String timeframe,
+            @Param("triggerSource") ExecutionTriggerSource triggerSource,
+            @Param("terminal") Collection<ExecutionStatus> terminalStatuses);
+
+    /**
      * PR #303 — return all currently-pending executions for the given trigger
      * source (e.g. {@link ExecutionTriggerSource#QUANT_AUTO_ARM}). Used by the
      * auto-submit scheduler to find decisions whose cancel window has elapsed.

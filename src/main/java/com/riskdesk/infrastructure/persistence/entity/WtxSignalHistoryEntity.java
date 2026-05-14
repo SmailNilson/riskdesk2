@@ -52,6 +52,10 @@ public class WtxSignalHistoryEntity {
     @Column(columnDefinition = "text")
     private String enrichmentJson;
 
+    /** IBKR routing outcome; null when routing was never attempted (e.g. action NONE). */
+    @Column(length = 30)
+    private String routingOutcome;
+
     @Column(nullable = false)
     private Instant signalTs;
 
@@ -88,6 +92,9 @@ public class WtxSignalHistoryEntity {
 
     public String getEnrichmentJson() { return enrichmentJson; }
     public void setEnrichmentJson(String enrichmentJson) { this.enrichmentJson = enrichmentJson; }
+
+    public String getRoutingOutcome() { return routingOutcome; }
+    public void setRoutingOutcome(String routingOutcome) { this.routingOutcome = routingOutcome; }
 
     public Instant getSignalTs() { return signalTs; }
     public void setSignalTs(Instant signalTs) { this.signalTs = signalTs; }
