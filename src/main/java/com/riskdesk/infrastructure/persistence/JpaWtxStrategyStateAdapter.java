@@ -52,7 +52,7 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 e.getLastCandleTs(),
                 e.getUpdatedAt(),
                 profile,
-                e.isAutoExecutionEnabled(),
+                Boolean.TRUE.equals(e.getAutoExecutionEnabled()),
                 e.getEntryAtr(),
                 e.getBestFavorablePrice(),
                 e.getTrailingStopPrice()

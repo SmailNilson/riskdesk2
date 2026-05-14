@@ -46,8 +46,16 @@ public class WtxStrategyStateEntity {
     @Column(length = 20)
     private String activeProfile; // BASELINE | SESSION_ATR | HTF | STRICT
 
-    @Column(nullable = false)
-    private boolean autoExecutionEnabled;
+    /**
+     * Nullable (boxed) on purpose: when this column is introduced by Hibernate
+     * {@code ddl-auto=update} on an already-populated table, a {@code NOT NULL}
+     * boolean add is rejected by PostgreSQL and aborts the whole migration —
+     * which would leave every new WTX column missing. Kept nullable so the
+     * ALTER succeeds; legacy rows read back as {@code null} → treated as false
+     * by the adapter. New writes always persist a concrete true/false.
+     */
+    @Column
+    private Boolean autoExecutionEnabled;
 
     @Column(precision = 20, scale = 8)
     private BigDecimal entryAtr;
@@ -93,8 +101,8 @@ public class WtxStrategyStateEntity {
     public String getActiveProfile() { return activeProfile; }
     public void setActiveProfile(String activeProfile) { this.activeProfile = activeProfile; }
 
-    public boolean isAutoExecutionEnabled() { return autoExecutionEnabled; }
-    public void setAutoExecutionEnabled(boolean autoExecutionEnabled) { this.autoExecutionEnabled = autoExecutionEnabled; }
+    public Boolean getAutoExecutionEnabled() { return autoExecutionEnabled; }
+    public void setAutoExecutionEnabled(Boolean autoExecutionEnabled) { this.autoExecutionEnabled = autoExecutionEnabled; }
 
     public BigDecimal getEntryAtr() { return entryAtr; }
     public void setEntryAtr(BigDecimal entryAtr) { this.entryAtr = entryAtr; }
