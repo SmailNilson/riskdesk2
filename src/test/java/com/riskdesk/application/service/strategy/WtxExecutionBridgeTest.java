@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -79,7 +80,7 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void closeLong_closesExistingRow_andCreatesNoNewRow() {
+    void closeLong_marksExistingRowExitSubmitted_andCreatesNoNewRow() {
         // Seed an open WTX long entry row
         TradeExecutionRecord open = wtxRow("BUY", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(open);
@@ -89,8 +90,10 @@ class WtxExecutionBridgeTest {
 
         assertEquals(1, repo.all().size(), "CLOSE must not create a second execution row");
         TradeExecutionRecord row = repo.all().get(0);
-        assertEquals(ExecutionStatus.CLOSED, row.getStatus());
-        assertNotNull(row.getClosedAt());
+        // Non-terminal until the broker confirms the fill — must NOT be CLOSED yet.
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, row.getStatus());
+        assertNotNull(row.getExitSubmittedAt());
+        assertNull(row.getClosedAt(), "closedAt must stay null until the broker fill is reconciled");
         // The flatten order is a SELL of the original 2 contracts
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
                 "SELL".equals(r.action()) && r.quantity() == 2));
@@ -106,7 +109,7 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void reverseToLong_closesPriorRow_andOpensNewBuyRow_withDoubledOrderQty() {
+    void reverseToLong_retiresPriorRow_andOpensNewBuyRow_withDoubledOrderQty() {
         // Seed an open WTX short row that the reverse must flatten
         TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorShort);
@@ -118,7 +121,10 @@ class WtxExecutionBridgeTest {
 
         assertEquals(2, repo.all().size());
         TradeExecutionRecord prior = repo.byId(priorShort.getId());
-        assertEquals(ExecutionStatus.CLOSED, prior.getStatus(), "prior short row must be closed by the reverse");
+        // Prior row goes non-terminal (EXIT_SUBMITTED), NOT CLOSED — broker fill unconfirmed.
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, prior.getStatus(),
+                "prior short row must be retired to EXIT_SUBMITTED by the reverse");
+        assertNull(prior.getClosedAt());
 
         TradeExecutionRecord fresh = repo.all().stream()
                 .filter(r -> r.getStatus() == ExecutionStatus.ENTRY_SUBMITTED)
@@ -128,6 +134,44 @@ class WtxExecutionBridgeTest {
         // IBKR order is doubled: flatten 2 short + open 2 long = 4
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
                 "BUY".equals(r.action()) && r.quantity() == 4));
+    }
+
+    @Test
+    void reverseToLong_submissionFails_leavesPriorRowUntouched() {
+        TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorShort);
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IllegalStateException("IBKR rejected"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        bridge.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        // Prior row must stay ACTIVE — the live position keeps its execution row so the
+        // next bar can retry the reverse. The new row records the failed attempt.
+        TradeExecutionRecord prior = repo.byId(priorShort.getId());
+        assertEquals(ExecutionStatus.ACTIVE, prior.getStatus(),
+                "prior row must NOT be retired when the reverse submission fails");
+        TradeExecutionRecord fresh = repo.all().stream()
+                .filter(r -> !r.getId().equals(priorShort.getId()))
+                .findFirst().orElseThrow();
+        assertEquals(ExecutionStatus.FAILED, fresh.getStatus());
+    }
+
+    @Test
+    void reverseToLong_duplicateSignal_isCleanNoOpOnSecondCall() {
+        TradeExecutionRecord priorShort = wtxRow("SELL", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorShort);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxSignal sig = signal(WtxAction.REVERSE_TO_LONG);
+        bridge.submit(sig, state, bd(100));   // first reverse goes through
+        bridge.submit(sig, state, bd(100));   // duplicate signalTs+action → executionKey collision
+
+        // The duplicate is skipped: no third row, exactly one IBKR submission.
+        assertEquals(2, repo.all().size(), "duplicate reverse must not create a third row");
+        verify(ibkrOrderService).submitEntryOrder(any());
     }
 
     @Test

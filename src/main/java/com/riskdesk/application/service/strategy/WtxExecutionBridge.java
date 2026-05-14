@@ -100,17 +100,20 @@ public class WtxExecutionBridge {
 
     /**
      * OPEN / REVERSE — create a single entry row and submit the broker order.
-     * For a REVERSE, the prior WTX execution is closed first so the broker net
-     * position and the Active Positions feed stay consistent.
+     * For a REVERSE, the prior WTX execution row is retired only AFTER the broker
+     * accepts the new reverse order — a duplicate signal, missing price, or
+     * submission failure must never strand the live position with its only
+     * execution row already terminal.
      */
     private void handleEntry(WtxSignal signal, WtxStrategyState state, Instrument instrument,
                              WtxAction action, BigDecimal referencePrice) {
         boolean isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
 
-        if (isReverse) {
-            findOpenWtxExecution(state.instrument()).ifPresent(prior ->
-                    closeExecutionRow(prior, "WTX reversed by " + action.name()));
-        }
+        // Capture (read-only) the prior WTX row for a reverse — do NOT retire it yet.
+        // It is transitioned only once the reverse order is accepted (see success branch).
+        Optional<TradeExecutionRecord> priorForReverse = isReverse
+                ? findOpenWtxExecution(state.instrument())
+                : Optional.empty();
 
         String executionKey = "wtx:" + state.instrument() + ":" + signal.signalTs().getEpochSecond() + ":" + action.name();
         if (executionRepository.findByExecutionKey(executionKey).isPresent()) {
@@ -175,11 +178,16 @@ public class WtxExecutionBridge {
             executionRepository.save(persisted);
             log.info("WTX [{}] IBKR entry submitted — action={} positionQty={} orderQty={} ibkrSide={} brokerOrderId={}",
                     state.instrument(), action, positionQty, orderQty, ibkrSide, submission.brokerOrderId());
+            // Reverse order accepted by the broker — only now retire the prior position's row.
+            priorForReverse.ifPresent(prior -> markPriorRowExitSubmitted(prior,
+                    "WTX reversed by " + action.name() + " (broker order " + submission.brokerOrderId() + ")"));
         } catch (RuntimeException e) {
             persisted.setStatus(ExecutionStatus.FAILED);
             persisted.setStatusReason("WTX " + action.name() + " failed: " + truncate(e.getMessage(), 200));
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
+            // priorForReverse is intentionally left untouched — the live position keeps its
+            // active execution row so the next bar can retry the reverse.
             log.error("WTX [{}] IBKR submission failed for {} — {}",
                     state.instrument(), action, e.getMessage(), e);
         }
@@ -187,10 +195,13 @@ public class WtxExecutionBridge {
 
     /**
      * CLOSE — submit the broker-side flatten order against the bridge's own open WTX
-     * execution row and transition that row to {@code CLOSED}. Never creates a new row,
-     * so an ATR / max-loss / NY-force exit can't leak a phantom "active" close order.
-     * When no open WTX row exists the close is logged and skipped — submitting a naked
-     * order would risk opening an unintended position.
+     * execution row and transition that row to {@code EXIT_SUBMITTED} (non-terminal).
+     * Never creates a new row, so an ATR / max-loss / NY-force exit can't leak a phantom
+     * "active" close order. The row stays visible until the broker fill is reconciled
+     * downstream — marking it {@code CLOSED} here would hide a still-open position and
+     * strand the row (the fill tracker skips terminal rows). When no open WTX row exists
+     * the close is logged and skipped — submitting a naked order would risk opening an
+     * unintended position.
      */
     private void handleClose(WtxSignal signal, WtxStrategyState state, Instrument instrument,
                              WtxAction action, BigDecimal referencePrice) {
@@ -224,13 +235,16 @@ public class WtxExecutionBridge {
                     normalizeToTick(price, instrument)
             ));
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.CLOSED);
-            row.setStatusReason("WTX " + action.name() + " — IBKR close submitted: " + submission.brokerOrderStatus());
+            // Non-terminal: the broker has only ACCEPTED the close, not confirmed the fill.
+            // EXIT_SUBMITTED keeps the row visible in Active Positions until the fill is
+            // reconciled downstream (same contract as ActivePositionsService.closePosition).
+            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setStatusReason("WTX " + action.name() + " — IBKR close submitted: " + submission.brokerOrderStatus()
+                    + " (broker order " + submission.brokerOrderId() + ")");
             row.setExitSubmittedAt(now);
-            row.setClosedAt(now);
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("WTX [{}] IBKR close submitted — action={} qty={} ibkrSide={} closedExecutionId={} brokerOrderId={}",
+            log.info("WTX [{}] IBKR close submitted — action={} qty={} ibkrSide={} executionId={} brokerOrderId={}",
                     state.instrument(), action, qty, ibkrSide, row.getId(), submission.brokerOrderId());
         } catch (RuntimeException e) {
             // Keep the row non-terminal so the open position stays visible and the close is retryable.
@@ -242,16 +256,21 @@ public class WtxExecutionBridge {
         }
     }
 
-    /** Transitions an existing WTX execution row to CLOSED without touching the broker. */
-    private void closeExecutionRow(TradeExecutionRecord row, String reason) {
+    /**
+     * Retires a superseded WTX execution row to EXIT_SUBMITTED (non-terminal) without
+     * touching the broker — used for the prior row of a REVERSE, whose flatten leg rides
+     * on the already-accepted reverse order. Kept non-terminal so it stays visible until
+     * downstream fill reconciliation closes it; never marked CLOSED here because the broker
+     * has not yet confirmed the fill.
+     */
+    private void markPriorRowExitSubmitted(TradeExecutionRecord row, String reason) {
         Instant now = Instant.now();
-        row.setStatus(ExecutionStatus.CLOSED);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
         row.setStatusReason(reason);
         row.setExitSubmittedAt(now);
-        row.setClosedAt(now);
         row.setUpdatedAt(now);
         executionRepository.save(row);
-        log.info("WTX [{}] execution row {} closed — {}", row.getInstrument(), row.getId(), reason);
+        log.info("WTX [{}] prior execution row {} → EXIT_SUBMITTED — {}", row.getInstrument(), row.getId(), reason);
     }
 
     /** The bridge's own (WTX_AUTO) most-recent non-terminal execution for an instrument. */
