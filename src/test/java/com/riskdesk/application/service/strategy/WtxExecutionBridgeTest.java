@@ -69,6 +69,8 @@ class WtxExecutionBridgeTest {
         assertEquals(2, row.getQuantity());
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus());
         assertEquals(ExecutionTriggerSource.WTX_AUTO, row.getTriggerSource());
+        // The broker order id is persisted on ibkrOrderId so onOrderStatus (orderId-only lookup) can locate it.
+        assertEquals(999, row.getIbkrOrderId());
     }
 
     @Test
@@ -95,6 +97,8 @@ class WtxExecutionBridgeTest {
         assertEquals(ExecutionStatus.EXIT_SUBMITTED, row.getStatus());
         assertNotNull(row.getExitSubmittedAt());
         assertNull(row.getClosedAt(), "closedAt must stay null until the broker fill is reconciled");
+        // The close order id is persisted on ibkrOrderId so onOrderStatus can reconcile the fill.
+        assertEquals(999, row.getIbkrOrderId());
         // The flatten order is a SHORT (sell) of the original 2 contracts
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
                 "SHORT".equals(r.action()) && r.quantity() == 2));
@@ -135,16 +139,19 @@ class WtxExecutionBridgeTest {
 
         assertEquals(2, repo.all().size());
         TradeExecutionRecord prior = repo.byId(priorShort.getId());
-        // Prior row goes non-terminal (EXIT_SUBMITTED), NOT CLOSED — broker fill unconfirmed.
-        assertEquals(ExecutionStatus.EXIT_SUBMITTED, prior.getStatus(),
-                "prior short row must be retired to EXIT_SUBMITTED by the reverse");
-        assertNull(prior.getClosedAt());
+        // Prior row is terminally CLOSED: the reverse is one broker order tracked on the NEW
+        // row, so the prior row can never get its own fill callback — a non-terminal status
+        // would strand it. Closed only AFTER the reverse order was accepted.
+        assertEquals(ExecutionStatus.CLOSED, prior.getStatus(),
+                "prior short row must be terminally closed by the accepted reverse");
+        assertNotNull(prior.getClosedAt());
 
         TradeExecutionRecord fresh = repo.all().stream()
                 .filter(r -> r.getStatus() == ExecutionStatus.ENTRY_SUBMITTED)
                 .findFirst().orElseThrow();
         assertEquals("LONG", fresh.getAction());
         assertEquals(2, fresh.getQuantity(), "row quantity is the resulting position size");
+        assertEquals(999, fresh.getIbkrOrderId(), "new row carries the reverse order id for fill tracking");
         // IBKR order is doubled: flatten 2 short + open 2 long = 4
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
                 "LONG".equals(r.action()) && r.quantity() == 4));

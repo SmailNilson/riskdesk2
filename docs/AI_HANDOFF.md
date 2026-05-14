@@ -15,14 +15,17 @@ Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:
   row. The bridge locates its own open `WTX_AUTO` execution row via the new
   `TradeExecutionRepositoryPort.findActiveByInstrumentAndTriggerSource(...)`, submits the flatten
   order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal). `REVERSE_*`
-  retires the prior row to `EXIT_SUBMITTED` — only **after** the new reverse order is accepted —
-  before opening the new one. Row `quantity` is the resulting position size; the IBKR order
-  quantity is doubled only for a REVERSE.
+  retires the prior row to **`CLOSED`** (terminal) — only **after** the new reverse order is
+  accepted — because the reverse is a single broker order tracked on the NEW row, so the prior
+  row can never receive its own fill callback; a non-terminal status would strand it. Row
+  `quantity` is the resulting position size; the IBKR order quantity is doubled only for a REVERSE.
 - **Exit-fill reconciliation.** `ExecutionFillTrackingService.onOrderStatus` now transitions an
-  `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback (located via the `executionKey`
-  orderRef). Without it an `EXIT_SUBMITTED` row would stay non-terminal forever, leaving a phantom
-  open position. `handleClose` also skips submission when the open row is already `EXIT_SUBMITTED`
-  — no duplicate flatten while a close is in flight.
+  `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback. That callback is located **only by
+  `orderId`** (`onOrderStatus` receives no `orderRef`), so the bridge persists the broker order id
+  on `ibkrOrderId` at submission time for both entries and closes — otherwise an early
+  `Filled` status arriving before `execDetails` would be dropped. `handleClose` also skips
+  submission when the open row is already `EXIT_SUBMITTED` — no duplicate flatten while a close
+  is in flight.
 - When a CLOSE finds no open WTX row, it logs a warning and skips submission — never fires a naked order.
 
 ## WTX Strategy — Pine Script profile parity (2026-05-13)

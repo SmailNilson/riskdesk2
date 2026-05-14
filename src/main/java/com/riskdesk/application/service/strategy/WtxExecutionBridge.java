@@ -174,6 +174,11 @@ public class WtxExecutionBridge {
                     persisted.getNormalizedEntryPrice()
             ));
             persisted.setEntryOrderId(submission.brokerOrderId());
+            // Persist the broker order id on ibkrOrderId too: ExecutionFillTrackingService.onOrderStatus
+            // locates rows ONLY by orderId (it receives no orderRef), so without this an early
+            // orderStatus(Filled) before execDetails would be dropped and the row would never
+            // leave ENTRY_SUBMITTED.
+            persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
             persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
             persisted.setStatusReason("WTX " + action.name() + " submitted: " + submission.brokerOrderStatus());
             persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
@@ -182,7 +187,11 @@ public class WtxExecutionBridge {
             log.info("WTX [{}] IBKR entry submitted — action={} positionQty={} orderQty={} orderAction={} brokerOrderId={}",
                     state.instrument(), action, positionQty, orderQty, orderAction, submission.brokerOrderId());
             // Reverse order accepted by the broker — only now retire the prior position's row.
-            priorForReverse.ifPresent(prior -> markPriorRowExitSubmitted(prior,
+            // It is closed terminally (not EXIT_SUBMITTED): the reverse is a SINGLE broker order
+            // tracked on the NEW row, so the prior row can never receive a fill callback of its
+            // own. Leaving it non-terminal would strand it in Active Positions and let it block
+            // later close handling once the new position closes.
+            priorForReverse.ifPresent(prior -> retirePriorReverseRow(prior,
                     "WTX reversed by " + action.name() + " (broker order " + submission.brokerOrderId() + ")"));
         } catch (RuntimeException e) {
             persisted.setStatus(ExecutionStatus.FAILED);
@@ -247,8 +256,12 @@ public class WtxExecutionBridge {
             Instant now = Instant.now();
             // Non-terminal: the broker has only ACCEPTED the close, not confirmed the fill.
             // EXIT_SUBMITTED keeps the row visible in Active Positions; ExecutionFillTrackingService
-            // transitions it to CLOSED on the Filled callback (located via the executionKey orderRef).
+            // transitions it to CLOSED on the Filled callback. That callback is located ONLY by
+            // orderId (onOrderStatus receives no orderRef), so the close order id MUST be persisted
+            // on ibkrOrderId here — otherwise an early Filled status would be dropped and the row
+            // would stay EXIT_SUBMITTED forever.
             row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
             row.setStatusReason("WTX " + action.name() + " — IBKR close submitted: " + submission.brokerOrderStatus()
                     + " (broker order " + submission.brokerOrderId() + ")");
             row.setExitSubmittedAt(now);
@@ -267,20 +280,28 @@ public class WtxExecutionBridge {
     }
 
     /**
-     * Retires a superseded WTX execution row to EXIT_SUBMITTED (non-terminal) without
-     * touching the broker — used for the prior row of a REVERSE, whose flatten leg rides
-     * on the already-accepted reverse order. Kept non-terminal so it stays visible until
-     * downstream fill reconciliation closes it; never marked CLOSED here because the broker
-     * has not yet confirmed the fill.
+     * Terminally closes a superseded WTX execution row — the prior row of a REVERSE, whose
+     * flatten leg rides on the already-accepted reverse order. It is marked {@code CLOSED}
+     * (not {@code EXIT_SUBMITTED}) because the reverse is a single broker order tracked on
+     * the NEW row: the prior row can never receive its own fill callback, so a non-terminal
+     * status would strand it forever in Active Positions and could later be mistaken for the
+     * sole open WTX row, blocking close handling. Only invoked AFTER the reverse order is
+     * accepted by the broker.
      */
-    private void markPriorRowExitSubmitted(TradeExecutionRecord row, String reason) {
+    private void retirePriorReverseRow(TradeExecutionRecord row, String reason) {
         Instant now = Instant.now();
-        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setStatus(ExecutionStatus.CLOSED);
         row.setStatusReason(reason);
         row.setExitSubmittedAt(now);
+        row.setClosedAt(now);
         row.setUpdatedAt(now);
         executionRepository.save(row);
-        log.info("WTX [{}] prior execution row {} → EXIT_SUBMITTED — {}", row.getInstrument(), row.getId(), reason);
+        log.info("WTX [{}] prior execution row {} → CLOSED — {}", row.getInstrument(), row.getId(), reason);
+    }
+
+    /** IBKR order ids fit in the int range; {@code ibkrOrderId} is the Integer key the fill tracker uses. */
+    private Integer toIbkrOrderId(Long brokerOrderId) {
+        return brokerOrderId == null ? null : brokerOrderId.intValue();
     }
 
     /** The bridge's own (WTX_AUTO) most-recent non-terminal execution for an instrument. */
