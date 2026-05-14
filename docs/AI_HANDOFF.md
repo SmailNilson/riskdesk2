@@ -1,6 +1,35 @@
 # AI Handoff
 
-Last updated: 2026-05-13
+Last updated: 2026-05-14
+
+## WTX auto-execution — lifecycle correctness fix (2026-05-14)
+
+Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:
+
+- **Broker-side action token.** Execution rows store `action = "LONG"/"SHORT"` instead of the
+  WTX enum name. This is the token `IbGatewayBrokerGateway` interprets correctly (only `"SHORT"`
+  maps to `Action.SELL`; anything else is a BUY — so `"BUY"`/`"SELL"` would both be misread as
+  buys) and which `ActivePositionView` also resolves to direction + PnL sign. The WTX semantic
+  action is preserved in `statusReason`.
+- **Exit lifecycle.** `CLOSE_LONG` / `CLOSE_SHORT` no longer create a fresh `ENTRY_SUBMITTED`
+  row. The bridge locates its own open `WTX_AUTO` execution row via the new
+  `TradeExecutionRepositoryPort.findActiveByInstrumentAndTriggerSource(...)`, submits the flatten
+  order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal).
+- **REVERSE = two 1:1 orders.** A `REVERSE_*` is decomposed into a **close leg** against the
+  prior row (→ `EXIT_SUBMITTED`) and an **open leg** for the new row (→ `ENTRY_SUBMITTED`) —
+  two real broker orders instead of one doubled order. This means each row is a clean 1:1
+  `order ↔ row` pair the standard fill tracker reconciles via its own `ibkrOrderId`; there is
+  no "one order, two rows" mismatch and the prior row is never stranded (terminal-before-fill
+  or orphaned-non-terminal). All open-leg validation runs before the close leg, and if the
+  close leg is rejected the reverse aborts without opening anything.
+- **Exit-fill reconciliation.** `ExecutionFillTrackingService.onOrderStatus` now transitions an
+  `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback. That callback is located **only by
+  `orderId`** (`onOrderStatus` receives no `orderRef`), so the bridge persists the broker order id
+  on `ibkrOrderId` at submission time for both entries and closes — otherwise an early
+  `Filled` status arriving before `execDetails` would be dropped. `handleClose` also skips
+  submission when the open row is already `EXIT_SUBMITTED` — no duplicate flatten while a close
+  is in flight.
+- When a CLOSE finds no open WTX row, it logs a warning and skips submission — never fires a naked order.
 
 ## WTX Strategy — Pine Script profile parity (2026-05-13)
 

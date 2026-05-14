@@ -44,6 +44,15 @@ public interface TradeExecutionRepositoryPort {
     Optional<TradeExecutionRecord> findActiveByInstrument(String instrument);
 
     /**
+     * WTX auto-execution — most recent non-terminal execution for the given instrument
+     * filtered to a single trigger source. Lets the WTX bridge locate its own open row
+     * (the one it must close/reverse) without ever touching a mentor or quant execution
+     * for the same symbol.
+     */
+    Optional<TradeExecutionRecord> findActiveByInstrumentAndTriggerSource(String instrument,
+                                                                          ExecutionTriggerSource triggerSource);
+
+    /**
      * PR #303 — auto-arm pipeline.
      * Returns all currently-armed (PENDING_ENTRY_SUBMISSION) executions whose
      * {@code triggerSource} matches the supplied source. Used by the

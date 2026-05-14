@@ -183,6 +183,7 @@ class QuantManualTradeServiceTest {
         @Override public Optional<TradeExecutionRecord> findByIbkrOrderId(Integer id) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findByExecutionKey(String key) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findActiveByInstrument(String instrument) { return Optional.empty(); }
+        @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTriggerSource(String instrument, ExecutionTriggerSource src) { return Optional.empty(); }
         @Override public List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource src) { return List.of(); }
         @Override public List<TradeExecutionRecord> findAllActive() { return List.of(); }
     }
