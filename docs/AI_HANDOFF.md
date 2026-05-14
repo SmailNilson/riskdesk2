@@ -14,11 +14,14 @@ Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:
 - **Exit lifecycle.** `CLOSE_LONG` / `CLOSE_SHORT` no longer create a fresh `ENTRY_SUBMITTED`
   row. The bridge locates its own open `WTX_AUTO` execution row via the new
   `TradeExecutionRepositoryPort.findActiveByInstrumentAndTriggerSource(...)`, submits the flatten
-  order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal). `REVERSE_*`
-  retires the prior row to **`CLOSED`** (terminal) — only **after** the new reverse order is
-  accepted — because the reverse is a single broker order tracked on the NEW row, so the prior
-  row can never receive its own fill callback; a non-terminal status would strand it. Row
-  `quantity` is the resulting position size; the IBKR order quantity is doubled only for a REVERSE.
+  order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal).
+- **REVERSE = two 1:1 orders.** A `REVERSE_*` is decomposed into a **close leg** against the
+  prior row (→ `EXIT_SUBMITTED`) and an **open leg** for the new row (→ `ENTRY_SUBMITTED`) —
+  two real broker orders instead of one doubled order. This means each row is a clean 1:1
+  `order ↔ row` pair the standard fill tracker reconciles via its own `ibkrOrderId`; there is
+  no "one order, two rows" mismatch and the prior row is never stranded (terminal-before-fill
+  or orphaned-non-terminal). All open-leg validation runs before the close leg, and if the
+  close leg is rejected the reverse aborts without opening anything.
 - **Exit-fill reconciliation.** `ExecutionFillTrackingService.onOrderStatus` now transitions an
   `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback. That callback is located **only by
   `orderId`** (`onOrderStatus` receives no `orderRef`), so the bridge persists the broker order id
