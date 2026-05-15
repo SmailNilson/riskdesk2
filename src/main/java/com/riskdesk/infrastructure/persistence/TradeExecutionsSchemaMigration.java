@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.persistence;
 import com.riskdesk.infrastructure.persistence.entity.TradeExecutionEntity;
 import jakarta.annotation.PostConstruct;
 import jakarta.persistence.Column;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Transient;
 import jakarta.persistence.Version;
@@ -53,19 +54,25 @@ public class TradeExecutionsSchemaMigration {
     }
 
     @PostConstruct
-    void dropLegacyNotNullConstraints() {
+    void runLegacyCleanups() {
         Set<String> entityNullableColumns = collectEntityNullableColumns();
-        if (entityNullableColumns.isEmpty()) {
-            return;
-        }
+        Set<String> enumColumns = collectEnumColumns();
         try (Connection connection = dataSource.getConnection()) {
             for (String column : entityNullableColumns) {
                 dropNotNullIfPresent(connection, column);
             }
+            // Legacy enum CHECK constraints freeze the value set at table-creation time.
+            // Any enum value added to the Java enum afterwards (e.g. WTX_AUTO on
+            // ExecutionTriggerSource) is rejected by the DB until the CHECK is dropped.
+            // Hibernate ddl-auto=update never refreshes CHECK constraints, so we drop
+            // them here and rely on the Java @Enumerated mapping to validate inputs.
+            for (String column : enumColumns) {
+                dropEnumCheckIfPresent(connection, column);
+            }
         } catch (SQLException e) {
             // Don't hard-fail startup on the check — let Hibernate proceed and surface
             // any real schema problem on its own.
-            log.warn("Could not verify/drop legacy NOT NULL constraints on {} — letting "
+            log.warn("Could not verify/clean legacy constraints on {} — letting "
                     + "Hibernate proceed: {}", TABLE, e.getMessage());
         }
     }
@@ -123,6 +130,53 @@ public class TradeExecutionsSchemaMigration {
             }
         }
         return sb.toString();
+    }
+
+    /** Columns mapped to an {@code @Enumerated} type — their value set evolves with the Java enum. */
+    private Set<String> collectEnumColumns() {
+        Set<String> columns = new LinkedHashSet<>();
+        for (Field field : TradeExecutionEntity.class.getDeclaredFields()) {
+            if (field.isSynthetic() || java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            if (!field.isAnnotationPresent(Enumerated.class)) {
+                continue;
+            }
+            columns.add(resolveColumnName(field, field.getAnnotation(Column.class)));
+        }
+        return columns;
+    }
+
+    /**
+     * Drop the legacy {@code <table>_<column>_check} CHECK constraint when present.
+     * Postgres's Hibernate dialect uses that naming for {@code @Enumerated(EnumType.STRING)}
+     * columns. The Java enum (@Enumerated) keeps validating writes, so dropping the DB-side
+     * check just removes a frozen-at-create-time value list that drifts behind the code.
+     */
+    private void dropEnumCheckIfPresent(Connection connection, String column) throws SQLException {
+        String constraintName = TABLE + "_" + column + "_check";
+        if (!checkConstraintExists(connection, constraintName)) {
+            return;
+        }
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE " + TABLE + " DROP CONSTRAINT IF EXISTS " + constraintName);
+        }
+        log.warn("Dropped legacy enum CHECK constraint {} — the Java @Enumerated mapping "
+                + "still validates inputs; the frozen DB-side value list was rejecting "
+                + "enum values added after the table was created.", constraintName);
+    }
+
+    private boolean checkConstraintExists(Connection connection, String constraintName) throws SQLException {
+        String sql = "SELECT 1 FROM information_schema.table_constraints "
+                + "WHERE LOWER(table_name) = ? AND LOWER(constraint_name) = ? "
+                + "  AND constraint_type = 'CHECK'";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, TABLE);
+            ps.setString(2, constraintName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
     }
 
     private void dropNotNullIfPresent(Connection connection, String column) throws SQLException {
