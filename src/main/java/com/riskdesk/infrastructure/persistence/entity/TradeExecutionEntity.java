@@ -93,10 +93,16 @@ public class TradeExecutionEntity {
     @Column(nullable = false, precision = 19, scale = 6)
     private BigDecimal normalizedEntryPrice;
 
-    @Column(nullable = false, precision = 19, scale = 6)
+    /**
+     * Nullable since WTX_AUTO / QUANT_AUTO_ARM rows are armed before any stop
+     * loss is known (BASELINE has no SL; trailing arms only after activation).
+     * The mentor execution path still sets it from the review's planned stop.
+     */
+    @Column(nullable = true, precision = 19, scale = 6)
     private BigDecimal virtualStopLoss;
 
-    @Column(nullable = false, precision = 19, scale = 6)
+    /** Nullable since WTX/Quant auto rows have no pre-armed take profit — see {@link #virtualStopLoss}. */
+    @Column(nullable = true, precision = 19, scale = 6)
     private BigDecimal virtualTakeProfit;
 
     @Column(precision = 19, scale = 6)
