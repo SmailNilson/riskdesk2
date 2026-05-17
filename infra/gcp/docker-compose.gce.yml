@@ -34,7 +34,7 @@ services:
       postgres:
         condition: service_healthy
       ibkr-gateway:
-        condition: service_started
+        condition: service_healthy
 
   edge:
     image: nginx:1.27-alpine
@@ -59,6 +59,12 @@ services:
     volumes:
       - /var/lib/riskdesk/ibkr-settings:/home/ibgateway/tws_settings
       - /var/log/riskdesk/ibkr:/home/ibgateway/logs
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost ${IBKR_API_PORT:-4003} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
 
 volumes:
   pgdata:
