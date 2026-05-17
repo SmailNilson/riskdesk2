@@ -252,13 +252,14 @@ jobs:
 
       - name: Upload runtime config bundle
         run: |
-          gcloud storage cp infra/gcp/docker-compose.gce.yml "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" &
-          gcloud storage cp infra/gcp/render-secrets-env.sh "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" &
-          gcloud storage cp infra/gcp/backup-postgres-to-gcs.sh "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" &
-          gcloud storage cp infra/gcp/refresh-runtime-on-vm.sh "gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh" &
-          gcloud storage cp infra/docker/nginx/local-prod.conf "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" &
-          gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" &
-          wait
+          pids=()
+          gcloud storage cp infra/gcp/docker-compose.gce.yml "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" & pids+=($!)
+          gcloud storage cp infra/gcp/render-secrets-env.sh "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" & pids+=($!)
+          gcloud storage cp infra/gcp/backup-postgres-to-gcs.sh "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" & pids+=($!)
+          gcloud storage cp infra/gcp/refresh-runtime-on-vm.sh "gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh" & pids+=($!)
+          gcloud storage cp infra/docker/nginx/local-prod.conf "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" & pids+=($!)
+          gcloud storage cp infra/docker/postgres/init/01-extensions.sql "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" & pids+=($!)
+          for pid in "${pids[@]}"; do wait "$pid" || { echo "GCS upload failed (pid $pid)"; exit 1; }; done
 
       - name: Deploy on VM and wait for healthy backend
         env:
