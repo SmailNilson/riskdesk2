@@ -280,7 +280,7 @@ jobs:
             --project "${PROJECT_ID}" &
           IAP_PID=$!
           echo "IAP tunnel PID=${IAP_PID} — waiting for it to bind..."
-          sleep 8
+          for i in $(seq 1 15); do nc -z localhost 2222 2>/dev/null && break; sleep 1; done
 
           SSH="ssh -i $HOME/.ssh/deploy_key
                    -o IdentitiesOnly=yes
@@ -291,7 +291,7 @@ jobs:
 
           DEPLOY_OK=false
           for attempt in 1 2 3; do
-            $SSH "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.tag-build-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.tag-build-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.tag-build-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 10; done\" && echo Deploy OK'" \
+            $SSH "sudo bash -lc 'gcloud storage cp gs://${CONFIG_BUCKET}/riskdesk/refresh-runtime-on-vm.sh /opt/riskdesk/refresh-runtime-on-vm.sh && chmod +x /opt/riskdesk/refresh-runtime-on-vm.sh && BACKEND_IMAGE=\"${{ needs.tag-build-push.outputs.backend_image }}\" FRONTEND_IMAGE=\"${{ needs.tag-build-push.outputs.frontend_image }}\" IBKR_GATEWAY_IMAGE=\"${{ needs.tag-build-push.outputs.ibkr_gateway_image }}\" /opt/riskdesk/refresh-runtime-on-vm.sh && timeout 480 bash -c \"until curl -sf http://localhost:3000/actuator/health 2>/dev/null | grep -q UP; do echo waiting for backend...; sleep 3; done\" && echo Deploy OK'" \
               && DEPLOY_OK=true && break
             echo "SSH attempt ${attempt}/3 failed — retrying in 15s..."
             [ "${attempt}" -lt 3 ] && sleep 15

@@ -64,11 +64,12 @@ mkdir -p /opt/riskdesk /opt/riskdesk/nginx /opt/riskdesk/postgres-init
 mkdir -p /var/lib/riskdesk/ibkr-settings /var/log/riskdesk/ibkr
 chown -R 1000:1000 /var/lib/riskdesk/ibkr-settings /var/log/riskdesk/ibkr
 
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" /opt/riskdesk/docker-compose.yml
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" /opt/riskdesk/render-secrets-env.sh
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" /opt/riskdesk/backup-postgres-to-gcs.sh
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" /opt/riskdesk/nginx/local-prod.conf
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" /opt/riskdesk/postgres-init/01-extensions.sql
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" /opt/riskdesk/docker-compose.yml &
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" /opt/riskdesk/render-secrets-env.sh &
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" /opt/riskdesk/backup-postgres-to-gcs.sh &
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" /opt/riskdesk/nginx/local-prod.conf &
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" /opt/riskdesk/postgres-init/01-extensions.sql &
+wait
 
 chmod +x /opt/riskdesk/render-secrets-env.sh /opt/riskdesk/backup-postgres-to-gcs.sh
 
@@ -103,5 +104,6 @@ EOF
 COMPOSE_CMD=${COMPOSE_CMD:-$(compose_cmd)}
 
 cd /opt/riskdesk
-${COMPOSE_CMD} pull
-${COMPOSE_CMD} up -d --remove-orphans --force-recreate
+${COMPOSE_CMD} pull backend frontend
+${COMPOSE_CMD} up -d --no-recreate ibkr-gateway postgres
+${COMPOSE_CMD} up -d --remove-orphans --force-recreate backend frontend edge
