@@ -106,14 +106,14 @@ COMPOSE_CMD=${COMPOSE_CMD:-$(compose_cmd)}
 
 cd /opt/riskdesk
 ${COMPOSE_CMD} pull backend frontend
-# Recreate ibkr-gateway only if it has no healthcheck yet (one-time migration).
-# Containers created before the healthcheck was added report <nil> — recreating
-# them picks up the new config so that service_healthy can be satisfied.
-IBKR_HC=$(docker inspect riskdesk-ibkr-gateway --format='{{.Config.Healthcheck}}' 2>/dev/null || true)
-if [ "${IBKR_HC}" = "<nil>" ] || [ -z "${IBKR_HC}" ]; then
-  ${COMPOSE_CMD} up -d --force-recreate ibkr-gateway
-else
+# Skip recreating ibkr-gateway when it is currently healthy — restarting
+# it forces a full IB re-authentication (2-5 min). If unhealthy or missing,
+# recreate it so that the new config and healthcheck are applied.
+IBKR_STATUS=$(docker inspect riskdesk-ibkr-gateway --format='{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+if [ "${IBKR_STATUS}" = "healthy" ]; then
   ${COMPOSE_CMD} up -d --no-recreate ibkr-gateway
+else
+  ${COMPOSE_CMD} up -d --force-recreate ibkr-gateway
 fi
 ${COMPOSE_CMD} up -d --no-recreate postgres
 ${COMPOSE_CMD} up -d --remove-orphans --force-recreate backend frontend edge
