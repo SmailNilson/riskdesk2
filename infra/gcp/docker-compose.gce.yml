@@ -34,7 +34,7 @@ services:
       postgres:
         condition: service_healthy
       ibkr-gateway:
-        condition: service_healthy
+        condition: service_started
 
   edge:
     image: nginx:1.27-alpine
