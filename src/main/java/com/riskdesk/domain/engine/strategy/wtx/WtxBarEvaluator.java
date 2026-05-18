@@ -118,6 +118,7 @@ public final class WtxBarEvaluator {
                 action,
                 WtxEnrichmentSnapshot.empty(),
                 candleTs,
+                null,
                 null
         ));
     }

@@ -27,6 +27,26 @@ public enum WtxRoutingOutcome {
     SKIPPED_NO_QTY,
     /** A close/reverse was requested but no open WTX execution row exists for this timeframe. */
     SKIPPED_NO_OPEN_ROW,
-    /** The broker rejected the order. */
-    FAILED
+    /**
+     * Pre-flight margin check denied the order: estimated initial margin exceeded
+     * available funds. No broker order was submitted — opposite of {@link #FAILED_BROKER_REJECT}
+     * where IBKR rejects after submission.
+     */
+    SKIPPED_INSUFFICIENT_MARGIN,
+    /** The broker rejected the order — generic / legacy fallback. Prefer the typed variants below. */
+    FAILED,
+    /**
+     * IBKR did not acknowledge the order within the configured wait window.
+     * Broker state is <b>unknown</b>: the order may have been received but the
+     * {@code orderStatus} callback was lost. The corresponding execution row is
+     * left non-terminal so the live position stays visible and the operator can
+     * reconcile manually.
+     */
+    FAILED_TIMEOUT,
+    /**
+     * IBKR explicitly rejected the order (Cancelled / ApiCancelled / Inactive /
+     * non-margin {@code rejectReason}). Distinct from {@link #SKIPPED_INSUFFICIENT_MARGIN}
+     * (which is decided pre-flight) and from {@link #FAILED_TIMEOUT} (where the state is unknown).
+     */
+    FAILED_BROKER_REJECT
 }

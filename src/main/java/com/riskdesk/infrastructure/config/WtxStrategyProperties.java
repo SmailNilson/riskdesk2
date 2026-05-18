@@ -49,6 +49,25 @@ public class WtxStrategyProperties {
     // IBKR auto-execution — used by WtxExecutionBridge when state.autoExecutionEnabled is true
     private String brokerAccountId = "wtx-default";
 
+    /**
+     * Pre-flight margin check policy. PORTFOLIO_HEURISTIC (default) uses the existing
+     * portfolio snapshot cache (no extra IBKR call, zero latency). OFF disables the check
+     * (legacy behavior — IBKR rejects with code 201 if margin is insufficient). WHATIF
+     * sends an {@code Order.whatIf=true} to IBKR for an exact ground-truth check but adds
+     * 200-500ms of latency per signal — opt-in only.
+     */
+    public enum PreflightMode { OFF, PORTFOLIO_HEURISTIC, WHATIF }
+    private PreflightMode preflightMode = PreflightMode.PORTFOLIO_HEURISTIC;
+
+    /**
+     * Conservative margin buffer applied by the PORTFOLIO_HEURISTIC pre-flight: the
+     * estimated initial margin for the order is computed as
+     * {@code price × contractMultiplier × qty × preflightMarginPercent}. Default 0.15
+     * (15%) — IBKR futures init margin is typically 10-12% for the micros, the extra
+     * buffer absorbs intraday changes and overnight margin bumps.
+     */
+    private BigDecimal preflightMarginPercent = new BigDecimal("0.15");
+
     public WtxConfig toConfig() {
         return new WtxConfig(
                 instruments, timeframes,
@@ -155,4 +174,10 @@ public class WtxStrategyProperties {
 
     public String getBrokerAccountId() { return brokerAccountId; }
     public void setBrokerAccountId(String brokerAccountId) { this.brokerAccountId = brokerAccountId; }
+
+    public PreflightMode getPreflightMode() { return preflightMode; }
+    public void setPreflightMode(PreflightMode preflightMode) { this.preflightMode = preflightMode; }
+
+    public BigDecimal getPreflightMarginPercent() { return preflightMarginPercent; }
+    public void setPreflightMarginPercent(BigDecimal preflightMarginPercent) { this.preflightMarginPercent = preflightMarginPercent; }
 }

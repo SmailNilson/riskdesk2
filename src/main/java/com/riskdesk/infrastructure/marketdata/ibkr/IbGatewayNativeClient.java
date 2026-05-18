@@ -59,7 +59,6 @@ public class IbGatewayNativeClient {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration SNAPSHOT_TIMEOUT = Duration.ofSeconds(2);
-    private static final Duration ORDER_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration RECONNECT_COOLDOWN = Duration.ofSeconds(5);
     /** Subscriptions that produce no price tick for this long are considered stale. */
     private static final long STALE_PRICE_SECONDS = 60L;
@@ -106,8 +105,63 @@ public class IbGatewayNativeClient {
     private volatile IbGatewayContractResolver contractResolverRef;
     private volatile int depthNumRows = 10;
 
+    /**
+     * Async error contexts captured from {@code message(int id, int errorCode, ...)} for
+     * orders currently in flight. {@link #placeLimitOrder} consumes the entry indexed by
+     * IBKR {@code orderId} to enrich the rejection exception with the structured error
+     * code (e.g. 201 = margin insufficient) and the broker text.
+     *
+     * <p>Entries are removed by {@code placeLimitOrder} on completion. Stale entries
+     * (older than {@link #ORDER_ERROR_CONTEXT_TTL}) are purged opportunistically when
+     * new ones arrive — no scheduled cleanup needed.</p>
+     */
+    private final Map<Integer, OrderErrorContext> pendingOrderErrors = new ConcurrentHashMap<>();
+    private static final Duration ORDER_ERROR_CONTEXT_TTL = Duration.ofSeconds(30);
+
+    /** Snapshot of an IBKR async error tied to a specific order id. */
+    private record OrderErrorContext(int errorCode, String message, Instant at) {}
+
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
+    }
+
+    /**
+     * Effective order-ack timeout, read live from {@link IbkrProperties} so an operator
+     * can widen it without restarting (e.g. raise to 30s during a known IBKR slow window).
+     * Default is 15s — see {@link IbkrProperties#getOrderAckTimeoutMs()}.
+     */
+    private Duration orderTimeout() {
+        int ms = properties.getOrderAckTimeoutMs();
+        return Duration.ofMillis(ms > 0 ? ms : 15_000);
+    }
+
+    /**
+     * Order-level error codes we want to capture for typed rejection mapping.
+     * 201 = margin (the bug we observed in prod), 202 = order cancelled,
+     * 203 = security not allowed, 399 = warning that can carry margin info.
+     */
+    private static boolean isOrderErrorCode(int code) {
+        return code == 201 || code == 202 || code == 203 || code == 399;
+    }
+
+    /**
+     * Heuristic: does the broker text look like a margin / equity / buying-power complaint?
+     * Used as a fallback when {@code errorCode} is not surfaced through the {@code message()}
+     * callback (e.g. when the reject arrives via {@code orderState.rejectReason()} instead).
+     */
+    private static boolean looksLikeMarginReject(String text) {
+        if (text == null) return false;
+        String lower = text.toLowerCase();
+        return lower.contains("margin")
+            || lower.contains("equity")
+            || lower.contains("buying power")
+            || lower.contains("insufficient funds");
+    }
+
+    /** Drop stale {@link #pendingOrderErrors} entries — opportunistic, no scheduler needed. */
+    private void purgeStaleOrderErrors() {
+        Instant cutoff = Instant.now().minus(ORDER_ERROR_CONTEXT_TTL);
+        pendingOrderErrors.entrySet().removeIf(e -> e.getValue().at().isBefore(cutoff));
     }
 
     /**
@@ -660,7 +714,7 @@ public class IbGatewayNativeClient {
 
         boolean completed = false;
         try {
-            completed = latch.await(ORDER_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            completed = latch.await(orderTimeout().toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             error.compareAndSet(null, "Interrupted while waiting for IBKR order acknowledgement.");
@@ -670,6 +724,9 @@ public class IbGatewayNativeClient {
             } catch (Exception ignored) {
             }
         }
+
+        // Pre-clean the async error map so we look up the right entry, then capture it.
+        OrderErrorContext asyncErr = pendingOrderErrors.remove(order.orderId());
 
         if (acceptedStatus.get() != null) {
             return new NativeOrderSubmission((long) order.orderId(), acceptedStatus.get(), orderRef, Instant.now());
@@ -681,13 +738,38 @@ public class IbGatewayNativeClient {
             return new NativeOrderSubmission(snapshot.orderId(), snapshot.status(), snapshot.orderRef(), Instant.now());
         }
 
-        if (error.get() != null) {
-            throw new IllegalStateException(error.get());
+        // Build a typed rejection exception so callers (WtxExecutionBridge) can map it to
+        // the right routing outcome — SKIPPED_INSUFFICIENT_MARGIN / FAILED_TIMEOUT / FAILED_BROKER_REJECT.
+        // Prefer the async errorCode when available (captured by message() above), then the
+        // synchronous error captured by the IOrderHandler, then the timeout fallback.
+        Integer brokerCode = asyncErr != null ? asyncErr.errorCode() : null;
+        String brokerMsg = asyncErr != null ? asyncErr.message() : error.get();
+        String detail;
+
+        IbkrOrderRejectionException.Kind kind;
+        if (brokerCode != null && brokerCode == 201) {
+            kind = IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN;
+            detail = "IBKR margin insufficient (code=201): " + brokerMsg;
+        } else if (looksLikeMarginReject(brokerMsg) || looksLikeMarginReject(error.get())) {
+            kind = IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN;
+            String text = brokerMsg != null ? brokerMsg : error.get();
+            detail = "IBKR margin insufficient: " + text;
+        } else if (error.get() != null && (error.get().contains("Cancelled") || error.get().contains("ApiCancelled"))) {
+            kind = IbkrOrderRejectionException.Kind.CANCELLED;
+            detail = error.get();
+        } else if (error.get() != null) {
+            kind = IbkrOrderRejectionException.Kind.BROKER_REJECT;
+            detail = error.get();
+        } else if (!completed) {
+            kind = IbkrOrderRejectionException.Kind.TIMEOUT;
+            detail = "IBKR order submission timed out without acknowledgement.";
+        } else {
+            kind = IbkrOrderRejectionException.Kind.UNKNOWN;
+            detail = "IBKR order submission did not yield a confirmed status.";
         }
-        if (!completed) {
-            throw new IllegalStateException("IBKR order submission timed out without acknowledgement.");
-        }
-        throw new IllegalStateException("IBKR order submission did not yield a confirmed status.");
+        throw new IbkrOrderRejectionException(kind, brokerCode,
+                brokerMsg != null ? brokerMsg : error.get(),
+                detail);
     }
 
 
@@ -1243,7 +1325,7 @@ public class IbGatewayNativeClient {
         };
 
         controller.reqLiveOrders(handler);
-        awaitLatch(latch, "live orders", ORDER_TIMEOUT);
+        awaitLatch(latch, "live orders", orderTimeout());
         try {
             controller.removeLiveOrderHandler(handler);
         } catch (Exception ignored) {
@@ -1279,7 +1361,7 @@ public class IbGatewayNativeClient {
         };
 
         controller.reqCompletedOrders(handler);
-        awaitLatch(latch, "completed orders", ORDER_TIMEOUT);
+        awaitLatch(latch, "completed orders", orderTimeout());
         return Optional.ofNullable(found.get());
     }
 
@@ -1376,6 +1458,13 @@ public class IbGatewayNativeClient {
                 }
                 // Connection never completed — nothing active to cancel.
                 submitCleanup(ctx, false);
+            }
+            // Capture order-level error codes so placeLimitOrder() can build a typed
+            // IbkrOrderRejectionException (e.g. 201 = margin) instead of a generic
+            // "timed out without acknowledgement" — which masked the real cause in prod.
+            if (id > 0 && isOrderErrorCode(errorCode)) {
+                pendingOrderErrors.put(id, new OrderErrorContext(errorCode, errorMsg, Instant.now()));
+                purgeStaleOrderErrors();
             }
             log.warn("IB Gateway message id={} code={} msg={}", id, errorCode, errorMsg);
         }

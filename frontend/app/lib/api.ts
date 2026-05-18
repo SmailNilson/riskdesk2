@@ -1618,7 +1618,10 @@ export type WtxRoutingOutcome =
   | 'SKIPPED_NO_PRICE'
   | 'SKIPPED_NO_QTY'
   | 'SKIPPED_NO_OPEN_ROW'
-  | 'FAILED';
+  | 'SKIPPED_INSUFFICIENT_MARGIN'
+  | 'FAILED'
+  | 'FAILED_TIMEOUT'
+  | 'FAILED_BROKER_REJECT';
 
 export interface WtxEnrichmentView {
   deltaDirection: 'BUYING' | 'SELLING' | null;
@@ -1654,6 +1657,8 @@ export interface WtxSignalView {
   enrichment: WtxEnrichmentView | null;
   signalTs: string;
   routingOutcome: WtxRoutingOutcome | null;
+  /** Human-readable error reason attached to a FAILED_* or SKIPPED_INSUFFICIENT_MARGIN outcome. Null otherwise. */
+  routingErrorMessage: string | null;
 }
 
 export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {

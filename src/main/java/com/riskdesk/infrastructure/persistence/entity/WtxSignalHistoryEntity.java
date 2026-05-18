@@ -56,6 +56,13 @@ public class WtxSignalHistoryEntity {
     @Column(length = 30)
     private String routingOutcome;
 
+    /**
+     * Human-readable error message attached to a failure / insufficient-margin outcome.
+     * Truncated to 300 chars upstream. Null for successful or self-explanatory outcomes.
+     */
+    @Column(length = 300)
+    private String routingErrorMessage;
+
     @Column(nullable = false)
     private Instant signalTs;
 
@@ -95,6 +102,9 @@ public class WtxSignalHistoryEntity {
 
     public String getRoutingOutcome() { return routingOutcome; }
     public void setRoutingOutcome(String routingOutcome) { this.routingOutcome = routingOutcome; }
+
+    public String getRoutingErrorMessage() { return routingErrorMessage; }
+    public void setRoutingErrorMessage(String routingErrorMessage) { this.routingErrorMessage = routingErrorMessage; }
 
     public Instant getSignalTs() { return signalTs; }
     public void setSignalTs(Instant signalTs) { this.signalTs = signalTs; }

@@ -169,7 +169,7 @@ public class WtxStrategyService {
                 BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
                 state = applyAction(signal.suggestedAction(), state, instrument, config,
                         currentCandle.getClose(), entryAtr);
-                signal = signal.withRoutingOutcome(
+                signal = signal.withRouting(
                         routeToExecution(signal, state, currentCandle.getClose()));
             }
 
@@ -192,7 +192,7 @@ public class WtxStrategyService {
                 WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
                         "MAX_LOSS_HALT", event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
-                haltSignal = haltSignal.withRoutingOutcome(
+                haltSignal = haltSignal.withRouting(
                         routeToExecution(haltSignal, state, currentCandle.getClose()));
                 state = closePosition(state, instrument, currentCandle.getClose());
                 historyPort.save(haltSignal);
@@ -222,7 +222,7 @@ public class WtxStrategyService {
                             WtxSignal forceCloseSignal = buildCloseSignal(state, timeframe, closeAction,
                                     "FORCE_CLOSE:" + reason, java.time.Instant.now());
                             // Route to IBKR with the pre-close state so the open quantity is preserved.
-                            forceCloseSignal = forceCloseSignal.withRoutingOutcome(
+                            forceCloseSignal = forceCloseSignal.withRouting(
                                     routeToExecution(forceCloseSignal, state, exitPrice));
                             WtxStrategyState closed = closePosition(state, instrument, exitPrice);
                             historyPort.save(forceCloseSignal);
@@ -309,7 +309,7 @@ public class WtxStrategyService {
                 exit.reason().name(), event.timestamp());
         // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
         // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)
-        exitSignal = exitSignal.withRoutingOutcome(routeToExecution(exitSignal, state, exit.exitPrice()));
+        exitSignal = exitSignal.withRouting(routeToExecution(exitSignal, state, exit.exitPrice()));
         WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
@@ -331,6 +331,7 @@ public class WtxStrategyService {
                 action,
                 WtxEnrichmentSnapshot.empty().withFilters(null, null, reason),
                 ts,
+                null,
                 null
         );
     }
@@ -364,23 +365,25 @@ public class WtxStrategyService {
         }
     }
 
-    private WtxRoutingOutcome routeToExecution(WtxSignal signal, WtxStrategyState state,
-                                               BigDecimal referencePrice) {
+    private WtxRoutingResult routeToExecution(WtxSignal signal, WtxStrategyState state,
+                                              BigDecimal referencePrice) {
         if (!state.autoExecutionEnabled()) {
-            return WtxRoutingOutcome.SKIPPED_AUTO_OFF;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_AUTO_OFF);
         }
         WtxExecutionBridge bridge = executionBridgeProvider.getIfAvailable();
         if (bridge == null) {
             log.info("WTX [{} {}] auto-execution enabled but bridge not wired",
                     state.instrument(), state.timeframe());
-            return WtxRoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
         }
         try {
             return bridge.submit(signal, state, referencePrice);
         } catch (Exception e) {
             log.error("WTX [{} {}] execution bridge failure: {}",
                     state.instrument(), state.timeframe(), e.getMessage(), e);
-            return WtxRoutingOutcome.FAILED;
+            String msg = e.getMessage() == null ? "execution bridge failure" : e.getMessage();
+            return WtxRoutingResult.of(WtxRoutingOutcome.FAILED,
+                    msg.length() > 200 ? msg.substring(0, 200) : msg);
         }
     }
 
@@ -406,6 +409,7 @@ public class WtxStrategyService {
         payload.put("enrichment", signal.enrichment());
         payload.put("signalTs", signal.signalTs().toString());
         payload.put("routingOutcome", signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
+        payload.put("routingErrorMessage", signal.routingErrorMessage());
         return payload;
     }
 

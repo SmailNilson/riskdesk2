@@ -42,6 +42,7 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         e.setActionTaken(signal.suggestedAction().name());
         e.setEnrichmentJson(serializeEnrichment(signal.enrichment()));
         e.setRoutingOutcome(signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
+        e.setRoutingErrorMessage(signal.routingErrorMessage());
         e.setSignalTs(signal.signalTs());
         e.setCreatedAt(Instant.now());
         repository.save(e);
@@ -88,7 +89,8 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 com.riskdesk.domain.engine.strategy.wtx.WtxAction.valueOf(e.getActionTaken()),
                 enrichment != null ? enrichment : WtxEnrichmentSnapshot.empty(),
                 e.getSignalTs(),
-                parseRoutingOutcome(e.getRoutingOutcome())
+                parseRoutingOutcome(e.getRoutingOutcome()),
+                e.getRoutingErrorMessage()
         );
     }
 
