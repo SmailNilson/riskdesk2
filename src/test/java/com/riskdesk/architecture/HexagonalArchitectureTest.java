@@ -75,4 +75,12 @@ class HexagonalArchitectureTest {
                 "com.fasterxml.jackson.."
             )
             .because("the quant domain slice must stay framework-free and may only depend on other com.riskdesk.domain classes");
+
+    @ArchTest
+    static final ArchRule ibkr_order_rejection_exception_must_stay_outside_domain =
+        noClasses()
+            .that().resideInAPackage("..domain..")
+            .should().dependOnClassesThat().haveSimpleNameContaining("IbkrOrderRejection")
+            .because("IBKR-specific exception types must stay in infrastructure / application — the domain must "
+                + "not leak broker-specific failure modes");
 }

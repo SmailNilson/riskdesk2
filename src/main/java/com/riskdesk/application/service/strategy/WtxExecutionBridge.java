@@ -2,9 +2,12 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.service.IbkrMarginPreflightService;
+import com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
+import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -13,9 +16,11 @@ import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
@@ -50,6 +55,21 @@ import java.util.Optional;
  *       {@code orderId}.</li>
  * </ul>
  *
+ * <p><b>Failure typing (slice 1):</b> the bridge returns {@link WtxRoutingResult} — an outcome
+ * plus a human-readable error message — so the UI can distinguish three failure modes:</p>
+ * <ul>
+ *   <li>{@link WtxRoutingOutcome#SKIPPED_INSUFFICIENT_MARGIN} — broker reported margin /
+ *       equity insufficient (e.g. IBKR code 201). No position change occurred. The bridge
+ *       does NOT mark the execution row FAILED — it stays {@code ACTIVE} so a subsequent
+ *       bar can retry once funds are available.</li>
+ *   <li>{@link WtxRoutingOutcome#FAILED_TIMEOUT} — IBKR did not ack the order. The broker
+ *       state is unknown; the row is left non-terminal with statusReason hinting at
+ *       manual reconciliation.</li>
+ *   <li>{@link WtxRoutingOutcome#FAILED_BROKER_REJECT} — IBKR explicitly rejected the
+ *       order (non-margin reject). For an open leg the row is marked {@code FAILED};
+ *       for a close leg the row stays non-terminal to retry on the next bar.</li>
+ * </ul>
+ *
  * Idempotence: entry rows use executionKey {@code wtx:<instrument>:<signalTs>:<action>} and
  * {@code createIfAbsent} honours the unique constraint on the key.
  */
@@ -63,37 +83,56 @@ public class WtxExecutionBridge {
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
     private final WtxStrategyProperties wtxProperties;
+    /**
+     * Pre-flight margin check. Nullable: when the {@code IbkrMarginPreflightService}
+     * bean is not wired (legacy deploy, or {@code riskdesk.wtx.enabled=false} on the
+     * service but the bridge still constructible for tests) the bridge runs without
+     * a pre-flight — same behavior as {@link WtxStrategyProperties.PreflightMode#OFF}.
+     */
+    private final IbkrMarginPreflightService marginPreflight;
 
+    /** Test-only legacy constructor — production code uses the 5-arg variant via Spring autowiring. */
     public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null);
+    }
+
+    @Autowired
+    public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
+                              TradeExecutionRepositoryPort executionRepository,
+                              IbkrProperties ibkrProperties,
+                              WtxStrategyProperties wtxProperties,
+                              IbkrMarginPreflightService marginPreflight) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.wtxProperties = wtxProperties;
+        this.marginPreflight = marginPreflight;
     }
 
-    public WtxRoutingOutcome submit(WtxSignal signal, WtxStrategyState state) {
+    public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state) {
         return submit(signal, state, null);
     }
 
     /**
-     * Routes a WTX signal to IBKR and reports the outcome. Every early-return logs the
-     * exact gate it stopped at at INFO level so an "Auto-IBKR : ON but no order" case is
-     * always diagnosable from the backend log and the returned {@link WtxRoutingOutcome}.
-     * Returns {@code null} when routing was never meaningfully attempted (no signal/state,
-     * or a non-actionable action).
+     * Routes a WTX signal to IBKR and reports the outcome with an optional error message.
+     * Every early-return logs the exact gate it stopped at at INFO level so an
+     * "Auto-IBKR : ON but no order" case is always diagnosable from the backend log and
+     * the returned {@link WtxRoutingResult}.
+     * Returns a result with a {@code null} outcome's {@code errorMessage} when routing
+     * was never meaningfully attempted (no signal/state, or a non-actionable action).
      */
-    public WtxRoutingOutcome submit(WtxSignal signal, WtxStrategyState state, BigDecimal referencePrice) {
+    public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state, BigDecimal referencePrice) {
         if (signal == null || state == null) return null;
         if (!state.autoExecutionEnabled()) {
-            return WtxRoutingOutcome.SKIPPED_AUTO_OFF;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_AUTO_OFF);
         }
         if (!ibkrProperties.isEnabled()) {
             log.info("WTX [{} {}] routing skipped — IBKR disabled in backend (ibkrProperties.enabled=false)",
                     state.instrument(), state.timeframe());
-            return WtxRoutingOutcome.SKIPPED_IBKR_DISABLED;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_IBKR_DISABLED);
         }
 
         WtxAction action = signal.suggestedAction();
@@ -104,7 +143,7 @@ public class WtxExecutionBridge {
             instrument = Instrument.valueOf(state.instrument());
         } catch (IllegalArgumentException e) {
             log.warn("WTX execution bridge: unknown instrument {}", state.instrument());
-            return WtxRoutingOutcome.FAILED;
+            return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, "Unknown instrument: " + state.instrument());
         }
 
         return switch (action) {
@@ -126,8 +165,8 @@ public class WtxExecutionBridge {
      * orphaned non-terminal row. All open-leg validation runs before the close leg, so a
      * duplicate / missing-price reverse never fires a close that can't be followed by an open.
      */
-    private WtxRoutingOutcome handleEntry(WtxSignal signal, WtxStrategyState state, Instrument instrument,
-                                          WtxAction action, BigDecimal referencePrice) {
+    private WtxRoutingResult handleEntry(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                                         WtxAction action, BigDecimal referencePrice) {
         boolean isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String tf = signal.timeframe();
 
@@ -136,23 +175,39 @@ public class WtxExecutionBridge {
         if (executionRepository.findByExecutionKey(executionKey).isPresent()) {
             log.info("WTX [{} {}] routing skipped — duplicate execution for {}",
                     state.instrument(), tf, executionKey);
-            return WtxRoutingOutcome.SKIPPED_DUPLICATE;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
         }
 
         BigDecimal price = referencePrice != null ? referencePrice : state.entryPrice();
         if (price == null) {
             log.info("WTX [{} {}] routing skipped — missing reference price for {}",
                     state.instrument(), tf, action);
-            return WtxRoutingOutcome.SKIPPED_NO_PRICE;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
         }
 
         int positionQty = positionQuantity(state);
         if (positionQty <= 0) {
             log.info("WTX [{} {}] routing skipped — non-positive quantity {}",
                     state.instrument(), tf, positionQty);
-            return WtxRoutingOutcome.SKIPPED_NO_QTY;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
         }
         String orderAction = mapToOrderAction(action);
+
+        // Pre-flight margin check (slice 2): for a REVERSE we estimate the worst-case
+        // exposure as close-leg + open-leg = 2 × positionQty. This is conservative — IBKR
+        // typically nets out the close-leg margin once the fill arrives, but the broker may
+        // still reject the first leg if account funds are below the gross margin at submit
+        // time (the prod bug: Equity 9757 < InitMargin 11729 at 09:20Z).
+        if (marginPreflight != null) {
+            int preflightQty = isReverse ? 2 * positionQty : positionQty;
+            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, preflightQty, price);
+            if (!decision.allowed()) {
+                log.warn("WTX [{} {}] routing denied by pre-flight — {}",
+                        state.instrument(), tf, decision.denyReason());
+                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
+                        truncate(decision.denyReason(), 200));
+            }
+        }
 
         // REVERSE: flatten the prior position with its own close-leg order BEFORE opening the
         // new one. Every open-leg precondition is already validated above, so the close leg
@@ -168,14 +223,14 @@ public class WtxExecutionBridge {
                 if (priorPrice == null) {
                     log.info("WTX [{} {}] routing skipped — missing price for {} close leg, aborting reverse",
                             state.instrument(), tf, action);
-                    return WtxRoutingOutcome.SKIPPED_NO_PRICE;
+                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
                 }
-                boolean closed = submitCloseLeg(priorRow, instrument, orderAction, priorQty, priorPrice,
+                CloseLegResult closeResult = submitCloseLeg(priorRow, instrument, orderAction, priorQty, priorPrice,
                         "WTX reversed by " + action.name());
-                if (!closed) {
-                    log.warn("WTX [{} {}] reverse close leg rejected — new position not opened",
-                            state.instrument(), tf);
-                    return WtxRoutingOutcome.FAILED;
+                if (!closeResult.accepted()) {
+                    log.warn("WTX [{} {}] reverse close leg rejected — new position not opened (outcome={})",
+                            state.instrument(), tf, closeResult.outcomeOnFailure());
+                    return WtxRoutingResult.of(closeResult.outcomeOnFailure(), closeResult.errorMessage());
                 }
             }
         }
@@ -228,16 +283,71 @@ public class WtxExecutionBridge {
             executionRepository.save(persisted);
             log.info("WTX [{} {}] IBKR open leg submitted — action={} positionQty={} orderAction={} brokerOrderId={}",
                     state.instrument(), tf, action, positionQty, orderAction, submission.brokerOrderId());
-            return WtxRoutingOutcome.ROUTED;
+            return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
+        } catch (IbkrOrderRejectionException e) {
+            // Typed broker exception: map kind → outcome and persist a clean reason.
+            return handleEntryRejection(persisted, action, e);
         } catch (RuntimeException e) {
+            // Unknown error path — preserve legacy FAILED outcome.
+            String msg = truncate(e.getMessage(), 200);
             persisted.setStatus(ExecutionStatus.FAILED);
-            persisted.setStatusReason("WTX " + action.name() + " failed: " + truncate(e.getMessage(), 200));
+            persisted.setStatusReason("WTX " + action.name() + " failed: " + msg);
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
             log.error("WTX [{} {}] IBKR submission failed for {} — {}",
                     state.instrument(), tf, action, e.getMessage(), e);
-            return WtxRoutingOutcome.FAILED;
+            return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, msg);
         }
+    }
+
+    /**
+     * Maps a typed {@link IbkrOrderRejectionException} from the open leg into a
+     * {@link WtxRoutingResult}. Tied to the bridge's persistence contract:
+     * <ul>
+     *   <li>{@code INSUFFICIENT_MARGIN} — leave the row {@code ACTIVE} (do NOT terminal-fail
+     *       it). No position change occurred at the broker; the next bar can retry once funds
+     *       come back.</li>
+     *   <li>{@code TIMEOUT} — broker state unknown. Leave the row {@code ACTIVE} with an
+     *       explicit "manual reconcile required" status reason.</li>
+     *   <li>{@code BROKER_REJECT} / {@code CANCELLED} / {@code UNKNOWN} — mark {@code FAILED}.</li>
+     * </ul>
+     */
+    private WtxRoutingResult handleEntryRejection(TradeExecutionRecord row, WtxAction action,
+                                                  IbkrOrderRejectionException e) {
+        String brokerText = e.brokerMessage() != null ? e.brokerMessage() : e.getMessage();
+        String shortMsg = truncate(brokerText, 200);
+        WtxRoutingOutcome outcome;
+        switch (e.kind()) {
+            case INSUFFICIENT_MARGIN -> {
+                outcome = WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN;
+                // Leave row ACTIVE (still pending) — no position change at the broker.
+                row.setStatusReason("WTX " + action.name() + " skipped — insufficient margin: " + shortMsg);
+                log.warn("WTX [{} {}] open leg skipped — INSUFFICIENT_MARGIN ({})",
+                        row.getInstrument(), row.getTimeframe(), shortMsg);
+            }
+            case TIMEOUT -> {
+                outcome = WtxRoutingOutcome.FAILED_TIMEOUT;
+                // Keep non-terminal — broker state is unknown, do not terminal-fail.
+                row.setStatusReason("WTX " + action.name() + " timeout — ack lost, manual reconcile required");
+                log.error("WTX [{} {}] open leg timeout — broker state unknown, row left non-terminal",
+                        row.getInstrument(), row.getTimeframe());
+            }
+            case BROKER_REJECT, CANCELLED, UNKNOWN -> {
+                outcome = WtxRoutingOutcome.FAILED_BROKER_REJECT;
+                row.setStatus(ExecutionStatus.FAILED);
+                row.setStatusReason("WTX " + action.name() + " rejected: " + shortMsg);
+                log.error("WTX [{} {}] open leg rejected — {} ({})",
+                        row.getInstrument(), row.getTimeframe(), e.kind(), shortMsg);
+            }
+            default -> {
+                outcome = WtxRoutingOutcome.FAILED;
+                row.setStatus(ExecutionStatus.FAILED);
+                row.setStatusReason("WTX " + action.name() + " failed: " + shortMsg);
+            }
+        }
+        row.setUpdatedAt(Instant.now());
+        executionRepository.save(row);
+        return WtxRoutingResult.of(outcome, shortMsg);
     }
 
     /**
@@ -246,14 +356,14 @@ public class WtxExecutionBridge {
      * leak a phantom "active" close order. When no open WTX row exists the close is logged
      * and skipped — submitting a naked order would risk opening an unintended position.
      */
-    private WtxRoutingOutcome handleClose(WtxSignal signal, WtxStrategyState state, Instrument instrument,
-                                          WtxAction action, BigDecimal referencePrice) {
+    private WtxRoutingResult handleClose(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                                         WtxAction action, BigDecimal referencePrice) {
         String tf = signal.timeframe();
         Optional<TradeExecutionRecord> open = findOpenWtxExecution(state.instrument(), tf);
         if (open.isEmpty()) {
             log.info("WTX [{} {}] close requested ({}) but no open WTX execution row found — "
                     + "skipping IBKR submission to avoid a naked order", state.instrument(), tf, action);
-            return WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW);
         }
         TradeExecutionRecord row = open.get();
         // Guard against a second flatten while the first close is still in flight. The fill
@@ -261,23 +371,26 @@ public class WtxExecutionBridge {
         if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
             log.info("WTX [{} {}] close requested ({}) but execution {} is already EXIT_SUBMITTED — "
                     + "skipping duplicate flatten", state.instrument(), tf, action, row.getId());
-            return WtxRoutingOutcome.SKIPPED_DUPLICATE;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
         }
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : positionQuantity(state);
         if (qty <= 0) {
             log.info("WTX [{} {}] routing skipped — non-positive close quantity {}",
                     state.instrument(), tf, qty);
-            return WtxRoutingOutcome.SKIPPED_NO_QTY;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
         }
         BigDecimal price = referencePrice != null ? referencePrice : row.getNormalizedEntryPrice();
         if (price == null) {
             log.info("WTX [{} {}] routing skipped — missing reference price for {} close",
                     state.instrument(), tf, action);
-            return WtxRoutingOutcome.SKIPPED_NO_PRICE;
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
         }
-        boolean closed = submitCloseLeg(row, instrument, mapToOrderAction(action), qty, price,
+        CloseLegResult closeResult = submitCloseLeg(row, instrument, mapToOrderAction(action), qty, price,
                 "WTX " + action.name());
-        return closed ? WtxRoutingOutcome.ROUTED : WtxRoutingOutcome.FAILED;
+        if (closeResult.accepted()) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
+        }
+        return WtxRoutingResult.of(closeResult.outcomeOnFailure(), closeResult.errorMessage());
     }
 
     /**
@@ -291,11 +404,12 @@ public class WtxExecutionBridge {
      * on {@code ibkrOrderId} here — otherwise an early {@code Filled} status arriving before
      * {@code execDetails} would be dropped and the row would stay {@code EXIT_SUBMITTED} forever.</p>
      *
-     * @return {@code true} when the broker accepted the order; {@code false} on submission failure
-     *         (the row is left non-terminal so the position stays visible and the close is retryable).
+     * @return a {@link CloseLegResult} carrying acceptance, the typed outcome on failure,
+     *         and the broker message. The row is left non-terminal on failure so the live
+     *         position stays visible and the close is retryable next bar.
      */
-    private boolean submitCloseLeg(TradeExecutionRecord row, Instrument instrument,
-                                   String orderAction, int qty, BigDecimal price, String reasonPrefix) {
+    private CloseLegResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument,
+                                          String orderAction, int qty, BigDecimal price, String reasonPrefix) {
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                     row.getId(),
@@ -316,15 +430,38 @@ public class WtxExecutionBridge {
             executionRepository.save(row);
             log.info("WTX [{} {}] IBKR close leg submitted — orderAction={} qty={} executionId={} brokerOrderId={}",
                     row.getInstrument(), row.getTimeframe(), orderAction, qty, row.getId(), submission.brokerOrderId());
-            return true;
+            return CloseLegResult.ok();
+        } catch (IbkrOrderRejectionException e) {
+            // Typed broker exception — keep the row non-terminal so the open position stays
+            // visible and the close is retryable on the next bar / next signal.
+            String brokerText = e.brokerMessage() != null ? e.brokerMessage() : e.getMessage();
+            String shortMsg = truncate(brokerText, 200);
+            WtxRoutingOutcome outcome = switch (e.kind()) {
+                case INSUFFICIENT_MARGIN -> WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN;
+                case TIMEOUT -> WtxRoutingOutcome.FAILED_TIMEOUT;
+                case BROKER_REJECT, CANCELLED -> WtxRoutingOutcome.FAILED_BROKER_REJECT;
+                default -> WtxRoutingOutcome.FAILED;
+            };
+            String suffix = outcome == WtxRoutingOutcome.FAILED_TIMEOUT
+                    ? " close timeout — ack lost, manual reconcile required"
+                    : outcome == WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN
+                        ? " close skipped — insufficient margin: " + shortMsg
+                        : " close failed: " + shortMsg;
+            row.setStatusReason(reasonPrefix + suffix);
+            row.setUpdatedAt(Instant.now());
+            executionRepository.save(row);
+            log.error("WTX [{} {}] IBKR close leg rejected — {} ({})",
+                    row.getInstrument(), row.getTimeframe(), e.kind(), shortMsg);
+            return CloseLegResult.rejected(outcome, shortMsg);
         } catch (RuntimeException e) {
-            // Keep the row non-terminal so the open position stays visible and the close is retryable.
-            row.setStatusReason(reasonPrefix + " close failed: " + truncate(e.getMessage(), 200));
+            // Untyped path: legacy FAILED for backwards compatibility.
+            String shortMsg = truncate(e.getMessage(), 200);
+            row.setStatusReason(reasonPrefix + " close failed: " + shortMsg);
             row.setUpdatedAt(Instant.now());
             executionRepository.save(row);
             log.error("WTX [{} {}] IBKR close leg failed — {}",
                     row.getInstrument(), row.getTimeframe(), e.getMessage(), e);
-            return false;
+            return CloseLegResult.rejected(WtxRoutingOutcome.FAILED, shortMsg);
         }
     }
 
@@ -383,5 +520,19 @@ public class WtxExecutionBridge {
     private String truncate(String value, int max) {
         if (value == null) return "(no message)";
         return value.length() <= max ? value : value.substring(0, max);
+    }
+
+    /**
+     * Internal carrier for the outcome of {@link #submitCloseLeg}. Replaces the old
+     * boolean return so the caller (handleEntry's REVERSE branch, handleClose) can propagate
+     * the typed outcome and the broker message into the final {@link WtxRoutingResult}.
+     */
+    private record CloseLegResult(boolean accepted, WtxRoutingOutcome outcomeOnFailure, String errorMessage) {
+        static CloseLegResult ok() {
+            return new CloseLegResult(true, null, null);
+        }
+        static CloseLegResult rejected(WtxRoutingOutcome outcome, String message) {
+            return new CloseLegResult(false, outcome, message);
+        }
     }
 }

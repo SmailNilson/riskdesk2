@@ -6,6 +6,7 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.engine.strategy.wtx.WtxEnrichmentSnapshot;
 import com.riskdesk.domain.engine.strategy.wtx.WtxPosition;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
+import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignalType;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
@@ -14,6 +15,7 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -267,14 +270,16 @@ class WtxExecutionBridgeTest {
     void openLong_returnsRouted() {
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
-        assertEquals(WtxRoutingOutcome.ROUTED, bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+        assertEquals(WtxRoutingOutcome.ROUTED,
+                bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)).outcome());
     }
 
     @Test
     void autoExecutionDisabled_returnsSkippedAutoOff() {
         WtxStrategyState state = flatState() // autoExecutionEnabled defaults to false
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
-        assertEquals(WtxRoutingOutcome.SKIPPED_AUTO_OFF, bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+        assertEquals(WtxRoutingOutcome.SKIPPED_AUTO_OFF,
+                bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)).outcome());
     }
 
     @Test
@@ -283,7 +288,7 @@ class WtxExecutionBridgeTest {
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
         assertEquals(WtxRoutingOutcome.SKIPPED_IBKR_DISABLED,
-                bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)));
+                bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100)).outcome());
     }
 
     @Test
@@ -292,14 +297,14 @@ class WtxExecutionBridgeTest {
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
         WtxSignal sig = signal(WtxAction.OPEN_LONG);
         bridge.submit(sig, state, bd(100));
-        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, bridge.submit(sig, state, bd(100)));
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, bridge.submit(sig, state, bd(100)).outcome());
     }
 
     @Test
     void closeLong_noOpenRow_returnsSkippedNoOpenRow() {
         WtxStrategyState state = flatState().withAutoExecution(true);
         assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW,
-                bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105)));
+                bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105)).outcome());
     }
 
     @Test
@@ -309,11 +314,168 @@ class WtxExecutionBridgeTest {
 
         // A 10m close must NOT flatten the 5m row — there is no 10m open row.
         WtxStrategyState state10m = WtxStrategyState.initial("MCL", "10m", bd(10_000)).withAutoExecution(true);
-        WtxRoutingOutcome outcome = bridge.submit(signal(WtxAction.CLOSE_LONG, "10m"), state10m, bd(105));
+        WtxRoutingOutcome outcome = bridge.submit(signal(WtxAction.CLOSE_LONG, "10m"), state10m, bd(105)).outcome();
 
         assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, outcome);
         assertEquals(ExecutionStatus.ACTIVE, repo.all().get(0).getStatus(), "the 5m row must be untouched");
         verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ── typed broker rejection outcomes (slice 1) ──────────────────────────
+
+    @Test
+    void openLong_brokerRejectsInsufficientMargin_returnsSkippedInsufficientMargin_rowStaysNonTerminal() {
+        // IBKR rejects with the same shape as the prod 09:20Z bug: code=201, margin insufficient.
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201,
+                        "Equity with Loan Value [9757.44 USD] < Initial Margin [11729.16 USD]",
+                        "IBKR margin insufficient (code=201)"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        assertNotNull(result.errorMessage(), "errorMessage must carry the broker reject text for UI tooltip");
+        assertTrue(result.errorMessage().toLowerCase().contains("margin"));
+
+        // Row is NOT terminal — leaving ACTIVE so the next bar can retry once funds return.
+        TradeExecutionRecord row = repo.all().get(0);
+        assertFalse(row.getStatus() == ExecutionStatus.FAILED,
+                "INSUFFICIENT_MARGIN must NOT mark the row FAILED");
+    }
+
+    @Test
+    void openLong_brokerTimeout_returnsFailedTimeout_rowStaysNonTerminal_manualReconcileHint() {
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.TIMEOUT, null, null,
+                        "IBKR order submission timed out without acknowledgement."));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.FAILED_TIMEOUT, result.outcome());
+        TradeExecutionRecord row = repo.all().get(0);
+        // Conservative behavior: row stays non-terminal (broker state unknown) — operator
+        // reconciles manually. Hint must be in the statusReason for log diagnosis.
+        assertFalse(row.getStatus() == ExecutionStatus.FAILED,
+                "TIMEOUT must NOT terminal-fail the row — broker state unknown");
+        assertNotNull(row.getStatusReason());
+        assertTrue(row.getStatusReason().toLowerCase().contains("manual reconcile"),
+                "statusReason must hint at manual reconciliation");
+    }
+
+    @Test
+    void openLong_brokerCancelled_returnsFailedBrokerReject_rowMarkedFailed() {
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.BROKER_REJECT, null,
+                        "Order Cancelled (price doesn't conform)",
+                        "IBKR order Cancelled"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.FAILED_BROKER_REJECT, result.outcome());
+        TradeExecutionRecord row = repo.all().get(0);
+        assertEquals(ExecutionStatus.FAILED, row.getStatus(),
+                "BROKER_REJECT terminally fails the row — broker explicitly refused, no recovery path");
+    }
+
+    @Test
+    void reverseToShort_closeLegInsufficientMargin_skipsOpenLeg_priorRowStaysActive() {
+        // Seed an open LONG that the reverse must flatten before going SHORT.
+        TradeExecutionRecord priorLong = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorLong);
+
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201,
+                        "Equity 9757 < InitMargin 11729",
+                        "IBKR margin insufficient (code=201)"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // The bug at 09:20Z manifested here: close leg reject → no open leg → typed outcome.
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        assertNotNull(result.errorMessage());
+        // Prior row left ACTIVE — close leg failed, position remains visible for next bar.
+        assertEquals(ExecutionStatus.ACTIVE, repo.byId(priorLong.getId()).getStatus(),
+                "prior row stays ACTIVE when the close leg is rejected on margin");
+        // Only one broker call (the close leg) — no open leg submission.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverseToShort_closeLegTimeout_returnsFailedTimeout_priorRowNonTerminal() {
+        TradeExecutionRecord priorLong = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorLong);
+
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.TIMEOUT, null, null,
+                        "IBKR order submission timed out without acknowledgement."));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.FAILED_TIMEOUT, result.outcome());
+        // Prior row must stay non-terminal (broker state unknown — ack may have been lost).
+        TradeExecutionRecord prior = repo.byId(priorLong.getId());
+        assertFalse(prior.getStatus() == ExecutionStatus.FAILED,
+                "close-leg TIMEOUT must keep prior row non-terminal — no double-flatten risk");
+        // No open-leg attempt.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    // ── pre-flight margin (slice 2) ────────────────────────────────────────
+
+    @Test
+    void preflightDenies_returnsSkippedInsufficientMargin_noBrokerCall() {
+        // Bridge wired with a stub preflight that always denies — verifies the bridge
+        // short-circuits BEFORE any broker call (the desired behavior for the prod bug).
+        com.riskdesk.application.service.IbkrMarginPreflightService stub =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(stub.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision
+                        .deny("Equity 9757 < est. InitMargin 11729 (qty=4)"));
+        WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, stub);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithPreflight.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        assertNotNull(result.errorMessage(), "deny reason must propagate to errorMessage for the UI tooltip");
+        assertTrue(result.errorMessage().contains("InitMargin"));
+        // Critical: no broker call at all — the whole point of preflight.
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertTrue(repo.all().isEmpty(), "no execution row created when preflight denies");
+    }
+
+    @Test
+    void preflightAllows_routesNormally_brokerCallOccurs() {
+        com.riskdesk.application.service.IbkrMarginPreflightService stub =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(stub.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision.allow());
+        WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, stub);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithPreflight.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
     }
 
     // ── helpers ────────────────────────────────────────────────────────────
@@ -325,7 +487,7 @@ class WtxExecutionBridgeTest {
     private WtxSignal signal(WtxAction action, String timeframe) {
         return new WtxSignal("MCL", timeframe, WtxSignalType.COMPRA, "LONG",
                 bd(1), bd(0), true, action, WtxEnrichmentSnapshot.empty(),
-                Instant.parse("2026-05-13T14:00:00Z"), null);
+                Instant.parse("2026-05-13T14:00:00Z"), null, null);
     }
 
     private WtxStrategyState flatState() {

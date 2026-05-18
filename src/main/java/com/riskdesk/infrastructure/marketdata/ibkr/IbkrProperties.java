@@ -28,6 +28,13 @@ public class IbkrProperties {
     private boolean sslVerify         = false;
     private int     connectTimeoutMs  = 5000;
     private int     readTimeoutMs     = 10000;
+    /**
+     * Maximum wait (ms) for the first IBKR {@code orderStatus} acknowledgement after
+     * {@code placeOrder}. Aligned with REQUEST_TIMEOUT (15s) inside IbGatewayNativeClient
+     * — IBKR can take longer than 5s to ack under load, leading to spurious timeouts
+     * that masked margin rejects (error code 201) in prod.
+     */
+    private int     orderAckTimeoutMs = 15000;
 
     public boolean isEnabled()                  { return enabled; }
     public void setEnabled(boolean v)           { enabled = v; }
@@ -61,4 +68,7 @@ public class IbkrProperties {
 
     public int getReadTimeoutMs()               { return readTimeoutMs; }
     public void setReadTimeoutMs(int v)         { readTimeoutMs = v; }
+
+    public int getOrderAckTimeoutMs()           { return orderAckTimeoutMs; }
+    public void setOrderAckTimeoutMs(int v)     { orderAckTimeoutMs = v; }
 }
