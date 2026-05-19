@@ -150,6 +150,31 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void orderStatusSubmittedTransitionsPendingEntryToEntrySubmitted() {
+        TradeExecutionRecord stored = baseExecution();
+        stored.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        stored.setStatusReason("WTX OPEN_LONG sent to IBKR; acknowledgement pending");
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(
+            ORDER_ID,
+            "Submitted",
+            BigDecimal.ZERO,
+            BigDecimal.ONE,
+            BigDecimal.ZERO,
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, saved.getStatus());
+        assertEquals("IBKR entry order acknowledged: Submitted", saved.getStatusReason());
+        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+    }
+
+    @Test
     void orderStatusFilledTransitionsDomainStateToActive() {
         TradeExecutionRecord stored = baseExecution();
         stored.setStatus(ExecutionStatus.ENTRY_SUBMITTED);

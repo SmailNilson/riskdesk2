@@ -13,6 +13,12 @@ package com.riskdesk.domain.engine.strategy.wtx;
 public enum WtxRoutingOutcome {
     /** Broker order was submitted (entry, close or both legs of a reverse). */
     ROUTED,
+    /**
+     * The order was sent to IBKR and has a broker order id, but the initial
+     * acknowledgement did not arrive before the timeout. Later orderStatus /
+     * execDetails callbacks can still reconcile the execution row.
+     */
+    ACK_PENDING,
     /** autoExecutionEnabled is false for this (instrument, timeframe). */
     SKIPPED_AUTO_OFF,
     /** The execution bridge bean is not wired (riskdesk.wtx.enabled / IBKR mode off). */

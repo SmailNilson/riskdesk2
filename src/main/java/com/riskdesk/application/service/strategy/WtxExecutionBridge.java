@@ -62,9 +62,12 @@ import java.util.Optional;
  *       equity insufficient (e.g. IBKR code 201). No position change occurred. The bridge
  *       does NOT mark the execution row FAILED — it stays {@code ACTIVE} so a subsequent
  *       bar can retry once funds are available.</li>
- *   <li>{@link WtxRoutingOutcome#FAILED_TIMEOUT} — IBKR did not ack the order. The broker
- *       state is unknown; the row is left non-terminal with statusReason hinting at
- *       manual reconciliation.</li>
+ *   <li>{@link WtxRoutingOutcome#ACK_PENDING} — the order was sent to IBKR and has an
+ *       order id, but the initial ack was late. The row keeps that order id so later
+ *       callbacks can reconcile it.</li>
+ *   <li>{@link WtxRoutingOutcome#FAILED_TIMEOUT} — IBKR did not ack the order and no
+ *       broker order id was available. The broker state is unknown; the row is left
+ *       non-terminal with statusReason hinting at manual reconciliation.</li>
  *   <li>{@link WtxRoutingOutcome#FAILED_BROKER_REJECT} — IBKR explicitly rejected the
  *       order (non-margin reject). For an open leg the row is marked {@code FAILED};
  *       for a close leg the row stays non-terminal to retry on the next bar.</li>
@@ -228,8 +231,13 @@ public class WtxExecutionBridge {
                 CloseLegResult closeResult = submitCloseLeg(priorRow, instrument, orderAction, priorQty, priorPrice,
                         "WTX reversed by " + action.name());
                 if (!closeResult.accepted()) {
-                    log.warn("WTX [{} {}] reverse close leg rejected — new position not opened (outcome={})",
-                            state.instrument(), tf, closeResult.outcomeOnFailure());
+                    if (closeResult.outcomeOnFailure() == WtxRoutingOutcome.ACK_PENDING) {
+                        log.warn("WTX [{} {}] reverse close leg ack pending — new position not opened until reconcile",
+                                state.instrument(), tf);
+                    } else {
+                        log.warn("WTX [{} {}] reverse close leg rejected — new position not opened (outcome={})",
+                                state.instrument(), tf, closeResult.outcomeOnFailure());
+                    }
                     return WtxRoutingResult.of(closeResult.outcomeOnFailure(), closeResult.errorMessage());
                 }
             }
@@ -307,8 +315,10 @@ public class WtxExecutionBridge {
      *   <li>{@code INSUFFICIENT_MARGIN} — leave the row {@code ACTIVE} (do NOT terminal-fail
      *       it). No position change occurred at the broker; the next bar can retry once funds
      *       come back.</li>
-     *   <li>{@code TIMEOUT} — broker state unknown. Leave the row {@code ACTIVE} with an
-     *       explicit "manual reconcile required" status reason.</li>
+     *   <li>{@code TIMEOUT} — broker state unknown. If the native client can provide the
+     *       IBKR order id, persist it and mark the row submitted so late callbacks can
+     *       reconcile. Otherwise leave the row non-terminal with an explicit
+     *       "manual reconcile required" status reason.</li>
      *   <li>{@code BROKER_REJECT} / {@code CANCELLED} / {@code UNKNOWN} — mark {@code FAILED}.</li>
      * </ul>
      */
@@ -326,11 +336,27 @@ public class WtxExecutionBridge {
                         row.getInstrument(), row.getTimeframe(), shortMsg);
             }
             case TIMEOUT -> {
-                outcome = WtxRoutingOutcome.FAILED_TIMEOUT;
-                // Keep non-terminal — broker state is unknown, do not terminal-fail.
-                row.setStatusReason("WTX " + action.name() + " timeout — ack lost, manual reconcile required");
-                log.error("WTX [{} {}] open leg timeout — broker state unknown, row left non-terminal",
-                        row.getInstrument(), row.getTimeframe());
+                Long brokerOrderId = e.brokerOrderId();
+                if (brokerOrderId != null) {
+                    outcome = WtxRoutingOutcome.ACK_PENDING;
+                    row.setEntryOrderId(brokerOrderId);
+                    row.setIbkrOrderId(toIbkrOrderId(brokerOrderId));
+                    row.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+                    if (row.getEntrySubmittedAt() == null) {
+                        row.setEntrySubmittedAt(Instant.now());
+                    }
+                    row.setStatusReason("WTX " + action.name()
+                            + " sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")");
+                    log.warn("WTX [{} {}] open leg ack pending — brokerOrderId={} saved for reconciliation",
+                            row.getInstrument(), row.getTimeframe(), brokerOrderId);
+                } else {
+                    outcome = WtxRoutingOutcome.FAILED_TIMEOUT;
+                    // Keep non-terminal — broker state is unknown, do not terminal-fail.
+                    row.setStatusReason("WTX " + action.name()
+                            + " timeout — ack lost, manual reconcile required");
+                    log.error("WTX [{} {}] open leg timeout — broker state unknown, row left non-terminal",
+                            row.getInstrument(), row.getTimeframe());
+                }
             }
             case BROKER_REJECT, CANCELLED, UNKNOWN -> {
                 outcome = WtxRoutingOutcome.FAILED_BROKER_REJECT;
@@ -436,22 +462,43 @@ public class WtxExecutionBridge {
             // visible and the close is retryable on the next bar / next signal.
             String brokerText = e.brokerMessage() != null ? e.brokerMessage() : e.getMessage();
             String shortMsg = truncate(brokerText, 200);
+            Long brokerOrderId = e.brokerOrderId();
             WtxRoutingOutcome outcome = switch (e.kind()) {
                 case INSUFFICIENT_MARGIN -> WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN;
-                case TIMEOUT -> WtxRoutingOutcome.FAILED_TIMEOUT;
+                case TIMEOUT -> brokerOrderId != null
+                        ? WtxRoutingOutcome.ACK_PENDING
+                        : WtxRoutingOutcome.FAILED_TIMEOUT;
                 case BROKER_REJECT, CANCELLED -> WtxRoutingOutcome.FAILED_BROKER_REJECT;
                 default -> WtxRoutingOutcome.FAILED;
             };
-            String suffix = outcome == WtxRoutingOutcome.FAILED_TIMEOUT
-                    ? " close timeout — ack lost, manual reconcile required"
-                    : outcome == WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN
-                        ? " close skipped — insufficient margin: " + shortMsg
-                        : " close failed: " + shortMsg;
+            String suffix;
+            if (outcome == WtxRoutingOutcome.ACK_PENDING) {
+                Instant now = Instant.now();
+                row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+                row.setIbkrOrderId(toIbkrOrderId(brokerOrderId));
+                if (row.getExitSubmittedAt() == null) {
+                    row.setExitSubmittedAt(now);
+                }
+                suffix = " close sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")";
+                log.warn("WTX [{} {}] close leg ack pending — brokerOrderId={} saved for reconciliation",
+                        row.getInstrument(), row.getTimeframe(), brokerOrderId);
+            } else if (outcome == WtxRoutingOutcome.FAILED_TIMEOUT) {
+                suffix = " close timeout — ack lost, manual reconcile required";
+            } else if (outcome == WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN) {
+                suffix = " close skipped — insufficient margin: " + shortMsg;
+            } else {
+                suffix = " close failed: " + shortMsg;
+            }
             row.setStatusReason(reasonPrefix + suffix);
             row.setUpdatedAt(Instant.now());
             executionRepository.save(row);
-            log.error("WTX [{} {}] IBKR close leg rejected — {} ({})",
-                    row.getInstrument(), row.getTimeframe(), e.kind(), shortMsg);
+            if (outcome == WtxRoutingOutcome.ACK_PENDING) {
+                log.warn("WTX [{} {}] IBKR close leg ack pending — {}",
+                        row.getInstrument(), row.getTimeframe(), shortMsg);
+            } else {
+                log.error("WTX [{} {}] IBKR close leg rejected — {} ({})",
+                        row.getInstrument(), row.getTimeframe(), e.kind(), shortMsg);
+            }
             return CloseLegResult.rejected(outcome, shortMsg);
         } catch (RuntimeException e) {
             // Untyped path: legacy FAILED for backwards compatibility.
