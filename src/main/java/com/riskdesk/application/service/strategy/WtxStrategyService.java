@@ -165,12 +165,39 @@ public class WtxStrategyService {
             enrichment = enrichment.withFilters(htfBiasLabel, structurePassed, structureReason);
             signal = signal.withEnrichment(enrichment);
 
+            // Swing-bias filter (opt-in per (instrument, timeframe)). Null bias passes through.
+            boolean filterRewroteToClose = false;
+            if (state.swingBiasFilterEnabled()) {
+                WtxAction filtered = WtxSwingBiasFilter.filter(
+                        signal.direction(), signal.suggestedAction(),
+                        enrichment.smcSwingBias(), state.currentPosition());
+                if (filtered != signal.suggestedAction()) {
+                    log.info("WTX [{} {}] swing-bias filter: direction={} swingBias={} action {} -> {}",
+                            instrumentName, event.timeframe(), signal.direction(),
+                            enrichment.smcSwingBias(), signal.suggestedAction(), filtered);
+                    filterRewroteToClose =
+                            filtered == WtxAction.CLOSE_LONG || filtered == WtxAction.CLOSE_SHORT;
+                    signal = signal.withAction(filtered);
+                }
+            }
+
             if (signal.canTrade() && signal.suggestedAction() != WtxAction.NONE) {
-                BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
-                state = applyAction(signal.suggestedAction(), state, instrument, config,
-                        currentCandle.getClose(), entryAtr);
-                signal = signal.withRouting(
-                        routeToExecution(signal, state, currentCandle.getClose()));
+                if (filterRewroteToClose) {
+                    // Route BEFORE flattening so the bridge submits the full open quantity
+                    // — applyAction → closePosition → withFlat clears entryQty to 0, which
+                    // would shrink the IBKR close to a single contract for size > 1.
+                    // Same ordering invariant as applyExit() and the MAX_LOSS_HALT path.
+                    signal = signal.withRouting(
+                            routeToExecution(signal, state, currentCandle.getClose()));
+                    state = applyAction(signal.suggestedAction(), state, instrument, config,
+                            currentCandle.getClose(), null);
+                } else {
+                    BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
+                    state = applyAction(signal.suggestedAction(), state, instrument, config,
+                            currentCandle.getClose(), entryAtr);
+                    signal = signal.withRouting(
+                            routeToExecution(signal, state, currentCandle.getClose()));
+                }
             }
 
             historyPort.save(signal);
@@ -279,6 +306,30 @@ public class WtxStrategyService {
                 enabled ? "LIVE" : "off");
         publishState(updated, properties.toConfig());
         return updated;
+    }
+
+    public WtxStrategyState updateSwingBiasFilter(String instrument, String timeframe, boolean enabled) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withSwingBiasFilter(enabled);
+        statePort.save(updated);
+        log.info("WTX [{} {}] swing-bias filter {}", instrument, timeframe,
+                enabled ? "ENABLED" : "DISABLED");
+        publishState(updated, properties.toConfig());
+        return updated;
+    }
+
+    /**
+     * Current swing bias for an (instrument, timeframe), derived from the most recent
+     * signal's enrichment. Returns null when no signal exists yet or the enrichment did
+     * not carry a bias (SMC engine warm-up). Used by the UI to display the direction
+     * badge next to the filter toggle.
+     */
+    public String currentSwingBias(String instrument, String timeframe) {
+        List<WtxSignal> recent = historyPort.findRecent(instrument, timeframe, 1);
+        if (recent.isEmpty()) return null;
+        WtxEnrichmentSnapshot enrichment = recent.get(0).enrichment();
+        return enrichment != null ? enrichment.smcSwingBias() : null;
     }
 
     // ── private helpers ────────────────────────────────────────────────────
@@ -425,6 +476,8 @@ public class WtxStrategyService {
         payload.put("maxLossHit", state.maxLossHit());
         payload.put("activeProfile", profile.name());
         payload.put("autoExecutionEnabled", state.autoExecutionEnabled());
+        payload.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
+        payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
         payload.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return payload;
     }

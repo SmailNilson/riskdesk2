@@ -1607,6 +1607,10 @@ export interface WtxStrategyStateView {
   canTrade: boolean;
   activeProfile: WtxProfile;
   autoExecutionEnabled: boolean;
+  /** When true, contra-swing-bias signals are cut (or skipped if flat). Null bias passes through. */
+  swingBiasFilterEnabled: boolean;
+  /** Last seen swing bias direction from the most recent signal's enrichment. Null during warm-up. */
+  currentSwingBias: 'BULLISH' | 'BEARISH' | null;
 }
 
 export type WtxRoutingOutcome =
@@ -1687,6 +1691,16 @@ export async function updateWtxProfile(instrument: string, timeframe: string, pr
 
 export async function updateWtxAutoExecution(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
   const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/auto-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxSwingBiasFilter(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/swing-bias-filter`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
