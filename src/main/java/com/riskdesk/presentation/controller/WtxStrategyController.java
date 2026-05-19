@@ -109,7 +109,18 @@ public class WtxStrategyController {
         if (raw instanceof Boolean b) {
             enabled = b;
         } else if (raw instanceof String s) {
-            enabled = Boolean.parseBoolean(s);
+            // Strict parse: only "true" / "false" (case-insensitive). `Boolean.parseBoolean`
+            // silently coerces "tru", "yes", "1" etc. to false, which would disable the
+            // filter from malformed client input while still returning 200.
+            String normalized = s.trim().toLowerCase();
+            if ("true".equals(normalized)) {
+                enabled = true;
+            } else if ("false".equals(normalized)) {
+                enabled = false;
+            } else {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        "'enabled' must be boolean (true/false), got: " + s));
+            }
         } else {
             return ResponseEntity.badRequest().body(Map.of("error", "'enabled' must be boolean"));
         }
