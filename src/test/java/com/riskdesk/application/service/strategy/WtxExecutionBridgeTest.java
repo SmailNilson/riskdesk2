@@ -477,6 +477,11 @@ class WtxExecutionBridgeTest {
         assertEquals(54321, prior.getIbkrOrderId());
         assertNotNull(prior.getExitSubmittedAt());
         assertTrue(prior.getStatusReason().toLowerCase().contains("acknowledgement pending"));
+        // Reversal is lost: open leg not attempted, no fill-driven retry exists yet.
+        // The hint must surface in the routing result so the UI tooltip carries it.
+        assertNotNull(result.errorMessage());
+        assertTrue(result.errorMessage().toLowerCase().contains("reversal lost"),
+                "errorMessage must hint that the reversal was lost (open leg not attempted)");
         verify(ibkrOrderService, times(1)).submitEntryOrder(any());
     }
 

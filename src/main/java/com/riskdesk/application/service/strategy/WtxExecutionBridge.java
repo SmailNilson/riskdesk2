@@ -232,12 +232,21 @@ public class WtxExecutionBridge {
                         "WTX reversed by " + action.name());
                 if (!closeResult.accepted()) {
                     if (closeResult.outcomeOnFailure() == WtxRoutingOutcome.ACK_PENDING) {
-                        log.warn("WTX [{} {}] reverse close leg ack pending — new position not opened until reconcile",
+                        // The reversal is effectively lost — the close ack-pends and there is
+                        // no fill-driven retry that fires the open leg once it confirms. Log
+                        // at ERROR so the missed reverse is greppable; embed the hint in the
+                        // routing result so the UI tooltip surfaces it too.
+                        log.error("WTX [{} {}] reverse close leg ack pending — open leg NOT attempted, "
+                                + "reversal signal LOST until manual reconcile",
                                 state.instrument(), tf);
-                    } else {
-                        log.warn("WTX [{} {}] reverse close leg rejected — new position not opened (outcome={})",
-                                state.instrument(), tf, closeResult.outcomeOnFailure());
+                        String hint = "reversal lost — close ack pending, open leg not attempted";
+                        String msg = closeResult.errorMessage() == null
+                                ? hint
+                                : hint + "; " + closeResult.errorMessage();
+                        return WtxRoutingResult.of(closeResult.outcomeOnFailure(), msg);
                     }
+                    log.warn("WTX [{} {}] reverse close leg rejected — new position not opened (outcome={})",
+                            state.instrument(), tf, closeResult.outcomeOnFailure());
                     return WtxRoutingResult.of(closeResult.outcomeOnFailure(), closeResult.errorMessage());
                 }
             }
@@ -339,12 +348,7 @@ public class WtxExecutionBridge {
                 Long brokerOrderId = e.brokerOrderId();
                 if (brokerOrderId != null) {
                     outcome = WtxRoutingOutcome.ACK_PENDING;
-                    row.setEntryOrderId(brokerOrderId);
-                    row.setIbkrOrderId(toIbkrOrderId(brokerOrderId));
-                    row.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-                    if (row.getEntrySubmittedAt() == null) {
-                        row.setEntrySubmittedAt(Instant.now());
-                    }
+                    persistAckPending(row, brokerOrderId, ExecutionStatus.ENTRY_SUBMITTED);
                     row.setStatusReason("WTX " + action.name()
                             + " sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")");
                     log.warn("WTX [{} {}] open leg ack pending — brokerOrderId={} saved for reconciliation",
@@ -473,12 +477,7 @@ public class WtxExecutionBridge {
             };
             String suffix;
             if (outcome == WtxRoutingOutcome.ACK_PENDING) {
-                Instant now = Instant.now();
-                row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
-                row.setIbkrOrderId(toIbkrOrderId(brokerOrderId));
-                if (row.getExitSubmittedAt() == null) {
-                    row.setExitSubmittedAt(now);
-                }
+                persistAckPending(row, brokerOrderId, ExecutionStatus.EXIT_SUBMITTED);
                 suffix = " close sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")";
                 log.warn("WTX [{} {}] close leg ack pending — brokerOrderId={} saved for reconciliation",
                         row.getInstrument(), row.getTimeframe(), brokerOrderId);
@@ -515,6 +514,33 @@ public class WtxExecutionBridge {
     /** IBKR order ids fit in the int range; {@code ibkrOrderId} is the Integer key the fill tracker uses. */
     private Integer toIbkrOrderId(Long brokerOrderId) {
         return brokerOrderId == null ? null : brokerOrderId.intValue();
+    }
+
+    /**
+     * Shared ack-pending mutation. Persists the broker order id on {@code ibkrOrderId} so
+     * {@code ExecutionFillTrackingService.locate(orderId, null)} can match late callbacks,
+     * sets the leg's submitted timestamp if not already set, and transitions the row to the
+     * matching submitted state. The caller is responsible for {@code statusReason} and
+     * {@code updatedAt} (set by the surrounding save flow).
+     *
+     * @param submittedStatus must be {@link ExecutionStatus#ENTRY_SUBMITTED} or
+     *                        {@link ExecutionStatus#EXIT_SUBMITTED} — defines which timestamp
+     *                        is initialized and whether {@code entryOrderId} is persisted.
+     */
+    private void persistAckPending(TradeExecutionRecord row, Long brokerOrderId, ExecutionStatus submittedStatus) {
+        row.setIbkrOrderId(toIbkrOrderId(brokerOrderId));
+        row.setStatus(submittedStatus);
+        Instant now = Instant.now();
+        if (submittedStatus == ExecutionStatus.ENTRY_SUBMITTED) {
+            row.setEntryOrderId(brokerOrderId);
+            if (row.getEntrySubmittedAt() == null) {
+                row.setEntrySubmittedAt(now);
+            }
+        } else if (submittedStatus == ExecutionStatus.EXIT_SUBMITTED) {
+            if (row.getExitSubmittedAt() == null) {
+                row.setExitSubmittedAt(now);
+            }
+        }
     }
 
     /**
