@@ -1611,6 +1611,7 @@ export interface WtxStrategyStateView {
 
 export type WtxRoutingOutcome =
   | 'ROUTED'
+  | 'ACK_PENDING'
   | 'SKIPPED_AUTO_OFF'
   | 'SKIPPED_BRIDGE_UNAVAILABLE'
   | 'SKIPPED_IBKR_DISABLED'

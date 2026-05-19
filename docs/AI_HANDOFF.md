@@ -2,6 +2,21 @@
 
 Last updated: 2026-05-14
 
+## WTX auto-execution — ack timeout reconciliation (2026-05-19)
+
+Fixes the confusing "TIMEOUT but the order passed in IBKR" case.
+
+- `FAILED_TIMEOUT` now means no acknowledgement and no broker order id was available.
+- When the native IBKR client has already assigned/sent a broker `orderId` but the first
+  acknowledgement arrives after `riskdesk.ibkr.order-ack-timeout-ms`, WTX returns
+  `ACK_PENDING` instead of a red failure. The execution row persists that `ibkrOrderId` so
+  delayed `orderStatus` / `execDetails` callbacks can reconcile it.
+- Open-leg ack-pending rows move to `ENTRY_SUBMITTED`; close-leg ack-pending rows move to
+  `EXIT_SUBMITTED` to avoid duplicate flatten orders while the broker state is still unknown.
+- `ExecutionFillTrackingService` now promotes a pending entry to `ENTRY_SUBMITTED` when a late
+  `Submitted` / `PreSubmitted` / `PendingSubmit` callback arrives.
+- Frontend WTX signal cards render this state as `ACK ?`, not `TIMEOUT`.
+
 ## WTX — per-(instrument, timeframe) state + routing visibility (2026-05-14)
 
 Fixes the "Auto-IBKR : ON but no order" report. Two root causes:

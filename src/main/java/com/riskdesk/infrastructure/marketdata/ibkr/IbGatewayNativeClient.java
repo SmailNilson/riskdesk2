@@ -739,7 +739,8 @@ public class IbGatewayNativeClient {
         }
 
         // Build a typed rejection exception so callers (WtxExecutionBridge) can map it to
-        // the right routing outcome — SKIPPED_INSUFFICIENT_MARGIN / FAILED_TIMEOUT / FAILED_BROKER_REJECT.
+        // the right routing outcome — SKIPPED_INSUFFICIENT_MARGIN / ACK_PENDING /
+        // FAILED_TIMEOUT / FAILED_BROKER_REJECT.
         // Prefer the async errorCode when available (captured by message() above), then the
         // synchronous error captured by the IOrderHandler, then the timeout fallback.
         Integer brokerCode = asyncErr != null ? asyncErr.errorCode() : null;
@@ -767,9 +768,11 @@ public class IbGatewayNativeClient {
             kind = IbkrOrderRejectionException.Kind.UNKNOWN;
             detail = "IBKR order submission did not yield a confirmed status.";
         }
+        Long brokerOrderId = order.orderId() > 0 ? (long) order.orderId() : null;
         throw new IbkrOrderRejectionException(kind, brokerCode,
                 brokerMsg != null ? brokerMsg : error.get(),
-                detail);
+                detail,
+                brokerOrderId);
     }
 
 

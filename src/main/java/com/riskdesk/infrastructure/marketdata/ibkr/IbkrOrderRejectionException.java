@@ -40,12 +40,19 @@ public class IbkrOrderRejectionException extends RuntimeException {
     private final Kind kind;
     private final Integer brokerErrorCode;
     private final String brokerMessage;
+    private final Long brokerOrderId;
 
     public IbkrOrderRejectionException(Kind kind, Integer brokerErrorCode, String brokerMessage, String detail) {
+        this(kind, brokerErrorCode, brokerMessage, detail, null);
+    }
+
+    public IbkrOrderRejectionException(Kind kind, Integer brokerErrorCode, String brokerMessage,
+                                       String detail, Long brokerOrderId) {
         super(detail != null ? detail : (brokerMessage != null ? brokerMessage : "IBKR order rejected"));
         this.kind = kind == null ? Kind.UNKNOWN : kind;
         this.brokerErrorCode = brokerErrorCode;
         this.brokerMessage = brokerMessage;
+        this.brokerOrderId = brokerOrderId;
     }
 
     public Kind kind() {
@@ -58,5 +65,9 @@ public class IbkrOrderRejectionException extends RuntimeException {
 
     public String brokerMessage() {
         return brokerMessage;
+    }
+
+    public Long brokerOrderId() {
+        return brokerOrderId;
     }
 }

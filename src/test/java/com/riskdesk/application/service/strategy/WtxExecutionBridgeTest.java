@@ -369,6 +369,27 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void openLong_brokerTimeoutWithOrderId_returnsAckPending_andPersistsOrderIdForLateCallbacks() {
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.TIMEOUT, null, null,
+                        "IBKR order submission timed out without acknowledgement.",
+                        12345L));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ACK_PENDING, result.outcome());
+        TradeExecutionRecord row = repo.all().get(0);
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus());
+        assertEquals(12345L, row.getEntryOrderId());
+        assertEquals(12345, row.getIbkrOrderId());
+        assertNotNull(row.getEntrySubmittedAt());
+        assertTrue(row.getStatusReason().toLowerCase().contains("acknowledgement pending"));
+    }
+
+    @Test
     void openLong_brokerCancelled_returnsFailedBrokerReject_rowMarkedFailed() {
         when(ibkrOrderService.submitEntryOrder(any()))
                 .thenThrow(new IbkrOrderRejectionException(
@@ -432,6 +453,35 @@ class WtxExecutionBridgeTest {
         assertFalse(prior.getStatus() == ExecutionStatus.FAILED,
                 "close-leg TIMEOUT must keep prior row non-terminal — no double-flatten risk");
         // No open-leg attempt.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverseToShort_closeLegTimeoutWithOrderId_returnsAckPending_priorRowExitSubmittedForLateCallbacks() {
+        TradeExecutionRecord priorLong = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorLong);
+
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.TIMEOUT, null, null,
+                        "IBKR order submission timed out without acknowledgement.",
+                        54321L));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ACK_PENDING, result.outcome());
+        TradeExecutionRecord prior = repo.byId(priorLong.getId());
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, prior.getStatus());
+        assertEquals(54321, prior.getIbkrOrderId());
+        assertNotNull(prior.getExitSubmittedAt());
+        assertTrue(prior.getStatusReason().toLowerCase().contains("acknowledgement pending"));
+        // Reversal is lost: open leg not attempted, no fill-driven retry exists yet.
+        // The hint must surface in the routing result so the UI tooltip carries it.
+        assertNotNull(result.errorMessage());
+        assertTrue(result.errorMessage().toLowerCase().contains("reversal lost"),
+                "errorMessage must hint that the reversal was lost (open leg not attempted)");
         verify(ibkrOrderService, times(1)).submitEntryOrder(any());
     }
 

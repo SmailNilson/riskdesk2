@@ -196,6 +196,21 @@ Do not:
 - create separate mentor reviews for alerts that fire simultaneously for the same trading signal
 - move transition detection logic out of the domain layer
 
+### IBKR Order Acknowledgement Rule
+
+When routing live orders through IBKR:
+
+- treat an acknowledgement timeout as an unknown broker state, not as a definitive reject
+- if the native client has an IBKR `orderId`, persist it immediately so delayed `orderStatus` and `execDetails` callbacks can reconcile the execution row
+- distinguish `ACK_PENDING` from `FAILED_TIMEOUT` in user-facing routing state
+- never submit a duplicate flatten order while a close leg is ack-pending or exit-submitted
+
+Do not:
+
+- mark an order failed only because the first acknowledgement missed the local timeout
+- discard late broker callbacks when the order can be linked by `ibkrOrderId` or `orderRef`
+- present ack timeout as broker rejection in the UI
+
 ### Synthetic DXY Rule
 
 When working with the dollar index inside RiskDesk:
