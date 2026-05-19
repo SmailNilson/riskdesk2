@@ -12,11 +12,13 @@ import com.riskdesk.domain.marketdata.event.CandleClosed;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Side;
+import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -46,6 +48,7 @@ public class WtxStrategyService {
     private final SimpMessagingTemplate ws;
     private final WtxStrategyProperties properties;
     private final ObjectProvider<WtxExecutionBridge> executionBridgeProvider;
+    private final ApplicationEventPublisher eventPublisher;
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -54,7 +57,8 @@ public class WtxStrategyService {
             WtxEnrichmentBuilder enrichmentBuilder,
             SimpMessagingTemplate ws,
             WtxStrategyProperties properties,
-            ObjectProvider<WtxExecutionBridge> executionBridgeProvider
+            ObjectProvider<WtxExecutionBridge> executionBridgeProvider,
+            ApplicationEventPublisher eventPublisher
     ) {
         this.statePort = statePort;
         this.historyPort = historyPort;
@@ -63,6 +67,16 @@ public class WtxStrategyService {
         this.ws = ws;
         this.properties = properties;
         this.executionBridgeProvider = executionBridgeProvider;
+        this.eventPublisher = eventPublisher;
+    }
+
+    private void publishWtxEvent(WtxSignal signal, BigDecimal price) {
+        try {
+            eventPublisher.publishEvent(WtxSignalDetectedEvent.from(signal, price));
+        } catch (Exception e) {
+            log.warn("Failed to publish WtxSignalDetectedEvent for {} {} — {}",
+                    signal.instrument(), signal.timeframe(), e.getMessage());
+        }
     }
 
     @EventListener
@@ -175,6 +189,7 @@ public class WtxStrategyService {
 
             historyPort.save(signal);
             ws.convertAndSend("/topic/wtx-signals", toWsPayload(signal, state));
+            publishWtxEvent(signal, currentCandle.getClose());
             log.info("WTX [{}] signal={} action={} canTrade={} wt1={} htf={} struct={}",
                     instrumentName, signal.signalType(), signal.suggestedAction(),
                     signal.canTrade(), signal.wt1Value(),
@@ -197,6 +212,7 @@ public class WtxStrategyService {
                 state = closePosition(state, instrument, currentCandle.getClose());
                 historyPort.save(haltSignal);
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
+                publishWtxEvent(haltSignal, currentCandle.getClose());
             }
             state = state.withMaxLossHit();
         }
@@ -228,6 +244,7 @@ public class WtxStrategyService {
                             historyPort.save(forceCloseSignal);
                             statePort.save(closed);
                             ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
+                            publishWtxEvent(forceCloseSignal, exitPrice);
                             log.info("WTX [{} {}] force-closed — {}", instrumentName, timeframe, reason);
                             publishState(closed, config);
                         } catch (Exception e) {
@@ -313,6 +330,7 @@ public class WtxStrategyService {
         WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
+        publishWtxEvent(exitSignal, exit.exitPrice());
         log.info("WTX [{}] trailing exit fired — reason={} exitPrice={} mfe={}",
                 state.instrument(), exit.reason(), exit.exitPrice(), exit.updatedBestFavorablePrice());
         return closed;

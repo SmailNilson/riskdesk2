@@ -2,6 +2,7 @@ package com.riskdesk.domain.notification.port;
 
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
+import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
 
 /**
  * Port for external push notifications.
@@ -18,6 +19,15 @@ public interface NotificationPort {
      * update. Telegram overrides with a dedicated red-formatted message.
      */
     default void sendTradeBlockedByGate(TradeBlockedByStrategyGateEvent event) {
+        // no-op
+    }
+
+    /**
+     * Fire a notification for every WTX signal landing in history
+     * (COMPRA/VENTA/COMPRA_1/VENTA_1, close/halt). Default no-op so non-Telegram
+     * adapters can ignore the channel.
+     */
+    default void sendWtxSignal(WtxSignalDetectedEvent event) {
         // no-op
     }
 }

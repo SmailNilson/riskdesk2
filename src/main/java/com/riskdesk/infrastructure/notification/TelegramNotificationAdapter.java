@@ -1,7 +1,9 @@
 package com.riskdesk.infrastructure.notification;
 
+import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
+import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
 import com.riskdesk.domain.notification.port.NotificationPort;
 import com.riskdesk.infrastructure.config.TelegramProperties;
 import org.slf4j.Logger;
@@ -10,6 +12,7 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Map;
 
@@ -162,6 +165,77 @@ public class TelegramNotificationAdapter implements NotificationPort {
         sb.append("\n\u26A0\uFE0F <i>No IBKR order was placed. Trade halted before broker contact.</i>\n");
         sb.append("\u26A1\uFE0F <i>RiskDesk \u2014 Strategy Execution Gate</i>");
         return sb.toString();
+    }
+
+    @Override
+    public void sendWtxSignal(WtxSignalDetectedEvent event) {
+        if (!properties.isEnabled()) {
+            log.debug("Telegram notifications disabled — skipping WTX signal for {} {}",
+                    event.instrument(), event.timeframe());
+            return;
+        }
+        if (properties.getBotToken().isBlank() || properties.getChatId().isBlank()) {
+            log.warn("Telegram bot-token or chat-id not configured — skipping WTX signal");
+            return;
+        }
+
+        String message = formatWtxMessage(event);
+        String url = String.format(TELEGRAM_API, properties.getBotToken());
+
+        try {
+            restTemplate.postForEntity(url, Map.of(
+                    "chat_id", properties.getChatId(),
+                    "text", message,
+                    "parse_mode", "HTML"
+            ), String.class);
+            log.info("Telegram WTX alert sent for {} {} {} {}",
+                    event.instrument(), event.timeframe(), event.signalType(), event.action());
+        } catch (Exception e) {
+            log.error("Failed to send Telegram WTX alert for {} {} — {}",
+                    event.instrument(), event.timeframe(), e.getMessage());
+        }
+    }
+
+    private String formatWtxMessage(WtxSignalDetectedEvent e) {
+        boolean isLong  = "LONG".equalsIgnoreCase(e.direction());
+        boolean isClose = e.action() == WtxAction.CLOSE_LONG
+                       || e.action() == WtxAction.CLOSE_SHORT
+                       || e.action() == WtxAction.CLOSE_ALL;
+        boolean isReverse = e.action() == WtxAction.REVERSE_TO_LONG
+                         || e.action() == WtxAction.REVERSE_TO_SHORT;
+
+        String headerEmoji   = isClose   ? "🏁"
+                            : isReverse ? "🔁"
+                            : isLong    ? "🟢" : "🔴";
+        String sideLabel     = isLong ? "COMPRA" : "VENTA";
+        int decimals = priceDecimals(e.instrument());
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(headerEmoji).append(" <b>WTX ").append(e.signalType());
+        sb.append(" — ").append(sideLabel).append(" ").append(e.instrument());
+        sb.append("</b>\n\n");
+
+        sb.append("📊 <b>Instrument:</b> ").append(e.instrument())
+          .append(" (").append(instrumentLabel(e.instrument())).append(")\n");
+        sb.append("⏱ <b>Timeframe:</b> ").append(e.timeframe()).append("\n");
+        sb.append("🎯 <b>Action:</b> ").append(e.action()).append("\n");
+        sb.append(e.canTrade() ? "✅" : "⛔").append(" <b>Tradeable:</b> ")
+          .append(e.canTrade() ? "yes" : "no (gated)").append("\n");
+
+        if (e.price() != null) {
+            sb.append("💰 <b>Price:</b> ").append(formatPrice(e.price().doubleValue(), decimals)).append("\n");
+        }
+
+        sb.append("\n═════ WaveTrend ═════\n");
+        sb.append("WT1: ").append(formatBig(e.wt1Value()))
+          .append("  ·  WT2: ").append(formatBig(e.wt2Value())).append("\n");
+
+        sb.append("\n⚡️ <i>RiskDesk — WTX Strategy</i>");
+        return sb.toString();
+    }
+
+    private static String formatBig(BigDecimal v) {
+        return v == null ? "?" : String.format(java.util.Locale.ROOT, "%.2f", v.doubleValue());
     }
 
     /**

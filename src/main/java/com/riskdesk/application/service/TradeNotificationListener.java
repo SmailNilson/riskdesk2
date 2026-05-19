@@ -2,6 +2,7 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
+import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
 import com.riskdesk.domain.notification.port.NotificationPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +46,17 @@ public class TradeNotificationListener {
         } catch (Exception e) {
             log.error("Gate-block notification failed for {} {} review {} — {}",
                 event.instrument(), event.action(), event.reviewId(), e.getMessage());
+        }
+    }
+
+    @Async
+    @EventListener
+    public void onWtxSignal(WtxSignalDetectedEvent event) {
+        try {
+            notificationPort.sendWtxSignal(event);
+        } catch (Exception e) {
+            log.error("WTX notification failed for {} {} {} — {}",
+                event.instrument(), event.timeframe(), event.signalType(), e.getMessage());
         }
     }
 }
