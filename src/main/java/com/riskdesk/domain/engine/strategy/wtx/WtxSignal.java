@@ -38,6 +38,12 @@ public record WtxSignal(
                 routingOutcome, routingErrorMessage);
     }
 
+    public WtxSignal withAction(WtxAction action) {
+        return new WtxSignal(instrument, timeframe, signalType, direction,
+                wt1Value, wt2Value, canTrade, action, enrichment, signalTs,
+                routingOutcome, routingErrorMessage);
+    }
+
     public WtxSignal withRoutingOutcome(WtxRoutingOutcome routingOutcome) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,

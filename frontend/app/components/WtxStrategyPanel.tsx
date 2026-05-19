@@ -6,6 +6,7 @@ import {
   getWtxRecentSignals,
   updateWtxProfile,
   updateWtxAutoExecution,
+  updateWtxSwingBiasFilter,
 } from '@/app/lib/api';
 import type {
   WtxStrategyStateView,
@@ -70,6 +71,45 @@ function RoutingChip({ outcome, errorMessage }: { outcome: WtxRoutingOutcome | n
     >
       {label}
     </span>
+  );
+}
+
+function SwingBiasControl({
+  enabled,
+  direction,
+  busy,
+  onToggle,
+}: {
+  enabled: boolean;
+  direction: 'BULLISH' | 'BEARISH' | null;
+  busy: boolean;
+  onToggle: () => void;
+}) {
+  const dirLabel = direction === 'BULLISH' ? '▲ BULL' : direction === 'BEARISH' ? '▼ BEAR' : '—';
+  const dirStyle =
+    direction === 'BULLISH' ? 'text-emerald-300' :
+    direction === 'BEARISH' ? 'text-red-300' :
+                              'text-zinc-500';
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={busy}
+      aria-pressed={enabled}
+      title={
+        enabled
+          ? `Filtre Swing-Bias actif — seules les entrées alignées avec ${direction ?? '—'} sont autorisées. Cliquer pour désactiver.`
+          : `Filtre Swing-Bias inactif — cliquer pour n'autoriser que les trades alignés avec le swing-bias SMC. Direction courante : ${direction ?? '—'}.`
+      }
+      className={`flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+        enabled
+          ? 'border-cyan-600/70 bg-cyan-950/40 text-cyan-200 hover:bg-cyan-950/60'
+          : 'border-zinc-700 text-zinc-400 hover:border-cyan-700 hover:text-cyan-300'
+      }`}
+    >
+      <span>Swing : {enabled ? 'ON' : 'OFF'}</span>
+      <span className={`font-mono ${enabled ? dirStyle : 'text-zinc-600'}`}>{dirLabel}</span>
+    </button>
   );
 }
 
@@ -201,6 +241,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [collapsed, setCollapsed] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
+  const [swingBiasBusy, setSwingBiasBusy] = useState(false);
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument, timeframe);
@@ -228,6 +269,17 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
       if (updated) setState(updated);
     } finally {
       setProfileBusy(false);
+    }
+  }, [instrument, timeframe, state]);
+
+  const onToggleSwingBias = useCallback(async () => {
+    if (!state) return;
+    setSwingBiasBusy(true);
+    try {
+      const updated = await updateWtxSwingBiasFilter(instrument, timeframe, !state.swingBiasFilterEnabled);
+      if (updated) setState(updated);
+    } finally {
+      setSwingBiasBusy(false);
     }
   }, [instrument, timeframe, state]);
 
@@ -322,6 +374,12 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
               >
                 Auto-IBKR : {autoExecOn ? 'ON' : 'OFF'}
               </button>
+              <SwingBiasControl
+                enabled={state.swingBiasFilterEnabled}
+                direction={state.currentSwingBias}
+                busy={swingBiasBusy}
+                onToggle={onToggleSwingBias}
+              />
             </div>
           )}
 

@@ -72,6 +72,15 @@ public class WtxStrategyStateEntity {
     @Column(precision = 20, scale = 8)
     private BigDecimal trailingStopPrice;
 
+    /**
+     * Nullable for the same reason as {@link #autoExecutionEnabled}: introducing a
+     * NOT NULL boolean column via Hibernate {@code ddl-auto=update} on an already
+     * populated table is rejected by PostgreSQL. Legacy rows read back as {@code null}
+     * → coerced to false by the adapter. New writes persist a concrete true/false.
+     */
+    @Column
+    private Boolean swingBiasFilterEnabled;
+
     public WtxStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -121,4 +130,7 @@ public class WtxStrategyStateEntity {
 
     public BigDecimal getTrailingStopPrice() { return trailingStopPrice; }
     public void setTrailingStopPrice(BigDecimal trailingStopPrice) { this.trailingStopPrice = trailingStopPrice; }
+
+    public Boolean getSwingBiasFilterEnabled() { return swingBiasFilterEnabled; }
+    public void setSwingBiasFilterEnabled(Boolean swingBiasFilterEnabled) { this.swingBiasFilterEnabled = swingBiasFilterEnabled; }
 }
