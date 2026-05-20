@@ -646,6 +646,27 @@ public class IbGatewayNativeClient {
             PersistentAccountSnapshotCache fresh = new PersistentAccountSnapshotCache(accountId);
             try {
                 localController.reqAccountUpdates(true, accountId, fresh);
+                // TOCTOU guard: clearStateLocked() runs under connectionLock (NOT
+                // accountSnapshotLock), so a disconnect can race between the localController
+                // capture above and this point — nulling both `controller` and
+                // `persistentAccountCache` while we held only accountSnapshotLock. Publishing
+                // `fresh` blindly here would bind a cache to a controller that has already
+                // been disconnected; subsequent calls would hit the fast-path on a dead feed
+                // and serve stale snapshots forever (the very bug this whole layer fixes).
+                // If the controller has been swapped or cleared, drop `fresh` and let the
+                // next caller re-bootstrap against the new controller.
+                if (controller != localController) {
+                    log.info("IB Gateway persistent account subscription discarded for {} — "
+                        + "controller changed during bootstrap (disconnect raced us)", accountId);
+                    // Best-effort cleanup on the now-detached controller. The connection is
+                    // gone so IBKR has already torn this subscription down — the call is
+                    // typically a no-op but issuing it keeps the broker-side state tidy if
+                    // the disconnect was a soft drop.
+                    try {
+                        localController.reqAccountUpdates(false, accountId, fresh);
+                    } catch (Exception ignored) {}
+                    return null;
+                }
                 persistentAccountCache = fresh;
                 log.info("IB Gateway persistent account subscription started for {}", accountId);
                 return fresh;
