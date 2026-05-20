@@ -92,6 +92,15 @@ public class IbGatewayNativeClient {
     private volatile CompletableFuture<Void> connectedFuture = new CompletableFuture<>();
     private volatile CompletableFuture<List<String>> accountsFuture = new CompletableFuture<>();
     private volatile List<String> managedAccounts = List.of();
+    /**
+     * Single permanent {@code reqAccountUpdates(true, ...)} subscription per process.
+     * Replaces the legacy per-call subscribe/unsubscribe cycle that raced with itself
+     * under load and produced spurious {@code code=2100 "API client has been
+     * unsubscribed from account data"} bursts, causing concurrent {@code orderStatus}
+     * callbacks to be lost in the noise (the WTX ACK_PENDING incident pattern).
+     * Initialized lazily on the first {@link #requestAccountSnapshot(String)} call.
+     */
+    private volatile PersistentAccountSnapshotCache persistentAccountCache;
     private volatile Instant reconnectBlockedUntil = Instant.EPOCH;
     private volatile String lastConnectionFailure = "uninitialized";
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
@@ -520,6 +529,26 @@ public class IbGatewayNativeClient {
     // Account & position data
     // -------------------------------------------------------------------------
 
+    /**
+     * Returns an account snapshot served from the in-memory {@link PersistentAccountSnapshotCache}.
+     *
+     * <p>A single {@code reqAccountUpdates(true, accountId, handler)} is started lazily on
+     * the first call (per process / per connection) and kept open until disconnect. Subsequent
+     * calls — including concurrent ones from the portfolio poll, WTX pre-flight margin checks
+     * and ad-hoc dashboard queries — read the cache without round-tripping to IBKR.</p>
+     *
+     * <p>This eliminates the {@code subscribe → await → unsubscribe} cycle that the legacy
+     * implementation ran on every call. Under load that cycle raced with itself, IBKR
+     * responded with {@code code=2100 "API client has been unsubscribed from account data"}
+     * on the older subscriber, and the {@code accountDownloadEnd} latch was never tripped —
+     * resulting in chronic 15s {@code accountLatch} timeouts that starved the same controller
+     * connection used for {@code orderStatus} callbacks. See WTX ACK_PENDING incident
+     * 2026-05-20 for the production fingerprint.</p>
+     *
+     * <p>The cache is bootstrapped synchronously the first time it is requested: the caller
+     * waits up to {@link #REQUEST_TIMEOUT} for the initial {@code accountDownloadEnd}. After
+     * that the wait is skipped — updates flow in via the persistent handler.</p>
+     */
     public Optional<IbGatewayAccountSnapshot> requestAccountSnapshot(String requestedAccountId) {
         if (!ensureConnected()) {
             return Optional.empty();
@@ -530,62 +559,123 @@ public class IbGatewayNativeClient {
             return Optional.empty();
         }
 
-        synchronized (accountSnapshotLock) {
-            CountDownLatch accountLatch = new CountDownLatch(1);
-            Map<String, String> values = new ConcurrentHashMap<>();
-            Map<Integer, Position> positions = new ConcurrentHashMap<>();
+        PersistentAccountSnapshotCache cache = ensurePersistentAccountSubscription(accountId);
+        if (cache == null) {
+            return Optional.empty();
+        }
 
-            ApiController.IAccountHandler accountHandler = new ApiController.IAccountHandler() {
-                @Override
-                public void accountValue(String account, String key, String value, String currency) {
-                    if (!accountId.equals(account)) {
-                        return;
-                    }
-                    values.put(key, value);
-                    if (currency != null && !currency.isBlank()) {
-                        values.put(key + ":currency", currency);
-                    }
-                }
-
-                @Override
-                public void accountTime(String timeStamp) {
-                    values.put("AccountTime", timeStamp);
-                }
-
-                @Override
-                public void accountDownloadEnd(String account) {
-                    if (accountId.equals(account)) {
-                        accountLatch.countDown();
-                    }
-                }
-
-                @Override
-                public void updatePortfolio(Position position) {
-                    if (position == null
-                        || !accountId.equals(position.account())
-                        || position.position() == null
-                        || !position.position().isValid()
-                        || position.position().isZero()) {
-                        return;
-                    }
-                    positions.put(position.conid(), position);
-                }
-            };
-
+        if (!cache.isInitialized()) {
             try {
-                controller.reqAccountUpdates(true, accountId, accountHandler);
-                boolean completed = accountLatch.await(REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-                controller.reqAccountUpdates(false, accountId, accountHandler);
-
-                if (!completed) {
-                    log.warn("IB Gateway account snapshot timed out for {}", accountId);
+                boolean ready = cache.awaitInitial(REQUEST_TIMEOUT);
+                if (!ready) {
+                    log.warn("IB Gateway persistent account snapshot timed out waiting for initial download for {}",
+                        accountId);
+                    // Return what we have — partial values are more useful than empty for the dashboard.
                 }
-
-                values.putIfAbsent("BaseCurrency", "USD");
-                return Optional.of(new IbGatewayAccountSnapshot(accountId, managedAccounts, values, List.copyOf(positions.values())));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return Optional.empty();
+            }
+        }
+
+        return Optional.of(cache.snapshot(managedAccounts));
+    }
+
+    /**
+     * Drops the persistent account cache so the next caller re-bootstraps a fresh
+     * subscription. Invoked when IBKR signals our handler has been unsubscribed
+     * server-side (code=2100) — at that point callbacks have stopped flowing and any
+     * snapshot we serve would be stale. No {@code reqAccountUpdates(false, ...)} is
+     * issued: IBKR has already torn down its side, calling unsubscribe again is at best
+     * a no-op and at worst triggers another spurious unsubscribe-of-the-current-handler
+     * cycle.
+     *
+     * <p>Package-private to allow direct testing of the invalidation contract from
+     * {@code IbGatewayNativeClientPersistentAccountTest} without a live IBKR connection.</p>
+     */
+    void invalidatePersistentAccountCache(String reason) {
+        PersistentAccountSnapshotCache prev;
+        synchronized (accountSnapshotLock) {
+            prev = persistentAccountCache;
+            persistentAccountCache = null;
+        }
+        if (prev != null) {
+            log.info("IB Gateway persistent account cache invalidated for {} — reason: {}",
+                prev.accountId(), reason);
+        }
+    }
+
+    /**
+     * Idempotent: returns the existing persistent subscription if it already covers
+     * {@code accountId}, otherwise starts a new one (and tears down a stale one targeting
+     * a different account). Synchronized on {@link #accountSnapshotLock} so a burst of
+     * concurrent callers triggers at most one {@code reqAccountUpdates(true, ...)} —
+     * the entire point of this layer.
+     */
+    private PersistentAccountSnapshotCache ensurePersistentAccountSubscription(String accountId) {
+        PersistentAccountSnapshotCache existing = persistentAccountCache;
+        if (existing != null && accountId.equals(existing.accountId())) {
+            return existing;
+        }
+        synchronized (accountSnapshotLock) {
+            existing = persistentAccountCache;
+            if (existing != null && accountId.equals(existing.accountId())) {
+                return existing;
+            }
+            ApiController localController = controller;
+            if (localController == null) {
+                // ensureConnected() succeeded above but a parallel disconnect raced us — skip.
+                return null;
+            }
+            // accountId changed (rare: master/sub account switch) — drop the stale subscription
+            // before opening the new one to avoid running two concurrent persistent subs.
+            // Clear `persistentAccountCache` here, NOT after the new subscribe succeeds: if the
+            // new subscribe throws we've already unsubscribed the previous cache broker-side, so
+            // leaving the field pointing at the now-defunct cache would let the fast-path on the
+            // next call hand back stale snapshots indefinitely. Clearing forces the next caller
+            // to retry the bootstrap cleanly.
+            if (existing != null) {
+                persistentAccountCache = null;
+                try {
+                    localController.reqAccountUpdates(false, existing.accountId(), existing);
+                } catch (Exception e) {
+                    log.debug("Failed to unsubscribe previous persistent account {}: {}",
+                        existing.accountId(), e.getMessage());
+                }
+            }
+            PersistentAccountSnapshotCache fresh = new PersistentAccountSnapshotCache(accountId);
+            try {
+                localController.reqAccountUpdates(true, accountId, fresh);
+                // TOCTOU guard: clearStateLocked() runs under connectionLock (NOT
+                // accountSnapshotLock), so a disconnect can race between the localController
+                // capture above and this point — nulling both `controller` and
+                // `persistentAccountCache` while we held only accountSnapshotLock. Publishing
+                // `fresh` blindly here would bind a cache to a controller that has already
+                // been disconnected; subsequent calls would hit the fast-path on a dead feed
+                // and serve stale snapshots forever (the very bug this whole layer fixes).
+                // If the controller has been swapped or cleared, drop `fresh` and let the
+                // next caller re-bootstrap against the new controller.
+                if (controller != localController) {
+                    log.info("IB Gateway persistent account subscription discarded for {} — "
+                        + "controller changed during bootstrap (disconnect raced us)", accountId);
+                    // Best-effort cleanup on the now-detached controller. The connection is
+                    // gone so IBKR has already torn this subscription down — the call is
+                    // typically a no-op but issuing it keeps the broker-side state tidy if
+                    // the disconnect was a soft drop.
+                    try {
+                        localController.reqAccountUpdates(false, accountId, fresh);
+                    } catch (Exception ignored) {}
+                    return null;
+                }
+                persistentAccountCache = fresh;
+                log.info("IB Gateway persistent account subscription started for {}", accountId);
+                return fresh;
+            } catch (Exception e) {
+                log.warn("Failed to start persistent account subscription for {}: {}",
+                    accountId, e.getMessage());
+                // persistentAccountCache is already null (or was never set on first bootstrap).
+                // Next call will retry from scratch — no stale cache to read from.
+                return null;
             }
         }
     }
@@ -1192,6 +1282,13 @@ public class IbGatewayNativeClient {
         ApiController prev = controller;
         List<StreamingPriceSubscription> subs = List.copyOf(streamingSubscriptions.values());
         List<StreamingQuoteSubscription> quoteSubs = List.copyOf(streamingQuoteSubscriptions.values());
+        // Capture-then-null the persistent account subscription so submitCleanup can
+        // call reqAccountUpdates(false, ...) on the OLD controller before it is dropped.
+        // Forgetting this would leave the broker-side subscription dangling and the next
+        // connection would reopen a second one in parallel — exactly the multi-subscription
+        // pattern that produced the code=2100 bursts this whole layer is meant to avoid.
+        PersistentAccountSnapshotCache prevAccount = persistentAccountCache;
+        persistentAccountCache = null;
         controller = null;
         managedAccounts = List.of();
         streamingSubscriptions.clear();
@@ -1199,7 +1296,7 @@ public class IbGatewayNativeClient {
         // Slice 3a — drop stale fill-tracking handler refs so they re-attach on reconnect.
         tradeReportHandlerRef = null;
         fillTrackingOrderHandler = null;
-        return new DisconnectContext(prev, subs, quoteSubs);
+        return new DisconnectContext(prev, subs, quoteSubs, prevAccount);
     }
 
     /**
@@ -1220,6 +1317,13 @@ public class IbGatewayNativeClient {
                 }
                 for (StreamingQuoteSubscription sub : ctx.quoteSubscriptions()) {
                     try { ctx.controller().cancelTopMktData(sub); } catch (Exception ignored) {}
+                }
+                if (ctx.accountSubscription() != null) {
+                    try {
+                        ctx.controller().reqAccountUpdates(false,
+                            ctx.accountSubscription().accountId(),
+                            ctx.accountSubscription());
+                    } catch (Exception ignored) {}
                 }
             }
             try { ctx.controller().disconnect(); } catch (Exception ignored) {}
@@ -1375,7 +1479,8 @@ public class IbGatewayNativeClient {
 
     private record DisconnectContext(ApiController controller,
                                      List<StreamingPriceSubscription> subscriptions,
-                                     List<StreamingQuoteSubscription> quoteSubscriptions) {}
+                                     List<StreamingQuoteSubscription> quoteSubscriptions,
+                                     PersistentAccountSnapshotCache accountSubscription) {}
 
     public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
 
@@ -1461,6 +1566,17 @@ public class IbGatewayNativeClient {
                 }
                 // Connection never completed — nothing active to cancel.
                 submitCleanup(ctx, false);
+            }
+            // Code 2100 = "API client has been unsubscribed from account data". When IBKR
+            // fires this on our persistent account subscription (another client opened a
+            // competing reqAccountUpdates, the broker forced an unsubscribe, etc.) the cache
+            // stops receiving callbacks but our field still points to the now-dead handler.
+            // Without invalidation the fast-path in ensurePersistentAccountSubscription would
+            // return that frozen cache forever; readers would get stale netLiq/positions and
+            // the WTX margin pre-flight would make decisions on data that no longer matches
+            // the broker. Drop the reference so the next caller re-bootstraps a live feed.
+            if (errorCode == 2100) {
+                invalidatePersistentAccountCache(errorMsg);
             }
             // Capture order-level error codes so placeLimitOrder() can build a typed
             // IbkrOrderRejectionException (e.g. 201 = margin) instead of a generic
