@@ -582,6 +582,30 @@ public class IbGatewayNativeClient {
     }
 
     /**
+     * Drops the persistent account cache so the next caller re-bootstraps a fresh
+     * subscription. Invoked when IBKR signals our handler has been unsubscribed
+     * server-side (code=2100) — at that point callbacks have stopped flowing and any
+     * snapshot we serve would be stale. No {@code reqAccountUpdates(false, ...)} is
+     * issued: IBKR has already torn down its side, calling unsubscribe again is at best
+     * a no-op and at worst triggers another spurious unsubscribe-of-the-current-handler
+     * cycle.
+     *
+     * <p>Package-private to allow direct testing of the invalidation contract from
+     * {@code IbGatewayNativeClientPersistentAccountTest} without a live IBKR connection.</p>
+     */
+    void invalidatePersistentAccountCache(String reason) {
+        PersistentAccountSnapshotCache prev;
+        synchronized (accountSnapshotLock) {
+            prev = persistentAccountCache;
+            persistentAccountCache = null;
+        }
+        if (prev != null) {
+            log.info("IB Gateway persistent account cache invalidated for {} — reason: {}",
+                prev.accountId(), reason);
+        }
+    }
+
+    /**
      * Idempotent: returns the existing persistent subscription if it already covers
      * {@code accountId}, otherwise starts a new one (and tears down a stale one targeting
      * a different account). Synchronized on {@link #accountSnapshotLock} so a burst of
@@ -1521,6 +1545,17 @@ public class IbGatewayNativeClient {
                 }
                 // Connection never completed — nothing active to cancel.
                 submitCleanup(ctx, false);
+            }
+            // Code 2100 = "API client has been unsubscribed from account data". When IBKR
+            // fires this on our persistent account subscription (another client opened a
+            // competing reqAccountUpdates, the broker forced an unsubscribe, etc.) the cache
+            // stops receiving callbacks but our field still points to the now-dead handler.
+            // Without invalidation the fast-path in ensurePersistentAccountSubscription would
+            // return that frozen cache forever; readers would get stale netLiq/positions and
+            // the WTX margin pre-flight would make decisions on data that no longer matches
+            // the broker. Drop the reference so the next caller re-bootstraps a live feed.
+            if (errorCode == 2100) {
+                invalidatePersistentAccountCache(errorMsg);
             }
             // Capture order-level error codes so placeLimitOrder() can build a typed
             // IbkrOrderRejectionException (e.g. 201 = margin) instead of a generic
