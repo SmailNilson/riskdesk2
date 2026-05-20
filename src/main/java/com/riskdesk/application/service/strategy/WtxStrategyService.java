@@ -325,6 +325,17 @@ public class WtxStrategyService {
         return updated;
     }
 
+    public WtxStrategyState updateConfiguredOrderQty(String instrument, String timeframe, int qty) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withConfiguredOrderQty(qty);
+        statePort.save(updated);
+        log.info("WTX [{} {}] configured order qty set to {} (sanitized: {})",
+                instrument, timeframe, qty, updated.configuredOrderQty());
+        publishState(updated, properties.toConfig());
+        return updated;
+    }
+
     public WtxStrategyState updateSwingBiasFilter(String instrument, String timeframe, boolean enabled) {
         WtxStrategyState state = statePort.load(instrument, timeframe)
                 .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
@@ -354,16 +365,19 @@ public class WtxStrategyService {
     private WtxStrategyState applyAction(WtxAction action, WtxStrategyState state,
                                          Instrument instrument, WtxConfig config,
                                          BigDecimal currentPrice, BigDecimal entryAtr) {
+        // Panel-configured size wins over the global config.fixedQty so the UI quantity input
+        // drives both the virtual P&L bookkeeping and the IBKR order quantity in one place.
+        BigDecimal orderQty = BigDecimal.valueOf(state.configuredOrderQty());
         return switch (action) {
-            case OPEN_LONG -> state.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty(), entryAtr);
-            case OPEN_SHORT -> state.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty(), entryAtr);
+            case OPEN_LONG -> state.withPosition(WtxPosition.LONG, currentPrice, orderQty, entryAtr);
+            case OPEN_SHORT -> state.withPosition(WtxPosition.SHORT, currentPrice, orderQty, entryAtr);
             case REVERSE_TO_LONG -> {
                 WtxStrategyState closed = closePosition(state, instrument, currentPrice);
-                yield closed.withPosition(WtxPosition.LONG, currentPrice, config.fixedQty(), entryAtr);
+                yield closed.withPosition(WtxPosition.LONG, currentPrice, orderQty, entryAtr);
             }
             case REVERSE_TO_SHORT -> {
                 WtxStrategyState closed = closePosition(state, instrument, currentPrice);
-                yield closed.withPosition(WtxPosition.SHORT, currentPrice, config.fixedQty(), entryAtr);
+                yield closed.withPosition(WtxPosition.SHORT, currentPrice, orderQty, entryAtr);
             }
             case CLOSE_LONG, CLOSE_SHORT, CLOSE_ALL -> closePosition(state, instrument, currentPrice);
             default -> state;
@@ -496,6 +510,7 @@ public class WtxStrategyService {
         payload.put("autoExecutionEnabled", state.autoExecutionEnabled());
         payload.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
+        payload.put("configuredOrderQty", state.configuredOrderQty());
         payload.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return payload;
     }

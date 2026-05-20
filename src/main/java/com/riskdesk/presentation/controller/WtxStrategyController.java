@@ -95,6 +95,50 @@ public class WtxStrategyController {
         return ResponseEntity.ok(toStateView(updated));
     }
 
+    @PutMapping("/state/{instrument}/{timeframe}/order-qty")
+    public ResponseEntity<Map<String, Object>> updateOrderQty(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null || !body.containsKey("qty")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'qty' field"));
+        }
+        int qty;
+        Object raw = body.get("qty");
+        try {
+            if (raw instanceof Number n) {
+                // Reject fractional numerics — Number.intValue() silently truncates 1.9 → 1,
+                // which would size a trade differently than the client asked for.
+                double d = n.doubleValue();
+                if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "'qty' must be a whole number, got: " + raw));
+                }
+                if (d > Integer.MAX_VALUE || d < Integer.MIN_VALUE) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "'qty' out of int range: " + raw));
+                }
+                qty = (int) d;
+            } else if (raw instanceof String s) {
+                // parseInt already rejects "1.9" with NumberFormatException — caught below.
+                qty = Integer.parseInt(s.trim());
+            } else {
+                return ResponseEntity.badRequest().body(Map.of("error", "'qty' must be an integer"));
+            }
+        } catch (NumberFormatException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", "'qty' must be an integer: " + raw));
+        }
+        if (qty <= 0 || qty > 100) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "'qty' must be between 1 and 100 contracts",
+                    "received", qty
+            ));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateConfiguredOrderQty(instrument, timeframe, qty);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
     @PutMapping("/state/{instrument}/{timeframe}/swing-bias-filter")
     public ResponseEntity<Map<String, Object>> updateSwingBiasFilter(
             @PathVariable String instrument,
@@ -143,6 +187,7 @@ public class WtxStrategyController {
         view.put("autoExecutionEnabled", state.autoExecutionEnabled());
         view.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         view.put("currentSwingBias", wtxStrategyService.currentSwingBias(state.instrument(), state.timeframe()));
+        view.put("configuredOrderQty", state.configuredOrderQty());
         view.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return view;
     }
@@ -161,6 +206,7 @@ public class WtxStrategyController {
         view.put("autoExecutionEnabled", false);
         view.put("swingBiasFilterEnabled", false);
         view.put("currentSwingBias", null);
+        view.put("configuredOrderQty", com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState.DEFAULT_ORDER_QTY);
         view.put("canTrade", true);
         return view;
     }

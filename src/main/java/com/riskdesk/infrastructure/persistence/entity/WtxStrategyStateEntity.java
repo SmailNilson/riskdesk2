@@ -81,6 +81,16 @@ public class WtxStrategyStateEntity {
     @Column
     private Boolean swingBiasFilterEnabled;
 
+    /**
+     * User-configured per-panel order quantity for the next OPEN / REVERSE open leg.
+     * Nullable for the same {@code ddl-auto=update} reason as {@link #autoExecutionEnabled}:
+     * adding a NOT NULL integer column on a populated table is rejected by PostgreSQL.
+     * Legacy rows read back as {@code null} → coerced to {@link
+     * com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState#DEFAULT_ORDER_QTY} by the adapter.
+     */
+    @Column
+    private Integer configuredOrderQty;
+
     public WtxStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -133,4 +143,7 @@ public class WtxStrategyStateEntity {
 
     public Boolean getSwingBiasFilterEnabled() { return swingBiasFilterEnabled; }
     public void setSwingBiasFilterEnabled(Boolean swingBiasFilterEnabled) { this.swingBiasFilterEnabled = swingBiasFilterEnabled; }
+
+    public Integer getConfiguredOrderQty() { return configuredOrderQty; }
+    public void setConfiguredOrderQty(Integer configuredOrderQty) { this.configuredOrderQty = configuredOrderQty; }
 }
