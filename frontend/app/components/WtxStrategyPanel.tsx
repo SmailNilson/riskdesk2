@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   getWtxState,
   getWtxRecentSignals,
@@ -245,6 +245,10 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [swingBiasBusy, setSwingBiasBusy] = useState(false);
   const [qtyBusy, setQtyBusy] = useState(false);
   const [qtyDraft, setQtyDraft] = useState<string>('');
+  // Tracks the (instrument, timeframe) tuple the qty draft is currently tied to. When the
+  // component is reused for a different panel, the new server state's qty overwrites the draft
+  // exactly once; subsequent polls for the same panel leave the user's in-progress edits alone.
+  const draftPanelRef = useRef<string>('');
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument, timeframe);
@@ -316,11 +320,25 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     }
   }, [instrument, timeframe, qtyBusy, qtyDraft, state]);
 
+  // When the (instrument, timeframe) props change, blank the draft right away so a stale
+  // in-progress edit from the previous panel can't be committed against the new panel during
+  // the brief window before its state payload arrives.
   useEffect(() => {
-    if (state && qtyDraft === '') {
+    setQtyDraft('');
+  }, [instrument, timeframe]);
+
+  // Sync the qty draft from server state exactly once per panel identity, and only when the
+  // state payload actually matches the props we're rendering for. Subsequent polls for the
+  // same panel skip this branch so the user's in-progress typing isn't clobbered.
+  useEffect(() => {
+    if (!state) return;
+    if (state.instrument !== instrument || state.timeframe !== timeframe) return;
+    const panelId = `${state.instrument}:${state.timeframe}`;
+    if (draftPanelRef.current !== panelId) {
+      draftPanelRef.current = panelId;
       setQtyDraft(String(state.configuredOrderQty));
     }
-  }, [state, qtyDraft]);
+  }, [state, instrument, timeframe]);
 
   const onToggleAutoExec = useCallback(async () => {
     if (!state) return;

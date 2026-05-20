@@ -663,6 +663,56 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reconcile_scopesPortfolioReadToConfiguredBrokerAccount() {
+        // wtx.broker-account-id is configured to "DU777"; the bridge must request that account
+        // from the portfolio service AND filter out positions belonging to other accounts so a
+        // multi-account gateway can't trigger cross-account duplicate-skips.
+        wtxProperties.setBrokerAccountId("DU777");
+
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        // Snapshot mixes a same-symbol long position on a DIFFERENT account (DU111) — the bridge
+        // must ignore it and submit a normal OPEN order on DU777.
+        IbkrPositionView otherAccountPos = new IbkrPositionView(
+                "DU111", 99999L, "MCLM6", "FUT",
+                bd(2), BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "USD");
+        IbkrPortfolioSnapshot snap = new IbkrPortfolioSnapshot(
+                true, "DU777", List.of(), bd(10000), bd(2000), bd(8000),
+                bd(8000), bd(0), bd(0), bd(0), "USD", List.of(otherAccountPos), null);
+        when(portfolio.getPortfolio(any())).thenReturn(snap);
+
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        // Portfolio must have been queried for the configured account (not null).
+        verify(portfolio).getPortfolio(org.mockito.ArgumentMatchers.eq("DU777"));
+        // The other-account position must NOT trigger a duplicate-skip — a normal OPEN goes through.
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    @Test
+    void reconcile_defaultPlaceholderAccount_usesGatewayDefault() {
+        // brokerAccountId stays at the "wtx-default" placeholder — reconcile passes null to the
+        // portfolio service (legacy "let the gateway pick" behaviour) and does not filter by
+        // account on the way out.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        verify(portfolio).getPortfolio(org.mockito.ArgumentMatchers.isNull());
+    }
+
+    @Test
     void reconcile_portfolioUnavailable_failsOpen_behavesLikeLegacy() {
         // Portfolio query throws — bridge must log + fall back to legacy behaviour, NOT block the order.
         IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);

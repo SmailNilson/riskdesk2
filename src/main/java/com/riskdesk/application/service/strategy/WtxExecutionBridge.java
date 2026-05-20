@@ -604,11 +604,18 @@ public class WtxExecutionBridge {
      */
     private BigDecimal readLiveIbkrPosition(Instrument instrument) {
         if (ibkrPortfolioService == null) return null;
+        // Scope reconcile to the same account the bridge will submit the order on. In a
+        // multi-account gateway, querying the default selection could read account A's positions
+        // while orders go to account B, producing spurious duplicate-skips or unwanted REVERSE
+        // upgrades. The placeholder "wtx-default" means no real account is configured — fall
+        // back to the gateway's default selection (legacy behaviour).
+        String accountId = effectiveBrokerAccountId();
         IbkrPortfolioSnapshot snapshot;
         try {
-            snapshot = ibkrPortfolioService.getPortfolio(null);
+            snapshot = ibkrPortfolioService.getPortfolio(accountId);
         } catch (RuntimeException e) {
-            log.debug("WTX reconcile: portfolio snapshot unavailable for {} — {}", instrument, e.getMessage());
+            log.debug("WTX reconcile: portfolio snapshot unavailable for {} (account={}) — {}",
+                    instrument, accountId, e.getMessage());
             return null;
         }
         if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
@@ -618,11 +625,28 @@ public class WtxExecutionBridge {
         BigDecimal total = BigDecimal.ZERO;
         for (IbkrPositionView pos : snapshot.positions()) {
             if (pos == null || pos.position() == null) continue;
+            // Second-line account filter: some gateways return positions across every account
+            // attached to the session even when getPortfolio is given a specific id, so we filter
+            // again here. When no account is configured the filter is a no-op.
+            if (accountId != null && pos.accountId() != null && !accountId.equals(pos.accountId())) {
+                continue;
+            }
             if (matchesSymbol(pos.contractDesc(), symbol)) {
                 total = total.add(pos.position());
             }
         }
         return total;
+    }
+
+    /**
+     * The broker account id the bridge will submit orders on, or {@code null} when no real
+     * account is configured (the default placeholder {@code "wtx-default"} means "let the
+     * gateway pick"). Used to keep reconcile and submission scoped to the same account.
+     */
+    private String effectiveBrokerAccountId() {
+        String id = wtxProperties.getBrokerAccountId();
+        if (id == null || id.isBlank() || "wtx-default".equals(id)) return null;
+        return id;
     }
 
     /** IBKR ticker for an Instrument enum value. Differs from {@link Enum#name()} for E6 (IBKR symbol "6E"). */
