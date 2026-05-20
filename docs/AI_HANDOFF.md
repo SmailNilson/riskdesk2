@@ -1,6 +1,50 @@
 # AI Handoff
 
-Last updated: 2026-05-14
+Last updated: 2026-05-20
+
+## IBKR — persistent account snapshot subscription (2026-05-20)
+
+Fixes the structural cause of recurring WTX `ACK_PENDING` / `TIMEOUT` chips when no
+order ever reaches IBKR (incident 2026-05-20 09:10 UTC, ~90 → 109 `request timed out`
+warnings per 10 min during EU/US open windows).
+
+**Root cause.** `IbGatewayNativeClient.requestAccountSnapshot(...)` used to subscribe,
+await `accountDownloadEnd`, and unsubscribe on every call:
+
+```java
+controller.reqAccountUpdates(true,  accountId, handler);
+accountLatch.await(15s);
+controller.reqAccountUpdates(false, accountId, handler);
+```
+
+Although the method itself is `synchronized` on `accountSnapshotLock`, IBKR Gateway TWS
+reacts to a rapid subscribe/unsubscribe cycle by emitting `code=2100 "API client has
+been unsubscribed from account data"` and dropping the in-flight handler — the
+`accountLatch` is never tripped, the 15s timeout fires, and the same controller
+connection that should be delivering `orderStatus` callbacks is saturated with retries.
+Production logs showed 27-30 `code=2100` per 10 min in baseline, spiking to 109 during
+EU/US market open, with collateral damage on the order-acknowledgement path.
+
+**Fix.** New `PersistentAccountSnapshotCache` (in
+`infrastructure/marketdata/ibkr/`) implements `ApiController.IAccountHandler` and is
+registered **once** per connection via `reqAccountUpdates(true, accountId, cache)`.
+Callbacks flow into `ConcurrentHashMap` mirrors of account values and positions.
+`requestAccountSnapshot(...)` now returns a defensive copy of the cache — readers
+never round-trip to IBKR. Bootstrap waits at most `REQUEST_TIMEOUT` for the initial
+`accountDownloadEnd`; subsequent calls are constant-time map copies.
+
+The persistent subscription is captured into `DisconnectContext` so `submitCleanup`
+can `reqAccountUpdates(false, ...)` it on the old controller before disconnect —
+forgetting this would leave a dangling broker-side subscription and the next reconnect
+would open a second one in parallel, reintroducing the very pattern this layer eliminates.
+
+The application-layer 5s cache in `IbGatewayBrokerGateway` is unchanged — it now
+coalesces frontend-poll bursts onto a single defensive copy rather than gating an
+expensive upstream call.
+
+Tested: `PersistentAccountSnapshotCacheTest` (12 cases) covers handler-callback
+contract, defensive-copy semantics under concurrent writers + readers, position
+flatten dropping, cross-account filtering, and bootstrap latch behavior.
 
 ## WTX auto-execution — ack timeout reconciliation (2026-05-19)
 
