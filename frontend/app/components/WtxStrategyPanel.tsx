@@ -6,6 +6,7 @@ import {
   getWtxRecentSignals,
   updateWtxProfile,
   updateWtxAutoExecution,
+  updateWtxTelegramNotifications,
 } from '@/app/lib/api';
 import type {
   WtxStrategyStateView,
@@ -201,6 +202,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [collapsed, setCollapsed] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
+  const [telegramBusy, setTelegramBusy] = useState(false);
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument, timeframe);
@@ -231,6 +233,18 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     }
   }, [instrument, timeframe, state]);
 
+  const onToggleTelegram = useCallback(async () => {
+    if (!state) return;
+    const next = !state.telegramNotificationsEnabled;
+    setTelegramBusy(true);
+    try {
+      const updated = await updateWtxTelegramNotifications(instrument, timeframe, next);
+      if (updated) setState(updated);
+    } finally {
+      setTelegramBusy(false);
+    }
+  }, [instrument, timeframe, state]);
+
   const onToggleAutoExec = useCallback(async () => {
     if (!state) return;
     const turningOn = !state.autoExecutionEnabled;
@@ -258,6 +272,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
   const autoExecOn = state?.autoExecutionEnabled === true;
+  const telegramOn = state?.telegramNotificationsEnabled !== false; // default-on when undefined
 
   return (
     <div className={`border rounded-lg p-3 space-y-2 ${autoExecOn ? 'border-red-700/70 bg-red-950/10' : 'border-cyan-900/40 bg-zinc-900/80'}`}>
@@ -321,6 +336,22 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
                 }`}
               >
                 Auto-IBKR : {autoExecOn ? 'ON' : 'OFF'}
+              </button>
+              <button
+                type="button"
+                onClick={onToggleTelegram}
+                disabled={telegramBusy}
+                aria-pressed={telegramOn}
+                title={telegramOn
+                  ? `Couper les notifications Telegram pour ${instrument} ${timeframe}`
+                  : `Activer les notifications Telegram pour ${instrument} ${timeframe}`}
+                className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                  telegramOn
+                    ? 'border-sky-600/70 bg-sky-950/30 text-sky-300 hover:bg-sky-950/50'
+                    : 'border-zinc-700 text-zinc-500 hover:border-sky-700 hover:text-sky-300'
+                }`}
+              >
+                Telegram : {telegramOn ? 'ON' : 'OFF'}
               </button>
             </div>
           )}

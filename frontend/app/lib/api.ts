@@ -1607,6 +1607,7 @@ export interface WtxStrategyStateView {
   canTrade: boolean;
   activeProfile: WtxProfile;
   autoExecutionEnabled: boolean;
+  telegramNotificationsEnabled: boolean;
 }
 
 export type WtxRoutingOutcome =
@@ -1687,6 +1688,16 @@ export async function updateWtxProfile(instrument: string, timeframe: string, pr
 
 export async function updateWtxAutoExecution(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
   const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/auto-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxTelegramNotifications(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/telegram-notifications`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),

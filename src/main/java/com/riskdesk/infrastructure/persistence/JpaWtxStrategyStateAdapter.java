@@ -57,7 +57,10 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 Boolean.TRUE.equals(e.getAutoExecutionEnabled()),
                 e.getEntryAtr(),
                 e.getBestFavorablePrice(),
-                e.getTrailingStopPrice()
+                e.getTrailingStopPrice(),
+                // Default-on: legacy rows (column null) keep receiving Telegram alerts.
+                e.getTelegramNotificationsEnabled() == null
+                        || Boolean.TRUE.equals(e.getTelegramNotificationsEnabled())
         );
     }
 
@@ -75,6 +78,7 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         e.setUpdatedAt(Instant.now());
         e.setActiveProfile(s.activeProfile() != null ? s.activeProfile().name() : WtxProfile.BASELINE.name());
         e.setAutoExecutionEnabled(s.autoExecutionEnabled());
+        e.setTelegramNotificationsEnabled(s.telegramNotificationsEnabled());
         e.setEntryAtr(s.entryAtr());
         e.setBestFavorablePrice(s.bestFavorablePrice());
         e.setTrailingStopPrice(s.trailingStopPrice());

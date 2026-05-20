@@ -1,5 +1,6 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.domain.engine.strategy.wtx.port.WtxStrategyStatePort;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
@@ -23,9 +24,12 @@ public class TradeNotificationListener {
     private static final Logger log = LoggerFactory.getLogger(TradeNotificationListener.class);
 
     private final NotificationPort notificationPort;
+    private final WtxStrategyStatePort wtxStatePort;
 
-    public TradeNotificationListener(NotificationPort notificationPort) {
+    public TradeNotificationListener(NotificationPort notificationPort,
+                                     WtxStrategyStatePort wtxStatePort) {
         this.notificationPort = notificationPort;
+        this.wtxStatePort = wtxStatePort;
     }
 
     @Async
@@ -52,6 +56,18 @@ public class TradeNotificationListener {
     @Async
     @EventListener
     public void onWtxSignal(WtxSignalDetectedEvent event) {
+        // Per-(instrument, timeframe) Telegram toggle — load the persisted state
+        // and skip when the operator has opted out for this panel. State may be
+        // missing (very first signal ever for the pair), in which case the
+        // default is to notify (matches WtxStrategyState.initial()).
+        boolean enabled = wtxStatePort.load(event.instrument(), event.timeframe())
+                .map(s -> s.telegramNotificationsEnabled())
+                .orElse(true);
+        if (!enabled) {
+            log.debug("WTX telegram disabled for {} {} — skipping notification",
+                event.instrument(), event.timeframe());
+            return;
+        }
         try {
             notificationPort.sendWtxSignal(event);
         } catch (Exception e) {

@@ -63,6 +63,16 @@ public class WtxStrategyStateEntity {
     @Column
     private Boolean autoExecutionEnabled;
 
+    /**
+     * Per-(instrument, timeframe) opt-out for Telegram notifications. Same
+     * nullable-Boolean pattern as {@link #autoExecutionEnabled} so the
+     * Hibernate {@code ddl-auto=update} ALTER succeeds on populated tables.
+     * Adapter treats {@code null} as {@code true} (default-on for back-compat
+     * with rows persisted before this column existed).
+     */
+    @Column
+    private Boolean telegramNotificationsEnabled;
+
     @Column(precision = 20, scale = 8)
     private BigDecimal entryAtr;
 
@@ -112,6 +122,9 @@ public class WtxStrategyStateEntity {
 
     public Boolean getAutoExecutionEnabled() { return autoExecutionEnabled; }
     public void setAutoExecutionEnabled(Boolean autoExecutionEnabled) { this.autoExecutionEnabled = autoExecutionEnabled; }
+
+    public Boolean getTelegramNotificationsEnabled() { return telegramNotificationsEnabled; }
+    public void setTelegramNotificationsEnabled(Boolean telegramNotificationsEnabled) { this.telegramNotificationsEnabled = telegramNotificationsEnabled; }
 
     public BigDecimal getEntryAtr() { return entryAtr; }
     public void setEntryAtr(BigDecimal entryAtr) { this.entryAtr = entryAtr; }

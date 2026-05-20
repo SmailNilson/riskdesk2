@@ -286,6 +286,17 @@ public class WtxStrategyService {
         return updated;
     }
 
+    public WtxStrategyState updateTelegramNotifications(String instrument, String timeframe, boolean enabled) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withTelegramNotifications(enabled);
+        statePort.save(updated);
+        log.info("WTX [{} {}] telegram notifications {}",
+                instrument, timeframe, enabled ? "ENABLED" : "DISABLED");
+        publishState(updated, properties.toConfig());
+        return updated;
+    }
+
     public WtxStrategyState updateAutoExecution(String instrument, String timeframe, boolean enabled) {
         WtxStrategyState state = statePort.load(instrument, timeframe)
                 .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
