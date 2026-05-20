@@ -164,6 +164,7 @@ If a change touches several layers:
 - prefer GitHub Container Registry for repository-scoped image publishing because `GITHUB_TOKEN` can publish without storing an extra Docker registry secret
 - keep the Docker build context minimal with `.dockerignore` so CI does not upload local agent/runtime artifacts
 - if a required build dependency is not published to Maven Central, vendor it in a repo-local Maven repository so Docker and CI builds stay reproducible
+- GCE deploy workflows must use a named, least-privileged deploy user with explicit passwordless `sudo`; do not hardcode direct `root` SSH access in CI
 
 ### Frontend Workflow Rule
 
@@ -194,6 +195,21 @@ Do not:
 - revert to state-based evaluation where alerts re-fire for persistent conditions
 - create separate mentor reviews for alerts that fire simultaneously for the same trading signal
 - move transition detection logic out of the domain layer
+
+### IBKR Order Acknowledgement Rule
+
+When routing live orders through IBKR:
+
+- treat an acknowledgement timeout as an unknown broker state, not as a definitive reject
+- if the native client has an IBKR `orderId`, persist it immediately so delayed `orderStatus` and `execDetails` callbacks can reconcile the execution row
+- distinguish `ACK_PENDING` from `FAILED_TIMEOUT` in user-facing routing state
+- never submit a duplicate flatten order while a close leg is ack-pending or exit-submitted
+
+Do not:
+
+- mark an order failed only because the first acknowledgement missed the local timeout
+- discard late broker callbacks when the order can be linked by `ibkrOrderId` or `orderRef`
+- present ack timeout as broker rejection in the UI
 
 ### Synthetic DXY Rule
 
@@ -280,6 +296,48 @@ When introducing real-order execution:
 - expose execution reads and writes through dedicated execution transport DTOs/endpoints rather than nesting the execution aggregate into review persistence by default
 - freeze execution quantity on the execution aggregate itself before any broker submission
 - when submitting an entry order, lock the execution row before the external broker side effect so two concurrent triggers cannot place two orders
+
+### WTX Auto-Execution Rule
+
+WTX is paper-trading by default. Routing to IBKR is opt-in per instrument:
+
+- `autoExecutionEnabled` lives on `WtxStrategyState` and defaults to `false` for every instrument.
+- The UI must confirm activation via a modal that names the instrument and the active profile before flipping the toggle.
+- Idempotence: `WtxExecutionBridge` builds an executionKey `wtx:<instrument>:<signalTs.epochSeconds>:<action>` and uses `TradeExecutionRepositoryPort.createIfAbsent` so a replay of the same bar can't double-submit.
+- Trigger source is the dedicated `ExecutionTriggerSource.WTX_AUTO` — never reuse mentor/quant trigger sources for WTX-originated orders.
+- WTX executions are written with `mentorSignalReviewId=null`; the unique constraint allows multiple nulls so this never collides with mentor-arming.
+- REVERSE actions submit a single double-quantity order; IBKR transparently flattens the opposing side and opens the new direction in one fill.
+
+## Tier 1 deterministic / Tier 2 AI advisory split
+
+For real-time decision systems we apply a strict split between deterministic
+and AI-driven layers:
+
+- **Tier 1 — deterministic.** Pure Java rules engines (e.g. `GateEvaluator`,
+  `OrderFlowPatternDetector`). Run on every scan, sub-millisecond, no external
+  dependency. They are the **source of truth** for the trader's UI: the score,
+  the gate verdicts and the suggested entry/SL/TP all come from tier 1.
+- **Tier 2 — advisory.** A single LLM call enriches qualified setups with
+  long-term memory (pgvector RAG), multi-instrument context and natural-
+  language reasoning. Tier 2 is **never on the critical path**: any failure
+  (network, API key, parse error, schema absent) collapses to
+  `AiAdvice.unavailable(...)` and the dashboard keeps showing tier 1 as if
+  tier 2 had never existed.
+
+**Rules:**
+
+1. Tier 1 must compile, test and run without any LLM dependency available.
+2. Tier 1 output is the canonical state — tier 2 cannot override the verdict,
+   only annotate it. The frontend renders tier 1 first; tier 2 appears as a
+   separate badge/tooltip.
+3. Tier 2 is **opt-in** via configuration (`riskdesk.quant.advisor.enabled=false`
+   by default). Disabled means the adapter bean is not even created — the
+   service returns `unavailable` immediately and never hits the network.
+4. Tier 2 calls must be **rare** (gate-triggered, cached). A tier 2 component
+   that fires every scan is a bug.
+5. Tier 2 responses must be **structured** (JSON schema). Free-form prose is
+   fine in `reasoning` / `risk` fields but the verdict must come from a fixed
+   enum so the frontend can render a stable colour token.
 
 ## Date, Time & Timezone Rules
 

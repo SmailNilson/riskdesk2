@@ -9,17 +9,23 @@ import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
+import QuantGatePanel from './quant/QuantGatePanel';
+import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
+import QuantSetupNotification from './quant/QuantSetupNotification';
+import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
+import { QUANT_INSTRUMENTS } from './quant/types';
 import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
 import { LiveAnalysisPanel } from './LiveAnalysisPanel';
-import { AnalysisReplayPanel } from './AnalysisReplayPanel';
+import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
+import WtxStrategyPanel from './WtxStrategyPanel';
 import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -65,7 +71,7 @@ export default function Dashboard() {
     }
   }, [instrument, purging]);
 
-  const { prices, alerts, mentorSignalReviews, connected, refresh } = useWebSocket();
+  const { prices, alerts, mentorSignalReviews, wtxSignals, connected, refresh } = useWebSocket();
 
   // Zone collapse state is hoisted so the grid's track widths follow the
   // actual zone state — without this, the `auto` tracks would shrink below
@@ -105,6 +111,7 @@ export default function Dashboard() {
   }, [loadSnapshot]);
 
   return (
+    <QuantStreamProvider instruments={QUANT_INSTRUMENTS}>
     <div className={`min-h-screen bg-zinc-950 text-white flex flex-col ${theme === 'light' ? 'light' : ''}`}>
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2.5 bg-zinc-900 border-b border-zinc-800">
@@ -250,8 +257,10 @@ export default function Dashboard() {
             snapshot={snapshot}
             livePrice={prices[instrument]}
           />
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
+          </div>
           <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
-          <AnalysisReplayPanel instrument={instrument} timeframe={timeframe} />
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
@@ -265,6 +274,10 @@ export default function Dashboard() {
           collapsed={rightZone.collapsed}
           onCollapsedChange={rightZone.setCollapsed}
         >
+          <WtxStrategyPanel instrument={instrument} timeframe="5m" liveSignals={wtxSignals} />
+          <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
+          <SetupRecommendationPanel />
+          <QuantGatePanel />
           <AiMentorDesk
             instrument={instrument}
             timeframe={timeframe}
@@ -284,6 +297,8 @@ export default function Dashboard() {
       </div>
 
       <AlertsFeed alerts={alerts} />
+      <QuantSetupNotification />
     </div>
+    </QuantStreamProvider>
   );
 }

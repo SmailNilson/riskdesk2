@@ -32,7 +32,8 @@ class PlaybookSelectorPriorityTest {
         new NyOpenReversalPlaybook(),
         new LondonSweepPlaybook(),
         new SbdrPlaybook(),
-        new LsarPlaybook()
+        new LsarPlaybook(),
+        new ContextualPullbackPlaybook()
     );
 
     private final PlaybookSelector selector = new PlaybookSelector(PRODUCTION_ORDER);
@@ -135,6 +136,8 @@ class PlaybookSelectorPriorityTest {
 
     @Test
     void empty_when_nothing_applicable() {
+        // Even the CTX fallback abstains because regime=CHOPPY and bias=NEUTRAL —
+        // no playbook should ever match a fully-unknown market.
         MarketContext ctx = new MarketContext(
             Instrument.MCL, "10m",
             MacroBias.NEUTRAL, MarketRegime.CHOPPY,
@@ -145,5 +148,45 @@ class PlaybookSelectorPriorityTest {
             AT
         );
         assertThat(selector.select(ctx)).isEmpty();
+    }
+
+    @Test
+    void contextual_pullback_selected_inside_va_outside_kill_zone() {
+        // The "stuck on NO_TRADE" scenario: LONDON session but price inside VA →
+        // session-extreme playbooks abstain, regime=RANGING + known bias hands the
+        // baton to the CTX fallback so the scoring layer at least runs.
+        MarketContext ctx = new MarketContext(
+            Instrument.MGC, "10m",
+            MacroBias.BEAR, MarketRegime.RANGING,
+            PriceLocation.INSIDE_VA, PdZone.EQUILIBRIUM,
+            new BigDecimal("100"), new BigDecimal("1.0"),
+            MtfSnapshot.neutral(), PortfolioState.unknown(),
+            new SessionInfo("LONDON", true, true, false),
+            AT
+        );
+        assertThat(selector.select(ctx))
+            .isPresent()
+            .get()
+            .extracting(Playbook::id)
+            .isEqualTo(ContextualPullbackPlaybook.ID);
+    }
+
+    @Test
+    void specific_playbook_still_wins_over_contextual_pullback() {
+        // SBDR matches (TRENDING + BULL + DISCOUNT) — CTX must NOT preempt it.
+        MarketContext ctx = new MarketContext(
+            Instrument.MNQ, "1h",
+            MacroBias.BULL, MarketRegime.TRENDING,
+            PriceLocation.INSIDE_VA, PdZone.DISCOUNT,
+            new BigDecimal("100"), new BigDecimal("1.0"),
+            MtfSnapshot.neutral(), PortfolioState.unknown(),
+            SessionInfo.unknown(),
+            AT
+        );
+        assertThat(selector.select(ctx))
+            .isPresent()
+            .get()
+            .extracting(Playbook::id)
+            .isEqualTo(SbdrPlaybook.ID);
     }
 }

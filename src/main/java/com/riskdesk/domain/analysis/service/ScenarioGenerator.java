@@ -220,6 +220,14 @@ public final class ScenarioGenerator {
     }
 
     private BigDecimal farUpwardLiquidity(SmcContext smc, BigDecimal entry, BigDecimal tp1) {
+        // tp1 may be null when nearestUpwardLiquidity found no equilibrium / weakHigh above entry
+        // (e.g. price at session high, or PREMIUM zone empty). The downstream null-check on tp1
+        // (line 67) already aborts the whole scenario, so returning null here is the correct
+        // behaviour and avoids the NullPointerException that previously stalled the live
+        // analysis scheduler indefinitely (production incident 2026-04-28).
+        if (tp1 == null) {
+            return null;
+        }
         if (smc.premiumZoneTop() != null && smc.premiumZoneTop() > tp1.doubleValue()) {
             return BigDecimal.valueOf(smc.premiumZoneTop());
         }
@@ -237,6 +245,11 @@ public final class ScenarioGenerator {
     }
 
     private BigDecimal farDownwardLiquidity(SmcContext smc, BigDecimal entry, BigDecimal tp1) {
+        // See farUpwardLiquidity above — tp1 may be null when nearestDownwardLiquidity found
+        // no equilibrium / weakLow below entry. Skip safely instead of NPE'ing.
+        if (tp1 == null) {
+            return null;
+        }
         if (smc.discountZoneBottom() != null && smc.discountZoneBottom() < tp1.doubleValue()) {
             return BigDecimal.valueOf(smc.discountZoneBottom());
         }

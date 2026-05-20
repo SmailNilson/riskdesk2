@@ -38,6 +38,15 @@ public class IbkrTickDataAdapter implements TickDataPort {
     }
 
     @Override
+    public Optional<TickAggregation> recentAggregation(Instrument instrument, long windowSeconds) {
+        TickByTickAggregator aggregator = aggregators.get(instrument);
+        if (aggregator != null && aggregator.hasData()) {
+            return Optional.of(aggregator.snapshotWindow(windowSeconds));
+        }
+        return Optional.empty();
+    }
+
+    @Override
     public boolean isRealTickDataAvailable(Instrument instrument) {
         TickByTickAggregator aggregator = aggregators.get(instrument);
         return aggregator != null && aggregator.hasData();

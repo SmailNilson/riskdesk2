@@ -49,11 +49,16 @@ class SessionTimingAgentTest {
     }
 
     @Test
-    void vetoes_5m_outside_kill_zone() {
+    void emits_informational_signal_for_5m_outside_kill_zone() {
+        // Updated 2026-04-30 — the 5m kill-zone restriction was demoted from a
+        // hard veto to an informational signal so 5m setups during the broader
+        // NY regular session (09:30–16:00 ET) are no longer blocked. The agent
+        // still surfaces the timing context in evidence; it just does not veto.
         SessionInfo s = new SessionInfo("NY_PM", false, true, false);
         AgentVote v = agent.evaluate(input("5m", s));
-        assertThat(v.hasVeto()).isTrue();
-        assertThat(v.vetoReason().get()).contains("5m-outside-kill-zone");
+        assertThat(v.hasVeto()).as("kill-zone is no longer a hard veto").isFalse();
+        assertThat(v.directionalVote()).isEqualTo(0);
+        assertThat(v.evidence()).anyMatch(e -> e.contains("outside London/NY kill zones"));
     }
 
     @Test

@@ -26,6 +26,17 @@ import java.util.concurrent.ConcurrentMap;
 
 @Service
 public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
+    /**
+     * Application-layer cache TTL — guards the upstream call into
+     * {@link IbGatewayNativeClient#requestAccountSnapshot(String)}.
+     *
+     * <p>Since that call now reads from {@code PersistentAccountSnapshotCache}
+     * (an always-live in-memory mirror fed by a single {@code reqAccountUpdates}
+     * subscription), each invocation is effectively a constant-time map copy. We can
+     * keep this TTL short — it exists mostly to coalesce frontend-poll bursts onto
+     * a single object copy and to keep the cache populated when the native client
+     * briefly returns {@code Optional.empty()} during reconnects.</p>
+     */
     private static final Duration PORTFOLIO_CACHE_TTL = Duration.ofSeconds(5);
 
     private final IbGatewayNativeClient nativeClient;

@@ -64,11 +64,13 @@ mkdir -p /opt/riskdesk /opt/riskdesk/nginx /opt/riskdesk/postgres-init
 mkdir -p /var/lib/riskdesk/ibkr-settings /var/log/riskdesk/ibkr
 chown -R 1000:1000 /var/lib/riskdesk/ibkr-settings /var/log/riskdesk/ibkr
 
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" /opt/riskdesk/docker-compose.yml
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" /opt/riskdesk/render-secrets-env.sh
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" /opt/riskdesk/backup-postgres-to-gcs.sh
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" /opt/riskdesk/nginx/local-prod.conf
-gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" /opt/riskdesk/postgres-init/01-extensions.sql
+pids=()
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/docker-compose.gce.yml" /opt/riskdesk/docker-compose.yml & pids+=($!)
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/render-secrets-env.sh" /opt/riskdesk/render-secrets-env.sh & pids+=($!)
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/backup-postgres-to-gcs.sh" /opt/riskdesk/backup-postgres-to-gcs.sh & pids+=($!)
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/nginx/local-prod.conf" /opt/riskdesk/nginx/local-prod.conf & pids+=($!)
+gcloud storage cp "gs://${CONFIG_BUCKET}/riskdesk/postgres-init/01-extensions.sql" /opt/riskdesk/postgres-init/01-extensions.sql & pids+=($!)
+for pid in "${pids[@]}"; do wait "$pid" || { echo "GCS download failed (pid $pid)"; exit 1; }; done
 
 chmod +x /opt/riskdesk/render-secrets-env.sh /opt/riskdesk/backup-postgres-to-gcs.sh
 
@@ -103,5 +105,15 @@ EOF
 COMPOSE_CMD=${COMPOSE_CMD:-$(compose_cmd)}
 
 cd /opt/riskdesk
-${COMPOSE_CMD} pull
-${COMPOSE_CMD} up -d --remove-orphans --force-recreate
+${COMPOSE_CMD} pull backend frontend
+# Skip recreating ibkr-gateway when it is currently healthy — restarting
+# it forces a full IB re-authentication (2-5 min). If unhealthy or missing,
+# recreate it so that the new config and healthcheck are applied.
+IBKR_STATUS=$(docker inspect riskdesk-ibkr-gateway --format='{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+if [ "${IBKR_STATUS}" = "healthy" ]; then
+  ${COMPOSE_CMD} up -d --no-recreate ibkr-gateway
+else
+  ${COMPOSE_CMD} up -d --force-recreate ibkr-gateway
+fi
+${COMPOSE_CMD} up -d --no-recreate postgres
+${COMPOSE_CMD} up -d --remove-orphans --force-recreate backend frontend edge

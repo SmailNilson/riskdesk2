@@ -60,4 +60,27 @@ class HexagonalArchitectureTest {
                 "javax.persistence.."
             )
             .because("domain should not be coupled to persistence concerns");
+
+    @ArchTest
+    static final ArchRule quant_domain_only_depends_on_domain =
+        noClasses()
+            .that().resideInAPackage("..domain.quant..")
+            .should().dependOnClassesThat().resideInAnyPackage(
+                "..application..",
+                "..presentation..",
+                "..infrastructure..",
+                "org.springframework..",
+                "jakarta.persistence..",
+                "javax.persistence..",
+                "com.fasterxml.jackson.."
+            )
+            .because("the quant domain slice must stay framework-free and may only depend on other com.riskdesk.domain classes");
+
+    @ArchTest
+    static final ArchRule ibkr_order_rejection_exception_must_stay_outside_domain =
+        noClasses()
+            .that().resideInAPackage("..domain..")
+            .should().dependOnClassesThat().haveSimpleNameContaining("IbkrOrderRejection")
+            .because("IBKR-specific exception types must stay in infrastructure / application — the domain must "
+                + "not leak broker-specific failure modes");
 }

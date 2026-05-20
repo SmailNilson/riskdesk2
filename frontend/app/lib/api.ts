@@ -1,4 +1,5 @@
 import { API_BASE } from '@/app/lib/runtimeConfig';
+import type { AdviceView, QuantSnapshotView } from '@/app/components/quant/types';
 
 const BASE = API_BASE;
 
@@ -1243,7 +1244,115 @@ export const api = {
     post<ExternalSetupSummary>(`/api/external-setups/${id}/validate`, body),
   rejectExternalSetup: (id: number, body: ExternalSetupRejectRequest) =>
     post<ExternalSetupSummary>(`/api/external-setups/${id}/reject`, body),
+
+  // ── Quant 7-Gates evaluator ────────────────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantGateController
+  // /snapshot/{instr} runs a fresh scan; /history/{instr}?hours=2 returns the
+  // in-memory ring buffer.
+  getQuantSnapshot: (instrument: string) =>
+    get<QuantSnapshotView>(`/api/quant/snapshot/${instrument}`),
+  getQuantHistory: (instrument: string, hours = 2) =>
+    get<QuantSnapshotView[]>(`/api/quant/history/${instrument}?hours=${hours}`),
+  // Triggers a tier-2 AI advisor call for the latest snapshot. Returns
+  // immediately with the cached verdict if one is fresh (≤ 30 s window).
+  askQuantAiAdvice: (instrument: string) =>
+    post<AdviceView & { instrument: string }>(`/api/quant/ai-advice/${instrument}`, {}),
+
+  // ── Quant auto-arm pipeline (PR #303) ──────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantAutoArmController
+  fireAutoArm: (executionId: number) =>
+    post<AutoArmStatusResponse>(`/api/quant/auto-arm/${executionId}/fire`, {}),
+  cancelAutoArm: (executionId: number) =>
+    post<AutoArmStatusResponse>(`/api/quant/auto-arm/${executionId}/cancel`, {}),
+  listActiveAutoArms: () =>
+    get<AutoArmStatusResponse[]>(`/api/quant/auto-arm/active`),
+
+  // ── Active Positions panel (PR #305) ──────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.ActivePositionsController
+  // /active returns every non-terminal execution (PENDING / SUBMITTED /
+  // ACTIVE / VIRTUAL_EXIT_TRIGGERED / EXIT_SUBMITTED) enriched with a
+  // server-side PnL snapshot. Live updates flow through /topic/positions
+  // (see useActivePositions). The /close endpoint transitions the row to
+  // CANCELLED (if not yet at the broker) or EXIT_SUBMITTED (broker-known).
+  listActivePositions: () =>
+    get<ActivePositionView[]>(`/api/quant/positions/active`),
+  closeActivePosition: (executionId: number) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/close`, {}),
+
+  // ── Quant manual trade ticket (PR #306) ────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.QuantManualTradeController
+  submitManualTrade: (instrument: string, payload: import('@/app/components/quant/types').ManualTradeRequest) =>
+    post<TradeExecutionView>(`/api/quant/manual-trade/${instrument}`, payload),
 };
+
+// ── Active Positions types ──────────────────────────────────────────────
+export interface ActivePositionView {
+  executionId: number;
+  instrument: string;
+  /** Derived from action — "LONG" or "SHORT". */
+  direction: string;
+  /** Raw broker action — "BUY" / "SELL". */
+  action: string;
+  status: string;
+  statusReason: string | null;
+  entryPrice: number | string | null;
+  /** Latest live price reading. May be null when the gateway has no recent push. */
+  currentPrice: number | string | null;
+  stopLoss: number | string | null;
+  takeProfit1: number | string | null;
+  takeProfit2: number | string | null;
+  quantity: number | null;
+  openedAt: string | null;
+  /** Server-computed PnL — clients SHOULD recompute on every WS price tick. */
+  pnlPoints: number | string | null;
+  pnlDollars: number | string | null;
+  pnlPercent: number | string | null;
+  triggerSource: string | null;
+  /** True when the row is in a state the close endpoint can act on. */
+  closable: boolean;
+}
+
+// ── Quant auto-arm types (PR #303) ──────────────────────────────────────
+export interface AutoArmStatusResponse {
+  executionId: number;
+  instrument: string;
+  /** Derived from action — "LONG" or "SHORT". */
+  direction: string;
+  /** Raw IBKR action string — "BUY" / "SELL". */
+  action: string;
+  status: string;
+  statusReason: string | null;
+  entry: string | number | null;
+  stopLoss: string | number | null;
+  takeProfit: string | number | null;
+  quantity: number | null;
+  armedAt: string | null;
+  autoSubmitAt: string | null;
+  /** Null when auto-submit is disabled. */
+  secondsUntilAutoSubmit: number | null;
+}
+
+/** Live state of an arm pushed via STOMP. */
+export type AutoArmStreamKind = 'ARMED' | 'CANCELLED' | 'FIRED' | 'EXPIRED' | 'AUTO_SUBMITTED';
+export interface AutoArmStreamPayload {
+  kind: AutoArmStreamKind;
+  instrument: string;
+  executionId: number;
+  /** Only present on ARMED. */
+  direction?: string;
+  entry?: string | null;
+  stopLoss?: string | null;
+  takeProfit1?: string | null;
+  takeProfit2?: string | null;
+  sizePercent?: number;
+  armedAt?: string;
+  expiresAt?: string;
+  autoSubmitAt?: string | null;
+  reasoning?: string;
+  /** Lifecycle events carry this. */
+  reason?: string;
+  changedAt?: string;
+}
 
 // ── External Setup types ────────────────────────────────────────────────
 export type ExternalSetupStatus =
@@ -1480,4 +1589,134 @@ export interface TradeDecision {
 
   status: TradeDecisionStatus;
   errorMessage: string | null;
+}
+
+// ── WTX Strategy ──────────────────────────────────────────────────────────────
+
+export type WtxProfile = 'BASELINE' | 'SESSION_ATR' | 'HTF' | 'STRICT';
+
+export interface WtxStrategyStateView {
+  instrument: string;
+  timeframe: string;
+  currentDirection: 'FLAT' | 'LONG' | 'SHORT';
+  dailyPnl: number;
+  dayStartEquity: number;
+  currentEquity: number;
+  maxDailyLossUsd: number;
+  maxLossHit: boolean;
+  canTrade: boolean;
+  activeProfile: WtxProfile;
+  autoExecutionEnabled: boolean;
+  /** When true, contra-swing-bias signals are cut (or skipped if flat). Null bias passes through. */
+  swingBiasFilterEnabled: boolean;
+  /** Last seen swing bias direction from the most recent signal's enrichment. Null during warm-up. */
+  currentSwingBias: 'BULLISH' | 'BEARISH' | null;
+  /** User-configured contracts to submit on the next OPEN / REVERSE open leg for this panel. */
+  configuredOrderQty: number;
+}
+
+export type WtxRoutingOutcome =
+  | 'ROUTED'
+  | 'ACK_PENDING'
+  | 'SKIPPED_AUTO_OFF'
+  | 'SKIPPED_BRIDGE_UNAVAILABLE'
+  | 'SKIPPED_IBKR_DISABLED'
+  | 'SKIPPED_DUPLICATE'
+  | 'SKIPPED_NO_PRICE'
+  | 'SKIPPED_NO_QTY'
+  | 'SKIPPED_NO_OPEN_ROW'
+  | 'SKIPPED_INSUFFICIENT_MARGIN'
+  | 'FAILED'
+  | 'FAILED_TIMEOUT'
+  | 'FAILED_BROKER_REJECT';
+
+export interface WtxEnrichmentView {
+  deltaDirection: 'BUYING' | 'SELLING' | null;
+  deltaValue: number | null;
+  orderFlowSource: 'REAL_TICKS' | 'CLV_ESTIMATED' | null;
+  absorptionSignal: 'BULLISH_ABSORPTION' | 'BEARISH_ABSORPTION' | null;
+  absorptionScore: number | null;
+  bbPct: number;
+  bbExpanding: boolean;
+  priceVsVwap: 'ABOVE' | 'BELOW' | 'AT';
+  vwapDistancePct: number;
+  smcInternalBias: 'BULLISH' | 'BEARISH' | null;
+  smcSwingBias: 'BULLISH' | 'BEARISH' | null;
+  nearestObType: 'BULLISH' | 'BEARISH' | null;
+  nearestObDistancePct: number | null;
+  cmf: number;
+  sessionPhase: string;
+  inKillZone: boolean;
+  htfBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' | null;
+  structurePassed: boolean | null;
+  structureReason: 'LOW_SWEEP_RECLAIM' | 'BULLISH_RECLAIM' | 'HIGH_SWEEP_REJECT' | 'BEARISH_REJECT' | 'BLOCKED' | 'UNAVAILABLE' | null;
+}
+
+export interface WtxSignalView {
+  instrument: string;
+  timeframe: string;
+  signalType: 'COMPRA' | 'COMPRA_1' | 'VENTA' | 'VENTA_1';
+  direction: 'LONG' | 'SHORT';
+  wt1Value: number;
+  wt2Value: number;
+  canTrade: boolean;
+  actionTaken: 'OPEN_LONG' | 'OPEN_SHORT' | 'REVERSE_TO_LONG' | 'REVERSE_TO_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'CLOSE_ALL' | 'NONE';
+  enrichment: WtxEnrichmentView | null;
+  signalTs: string;
+  routingOutcome: WtxRoutingOutcome | null;
+  /** Human-readable error reason attached to a FAILED_* or SKIPPED_INSUFFICIENT_MARGIN outcome. Null otherwise. */
+  routingErrorMessage: string | null;
+}
+
+export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function getWtxRecentSignals(instrument: string, limit = 20, timeframe?: string): Promise<WtxSignalView[]> {
+  const tf = timeframe ? `&timeframe=${timeframe}` : '';
+  const res = await fetch(`${BASE}/api/wtx/signals/recent?instrument=${instrument}&limit=${limit}${tf}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function updateWtxProfile(instrument: string, timeframe: string, profile: WtxProfile): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxAutoExecution(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/auto-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxSwingBiasFilter(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/swing-bias-filter`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxOrderQty(instrument: string, timeframe: string, qty: number): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/order-qty`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qty }),
+  });
+  if (!res.ok) return null;
+  return res.json();
 }

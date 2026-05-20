@@ -93,6 +93,55 @@ class ScenarioGeneratorTest {
     }
 
     @Test
+    void longBias_doesNotThrowWhenNoUpwardLiquidityExists() {
+        // Regression test for production incident 2026-04-28 — `Live analysis scan failed for
+        // MNQ M10: Cannot invoke "java.math.BigDecimal.doubleValue()" because "tp1" is null`.
+        //
+        // Scenario: price already above every potential tp1 target (equilibrium and weakHigh
+        // are both below entry). nearestUpwardLiquidity() returned null → farUpwardLiquidity()
+        // dereferenced tp1 → NullPointerException → ContinuousAnalysisScheduler stalled the
+        // entire live analysis pipeline (no fresh verdict written to /api/analysis/latest for
+        // 2 hours).
+        //
+        // Expected: generator returns scenarios without throwing; Continuation is correctly
+        // skipped because no upward target exists.
+        var smc = new SmcContext("BULLISH", "BULLISH", "PREMIUM", 27200.0, 27260.0, 27050.0,
+            Map.of(), 27290.0, 27250.0, 27050.0, 27100.0, null,
+            List.of(new SmcContext.ActiveOrderBlock("BULLISH", 27295, 27305, 27300, 100.0, false)),
+            List.of(), List.of());
+        var snap = simpleSnapshot(smc, BigDecimal.valueOf(27310));
+        var bias = bias(snap, Direction.LONG, 70);
+
+        // Must not throw.
+        var scenarios = generator.generate(snap, bias);
+
+        // Continuation cannot exist — nearestUpwardLiquidity is null when equilibrium and
+        // weakHigh are both below entry.
+        assertThat(scenarios).noneMatch(s -> "Continuation".equals(s.name()));
+        double sum = scenarios.stream().mapToDouble(TradeScenario::probability).sum();
+        assertThat(sum).isCloseTo(1.0, within(0.05));
+    }
+
+    @Test
+    void shortBias_doesNotThrowWhenNoDownwardLiquidityExists() {
+        // Mirror of the regression above, for SHORT bias. Price below every potential
+        // downward target (equilibrium above entry, weakLow above entry → tp1 null →
+        // farDownwardLiquidity used to NPE).
+        var smc = new SmcContext("BEARISH", "BEARISH", "DISCOUNT", 27250.0, 27400.0, 27200.0,
+            Map.of(), 27360.0, 27340.0, 27260.0, 27270.0, null,
+            List.of(new SmcContext.ActiveOrderBlock("BEARISH", 27225, 27235, 27230, 100.0, false)),
+            List.of(), List.of());
+        var snap = simpleSnapshot(smc, BigDecimal.valueOf(27220));
+        var bias = bias(snap, Direction.SHORT, 70);
+
+        var scenarios = generator.generate(snap, bias);
+
+        assertThat(scenarios).noneMatch(s -> "Continuation".equals(s.name()));
+        double sum = scenarios.stream().mapToDouble(TradeScenario::probability).sum();
+        assertThat(sum).isCloseTo(1.0, within(0.05));
+    }
+
+    @Test
     void scenariosNeverHaveNegativeProbability() {
         var smc = new SmcContext("BULLISH", "BULLISH", "DISCOUNT", 27190.0, 27360.0, 27040.0,
             Map.of(), 27250.0, 27220.0, 27050.0, 27170.0, null,

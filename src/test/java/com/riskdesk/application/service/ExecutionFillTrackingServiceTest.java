@@ -150,6 +150,31 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void orderStatusSubmittedTransitionsPendingEntryToEntrySubmitted() {
+        TradeExecutionRecord stored = baseExecution();
+        stored.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        stored.setStatusReason("WTX OPEN_LONG sent to IBKR; acknowledgement pending");
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(
+            ORDER_ID,
+            "Submitted",
+            BigDecimal.ZERO,
+            BigDecimal.ONE,
+            BigDecimal.ZERO,
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, saved.getStatus());
+        assertEquals("IBKR entry order acknowledged: Submitted", saved.getStatusReason());
+        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+    }
+
+    @Test
     void orderStatusFilledTransitionsDomainStateToActive() {
         TradeExecutionRecord stored = baseExecution();
         stored.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
@@ -171,6 +196,33 @@ class ExecutionFillTrackingServiceTest {
         assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
         assertEquals("Filled", saved.getOrderStatus());
         assertNotNull(saved.getEntryFilledAt());
+        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+    }
+
+    @Test
+    void orderStatusFilledOnExitSubmittedRowTransitionsToClosed() {
+        // A submitted exit/close order (e.g. a WTX auto-routed close) filling at the broker
+        // must move the row to the terminal CLOSED state — otherwise an EXIT_SUBMITTED row
+        // would stay non-terminal forever and the position would look open.
+        TradeExecutionRecord stored = baseExecution();
+        stored.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(
+            ORDER_ID,
+            "Filled",
+            new BigDecimal("1"),
+            BigDecimal.ZERO,
+            new BigDecimal("72.50"),
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.CLOSED, saved.getStatus());
+        assertNotNull(saved.getClosedAt());
         verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
     }
 

@@ -1,6 +1,294 @@
 # AI Handoff
 
-Last updated: 2026-04-23
+Last updated: 2026-05-20
+
+## IBKR — persistent account snapshot subscription (2026-05-20)
+
+Fixes the structural cause of recurring WTX `ACK_PENDING` / `TIMEOUT` chips when no
+order ever reaches IBKR (incident 2026-05-20 09:10 UTC, ~90 → 109 `request timed out`
+warnings per 10 min during EU/US open windows).
+
+**Root cause.** `IbGatewayNativeClient.requestAccountSnapshot(...)` used to subscribe,
+await `accountDownloadEnd`, and unsubscribe on every call:
+
+```java
+controller.reqAccountUpdates(true,  accountId, handler);
+accountLatch.await(15s);
+controller.reqAccountUpdates(false, accountId, handler);
+```
+
+Although the method itself is `synchronized` on `accountSnapshotLock`, IBKR Gateway TWS
+reacts to a rapid subscribe/unsubscribe cycle by emitting `code=2100 "API client has
+been unsubscribed from account data"` and dropping the in-flight handler — the
+`accountLatch` is never tripped, the 15s timeout fires, and the same controller
+connection that should be delivering `orderStatus` callbacks is saturated with retries.
+Production logs showed 27-30 `code=2100` per 10 min in baseline, spiking to 109 during
+EU/US market open, with collateral damage on the order-acknowledgement path.
+
+**Fix.** New `PersistentAccountSnapshotCache` (in
+`infrastructure/marketdata/ibkr/`) implements `ApiController.IAccountHandler` and is
+registered **once** per connection via `reqAccountUpdates(true, accountId, cache)`.
+Callbacks flow into `ConcurrentHashMap` mirrors of account values and positions.
+`requestAccountSnapshot(...)` now returns a defensive copy of the cache — readers
+never round-trip to IBKR. Bootstrap waits at most `REQUEST_TIMEOUT` for the initial
+`accountDownloadEnd`; subsequent calls are constant-time map copies.
+
+The persistent subscription is captured into `DisconnectContext` so `submitCleanup`
+can `reqAccountUpdates(false, ...)` it on the old controller before disconnect —
+forgetting this would leave a dangling broker-side subscription and the next reconnect
+would open a second one in parallel, reintroducing the very pattern this layer eliminates.
+
+The application-layer 5s cache in `IbGatewayBrokerGateway` is unchanged — it now
+coalesces frontend-poll bursts onto a single defensive copy rather than gating an
+expensive upstream call.
+
+Tested: `PersistentAccountSnapshotCacheTest` (12 cases) covers handler-callback
+contract, defensive-copy semantics under concurrent writers + readers, position
+flatten dropping, cross-account filtering, and bootstrap latch behavior.
+
+## WTX auto-execution — ack timeout reconciliation (2026-05-19)
+
+Fixes the confusing "TIMEOUT but the order passed in IBKR" case.
+
+- `FAILED_TIMEOUT` now means no acknowledgement and no broker order id was available.
+- When the native IBKR client has already assigned/sent a broker `orderId` but the first
+  acknowledgement arrives after `riskdesk.ibkr.order-ack-timeout-ms`, WTX returns
+  `ACK_PENDING` instead of a red failure. The execution row persists that `ibkrOrderId` so
+  delayed `orderStatus` / `execDetails` callbacks can reconcile it.
+- Open-leg ack-pending rows move to `ENTRY_SUBMITTED`; close-leg ack-pending rows move to
+  `EXIT_SUBMITTED` to avoid duplicate flatten orders while the broker state is still unknown.
+- `ExecutionFillTrackingService` now promotes a pending entry to `ENTRY_SUBMITTED` when a late
+  `Submitted` / `PreSubmitted` / `PendingSubmit` callback arrives.
+- Frontend WTX signal cards render this state as `ACK ?`, not `TIMEOUT`.
+
+## WTX — per-(instrument, timeframe) state + routing visibility (2026-05-14)
+
+Fixes the "Auto-IBKR : ON but no order" report. Two root causes:
+
+- **WTX state was keyed by `instrument` only**, so the 5m and 10m candle-close events for the
+  same instrument loaded/mutated/saved the *same* row. A position opened by one timeframe made
+  same-direction signals on the other return `NONE` (which never routes), and `REVERSE` legs
+  thrashed each other's `entryQty`/`entryPrice`/P&L.
+- **Routing failures were silent** (DEBUG/WARN only) — nothing on the signal told you whether a
+  routed signal reached IBKR or was dropped at a gate.
+
+What changed:
+- `WtxStrategyState` now carries `timeframe`; `wtx_strategy_states` has a **composite primary
+  key `(instrument, timeframe)`** (`@IdClass WtxStrategyStateId`). Profile, auto-execution,
+  position, equity and daily max-loss are all per-timeframe now — `maxDailyLossUsd` applies
+  **per timeframe** (effective per-instrument budget is 5m + 10m).
+- **DB migration is automatic.** Hibernate `ddl-auto=update` cannot alter a primary key, so
+  `WtxStrategyStateSchemaMigration` runs *before* the JPA `EntityManagerFactory` (ordered via
+  `WtxStrategyStateSchemaMigrationDependsOnPostProcessor`): if it detects the legacy
+  instrument-only `wtx_strategy_states` table (no `timeframe` column) it drops it so Hibernate
+  recreates it with the composite key. The guard is idempotent — a fresh DB or an
+  already-migrated table is a no-op. The table is pure runtime state (rebuilt from candles on
+  the next close), so no manual `DROP TABLE` step is needed anymore.
+- REST routes are now `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`,
+  `/auto-execution`). WS state topic is `/topic/wtx-state/{instrument}/{timeframe}`.
+- `WtxExecutionBridge` lookups (`findActiveByInstrumentAndTimeframeAndTriggerSource`) and the
+  `executionKey` (`wtx:<instrument>:<timeframe>:<signalTs>:<action>`) are timeframe-scoped — a
+  10m close/reverse can no longer target a 5m execution row.
+- New `WtxRoutingOutcome` enum (`ROUTED`, `SKIPPED_AUTO_OFF`, `SKIPPED_BRIDGE_UNAVAILABLE`,
+  `SKIPPED_IBKR_DISABLED`, `SKIPPED_DUPLICATE`, `SKIPPED_NO_PRICE`, `SKIPPED_NO_QTY`,
+  `SKIPPED_NO_OPEN_ROW`, `FAILED`). `WtxExecutionBridge.submit` returns it, every gate logs the
+  reason at INFO, and it is persisted on `wtx_signal_history.routing_outcome`, broadcast on
+  `/topic/wtx-signals`, and rendered as a chip on each signal card in the WTX panel.
+
+## WTX auto-execution — lifecycle correctness fix (2026-05-14)
+
+Follow-up to PR #325, addressing Codex review findings on `WtxExecutionBridge`:
+
+- **Broker-side action token.** Execution rows store `action = "LONG"/"SHORT"` instead of the
+  WTX enum name. This is the token `IbGatewayBrokerGateway` interprets correctly (only `"SHORT"`
+  maps to `Action.SELL`; anything else is a BUY — so `"BUY"`/`"SELL"` would both be misread as
+  buys) and which `ActivePositionView` also resolves to direction + PnL sign. The WTX semantic
+  action is preserved in `statusReason`.
+- **Exit lifecycle.** `CLOSE_LONG` / `CLOSE_SHORT` no longer create a fresh `ENTRY_SUBMITTED`
+  row. The bridge locates its own open `WTX_AUTO` execution row via the new
+  `TradeExecutionRepositoryPort.findActiveByInstrumentAndTriggerSource(...)`, submits the flatten
+  order against it, and transitions that row to `EXIT_SUBMITTED` (non-terminal).
+- **REVERSE = two 1:1 orders.** A `REVERSE_*` is decomposed into a **close leg** against the
+  prior row (→ `EXIT_SUBMITTED`) and an **open leg** for the new row (→ `ENTRY_SUBMITTED`) —
+  two real broker orders instead of one doubled order. This means each row is a clean 1:1
+  `order ↔ row` pair the standard fill tracker reconciles via its own `ibkrOrderId`; there is
+  no "one order, two rows" mismatch and the prior row is never stranded (terminal-before-fill
+  or orphaned-non-terminal). All open-leg validation runs before the close leg, and if the
+  close leg is rejected the reverse aborts without opening anything.
+- **Exit-fill reconciliation.** `ExecutionFillTrackingService.onOrderStatus` now transitions an
+  `EXIT_SUBMITTED` row to `CLOSED` on the `Filled` callback. That callback is located **only by
+  `orderId`** (`onOrderStatus` receives no `orderRef`), so the bridge persists the broker order id
+  on `ibkrOrderId` at submission time for both entries and closes — otherwise an early
+  `Filled` status arriving before `execDetails` would be dropped. `handleClose` also skips
+  submission when the open row is already `EXIT_SUBMITTED` — no duplicate flatten while a close
+  is in flight.
+- When a CLOSE finds no open WTX row, it logs a warning and skips submission — never fires a naked order.
+
+## WTX Strategy — Pine Script profile parity (2026-05-13)
+
+The WTX (WaveTrend XT) runtime now mirrors the four profiles of the reference Pine
+Script `RiskDesk WT_X MNQ Filtered - TV v1`. Profile is stored **per instrument** in
+`wtx_strategy_states.active_profile` and is switchable live from the WTX panel.
+
+| Profile | Behaviour |
+|---|---|
+| `BASELINE` | Raw WT crossover + zone signals only. Preserves the legacy behaviour — no max-loss gating beyond NY force-close. |
+| `SESSION_ATR` | Adds the daily max-loss kill switch (fixes a regression where `canTrade` ignored `maxLossHit`) and ATR trailing exits. |
+| `HTF` | Above + 60m EMA21/55 bias filter (configurable). A bearish HTF blocks longs; bullish HTF blocks shorts. |
+| `STRICT` | Above + structure proxy (sweep-and-reclaim / break-and-reclaim) ported bar-for-bar from Pine. |
+
+### What changed
+- `WtxProfile` enum + `state.activeProfile` field, default `BASELINE` (no regression for existing users).
+- `WtxRiskGuard.canTradeForProfile(profile, maxLossHit, forceCloseWindow)` — the daily-loss flag now blocks new trades from `SESSION_ATR` upward.
+- `WtxTrailingExitEvaluator` — fixed initial stop at `slAtrMult × ATR`, switches to trailing at `bestFavorablePrice ± trailingAtrMult × ATR` once the position is in profit by `trailingActivationR × slAtrMult × ATR`. Exits emit synthetic `CLOSE_LONG` / `CLOSE_SHORT` signals on `/topic/wtx-signals`.
+- `WtxHtfBiasFilter` (pure function) + HTF candle fetch in `WtxStrategyService.buildHtfContext`.
+- `WtxStructureFilter` (pure function) — rolling priorLow/priorHigh over `structureLookback` bars, sweep buffer `sweepBufferAtr × ATR`, reclaim buffer `0.25 × ATR`.
+- `WtxEnrichmentSnapshot` now carries `htfBias`, `structurePassed`, `structureReason` so the panel can show *why* a signal was blocked.
+- `WtxExecutionBridge` (opt-in per instrument) routes WTX actions to IBKR via the existing `IbkrOrderService`. Idempotence is keyed by `wtx:<instrument>:<signalTs>:<action>` in `trade_executions`. Trigger source: new `ExecutionTriggerSource.WTX_AUTO`.
+- Two new endpoints — `PUT /api/wtx/state/{instrument}/profile` and `PUT /api/wtx/state/{instrument}/auto-execution`.
+- UI: profile dropdown + Auto-IBKR toggle with confirmation modal. Panel border turns red while auto-IBKR is ON.
+
+### Safety defaults
+- `autoExecutionEnabled = false` for every instrument on first contact. The user must opt in explicitly via the modal-confirmed toggle.
+- `activeProfile = BASELINE` for every instrument on first contact.
+- HTF fetch failures (insufficient 1h history) fall back to permissive — never silently block.
+
+### Configuration
+New properties under `riskdesk.wtx.*` in `application.properties`:
+```
+riskdesk.wtx.atr-length=14
+riskdesk.wtx.sl-atr-mult=1.4
+riskdesk.wtx.tp-atr-mult=2.1
+riskdesk.wtx.trailing-atr-mult=2.0
+riskdesk.wtx.trailing-activation-r=0.5
+riskdesk.wtx.htf-timeframe=1h
+riskdesk.wtx.htf-fast-len=21
+riskdesk.wtx.htf-slow-len=55
+riskdesk.wtx.structure-lookback=12
+riskdesk.wtx.sweep-buffer-atr=0.05
+riskdesk.wtx.broker-account-id=<your IBKR account or "wtx-default">
+```
+
+## Quant 7-Gates + AI Advisor (Tier 1 / Tier 2 split)
+
+**Tier 1 — deterministic Java gates (always on).** Same engine as before:
+seven gates lifted from `mnq_monitor_v3.py`, no LLM in the loop, scanned every
+60 s for MNQ / MGC / MCL. See the section below for the gate table.
+
+**Tier 2 — AI advisor (opt-in, rare).** When tier 1 reaches the trigger score
+(6/7 by default), a single Gemini call enriches the verdict with:
+
+- **Session memory** — same-day pattern observations + win-rate + last outcome
+- **RAG** — top-5 nearest historical situations via pgvector cosine similarity (`<=>`)
+- **Multi-instrument context** — current scores / day-moves for every other futures contract
+- **Order-flow pattern** — the deterministic `OrderFlowPattern` classification
+  (`ABSORPTION_HAUSSIERE`, `DISTRIBUTION_SILENCIEUSE`, `VRAIE_VENTE`,
+  `VRAI_ACHAT`, `INDETERMINE`)
+
+Cost stays low: ~10–20 calls/day per instrument max, plus a 30 s in-memory
+cache deduplicates manual "Ask AI" double-clicks.
+
+**Failure-mode contract.** The advisor never blocks tier 1. If Gemini is down,
+if the API key is missing, or if pgvector is unavailable, the advisor adapter
+returns `AiAdvice.unavailable(...)` and the gate panel keeps publishing
+snapshots untouched.
+
+**Deviation from spec.** The original spec called for the Vertex AI Java SDK
+in `europe-west1` with context caching. RiskDesk does not yet ship the Vertex
+AI dependency — the existing `GeminiMentorClient` + `GeminiEmbeddingClient`
+talk directly to `generativelanguage.googleapis.com`. To stay shippable, the
+adapter (`GeminiQuantAdvisorAdapter`) reuses that pattern. The
+`AdvisorPort` contract stays Vertex-ready: a future swap is a single new
+adapter class. Likewise, audit logs are SLF4J (instrument, score, verdict,
+prompt-hash, latency) instead of GCP Cloud Logging.
+
+**Frontend wiring.**
+
+- `useQuantStream` now also subscribes to `/topic/quant/narration/{instr}` and
+  `/topic/quant/advice/{instr}` (one STOMP client, three subscriptions per
+  instrument)
+- `QuantAdvisorBadge` renders the verdict with a colour token + tooltip
+  (reasoning, risk, confidence, model)
+- `QuantNarrationPanel` renders the markdown emitted by `QuantNarrator`
+- A "Ask AI" button on `QuantGatePanel` triggers `POST /api/quant/ai-advice/{instr}`
+  for an on-demand call
+
+**New / extended files.**
+
+- Domain: `domain/quant/pattern/{OrderFlowPattern, PatternAnalysis, OrderFlowPatternDetector}`,
+  `domain/quant/narrative/QuantNarrator`,
+  `domain/quant/advisor/{AdvisorPort, AiAdvice, MultiInstrumentContext}`,
+  `domain/quant/memory/{SessionMemory, MemoryRecord, QuantMemoryPort}`
+- Application: `application/quant/service/{QuantSetupNarrationService,
+  QuantSessionMemoryService, QuantAiAdvisorService}`,
+  `application/quant/adapter/GeminiQuantEmbeddingAdapter`
+- Infrastructure: `infrastructure/quant/advisor/{QuantAdvisorPromptBuilder,
+  GeminiQuantAdvisorAdapter}`, `infrastructure/quant/memory/QuantMemoryJdbcAdapter`
+  (raw `JdbcTemplate` mirroring `MentorMemoryService`)
+- Resources: `src/main/resources/prompts/quant-advisor.txt` (template loaded once at startup)
+- Properties: `riskdesk.quant.advisor.enabled` (default `false`),
+  `riskdesk.quant.ai-advice-trigger-score=6`,
+  `riskdesk.quant.ai-advice-cache-seconds=30`,
+  `riskdesk.quant.memory-rag-top-k=5`,
+  `riskdesk.quant.advisor-model` (defaults to `riskdesk.mentor.model`),
+  `riskdesk.quant.advisor-temperature=0.2`
+- Tests: `OrderFlowPatternDetectorTest` (6), `QuantNarratorTest` (2),
+  `QuantAiAdvisorServiceTest` (4 — cache TTL, context wiring, trigger
+  threshold, failsafe). Integration test for the pgvector adapter is **not**
+  included (would require a testcontainers + custom pgvector image — out of
+  scope for this slice; the production code mirrors the proven
+  `MentorMemoryService` pattern).
+
+## Quant 7-Gates Order Flow Evaluator
+
+Deterministic, framework-free SHORT-setup detector lifted verbatim from the
+battle-tested `mnq_monitor_v3.py` Python script. No LLM in the loop — the seven
+gates are pure functions over the order-flow stream, scanned every 60 s for
+MNQ, MGC and MCL.
+
+**Gates (G0..G6):**
+
+| Gate | Rule (failure means setup invalid) |
+| --- | --- |
+| G0 Régime | day-move > +75 pts OR ≥3 ABS BULL scans (n8 ≥ 8) in the last 30 min |
+| G1 ABS BEAR | n8 < 8, dom ≠ BEAR, or Δ > +500 (incoherent) |
+| G2 DIST_pur 2/3 | fewer than 2/3 recent DIST scans ≥ 60 % (ACCU **never** counts toward this — Option B fix) |
+| G3 Δ < -100 | spot delta not below −100 (bonus +TREND when strictly decreasing) |
+| G4 buy% < 48 | buy ratio ≥ 48 % |
+| G5 ACCU seuil | latest ACCU ≥ conditional threshold (50 / 65 / 75 depending on Δ + buy%) |
+| G6 LIVE_PUSH | price source not `LIVE_PUSH` (stale snapshot) |
+
+**Architecture (hexagonal, ArchUnit-enforced):**
+
+- `domain/quant/model/` — pure records + enum (`Gate`, `GateResult`, `DistEntry`, `QuantState`, `MarketSnapshot`, `QuantSnapshot`, `LivePriceSnapshot`, `DeltaSnapshot`)
+- `domain/quant/engine/GateEvaluator` — stateless pure function `evaluate(snap, state, instr) → Outcome(snapshot, nextState)`. Reset is per ET calendar day.
+- `domain/quant/port/` — input/output ports (`AbsorptionPort`, `DistributionPort`, `CyclePort`, `DeltaPort`, `LivePricePort`, `QuantStatePort`, `QuantNotificationPort`)
+- `application/quant/service/QuantGateService` — orchestrates parallel port fetch (CompletableFuture) + evaluator + state save + notify
+- `application/quant/scheduling/QuantGateScheduler` — `@Scheduled(60_000)` calling `service.scan(instr)` for MNQ, MGC, MCL in parallel
+- `application/quant/adapter/{Delta,LivePrice}PortAdapter` — bridges to existing `TickDataPort` and `MarketDataService`
+- `infrastructure/quant/persistence/QuantState{Entity,JpaRepository,JpaAdapter}` — `quant_state` table, JSON-serialised history lists
+- `infrastructure/quant/notification/QuantWebSocketAdapter` — STOMP topics `/topic/quant/snapshot/{instr}`, `/topic/quant/signals` (7/7), `/topic/quant/setups` (6/7)
+- `infrastructure/quant/port/{Absorption,Distribution,Cycle}PortAdapter` — translate JPA event entities into domain signals
+- `infrastructure/quant/QuantConfiguration` — exposes `GateEvaluator` as a Spring bean (kept out of the domain so it stays framework-free)
+- `presentation/quant/QuantGateController` — `GET /api/quant/snapshot/{instr}` + `GET /api/quant/history/{instr}?hours=N`
+
+**Frontend:** `frontend/app/components/quant/QuantGatePanel.tsx` is mounted in
+the AI Trade Desk zone, subscribes to `/topic/quant/snapshot/{instr}` via the
+new `useQuantStream` hook, and renders the 7 gates with ✅/❌ + reason. A
+`QuantSetupNotification` component fires a one-shot WebAudio cue and a
+toast when the backend confirms a 7/7 setup.
+
+**State persistence:** `QuantState` lives in the `quant_state` table (PK =
+instrument). The history lists (delta, dist_only, accu_only, abs_bull_scans)
+are stored as JSON and rotated on every scan. The `/history` endpoint is
+backed by an in-memory ring buffer (`QuantSnapshotHistoryStore`, capacity 240
+entries per instrument ≈ 4 hours) — fine for dashboard playback, resets on
+restart.
+
+**Spec source-of-truth:** `mnq_monitor_v3.py` was the reference — every
+threshold, window and reset rule mirrors that script. Coverage is in
+`GateEvaluatorTest` (13 cases including the v2→v3 G2 dist/accu separation,
+G5 conditional threshold paths, regime trap, and ET session reset).
 
 ## Hidden features surfaced — FALLBACK_DB badge, DXY breakdown, Flash Crash status, Rollover OI
 
@@ -385,8 +673,10 @@ What changed:
 - manual publication is available through `workflow_dispatch` with a `git_tag` input for tags that already exist
 - images are published to `ghcr.io/smailnilson/riskdesk2`
 - stable tags also refresh the `latest` container tag
-- tagged releases can now also be deployed from GitHub Actions over SSH via `docker-compose.release.yml` on the server
-- the deploy workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- tagged releases are now deployed by the `Tag & Deploy` workflow to the GCE VM through an IAP SSH tunnel after images are pushed to GCP Artifact Registry
+- the deploy workflow expects GitHub Actions variables `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_ZONE`, `GCP_ARTIFACT_REGISTRY_REPOSITORY`, `GCP_INSTANCE_NAME`, `GCP_CONFIG_BUCKET`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, and `GCP_DEPLOY_SSH_USER`
+- the deploy workflow expects GitHub Actions secret `DEPLOY_SSH_PRIVATE_KEY`
+- `GCP_DEPLOY_SSH_USER` must be a VM user with the deploy public key in `~/.ssh/authorized_keys` and passwordless `sudo`; do not hardcode `root` in workflows
 - the private IBKR `tws-api` dependency is vendored in `vendor/maven-repo` so Docker and GitHub Actions builds can resolve it without a developer-local Maven cache
 
 Why:

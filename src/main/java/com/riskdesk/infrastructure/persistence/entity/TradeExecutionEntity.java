@@ -43,13 +43,22 @@ public class TradeExecutionEntity {
     @Column(nullable = false, length = 128)
     private String executionKey;
 
-    @Column(nullable = false)
+    /**
+     * Nullable since PR #303 — auto-armed quant executions are NOT tied to a
+     * mentor review. The unique index {@code uk_trade_executions_review_id}
+     * still guarantees one execution per review when present (Postgres treats
+     * NULLs as distinct in unique indexes, so multiple auto-arm rows with NULL
+     * coexist freely).
+     */
+    @Column(nullable = true)
     private Long mentorSignalReviewId;
 
-    @Column(nullable = false, length = 512)
+    /** Nullable since PR #303 — see {@link #mentorSignalReviewId}. */
+    @Column(nullable = true, length = 512)
     private String reviewAlertKey;
 
-    @Column(nullable = false)
+    /** Nullable since PR #303 — see {@link #mentorSignalReviewId}. */
+    @Column(nullable = true)
     private Integer reviewRevision;
 
     @Column(nullable = false, length = 64)
@@ -84,10 +93,16 @@ public class TradeExecutionEntity {
     @Column(nullable = false, precision = 19, scale = 6)
     private BigDecimal normalizedEntryPrice;
 
-    @Column(nullable = false, precision = 19, scale = 6)
+    /**
+     * Nullable since WTX_AUTO / QUANT_AUTO_ARM rows are armed before any stop
+     * loss is known (BASELINE has no SL; trailing arms only after activation).
+     * The mentor execution path still sets it from the review's planned stop.
+     */
+    @Column(nullable = true, precision = 19, scale = 6)
     private BigDecimal virtualStopLoss;
 
-    @Column(nullable = false, precision = 19, scale = 6)
+    /** Nullable since WTX/Quant auto rows have no pre-armed take profit — see {@link #virtualStopLoss}. */
+    @Column(nullable = true, precision = 19, scale = 6)
     private BigDecimal virtualTakeProfit;
 
     @Column(precision = 19, scale = 6)

@@ -21,4 +21,7 @@ public interface JpaCycleEventRepository extends JpaRepository<CycleEventEntity,
     int deleteByTimestampBefore(Instant cutoff);
 
     List<CycleEventEntity> findByInstrumentOrderByTimestampDesc(Instrument instrument, Pageable pageable);
+
+    List<CycleEventEntity> findByInstrumentAndConfidenceGreaterThanEqualOrderByTimestampDesc(
+        Instrument instrument, int minConfidence, Pageable pageable);
 }

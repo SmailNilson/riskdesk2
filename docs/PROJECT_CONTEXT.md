@@ -110,7 +110,19 @@ These should stay transport-oriented only.
 - `application/service/MentorIntermarketService.java`
 - `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
 - `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/strategy/WtxStrategyService.java` — WaveTrend XT strategy orchestrator. Listens to `CandleClosed` per instrument/timeframe, evaluates the configured profile (`BASELINE` / `SESSION_ATR` / `HTF` / `STRICT`), applies trailing-ATR exits, attaches filter decisions to the enrichment snapshot, and optionally routes through `WtxExecutionBridge` for IBKR. **State is per `(instrument, timeframe)`** — `WtxStrategyState` carries `timeframe` and `wtx_strategy_states` has a composite PK, so 5m and 10m each have their own position, profile, auto-execution toggle and daily max-loss. REST: `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`, `/auto-execution`).
+- `application/service/strategy/WtxExecutionBridge.java` — opt-in IBKR routing for WTX. Writes a `TradeExecutionRecord` (mentorSignalReviewId = null, triggerSource = WTX_AUTO) keyed by `wtx:<instrument>:<timeframe>:<signalTs>:<action>`, then calls `IbkrOrderService.submitEntryOrder`. Open-row lookups are timeframe-scoped (`findActiveByInstrumentAndTimeframeAndTriggerSource`). Disabled when `state.autoExecutionEnabled = false` (default). `submit(...)` returns a `WtxRoutingOutcome` (`ROUTED` / `ACK_PENDING` / `SKIPPED_*` / `FAILED_*`) — logged at INFO, persisted on `wtx_signal_history.routing_outcome`, and shown as a chip in the WTX panel so a non-routed signal is always diagnosable. `ACK_PENDING` means IBKR has an order id but the initial acknowledgement timed out; delayed `orderStatus` / `execDetails` callbacks can still reconcile the execution row.
+- Domain helpers in `domain/engine/strategy/wtx/`:
+  - `WtxBarEvaluator` — filter-aware bar evaluation, returns the candidate `WtxSignal`.
+  - `WtxTrailingExitEvaluator` — fixed initial stop, then ATR trailing stop above an activation threshold.
+  - `WtxHtfBiasFilter` — 60m EMA stack bias (close ≥ fast ≥ slow → bullish, mirror for bearish).
+  - `WtxStructureFilter` — Pine `sweep + reclaim` / `break + reclaim` proxy over a rolling lookback.
+  - `WtxRiskGuard` — `canTradeForProfile`, `isForceCloseWindow`, `isNewTradingDay`, `isMaxLossHit`.
 - `application/service/ExecutionFillTrackingService.java` — Slice 3a. Implements `ExecutionFillListener` domain port. Receives IBKR `execDetails` + `orderStatus` callbacks from `IbGatewayNativeClient`, deduplicates by `execId`, persists raw broker feedback on `TradeExecutionEntity`, transitions domain state to `ACTIVE` on first `Filled`, publishes `/topic/executions` on every state-changing update.
+- `application/quant/service/QuantGateService.java` — runs the 7-gate SHORT-setup evaluator every 60 s (MNQ, MGC, MCL). Pure orchestration: parallel port fetch (Absorption, Distribution, Cycle, Delta, LivePrice) → `GateEvaluator.evaluate()` → state save → narration → optional tier-2 advisor → WebSocket publish. State persists in the `quant_state` table; recent snapshots in an in-memory ring buffer (`QuantSnapshotHistoryStore`).
+- `application/quant/service/QuantSetupNarrationService.java` — combines the gate snapshot with the deterministic `OrderFlowPatternDetector` and the `QuantNarrator` to produce the markdown surfaced in `/topic/quant/narration/{instr}`.
+- `application/quant/service/QuantSessionMemoryService.java` — in-memory aggregator (per-instrument scan count, observed patterns, win rate, last outcome) that feeds the AI advisor's same-session view. Resets at the ET calendar-day boundary.
+- `application/quant/service/QuantAiAdvisorService.java` — tier-2 orchestrator. Triggered when the gate score reaches `riskdesk.quant.ai-advice-trigger-score` (default 6). Pulls top-K nearest situations via pgvector (`QuantMemoryPort`), the same-session memory and the multi-instrument context, then calls `AdvisorPort`. Caches verdicts 30 s per instrument. Failure-safe — returns `AiAdvice.unavailable(...)` instead of throwing when the LLM / memory store is down.
 
 These coordinate use cases and should not become infrastructure adapters.
 
@@ -281,12 +293,11 @@ mvn -q -DskipTests compile
 
 ## Container Release Workflow
 
-- Docker image validation now runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
-- Docker image publication now runs in GitHub Actions on Git tag pushes
-- published images are pushed to `ghcr.io/smailnilson/riskdesk2`
-- if a tag already exists before the workflow is added, rerun publication with the manual `workflow_dispatch` input `git_tag`
-- release deployment can now run from GitHub Actions over SSH using `docker-compose.release.yml` on the target server
-- the deployment workflow expects GitHub Actions secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `GHCR_USERNAME`, and `GHCR_TOKEN`
+- Docker image validation runs in GitHub Actions on `push` to `main` and on pull requests targeting `main`
+- the `Tag & Deploy` workflow builds immutable release images, pushes them to GCP Artifact Registry, uploads the runtime config bundle to GCS, and refreshes the GCE VM through an IAP SSH tunnel
+- the deploy job expects GitHub Actions variables `GCP_PROJECT_ID`, `GCP_REGION`, `GCP_ZONE`, `GCP_ARTIFACT_REGISTRY_REPOSITORY`, `GCP_INSTANCE_NAME`, `GCP_CONFIG_BUCKET`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`, and `GCP_DEPLOY_SSH_USER`
+- the deploy job expects GitHub Actions secret `DEPLOY_SSH_PRIVATE_KEY`
+- `GCP_DEPLOY_SSH_USER` must identify the VM user that owns the public half of `DEPLOY_SSH_PRIVATE_KEY`; that user must have passwordless `sudo` because runtime refresh writes under `/opt/riskdesk` and controls Docker
 - local Docker is no longer required for the standard image release path
 - the private IBKR `tws-api` dependency is vendored under `vendor/maven-repo` so Docker/CI builds do not depend on a developer-local `~/.m2`
 

@@ -30,12 +30,14 @@ class InstitutionalDistributionDetectorTest {
 
     private AbsorptionSignal bear(int offsetSeconds, double score) {
         return new AbsorptionSignal(instrument, AbsorptionSide.BEARISH_ABSORPTION,
-            score, 700, 2.0, 9000, t0.plusSeconds(offsetSeconds));
+            score, 700, 2.0, 9000, t0.plusSeconds(offsetSeconds),
+            AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation");
     }
 
     private AbsorptionSignal bull(int offsetSeconds, double score) {
         return new AbsorptionSignal(instrument, AbsorptionSide.BULLISH_ABSORPTION,
-            score, -250, 1.0, 5000, t0.plusSeconds(offsetSeconds));
+            score, -250, 1.0, 5000, t0.plusSeconds(offsetSeconds),
+            AbsorptionSignal.AbsorptionType.DIVERGENCE, "Buyers absorbing sell pressure");
     }
 
     @Test
@@ -120,7 +122,8 @@ class InstitutionalDistributionDetectorTest {
         Instant far = t0.plus(Duration.ofMinutes(20));
         Optional<DistributionSignal> out = detector.onAbsorption(
             new AbsorptionSignal(instrument, AbsorptionSide.BEARISH_ABSORPTION,
-                5.0, 700, 2.0, 9000, far),
+                5.0, 700, 2.0, 9000, far,
+                AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation"),
             27100.0, null, far);
         assertThat(out).isEmpty();
     }
@@ -236,7 +239,8 @@ class InstitutionalDistributionDetectorTest {
         for (int i = 0; i < 3; i++) {
             Optional<DistributionSignal> out = mnqDetector.onAbsorption(
                 new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
-                    3.5, 700, 2.0, 9000, waveStart.plusSeconds(i * 5)),
+                    3.5, 700, 2.0, 9000, waveStart.plusSeconds(i * 5),
+                    AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation"),
                 27050.0, null, waveStart.plusSeconds(i * 5));
             if (out.isPresent()) secondWave = out;
         }
@@ -252,11 +256,13 @@ class InstitutionalDistributionDetectorTest {
 
         AbsorptionSignal highIntensity = new AbsorptionSignal(
             instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
-            3.5, 5000, 2.0, 6000, t0);
+            3.5, 5000, 2.0, 6000, t0,
+            AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation");
         // Low-intensity signal: delta=100 on volume=6000 → intensity ≈ 0.017 → bonus ≈ 0
         AbsorptionSignal lowIntensity = new AbsorptionSignal(
             instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
-            3.5, 100, 2.0, 6000, t0);
+            3.5, 100, 2.0, 6000, t0,
+            AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation");
 
         // High-intensity streak
         InstitutionalDistributionDetector highDet = new InstitutionalDistributionDetector(instrument);
@@ -264,7 +270,8 @@ class InstitutionalDistributionDetectorTest {
         for (int i = 0; i < 3; i++) {
             Optional<DistributionSignal> out = highDet.onAbsorption(
                 new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
-                    3.5, 5000, 2.0, 6000, t0.plusSeconds(i * 5)),
+                    3.5, 5000, 2.0, 6000, t0.plusSeconds(i * 5),
+                    AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation"),
                 27100.0, null, t0.plusSeconds(i * 5));
             if (out.isPresent()) highFired = out;
         }
@@ -275,7 +282,8 @@ class InstitutionalDistributionDetectorTest {
         for (int i = 0; i < 3; i++) {
             Optional<DistributionSignal> out = lowDet.onAbsorption(
                 new AbsorptionSignal(instrument, AbsorptionSignal.AbsorptionSide.BEARISH_ABSORPTION,
-                    3.5, 100, 2.0, 6000, t0.plusSeconds(i * 5)),
+                    3.5, 100, 2.0, 6000, t0.plusSeconds(i * 5),
+                    AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation"),
                 27100.0, null, t0.plusSeconds(i * 5));
             if (out.isPresent()) lowFired = out;
         }

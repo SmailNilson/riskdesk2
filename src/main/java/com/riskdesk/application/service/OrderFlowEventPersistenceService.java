@@ -94,7 +94,9 @@ public class OrderFlowEventPersistenceService {
                     signal.absorptionScore(),
                     signal.aggressiveDelta(),
                     signal.priceMoveTicks(),
-                    signal.totalVolume()
+                    signal.totalVolume(),
+                    signal.absorptionType() != null ? signal.absorptionType().name() : null,
+                    signal.explanation()
             );
             absorptionRepository.save(entity);
         } catch (Exception e) {

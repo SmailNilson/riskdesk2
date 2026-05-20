@@ -99,7 +99,8 @@ class OrderFlowControllerTest {
     void getRecentAbsorptions_returnsServiceResult() {
         AbsorptionEventView sample = new AbsorptionEventView(
             "MCL", Instant.parse("2026-04-20T14:05:00Z"), "BULLISH_ABSORPTION",
-            82.3, 450L, 1.5, 1_250L);
+            82.3, 450L, 1.5, 1_250L,
+            "DIVERGENCE", "Buyers absorbing sell pressure");
         when(historyService.recentAbsorptions(eq(Instrument.MCL), eq(20)))
             .thenReturn(List.of(sample));
 

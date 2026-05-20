@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
@@ -23,6 +24,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -45,19 +48,22 @@ public class OrderFlowHistoryService {
     private final JpaDistributionEventRepository distributionRepository;
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
+    private final OrderFlowProperties properties;
 
     public OrderFlowHistoryService(JpaIcebergEventRepository icebergRepository,
                                    JpaAbsorptionEventRepository absorptionRepository,
                                    JpaSpoofingEventRepository spoofingRepository,
                                    JpaDistributionEventRepository distributionRepository,
                                    JpaMomentumEventRepository momentumRepository,
-                                   JpaCycleEventRepository cycleRepository) {
+                                   JpaCycleEventRepository cycleRepository,
+                                   OrderFlowProperties properties) {
         this.icebergRepository = icebergRepository;
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
         this.distributionRepository = distributionRepository;
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
+        this.properties = properties;
     }
 
     @Transactional(readOnly = true)
@@ -95,16 +101,20 @@ public class OrderFlowHistoryService {
     @Transactional(readOnly = true)
     public List<MomentumEventView> recentMomentumBursts(Instrument instrument, int limit) {
         int capped = clampLimit(limit);
+        Instant cutoff = Instant.now().minus(Duration.ofMinutes(properties.getMomentum().getHistoryMaxAgeMinutes()));
         List<MomentumEventEntity> rows =
-            momentumRepository.findByInstrumentOrderByTimestampDesc(instrument, PageRequest.of(0, capped));
+            momentumRepository.findByInstrumentAndTimestampAfterOrderByTimestampDesc(
+                instrument, cutoff, PageRequest.of(0, capped));
         return rows.stream().map(OrderFlowHistoryService::toView).toList();
     }
 
     @Transactional(readOnly = true)
     public List<CycleEventView> recentCycles(Instrument instrument, int limit) {
         int capped = clampLimit(limit);
+        int minConfidence = properties.getCycle().getMinConfidence();
         List<CycleEventEntity> rows =
-            cycleRepository.findByInstrumentOrderByTimestampDesc(instrument, PageRequest.of(0, capped));
+            cycleRepository.findByInstrumentAndConfidenceGreaterThanEqualOrderByTimestampDesc(
+                instrument, minConfidence, PageRequest.of(0, capped));
         return rows.stream().map(OrderFlowHistoryService::toView).toList();
     }
 
@@ -129,6 +139,9 @@ public class OrderFlowHistoryService {
     }
 
     private static AbsorptionEventView toView(AbsorptionEventEntity e) {
+        // Legacy rows pre-date absorptionType/explanation columns — default to CLASSIC + empty so frontend doesn't crash.
+        String type = e.getAbsorptionType() != null ? e.getAbsorptionType() : "CLASSIC";
+        String explanation = e.getExplanation() != null ? e.getExplanation() : "";
         return new AbsorptionEventView(
             e.getInstrument().name(),
             e.getTimestamp(),
@@ -136,7 +149,9 @@ public class OrderFlowHistoryService {
             e.getAbsorptionScore(),
             e.getAggressiveDelta(),
             e.getPriceMoveTicks(),
-            e.getTotalVolume()
+            e.getTotalVolume(),
+            type,
+            explanation
         );
     }
 

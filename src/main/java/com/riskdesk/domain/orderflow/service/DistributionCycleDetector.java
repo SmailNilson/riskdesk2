@@ -82,12 +82,14 @@ public final class DistributionCycleDetector {
             case PHASE_1 -> {
                 // Still in phase 1 — replace with a stronger or newer setup on the same side
                 if (matchesPhase1Direction(signal)) {
+                    // Same direction — silent refresh, don't spam a new event
                     enterPhase1(signal, now);
                     return Optional.empty();
                 } else {
-                    // Opposite direction before momentum → reset to new phase 1
+                    // Opposite direction invalidates the pending cycle; emit new P1 so the
+                    // dashboard reflects the direction flip immediately instead of showing stale data.
                     enterPhase1(signal, now);
-                    return Optional.empty();
+                    return emitPartial(signal.priceAtDetection(), now, CyclePhase.PHASE_1);
                 }
             }
             case PHASE_2 -> {
@@ -98,9 +100,11 @@ public final class DistributionCycleDetector {
                     lastCompletedAt = now;
                     return Optional.of(completed);
                 } else {
-                    // Same-side distribution during phase 2 — invalidate cycle, restart as new phase 1
+                    // Same-side distribution during phase 2 invalidates the cycle.
+                    // Restart as a new phase 1 AND emit it so the dashboard reflects the reset
+                    // (was previously silent, leaving stale PHASE_2 visible while internal state moved).
                     enterPhase1(signal, now);
-                    return Optional.empty();
+                    return emitPartial(signal.priceAtDetection(), now, CyclePhase.PHASE_1);
                 }
             }
             default -> { return Optional.empty(); }

@@ -20,7 +20,8 @@ class TickAggregationTest {
             false, null,
             now.minusSeconds(300), now,
             TickAggregation.SOURCE_REAL_TICKS,
-            72.50, 71.80
+            72.50, 71.80,
+            71.90, 72.30
         );
 
         assertEquals(Instrument.MCL, agg.instrument());
@@ -48,6 +49,7 @@ class TickAggregationTest {
             true, TickAggregation.DIVERGENCE_BEARISH,
             now.minusSeconds(300), now,
             TickAggregation.SOURCE_CLV_ESTIMATED,
+            Double.NaN, Double.NaN,
             Double.NaN, Double.NaN
         );
 

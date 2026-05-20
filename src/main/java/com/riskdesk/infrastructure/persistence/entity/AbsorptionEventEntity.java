@@ -15,7 +15,7 @@ import java.time.Instant;
 
 /**
  * Persists absorption detection events from the order flow subsystem (UC-OF-004).
- * High delta + stable price + high volume = institutional limit orders absorbing aggressive flow.
+ * High delta + price action interpreted via the (delta sign × price sign) rule (CLASSIC vs DIVERGENCE).
  * 90-day retention, purged by OrderFlowEventPersistenceService.
  */
 @Entity
@@ -54,11 +54,20 @@ public class AbsorptionEventEntity {
     @Column(nullable = false)
     private long totalVolume;
 
+    /** CLASSIC or DIVERGENCE. Nullable for legacy rows written before the field existed. */
+    @Column(length = 12)
+    private String absorptionType;
+
+    /** Short plain-English explanation surfaced in the panel. Nullable for legacy rows. */
+    @Column(length = 80)
+    private String explanation;
+
     protected AbsorptionEventEntity() {}
 
     public AbsorptionEventEntity(Instrument instrument, Instant timestamp, String side,
                                  double absorptionScore, long aggressiveDelta,
-                                 double priceMoveTicks, long totalVolume) {
+                                 double priceMoveTicks, long totalVolume,
+                                 String absorptionType, String explanation) {
         this.instrument = instrument;
         this.timestamp = timestamp;
         this.side = side;
@@ -66,6 +75,8 @@ public class AbsorptionEventEntity {
         this.aggressiveDelta = aggressiveDelta;
         this.priceMoveTicks = priceMoveTicks;
         this.totalVolume = totalVolume;
+        this.absorptionType = absorptionType;
+        this.explanation = explanation;
     }
 
     public Long getId() { return id; }
@@ -76,4 +87,6 @@ public class AbsorptionEventEntity {
     public long getAggressiveDelta() { return aggressiveDelta; }
     public double getPriceMoveTicks() { return priceMoveTicks; }
     public long getTotalVolume() { return totalVolume; }
+    public String getAbsorptionType() { return absorptionType; }
+    public String getExplanation() { return explanation; }
 }

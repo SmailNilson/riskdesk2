@@ -21,4 +21,7 @@ public interface JpaMomentumEventRepository extends JpaRepository<MomentumEventE
     int deleteByTimestampBefore(Instant cutoff);
 
     List<MomentumEventEntity> findByInstrumentOrderByTimestampDesc(Instrument instrument, Pageable pageable);
+
+    List<MomentumEventEntity> findByInstrumentAndTimestampAfterOrderByTimestampDesc(
+        Instrument instrument, Instant since, Pageable pageable);
 }

@@ -3,6 +3,7 @@ package com.riskdesk.domain.orderflow.service;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal.AbsorptionSide;
+import com.riskdesk.domain.orderflow.model.AbsorptionSignal.AbsorptionType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -22,56 +23,95 @@ class AbsorptionDetectorTest {
         detector = new AbsorptionDetector();
     }
 
+    // ─── 4-quadrant decision rule ─────────────────────────────────────────
+
     @Test
-    void scoreBelowThreshold_returnsEmpty() {
-        // Small delta, small volume => low score
-        // score = (50/100) * (1 - 1/10) * (100/200) = 0.5 * 0.9 * 0.5 = 0.225 < 2.0
+    void negativeDelta_priceUp_returnsBullishDivergence() {
+        // delta < 0 + price ↑ → buyers absorbing sell pressure → BULL DIVERGENCE
+        // DIVERGENCE score = (500/100) * (5/10) * (600/200) = 5 * 0.5 * 3 = 7.5 > 1.5
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -50, 1.0, 100, 10.0, 100.0, 200.0, now);
+                instrument, -500, 5.0, 600, 10.0, 100.0, 200.0, now);
+
+        assertThat(result).isPresent();
+        AbsorptionSignal s = result.get();
+        assertThat(s.side()).isEqualTo(AbsorptionSide.BULLISH_ABSORPTION);
+        assertThat(s.absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
+        assertThat(s.explanation()).isEqualTo("Buyers absorbing sell pressure");
+    }
+
+    @Test
+    void positiveDelta_priceDown_returnsBearishDivergence() {
+        // delta > 0 + price ↓ → sellers absorbing buy pressure → BEAR DIVERGENCE
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, 500, -5.0, 600, 10.0, 100.0, 200.0, now);
+
+        assertThat(result).isPresent();
+        AbsorptionSignal s = result.get();
+        assertThat(s.side()).isEqualTo(AbsorptionSide.BEARISH_ABSORPTION);
+        assertThat(s.absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
+        assertThat(s.explanation()).isEqualTo("Sellers absorbing buy pressure");
+    }
+
+    @Test
+    void negativeDelta_priceDown_returnsBearishClassic() {
+        // delta < 0 + price ↓ → trend confirmation → BEAR CLASSIC
+        // CLASSIC score = (500/100) * (600/200) = 5 * 3 = 15 > 2.0
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, -500, -5.0, 600, 10.0, 100.0, 200.0, now);
+
+        assertThat(result).isPresent();
+        AbsorptionSignal s = result.get();
+        assertThat(s.side()).isEqualTo(AbsorptionSide.BEARISH_ABSORPTION);
+        assertThat(s.absorptionType()).isEqualTo(AbsorptionType.CLASSIC);
+        assertThat(s.explanation()).isEqualTo("Classic bear confirmation");
+    }
+
+    @Test
+    void positiveDelta_priceUp_returnsBullishClassic() {
+        // delta > 0 + price ↑ → trend confirmation → BULL CLASSIC
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, 500, 5.0, 600, 10.0, 100.0, 200.0, now);
+
+        assertThat(result).isPresent();
+        AbsorptionSignal s = result.get();
+        assertThat(s.side()).isEqualTo(AbsorptionSide.BULLISH_ABSORPTION);
+        assertThat(s.absorptionType()).isEqualTo(AbsorptionType.CLASSIC);
+        assertThat(s.explanation()).isEqualTo("Classic bull confirmation");
+    }
+
+    // ─── NEUTRAL guards (delta or price is zero) ───────────────────────────
+
+    @Test
+    void zeroDelta_returnsEmpty_neutral() {
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, 0, 5.0, 600, 10.0, 100.0, 200.0, now);
 
         assertThat(result).isEmpty();
     }
 
     @Test
-    void scoreAboveThreshold_returnsSignal() {
-        // Large delta, stable price, high volume
-        // score = (500/100) * (1 - 0.5/10) * (600/200) = 5.0 * 0.95 * 3.0 = 14.25 > 2.0
+    void zeroSignedPriceMove_returnsEmpty_neutral() {
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 10.0, 100.0, 200.0, now);
+                instrument, -500, 0.0, 600, 10.0, 100.0, 200.0, now);
 
-        assertThat(result).isPresent();
-        AbsorptionSignal signal = result.get();
-        assertThat(signal.absorptionScore()).isGreaterThan(2.0);
-        assertThat(signal.instrument()).isEqualTo(instrument);
-        assertThat(signal.totalVolume()).isEqualTo(600);
-        assertThat(signal.aggressiveDelta()).isEqualTo(-500);
+        assertThat(result).isEmpty();
     }
 
     @Test
-    void negativeDelta_stablePrice_returnsBullishAbsorption() {
-        // Negative delta = sellers aggressive, but price stable = buyers absorbing = BULLISH
+    void nanSignedPriceMove_returnsEmpty() {
+        // Orchestrator passes 0.0 when first/last prices are NaN, but defend at the detector boundary too.
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 10.0, 100.0, 200.0, now);
+                instrument, -500, Double.NaN, 600, 10.0, 100.0, 200.0, now);
 
-        assertThat(result).isPresent();
-        assertThat(result.get().side()).isEqualTo(AbsorptionSide.BULLISH_ABSORPTION);
+        assertThat(result).isEmpty();
     }
 
-    @Test
-    void positiveDelta_stablePrice_returnsBearishAbsorption() {
-        // Positive delta = buyers aggressive, but price stable = sellers absorbing = BEARISH
-        Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, 500, 0.5, 600, 10.0, 100.0, 200.0, now);
-
-        assertThat(result).isPresent();
-        assertThat(result.get().side()).isEqualTo(AbsorptionSide.BEARISH_ABSORPTION);
-    }
+    // ─── Normalizer guards ────────────────────────────────────────────────
 
     @Test
-    void zeroVolume_avgVolume_returnsEmpty_noDivisionError() {
-        // avgVolume = 0 => guard clause returns empty
+    void zeroAvgVolume_returnsEmpty() {
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 10.0, 100.0, 0.0, now);
+                instrument, -500, 5.0, 600, 10.0, 100.0, 0.0, now);
 
         assertThat(result).isEmpty();
     }
@@ -79,7 +119,7 @@ class AbsorptionDetectorTest {
     @Test
     void zeroDeltaThreshold_returnsEmpty() {
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 10.0, 0.0, 200.0, now);
+                instrument, -500, 5.0, 600, 10.0, 0.0, 200.0, now);
 
         assertThat(result).isEmpty();
     }
@@ -87,73 +127,111 @@ class AbsorptionDetectorTest {
     @Test
     void zeroAtr_returnsEmpty() {
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 0.0, 100.0, 200.0, now);
+                instrument, -500, 5.0, 600, 0.0, 100.0, 200.0, now);
+
+        assertThat(result).isEmpty();
+    }
+
+    // ─── Score gates ──────────────────────────────────────────────────────
+
+    @Test
+    void classic_scoreExactlyAtThreshold_returnsEmpty() {
+        // CLASSIC score = (200/100) * (200/200) = 2.0 — strict > gate, so empty.
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, 200, 1.0, 200, 10.0, 100.0, 200.0, now);
 
         assertThat(result).isEmpty();
     }
 
     @Test
-    void largePriceMove_lowScore_returnsEmpty() {
-        // priceMoveTicks = 15.0, atr = 10.0 => priceStability = 1 - 15/10 = -0.5 => <= 0 => empty
+    void classic_scoreJustAboveThreshold_returnsSignal() {
+        // CLASSIC score = (201/100) * (200/200) = 2.01 > 2.0 → fires.
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 15.0, 600, 10.0, 100.0, 200.0, now);
-
-        assertThat(result).isEmpty();
-    }
-
-    @Test
-    void priceMove_equalToAtr_returnsEmpty() {
-        // priceStability = 1 - 10/10 = 0 => <= 0 => empty
-        Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 10.0, 600, 10.0, 100.0, 200.0, now);
-
-        assertThat(result).isEmpty();
-    }
-
-    @Test
-    void scoreExactlyAtThreshold_returnsEmpty() {
-        // We need score = exactly 2.0 => <= 2.0 => empty (strict >)
-        // score = (delta/deltaT) * (1 - priceMove/atr) * (vol/avgVol)
-        // Let's compute: (200/100) * (1 - 0/10) * (200/200) = 2.0 * 1.0 * 1.0 = 2.0
-        Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -200, 0.0, 200, 10.0, 100.0, 200.0, now);
-
-        assertThat(result).isEmpty();
-    }
-
-    @Test
-    void scoreJustAboveThreshold_returnsSignal() {
-        // (201/100) * (1 - 0/10) * (200/200) = 2.01 > 2.0
-        Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -201, 0.0, 200, 10.0, 100.0, 200.0, now);
+                instrument, 201, 1.0, 200, 10.0, 100.0, 200.0, now);
 
         assertThat(result).isPresent();
+        assertThat(result.get().absorptionType()).isEqualTo(AbsorptionType.CLASSIC);
     }
 
     @Test
-    void signalContainsCorrectTimestamp() {
+    void divergence_scoreExactlyAtThreshold_returnsEmpty() {
+        // DIVERGENCE score = (150/100) * (10/10) * (200/200) = 1.5 — strict > gate, so empty.
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 600, 10.0, 100.0, 200.0, now);
+                instrument, -150, 10.0, 200, 10.0, 100.0, 200.0, now);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void divergence_scoreJustAboveThreshold_returnsSignal() {
+        // DIVERGENCE score = (151/100) * (10/10) * (200/200) = 1.51 > 1.5 → fires.
+        Optional<AbsorptionSignal> result = detector.evaluate(
+                instrument, -151, 10.0, 200, 10.0, 100.0, 200.0, now);
 
         assertThat(result).isPresent();
-        assertThat(result.get().timestamp()).isEqualTo(now);
+        assertThat(result.get().absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
     }
 
+    // ─── Asymmetric thresholds (DIVERGENCE 1.5 vs CLASSIC 2.0) ────────────
+
     @Test
-    void signalContainsCorrectPriceMoveTicks() {
+    void divergence_firesAtScore_1_8_butSameMagnitudesClassicDoesNotFire() {
+        // DIVERGENCE quadrant (delta < 0, price ↑) — score 1.8 > 1.5 → fires.
+        // delta=180, threshold=100, vol=200, avg=200, |move|=10, atr=10
+        // DIVERGENCE = 1.8 * 1.0 * 1.0 = 1.8 > 1.5
+        Optional<AbsorptionSignal> divergence = detector.evaluate(
+                instrument, -180, 10.0, 200, 10.0, 100.0, 200.0, now);
+        assertThat(divergence).isPresent();
+        assertThat(divergence.get().absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
+        assertThat(divergence.get().absorptionScore()).isEqualTo(1.8);
+
+        // CLASSIC quadrant (delta < 0, price ↓) — same |delta|, |vol|, |move|, |atr|
+        // CLASSIC = 1.8 * 1.0 = 1.8 ≤ 2.0 → empty.
+        Optional<AbsorptionSignal> classic = detector.evaluate(
+                instrument, -180, -10.0, 200, 10.0, 100.0, 200.0, now);
+        assertThat(classic).isEmpty();
+    }
+
+    // ─── Divergence amplifier (priceMove/atr boosts the score) ────────────
+
+    @Test
+    void divergenceLargeMove_scoresHigherThanSmallMoveSameDeltaVolume() {
+        // Same delta and volume; bigger counter-move ⇒ higher score.
+        // Memory entry MNQ 28-Apr scenario: delta -50…-100 + price holding/up = strong absorption.
+        Optional<AbsorptionSignal> small = detector.evaluate(
+                instrument, -500, 2.0, 600, 10.0, 100.0, 200.0, now);
+        Optional<AbsorptionSignal> large = detector.evaluate(
+                instrument, -500, 8.0, 600, 10.0, 100.0, 200.0, now);
+
+        assertThat(small).isPresent();
+        assertThat(large).isPresent();
+        assertThat(large.get().absorptionScore()).isGreaterThan(small.get().absorptionScore());
+        assertThat(small.get().absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
+        assertThat(large.get().absorptionType()).isEqualTo(AbsorptionType.DIVERGENCE);
+    }
+
+    // ─── Signal payload integrity ─────────────────────────────────────────
+
+    @Test
+    void signalCarriesTimestamp_delta_volume_priceMoveAbsolute() {
         Optional<AbsorptionSignal> result = detector.evaluate(
                 instrument, -500, 2.5, 600, 10.0, 100.0, 200.0, now);
 
         assertThat(result).isPresent();
-        assertThat(result.get().priceMoveTicks()).isEqualTo(2.5);
+        AbsorptionSignal s = result.get();
+        assertThat(s.timestamp()).isEqualTo(now);
+        assertThat(s.aggressiveDelta()).isEqualTo(-500);
+        assertThat(s.totalVolume()).isEqualTo(600);
+        // priceMoveTicks on the signal is the ABSOLUTE magnitude (back-compat with consumers).
+        assertThat(s.priceMoveTicks()).isEqualTo(2.5);
     }
 
     @Test
-    void zeroVolumePassed_returnsEmpty_becauseAvgVolumeGuard() {
-        // volume=0 but avgVolume=200 => volumeComponent = 0 => score = 0 => empty
+    void signalPriceMoveTicks_isAbsoluteEvenForNegativeSignedMove() {
         Optional<AbsorptionSignal> result = detector.evaluate(
-                instrument, -500, 0.5, 0, 10.0, 100.0, 200.0, now);
+                instrument, 500, -2.5, 600, 10.0, 100.0, 200.0, now);
 
-        assertThat(result).isEmpty();
+        assertThat(result).isPresent();
+        assertThat(result.get().priceMoveTicks()).isEqualTo(2.5);
     }
 }

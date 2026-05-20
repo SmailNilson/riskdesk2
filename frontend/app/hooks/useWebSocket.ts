@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { MentorSignalReview } from '@/app/lib/api';
+import type { WtxSignalView } from '@/app/lib/api';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
 
 export interface PriceUpdate {
@@ -38,6 +39,7 @@ export function useWebSocket() {
   const [prices, setPrices] = useState<Record<string, PriceUpdate>>({});
   const [alerts, setAlerts] = useState<AlertMessage[]>([]);
   const [mentorSignalReviews, setMentorSignalReviews] = useState<MentorSignalReview[]>([]);
+  const [wtxSignals, setWtxSignals] = useState<WtxSignalView[]>([]);
   const [connected, setConnected] = useState(false);
 
   const loadRecentAlerts = useCallback(() => {
@@ -96,6 +98,11 @@ export function useWebSocket() {
             return [review, ...filtered].slice(0, MENTOR_REVIEW_HISTORY_LIMIT);
           });
         });
+
+        client.subscribe('/topic/wtx-signals', (msg: IMessage) => {
+          const signal: WtxSignalView = JSON.parse(msg.body);
+          setWtxSignals(prev => [signal, ...prev].slice(0, 50));
+        });
       },
       onDisconnect: () => setConnected(false),
       onStompError: () => setConnected(false),
@@ -132,5 +139,5 @@ export function useWebSocket() {
       .catch(() => {});
   }, []);
 
-  return { prices, alerts, mentorSignalReviews, connected, refresh };
+  return { prices, alerts, mentorSignalReviews, wtxSignals, connected, refresh };
 }

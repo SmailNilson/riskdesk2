@@ -19,16 +19,20 @@ import java.util.List;
  * <p>Contract:
  * <ul>
  *   <li>No nearby OB → abstain.</li>
- *   <li>Price inside a bullish OB or within 0.25 × ATR of its top → positive vote.</li>
- *   <li>Price inside a bearish OB or within 0.25 × ATR of its bottom → negative vote.</li>
+ *   <li>Price inside a bullish OB or within 0.5 × ATR of its top → positive vote.</li>
+ *   <li>Price inside a bearish OB or within 0.5 × ATR of its bottom → negative vote.</li>
  *   <li>quality score (when available) scales confidence, not magnitude.</li>
  * </ul>
+ *
+ * <p>The 0.5 × ATR proximity matches the upstream {@code ZoneContextBuilder} band
+ * (1.0 × ATR pre-filter) — narrower bands here caused the agent to abstain even when
+ * a nearby OB had been pre-loaded, leaving the ZONE layer empirically zero.
  */
 public final class OrderBlockZoneAgent implements StrategyAgent {
 
     public static final String ID = "order-block-zone";
     private static final int BASE_VOTE = 60;
-    private static final double PROXIMITY_ATR_MULT = BigDecimal.valueOf(0.25).doubleValue();
+    private static final double PROXIMITY_ATR_MULT = BigDecimal.valueOf(0.5).doubleValue();
 
     @Override
     public String id() {

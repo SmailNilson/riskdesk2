@@ -14,18 +14,22 @@ import java.util.List;
  * CONTEXT agent — measures how many higher timeframes (H1 / H4 / Daily) agree
  * with the reference-timeframe {@link MacroBias}.
  *
- * <p>Vote scaling:
+ * <p>Vote scaling — asymmetric (confirmation outweighs opposition):
  * <ul>
- *   <li>3 of 3 aligned → ±90 conviction with high confidence</li>
- *   <li>2 of 3 aligned → ±60 conviction</li>
- *   <li>1 of 3 aligned → ±25 conviction (soft)</li>
- *   <li>0 of 3 aligned → direction is lonely — vote against it lightly</li>
+ *   <li>3 of 3 aligned → ±90 conviction (confidence 0.90)</li>
+ *   <li>2 of 3 aligned → ±60 conviction (confidence 0.75)</li>
+ *   <li>1 of 3 aligned → ±25 conviction (confidence 0.55)</li>
+ *   <li>1 of 3 opposed → ±20 against reference (confidence 0.45)</li>
+ *   <li>2 of 3 opposed → ±35 against reference (confidence 0.55)</li>
+ *   <li>3 of 3 opposed → ±45 against reference (confidence 0.70) — capped to avoid
+ *       fully cancelling the reference SMC bias on counter-trend setups</li>
+ *   <li>net 0 (split) → ±20 against reference (lonely-but-not-opposed)</li>
  *   <li>reference bias itself NEUTRAL, or all HTFs NEUTRAL → abstain</li>
  * </ul>
  *
- * <p>The sign always tracks the reference bias — if H4 and Daily disagree with H1
- * against a reference BULL, we produce a negative vote (bias lonely, HTFs
- * contradicting). Confidence scales with the majority strength.
+ * <p>The sign tracks the reference bias for confirmations and inverts for oppositions.
+ * Asymmetry is intentional: a perfect 3/3 opposition should dampen — not erase — the
+ * reference signal, otherwise the system never trades counter-trend SMC setups.
  */
 public final class HtfAlignmentAgent implements StrategyAgent {
 
@@ -70,30 +74,48 @@ public final class HtfAlignmentAgent implements StrategyAgent {
         int opposed = mtf.alignmentWith(bias == MacroBias.BULL ? MacroBias.BEAR : MacroBias.BULL);
         int net = aligned - opposed; // -3..+3
 
-        int magnitude = switch (Math.abs(net)) {
-            case 3 -> 90;
-            case 2 -> 60;
-            case 1 -> 25;
-            default -> 0;
-        };
+        // Asymmetric magnitude: a confirmation (net > 0) is a stronger signal than an
+        // opposition (net < 0). Treating them symmetrically caused the +90 contre-vote
+        // to fully cancel the reference SMC bias (−70) whenever HTFs disagreed, leaving
+        // CONTEXT ≈ 0 in the most common counter-trend setup. Cap opposition magnitude
+        // at 45 so it dampens — but does not erase — the reference signal.
+        int magnitude;
         int sign;
-        if (net == 0) {
-            // HTFs contradict reference — lonely setup. Vote lightly against the reference.
+        double confidence;
+        if (net > 0) {
+            magnitude = switch (net) {
+                case 3 -> 90;
+                case 2 -> 60;
+                case 1 -> 25;
+                default -> 0;
+            };
+            confidence = switch (net) {
+                case 3 -> 0.90;
+                case 2 -> 0.75;
+                default -> 0.55;
+            };
+            sign = bias == MacroBias.BULL ? +1 : -1;
+        } else if (net < 0) {
+            // Opposition: capped magnitude. 3-against = 45 (was 90), 2-against = 35,
+            // 1-against = 20.
+            magnitude = switch (-net) {
+                case 3 -> 45;
+                case 2 -> 35;
+                case 1 -> 20;
+                default -> 0;
+            };
+            confidence = switch (-net) {
+                case 3 -> 0.70;
+                case 2 -> 0.55;
+                default -> 0.45;
+            };
+            sign = bias == MacroBias.BULL ? -1 : +1;
+        } else {
+            // net == 0 — HTFs split evenly relative to reference. Lonely-but-not-opposed.
             sign = bias == MacroBias.BULL ? -1 : +1;
             magnitude = 20;
-        } else if (net > 0) {
-            sign = bias == MacroBias.BULL ? +1 : -1;
-        } else {
-            // reference BULL but HTFs mostly BEAR → vote bear-aligned (negative)
-            sign = bias == MacroBias.BULL ? -1 : +1;
+            confidence = 0.45;
         }
-
-        double confidence = switch (Math.abs(net)) {
-            case 3 -> 0.90;
-            case 2 -> 0.75;
-            case 1 -> 0.55;
-            default -> 0.45;
-        };
 
         List<String> evidence = new ArrayList<>();
         evidence.add("Reference bias " + bias + " — HTF alignment " + aligned + "/3");

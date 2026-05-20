@@ -19,6 +19,17 @@ public interface TickDataPort {
     Optional<TickAggregation> currentAggregation(Instrument instrument);
 
     /**
+     * Returns an aggregation over only the last {@code windowSeconds} of ticks.
+     * <p>
+     * Used by short-window detectors (absorption, momentum) that need a tight time
+     * frame to detect transient events. Implementations without windowing support
+     * fall back to {@link #currentAggregation(Instrument)}.
+     */
+    default Optional<TickAggregation> recentAggregation(Instrument instrument, long windowSeconds) {
+        return currentAggregation(instrument);
+    }
+
+    /**
      * Returns true if real tick-by-tick data (not CLV estimation) is currently
      * available for this instrument.
      */

@@ -1,7 +1,12 @@
 package com.riskdesk.infrastructure.notification;
 
+import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
+import com.riskdesk.domain.engine.strategy.wtx.WtxEnrichmentSnapshot;
+import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
+import com.riskdesk.domain.engine.strategy.wtx.WtxSignalType;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
+import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
 import com.riskdesk.infrastructure.config.TelegramProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -14,6 +19,7 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
@@ -400,6 +406,100 @@ class TelegramNotificationAdapterTest {
 
             assertThatCode(() -> adapter.sendTradeBlockedByGate(blockedEvent(
                 "NOR", "NO_TRADE", 22.0, "engine-decision=NO_TRADE")))
+                .doesNotThrowAnyException();
+        }
+    }
+
+    // ---- WTX signal notifications ----
+
+    @Nested
+    class WtxSignalNotification {
+
+        private WtxSignalDetectedEvent sample(WtxSignalType type, String direction,
+                                                WtxAction action, boolean canTrade) {
+            WtxSignal signal = new WtxSignal(
+                "MNQ", "10m", type, direction,
+                new BigDecimal("-34.70"), new BigDecimal("-30.10"),
+                canTrade, action,
+                WtxEnrichmentSnapshot.empty(),
+                Instant.parse("2026-05-19T19:00:00Z"),
+                null, null
+            );
+            return WtxSignalDetectedEvent.from(signal, new BigDecimal("24390.25"));
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void sendsCompraSignal() {
+            adapter.sendWtxSignal(sample(WtxSignalType.COMPRA_1, "LONG",
+                WtxAction.REVERSE_TO_LONG, true));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("WTX");
+            assertThat(text).contains("COMPRA_1");
+            assertThat(text).contains("COMPRA");
+            assertThat(text).contains("MNQ");
+            assertThat(text).contains("Micro Nasdaq-100");
+            assertThat(text).contains("10m");
+            assertThat(text).contains("REVERSE_TO_LONG");
+            assertThat(text).contains("yes");
+            assertThat(text).contains("-34.70");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void sendsVentaSignal() {
+            adapter.sendWtxSignal(sample(WtxSignalType.VENTA_1, "SHORT",
+                WtxAction.REVERSE_TO_SHORT, true));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("VENTA_1");
+            assertThat(text).contains("REVERSE_TO_SHORT");
+        }
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void marksNonTradeableWithGatedFlag() {
+            adapter.sendWtxSignal(sample(WtxSignalType.COMPRA, "LONG",
+                WtxAction.OPEN_LONG, false));
+
+            ArgumentCaptor<Map<String, Object>> cap = ArgumentCaptor.forClass(Map.class);
+            verify(restTemplate).postForEntity(anyString(), cap.capture(), eq(String.class));
+            String text = (String) cap.getValue().get("text");
+
+            assertThat(text).contains("no (gated)");
+            assertThat(text).contains("⛔");  // ⛔
+        }
+
+        @Test
+        void skipsWhenDisabled() {
+            properties.setEnabled(false);
+            adapter.sendWtxSignal(sample(WtxSignalType.COMPRA_1, "LONG",
+                WtxAction.REVERSE_TO_LONG, true));
+            verifyNoInteractions(restTemplate);
+        }
+
+        @Test
+        void skipsWhenTokenBlank() {
+            properties.setBotToken("");
+            adapter.sendWtxSignal(sample(WtxSignalType.VENTA, "SHORT",
+                WtxAction.OPEN_SHORT, true));
+            verifyNoInteractions(restTemplate);
+        }
+
+        @Test
+        void networkFailureDoesNotThrow() {
+            when(restTemplate.postForEntity(anyString(), any(), eq(String.class)))
+                .thenThrow(new RestClientException("Connection refused"));
+
+            assertThatCode(() -> adapter.sendWtxSignal(sample(WtxSignalType.COMPRA_1, "LONG",
+                WtxAction.REVERSE_TO_LONG, true)))
                 .doesNotThrowAnyException();
         }
     }
