@@ -756,18 +756,25 @@ public class WtxExecutionBridge {
     /**
      * Creates an ACTIVE tracking row for an IBKR-side position the bridge isn't following yet —
      * invoked when reconcile would skip an OPEN as duplicate but no local row exists (typical
-     * post-restart or manual-trade drift). Idempotent via a stable {@code wtx-track:} execution
-     * key per (instrument, timeframe), so repeated same-side signals don't spawn duplicate rows.
-     * Quantity comes straight from {@code |livePos|}; the next CLOSE / MAX_LOSS will flatten
-     * that exact size via the standard {@link #handleClose} flow.
+     * post-restart or manual-trade drift). Idempotency is keyed on "any non-terminal WTX row
+     * already exists for this (instrument, timeframe)" rather than on a stable executionKey —
+     * if the previous tracking row went terminal (CLOSED/CANCELLED/REJECTED/FAILED), a new
+     * ACTIVE row is created with a timestamped key so a fresh IBKR position acquired later
+     * still gets a closable local row and isn't invisible to CLOSE / MAX_LOSS flows.
+     * Quantity comes straight from {@code |livePos|}.
      */
     private void ensureTrackedRowForLivePosition(WtxStrategyState state, String timeframe,
                                                  BigDecimal livePos, BigDecimal price) {
-        String trackingKey = "wtx-track:" + state.instrument() + ":" + timeframe;
-        if (executionRepository.findByExecutionKey(trackingKey).isPresent()) {
+        if (findOpenWtxExecution(state.instrument(), timeframe).isPresent()) {
+            // A non-terminal WTX row is already managing a position for this panel — repeated
+            // same-side signals within the same lifecycle land here and stay idempotent.
             return;
         }
         int qty = Math.max(1, livePos.abs().intValue());
+        // Timestamped key (per-second granularity) prevents the unique-constraint collision
+        // with any prior terminal {@code wtx-track:} row from the same panel.
+        String trackingKey = "wtx-track:" + state.instrument() + ":" + timeframe + ":"
+                + Instant.now().getEpochSecond();
         TradeExecutionRecord row = new TradeExecutionRecord();
         row.setExecutionKey(trackingKey);
         row.setBrokerAccountId(firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default"));

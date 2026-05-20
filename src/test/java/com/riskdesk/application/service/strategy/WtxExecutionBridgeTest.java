@@ -563,7 +563,8 @@ class WtxExecutionBridgeTest {
         // Tracking row exists with the broker-side direction and IBKR qty.
         assertEquals(1, repo.all().size(), "duplicate-skip must still create a tracking row");
         TradeExecutionRecord tracked = repo.all().get(0);
-        assertEquals("wtx-track:MCL:10m", tracked.getExecutionKey());
+        assertTrue(tracked.getExecutionKey().startsWith("wtx-track:MCL:10m:"),
+                "tracking row uses the wtx-track: prefix scoped to (instrument, timeframe)");
         assertEquals("LONG", tracked.getAction());
         assertEquals(2, tracked.getQuantity());
         assertEquals(ExecutionStatus.ACTIVE, tracked.getStatus(),
@@ -588,6 +589,36 @@ class WtxExecutionBridgeTest {
         bridgeWithReconcile.submit(later, state, bd(100));
 
         assertEquals(1, repo.all().size(), "tracking row must be idempotent across duplicate signals");
+    }
+
+    @Test
+    void reconcile_priorTrackingRowTerminal_freshIbkrPositionGetsNewTrackingRow() {
+        // Regression: a stable wtx-track:<i>:<tf> key would block a new ACTIVE row once the
+        // previous tracking row went terminal (CLOSED / FAILED / CANCELLED / REJECTED). After a
+        // restart or a manual re-open the bridge would silently lose the live position again.
+        // Idempotency must be based on "any non-terminal WTX row" instead.
+        TradeExecutionRecord terminalPrior = wtxRow("LONG", 2, ExecutionStatus.CLOSED);
+        terminalPrior.setExecutionKey("wtx-track:MCL:10m:1700000000");
+        repo.createIfAbsent(terminalPrior);
+
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(3)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(3), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        // Two rows now: the terminal prior + a fresh ACTIVE tracking row for the live IBKR position.
+        assertEquals(2, repo.all().size(),
+                "terminal prior tracking row must not block creation of a new ACTIVE row");
+        long activeCount = repo.all().stream()
+                .filter(r -> r.getStatus() == ExecutionStatus.ACTIVE)
+                .filter(r -> r.getExecutionKey() != null && r.getExecutionKey().startsWith("wtx-track:MCL:10m:"))
+                .count();
+        assertEquals(1, activeCount, "exactly one fresh ACTIVE wtx-track row must exist");
     }
 
     @Test
