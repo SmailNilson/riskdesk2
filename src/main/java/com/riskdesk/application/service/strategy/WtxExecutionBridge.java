@@ -227,6 +227,15 @@ public class WtxExecutionBridge {
         BigDecimal liveIbkrPosition = readLiveIbkrPosition(instrument);
         ReconcileOutcome reconcile = reconcileWithIbkr(action, liveIbkrPosition, state.instrument(), tf);
         if (reconcile.skipResult() != null) {
+            // Same-side IBKR position with no WTX tracking row: synthesize an ACTIVE row so the
+            // next CLOSE / MAX_LOSS / trailing-exit signal can locate the broker-side position and
+            // flatten it. Without this, a duplicate-skip leaves the live position invisible to
+            // {@link #handleClose} (returns SKIPPED_NO_OPEN_ROW) and the broker position can only
+            // be exited manually.
+            if (reconcile.skipResult().outcome() == WtxRoutingOutcome.SKIPPED_DUPLICATE
+                    && liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
+                ensureTrackedRowForLivePosition(state, tf, liveIbkrPosition, price);
+            }
             return reconcile.skipResult();
         }
         action = reconcile.action();
@@ -718,6 +727,42 @@ public class WtxExecutionBridge {
         log.warn("WTX [{} {}] reconcile: synthesizing prior row for IBKR position {} (qty={}) — close leg will flatten it",
                 state.instrument(), timeframe, livePos, qty);
         return executionRepository.createIfAbsent(row);
+    }
+
+    /**
+     * Creates an ACTIVE tracking row for an IBKR-side position the bridge isn't following yet —
+     * invoked when reconcile would skip an OPEN as duplicate but no local row exists (typical
+     * post-restart or manual-trade drift). Idempotent via a stable {@code wtx-track:} execution
+     * key per (instrument, timeframe), so repeated same-side signals don't spawn duplicate rows.
+     * Quantity comes straight from {@code |livePos|}; the next CLOSE / MAX_LOSS will flatten
+     * that exact size via the standard {@link #handleClose} flow.
+     */
+    private void ensureTrackedRowForLivePosition(WtxStrategyState state, String timeframe,
+                                                 BigDecimal livePos, BigDecimal price) {
+        String trackingKey = "wtx-track:" + state.instrument() + ":" + timeframe;
+        if (executionRepository.findByExecutionKey(trackingKey).isPresent()) {
+            return;
+        }
+        int qty = Math.max(1, livePos.abs().intValue());
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setExecutionKey(trackingKey);
+        row.setBrokerAccountId(firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default"));
+        row.setInstrument(state.instrument());
+        row.setTimeframe(timeframe);
+        row.setAction(livePos.signum() > 0 ? "LONG" : "SHORT");
+        row.setQuantity(qty);
+        row.setTriggerSource(ExecutionTriggerSource.WTX_AUTO);
+        row.setRequestedBy("wtx-reconcile-track");
+        row.setStatus(ExecutionStatus.ACTIVE);
+        row.setStatusReason("WTX reconcile: tracking IBKR live position " + livePos
+                + " (duplicate OPEN skipped — row created so CLOSE/MAX_LOSS can flatten)");
+        row.setNormalizedEntryPrice(price);
+        row.setCreatedAt(Instant.now());
+        row.setUpdatedAt(Instant.now());
+        executionRepository.createIfAbsent(row);
+        log.warn("WTX [{} {}] reconcile: created tracking row for IBKR live position {} (qty={}) — "
+                + "future CLOSE/MAX_LOSS will flatten this row",
+                state.instrument(), timeframe, livePos, qty);
     }
 
     /** Carrier for {@link #reconcileWithIbkr}. Exactly one of the fields is non-null. */

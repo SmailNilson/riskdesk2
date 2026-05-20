@@ -541,8 +541,11 @@ class WtxExecutionBridgeTest {
     // ── IBKR live-position reconcile ───────────────────────────────────────
 
     @Test
-    void reconcile_ibkrAlreadySameSide_skipsAsDuplicate_noBrokerCall() {
+    void reconcile_ibkrAlreadySameSide_skipsAsDuplicate_butCreatesTrackingRowForFutureClose() {
         // IBKR already long 2 MCL; WTX wants OPEN_LONG → SKIPPED_DUPLICATE (no stacking).
+        // But a tracking row MUST be created so a subsequent CLOSE_LONG can flatten the broker
+        // position via the normal handleClose path — otherwise the live position would be
+        // invisible to WTX and only exitable manually.
         IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
         when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(2)));
         WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
@@ -556,7 +559,61 @@ class WtxExecutionBridgeTest {
         assertNotNull(result.errorMessage());
         assertTrue(result.errorMessage().toLowerCase().contains("already long"));
         verify(ibkrOrderService, never()).submitEntryOrder(any());
-        assertTrue(repo.all().isEmpty(), "no row created when reconcile skips");
+
+        // Tracking row exists with the broker-side direction and IBKR qty.
+        assertEquals(1, repo.all().size(), "duplicate-skip must still create a tracking row");
+        TradeExecutionRecord tracked = repo.all().get(0);
+        assertEquals("wtx-track:MCL:10m", tracked.getExecutionKey());
+        assertEquals("LONG", tracked.getAction());
+        assertEquals(2, tracked.getQuantity());
+        assertEquals(ExecutionStatus.ACTIVE, tracked.getStatus(),
+                "tracked row must be ACTIVE so handleClose can locate it");
+    }
+
+    @Test
+    void reconcile_sameSideDuplicateOnTwoSignals_onlyCreatesOneTrackingRow() {
+        // Two duplicate OPEN_LONG signals while IBKR holds long → exactly one wtx-track: row.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+        // Different signalTs to bypass the executionKey de-dup at the top of handleEntry.
+        WtxSignal later = new WtxSignal("MCL", "10m", WtxSignalType.COMPRA, "LONG",
+                bd(1), bd(0), true, WtxAction.OPEN_LONG, WtxEnrichmentSnapshot.empty(),
+                Instant.parse("2026-05-13T15:00:00Z"), null, null);
+        bridgeWithReconcile.submit(later, state, bd(100));
+
+        assertEquals(1, repo.all().size(), "tracking row must be idempotent across duplicate signals");
+    }
+
+    @Test
+    void reconcile_sameSideTrackingRow_isReachableByLaterClose() {
+        // Round-trip: duplicate-skip creates the tracking row, then a CLOSE flattens it.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState openState = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), openState, bd(100));
+        assertEquals(1, repo.all().size());
+
+        // Now the strategy decides to close.
+        WtxStrategyState closeState = flatState().withAutoExecution(true);
+        WtxRoutingResult closeResult = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), closeState, bd(105));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, closeResult.outcome());
+        TradeExecutionRecord row = repo.all().get(0);
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, row.getStatus(),
+                "tracked row must transition to EXIT_SUBMITTED via the standard close path");
+        // The flatten order is a SELL of 2 contracts (the IBKR-tracked qty).
+        verify(ibkrOrderService).submitEntryOrder(argThat(r ->
+                "SHORT".equals(r.action()) && r.quantity() == 2));
     }
 
     @Test

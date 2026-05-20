@@ -108,8 +108,20 @@ public class WtxStrategyController {
         Object raw = body.get("qty");
         try {
             if (raw instanceof Number n) {
-                qty = n.intValue();
+                // Reject fractional numerics — Number.intValue() silently truncates 1.9 → 1,
+                // which would size a trade differently than the client asked for.
+                double d = n.doubleValue();
+                if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "'qty' must be a whole number, got: " + raw));
+                }
+                if (d > Integer.MAX_VALUE || d < Integer.MIN_VALUE) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "'qty' out of int range: " + raw));
+                }
+                qty = (int) d;
             } else if (raw instanceof String s) {
+                // parseInt already rejects "1.9" with NumberFormatException — caught below.
                 qty = Integer.parseInt(s.trim());
             } else {
                 return ResponseEntity.badRequest().body(Map.of("error", "'qty' must be an integer"));
