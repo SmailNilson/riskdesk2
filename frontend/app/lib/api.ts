@@ -1611,6 +1611,8 @@ export interface WtxStrategyStateView {
   swingBiasFilterEnabled: boolean;
   /** Last seen swing bias direction from the most recent signal's enrichment. Null during warm-up. */
   currentSwingBias: 'BULLISH' | 'BEARISH' | null;
+  /** User-configured contracts to submit on the next OPEN / REVERSE open leg for this panel. */
+  configuredOrderQty: number;
 }
 
 export type WtxRoutingOutcome =
@@ -1704,6 +1706,16 @@ export async function updateWtxSwingBiasFilter(instrument: string, timeframe: st
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxOrderQty(instrument: string, timeframe: string, qty: number): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/order-qty`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qty }),
   });
   if (!res.ok) return null;
   return res.json();

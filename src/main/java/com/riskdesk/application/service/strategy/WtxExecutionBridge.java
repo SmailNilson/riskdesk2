@@ -2,9 +2,12 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.application.service.IbkrMarginPreflightService;
 import com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
@@ -93,13 +96,32 @@ public class WtxExecutionBridge {
      * a pre-flight — same behavior as {@link WtxStrategyProperties.PreflightMode#OFF}.
      */
     private final IbkrMarginPreflightService marginPreflight;
+    /**
+     * Live IBKR portfolio reader. Nullable: when absent the bridge skips the reconcile
+     * step (legacy behaviour). When present, the bridge consults IBKR's <i>actual</i>
+     * position before opening — if IBKR already holds the opposite side, the WTX
+     * {@code OPEN_*} is upgraded in-place to {@code REVERSE_TO_*}; if IBKR already holds
+     * the same side, the order is suppressed as a duplicate. This stops the bridge from
+     * stacking a fresh contract on top of a position it lost track of after a restart or
+     * a manual broker-side trade.
+     */
+    private final IbkrPortfolioService ibkrPortfolioService;
 
-    /** Test-only legacy constructor — production code uses the 5-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production code uses the 6-arg variant via Spring autowiring. */
     public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null);
+    }
+
+    /** Test-only — preflight wired, IBKR reconcile disabled. */
+    public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
+                              TradeExecutionRepositoryPort executionRepository,
+                              IbkrProperties ibkrProperties,
+                              WtxStrategyProperties wtxProperties,
+                              IbkrMarginPreflightService marginPreflight) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null);
     }
 
     @Autowired
@@ -107,12 +129,14 @@ public class WtxExecutionBridge {
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
-                              IbkrMarginPreflightService marginPreflight) {
+                              IbkrMarginPreflightService marginPreflight,
+                              IbkrPortfolioService ibkrPortfolioService) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.wtxProperties = wtxProperties;
         this.marginPreflight = marginPreflight;
+        this.ibkrPortfolioService = ibkrPortfolioService;
     }
 
     public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state) {
@@ -194,16 +218,27 @@ public class WtxExecutionBridge {
                     state.instrument(), tf, positionQty);
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
         }
+
+        // IBKR truth reconcile — if the broker already holds a position in this instrument,
+        // the WTX-state view of the world may be stale (post-restart, manual broker trade,
+        // failed reconcile). Trust IBKR: a same-side existing position skips the duplicate;
+        // an opposite-side position upgrades the OPEN into a REVERSE so we never stack a fresh
+        // contract on top of an unknown one. Returns the (possibly rewritten) action.
+        BigDecimal liveIbkrPosition = readLiveIbkrPosition(instrument);
+        ReconcileOutcome reconcile = reconcileWithIbkr(action, liveIbkrPosition, state.instrument(), tf);
+        if (reconcile.skipResult() != null) {
+            return reconcile.skipResult();
+        }
+        action = reconcile.action();
+        isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
-        // Pre-flight margin check (slice 2): for a REVERSE we estimate the worst-case
-        // exposure as close-leg + open-leg = 2 × positionQty. This is conservative — IBKR
-        // typically nets out the close-leg margin once the fill arrives, but the broker may
-        // still reject the first leg if account funds are below the gross margin at submit
-        // time (the prod bug: Equity 9757 < InitMargin 11729 at 09:20Z).
+        // Pre-flight margin: for a REVERSE the close leg releases its margin as soon as IBKR
+        // fills it, so the net consumed margin for the position size is ~1× positionQty (the
+        // open leg of the reverse). The previous 2× estimate was double-counting and caused
+        // false "NO MARGIN" denials on accounts with just enough headroom for one position.
         if (marginPreflight != null) {
-            int preflightQty = isReverse ? 2 * positionQty : positionQty;
-            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, preflightQty, price);
+            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, positionQty, price);
             if (!decision.allowed()) {
                 log.warn("WTX [{} {}] routing denied by pre-flight — {}",
                         state.instrument(), tf, decision.denyReason());
@@ -218,6 +253,14 @@ public class WtxExecutionBridge {
         // — nothing is opened and the live position keeps its active row for the next bar.
         if (isReverse) {
             Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), tf);
+            // Reconcile fallback: WTX has no open row but IBKR does. Synthesize a phantom row
+            // so submitCloseLeg can flatten the broker-side position without us needing its
+            // original entry price.
+            if (prior.isEmpty() && liveIbkrPosition != null && liveIbkrPosition.signum() != 0
+                    && ibkrPositionOpposes(action, liveIbkrPosition)) {
+                int qty = Math.max(1, liveIbkrPosition.abs().intValue());
+                prior = Optional.of(synthesizeReconcileRow(state, tf, qty, liveIbkrPosition, price));
+            }
             if (prior.isPresent() && prior.get().getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
                 TradeExecutionRecord priorRow = prior.get();
                 int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
@@ -544,6 +587,150 @@ public class WtxExecutionBridge {
     }
 
     /**
+     * Reads IBKR's live net position for {@code instrument}. Sums signed positions across
+     * every contract description that matches the instrument's symbol — necessary because
+     * IBKR returns positions keyed by conid (front/back month each get their own row when a
+     * rollover overlaps). Returns {@code null} when the portfolio service is not wired or
+     * the snapshot is unavailable; treat null as "unknown, fall back to legacy behaviour".
+     */
+    private BigDecimal readLiveIbkrPosition(Instrument instrument) {
+        if (ibkrPortfolioService == null) return null;
+        IbkrPortfolioSnapshot snapshot;
+        try {
+            snapshot = ibkrPortfolioService.getPortfolio(null);
+        } catch (RuntimeException e) {
+            log.debug("WTX reconcile: portfolio snapshot unavailable for {} — {}", instrument, e.getMessage());
+            return null;
+        }
+        if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
+            return null;
+        }
+        String symbol = ibkrSymbol(instrument);
+        BigDecimal total = BigDecimal.ZERO;
+        for (IbkrPositionView pos : snapshot.positions()) {
+            if (pos == null || pos.position() == null) continue;
+            if (matchesSymbol(pos.contractDesc(), symbol)) {
+                total = total.add(pos.position());
+            }
+        }
+        return total;
+    }
+
+    /** IBKR ticker for an Instrument enum value. Differs from {@link Enum#name()} for E6 (IBKR symbol "6E"). */
+    private static String ibkrSymbol(Instrument instrument) {
+        return switch (instrument) {
+            case E6 -> "6E";
+            default -> instrument.name();
+        };
+    }
+
+    /**
+     * Matches an IBKR {@code contractDesc} against an instrument symbol. {@code contractDesc}
+     * is the localSymbol the gateway emits (e.g. "MNQH6", "6EM6", "MGC JUN26") — testing
+     * for a leading-symbol prefix is the cheapest reliable match across native + client
+     * portal gateways.
+     */
+    private static boolean matchesSymbol(String contractDesc, String symbol) {
+        if (contractDesc == null || symbol == null) return false;
+        String upper = contractDesc.toUpperCase().trim();
+        return upper.startsWith(symbol);
+    }
+
+    private static boolean ibkrPositionOpposes(WtxAction action, BigDecimal livePos) {
+        if (livePos == null) return false;
+        boolean longAction = action == WtxAction.OPEN_LONG || action == WtxAction.REVERSE_TO_LONG;
+        boolean shortAction = action == WtxAction.OPEN_SHORT || action == WtxAction.REVERSE_TO_SHORT;
+        if (longAction) return livePos.signum() < 0;
+        if (shortAction) return livePos.signum() > 0;
+        return false;
+    }
+
+    /**
+     * Resolves a WTX {@code OPEN_*} / {@code REVERSE_*} action against the live IBKR
+     * position. Three outcomes:
+     * <ul>
+     *   <li>IBKR holds the same side already → return a {@code SKIPPED_DUPLICATE} result;
+     *       the bridge stops without touching either store.</li>
+     *   <li>IBKR holds the opposite side and the WTX action is {@code OPEN_*} → upgrade to
+     *       the matching {@code REVERSE_*} so the bridge flattens IBKR before opening fresh.
+     *       A WTX action of {@code REVERSE_*} stays as-is.</li>
+     *   <li>IBKR flat OR snapshot unavailable → return the original action unchanged.</li>
+     * </ul>
+     */
+    private ReconcileOutcome reconcileWithIbkr(WtxAction action, BigDecimal livePos,
+                                               String instrument, String timeframe) {
+        if (livePos == null || livePos.signum() == 0) {
+            return ReconcileOutcome.passthrough(action);
+        }
+        boolean longAction = action == WtxAction.OPEN_LONG || action == WtxAction.REVERSE_TO_LONG;
+        boolean shortAction = action == WtxAction.OPEN_SHORT || action == WtxAction.REVERSE_TO_SHORT;
+        boolean ibkrLong = livePos.signum() > 0;
+        boolean ibkrShort = livePos.signum() < 0;
+
+        if (longAction && ibkrLong) {
+            String msg = "IBKR already long " + livePos.abs() + " — no order submitted";
+            log.warn("WTX [{} {}] reconcile: {} (action was {})", instrument, timeframe, msg, action);
+            return ReconcileOutcome.skip(WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE, msg));
+        }
+        if (shortAction && ibkrShort) {
+            String msg = "IBKR already short " + livePos.abs() + " — no order submitted";
+            log.warn("WTX [{} {}] reconcile: {} (action was {})", instrument, timeframe, msg, action);
+            return ReconcileOutcome.skip(WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE, msg));
+        }
+        if (action == WtxAction.OPEN_LONG && ibkrShort) {
+            log.warn("WTX [{} {}] reconcile: IBKR holds short {} — upgrading OPEN_LONG to REVERSE_TO_LONG",
+                    instrument, timeframe, livePos.abs());
+            return ReconcileOutcome.passthrough(WtxAction.REVERSE_TO_LONG);
+        }
+        if (action == WtxAction.OPEN_SHORT && ibkrLong) {
+            log.warn("WTX [{} {}] reconcile: IBKR holds long {} — upgrading OPEN_SHORT to REVERSE_TO_SHORT",
+                    instrument, timeframe, livePos.abs());
+            return ReconcileOutcome.passthrough(WtxAction.REVERSE_TO_SHORT);
+        }
+        return ReconcileOutcome.passthrough(action);
+    }
+
+    /**
+     * Phantom prior-row used for the close leg of a reconcile-driven REVERSE when WTX has no
+     * tracked execution for the IBKR-side position. Persisted with {@code WTX_AUTO} trigger
+     * source and a {@code wtx-reconcile:} executionKey so the standard fill tracker reconciles
+     * the close fill. {@code normalizedEntryPrice} uses the signal reference price — we don't
+     * have the IBKR entry price here, and {@code submitCloseLeg} only uses it for the order
+     * price (which IBKR ignores for a flatten beyond tick-snap), not for P&L.
+     */
+    private TradeExecutionRecord synthesizeReconcileRow(WtxStrategyState state, String timeframe, int qty,
+                                                        BigDecimal livePos, BigDecimal price) {
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setExecutionKey("wtx-reconcile:" + state.instrument() + ":" + timeframe + ":"
+                + Instant.now().getEpochSecond());
+        row.setBrokerAccountId(firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default"));
+        row.setInstrument(state.instrument());
+        row.setTimeframe(timeframe);
+        row.setAction(livePos.signum() > 0 ? "LONG" : "SHORT");
+        row.setQuantity(qty);
+        row.setTriggerSource(ExecutionTriggerSource.WTX_AUTO);
+        row.setRequestedBy("wtx-reconcile");
+        row.setStatus(ExecutionStatus.ACTIVE);
+        row.setStatusReason("WTX reconcile: synthesized prior row from IBKR live position " + livePos);
+        row.setNormalizedEntryPrice(price);
+        row.setCreatedAt(Instant.now());
+        row.setUpdatedAt(Instant.now());
+        log.warn("WTX [{} {}] reconcile: synthesizing prior row for IBKR position {} (qty={}) — close leg will flatten it",
+                state.instrument(), timeframe, livePos, qty);
+        return executionRepository.createIfAbsent(row);
+    }
+
+    /** Carrier for {@link #reconcileWithIbkr}. Exactly one of the fields is non-null. */
+    private record ReconcileOutcome(WtxAction action, WtxRoutingResult skipResult) {
+        static ReconcileOutcome passthrough(WtxAction action) {
+            return new ReconcileOutcome(action, null);
+        }
+        static ReconcileOutcome skip(WtxRoutingResult result) {
+            return new ReconcileOutcome(null, result);
+        }
+    }
+
+    /**
      * The bridge's own (WTX_AUTO) most-recent non-terminal execution for an
      * (instrument, timeframe). Scoped to the timeframe because WTX state is
      * per-timeframe — a 10m close/reverse must never target a 5m row.
@@ -570,8 +757,16 @@ public class WtxExecutionBridge {
         };
     }
 
-    /** Resulting WTX position size (contracts). Never the doubled REVERSE order quantity. */
+    /**
+     * Resulting WTX position size (contracts). Prefers the user-configured panel quantity
+     * (the value backing the qty input on the WTX panel); falls back to {@code state.entryQty}
+     * for legacy paths where the state hasn't yet been updated by {@code applyAction}. Never
+     * the doubled REVERSE order quantity — close and open legs are sized independently.
+     */
     private int positionQuantity(WtxStrategyState state) {
+        if (state.configuredOrderQty() > 0) {
+            return state.configuredOrderQty();
+        }
         BigDecimal baseQty = state.entryQty();
         if (baseQty == null || baseQty.signum() <= 0) {
             baseQty = BigDecimal.ONE;

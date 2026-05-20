@@ -41,8 +41,19 @@ public record WtxStrategyState(
          * are downgraded to a CLOSE (if open) or NONE (if flat). Null bias is a passthrough.
          * Defaults to false to preserve legacy behaviour on existing rows.
          */
-        boolean swingBiasFilterEnabled
+        boolean swingBiasFilterEnabled,
+        /**
+         * User-configured number of contracts to submit for the next OPEN / REVERSE open
+         * leg of this (instrument, timeframe) panel. Distinct from {@link #entryQty}, which
+         * tracks the currently open position size. CLOSE / REVERSE close legs always use the
+         * existing row's quantity, not this value, so changing the panel size never causes
+         * a partial flatten of an open position.
+         */
+        int configuredOrderQty
 ) {
+    /** Panel default — matches what the user sees on first load. */
+    public static final int DEFAULT_ORDER_QTY = 2;
+
     public static WtxStrategyState initial(String instrument, String timeframe, BigDecimal startEquity) {
         return new WtxStrategyState(
                 instrument,
@@ -57,7 +68,8 @@ public record WtxStrategyState(
                 WtxProfile.BASELINE,
                 false,
                 null, null, null,
-                false
+                false,
+                DEFAULT_ORDER_QTY
         );
     }
 
@@ -66,7 +78,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withPosition(WtxPosition pos, BigDecimal entryPrice, BigDecimal qty, BigDecimal entryAtr) {
@@ -74,7 +86,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withFlat(BigDecimal realizedPnlAdd) {
@@ -84,7 +96,7 @@ public record WtxStrategyState(
                 dayStartEquity, newEquity, newRealized, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withDayReset(BigDecimal newStartEquity) {
@@ -92,7 +104,7 @@ public record WtxStrategyState(
                 newStartEquity, newStartEquity, BigDecimal.ZERO, false, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withMaxLossHit() {
@@ -100,7 +112,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, true, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withLastCandleTs(Instant ts) {
@@ -108,7 +120,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, ts, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withProfile(WtxProfile profile) {
@@ -116,7 +128,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 profile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withAutoExecution(boolean enabled) {
@@ -124,7 +136,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, enabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
     }
 
     public WtxStrategyState withSwingBiasFilter(boolean enabled) {
@@ -132,7 +144,7 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                enabled);
+                enabled, configuredOrderQty);
     }
 
     public WtxStrategyState withTrailing(BigDecimal bestFavorablePrice, BigDecimal trailingStopPrice) {
@@ -140,7 +152,16 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled);
+                swingBiasFilterEnabled, configuredOrderQty);
+    }
+
+    public WtxStrategyState withConfiguredOrderQty(int qty) {
+        int sanitized = qty <= 0 ? DEFAULT_ORDER_QTY : qty;
+        return new WtxStrategyState(instrument, timeframe, currentPosition, entryPrice, entryQty,
+                dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, sanitized);
     }
 
     /** Daily P&L = current equity - day start equity */

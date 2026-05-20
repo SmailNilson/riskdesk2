@@ -1,7 +1,10 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
 import com.riskdesk.domain.engine.strategy.wtx.WtxEnrichmentSnapshot;
 import com.riskdesk.domain.engine.strategy.wtx.WtxPosition;
@@ -512,6 +515,129 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void preflightForReverse_usesPositionQtyNotDoubled() {
+        // Regression: previously the bridge sent 2× positionQty to the preflight estimator for a
+        // REVERSE. That double-counted the close-leg margin (which IBKR releases on the fill) and
+        // caused false NO MARGIN denials on accounts with just enough headroom for one position.
+        com.riskdesk.application.service.IbkrMarginPreflightService spy =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision.allow());
+        WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, spy);
+
+        // Seed a prior LONG so REVERSE_TO_SHORT actually exercises the close leg.
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        bridgeWithPreflight.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // Preflight must see qty=2, not qty=4. Single call (we never recurse).
+        verify(spy, times(1)).canAffordOrder(any(), any(),
+                org.mockito.ArgumentMatchers.eq(2), any());
+    }
+
+    // ── IBKR live-position reconcile ───────────────────────────────────────
+
+    @Test
+    void reconcile_ibkrAlreadySameSide_skipsAsDuplicate_noBrokerCall() {
+        // IBKR already long 2 MCL; WTX wants OPEN_LONG → SKIPPED_DUPLICATE (no stacking).
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        assertNotNull(result.errorMessage());
+        assertTrue(result.errorMessage().toLowerCase().contains("already long"));
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertTrue(repo.all().isEmpty(), "no row created when reconcile skips");
+    }
+
+    @Test
+    void reconcile_ibkrHoldsOppositeSide_upgradesOpenToReverse_synthesizesPriorRow() {
+        // IBKR holds short 2 MCL but WTX has no local row; WTX wants OPEN_LONG → bridge must
+        // upgrade to REVERSE_TO_LONG and synthesize a phantom prior row so the close leg flattens
+        // the broker side before opening the new long.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(-2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // Two orders: one to flatten the IBKR short (BUY = "LONG"), one to open the new long.
+        verify(ibkrOrderService, times(2)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 2));
+        // Two rows now: the synthesized reconcile prior row + the new open row.
+        assertEquals(2, repo.all().size());
+        TradeExecutionRecord synthesized = repo.all().stream()
+                .filter(r -> r.getExecutionKey() != null && r.getExecutionKey().startsWith("wtx-reconcile:"))
+                .findFirst().orElseThrow(() -> new AssertionError("synthesized prior row missing"));
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, synthesized.getStatus());
+        assertEquals("SHORT", synthesized.getAction(),
+                "synthesized row carries the IBKR-side direction (the side being flattened)");
+    }
+
+    @Test
+    void reconcile_ibkrFlat_unchangedBehaviour_normalOpen() {
+        // IBKR returns a snapshot with no matching positions; bridge behaves exactly as it would
+        // without reconcile (single open-leg order, one row).
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MNQM6", bd(0))); // wrong symbol
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+        assertEquals(1, repo.all().size());
+    }
+
+    @Test
+    void reconcile_portfolioUnavailable_failsOpen_behavesLikeLegacy() {
+        // Portfolio query throws — bridge must log + fall back to legacy behaviour, NOT block the order.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenThrow(new RuntimeException("ibkr disconnected"));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    // ── configurable order qty ─────────────────────────────────────────────
+
+    @Test
+    void configuredOrderQty_drivesBrokerSubmissionQuantity() {
+        // The panel qty input — when set to 5 — must drive both the execution row size and the
+        // IBKR order submission size.
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(5), bd(1))
+                .withConfiguredOrderQty(5);
+        bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        verify(ibkrOrderService).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 5));
+        assertEquals(5, repo.all().get(0).getQuantity());
+    }
+
+    @Test
     void preflightAllows_routesNormally_brokerCallOccurs() {
         com.riskdesk.application.service.IbkrMarginPreflightService stub =
                 org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
@@ -566,6 +692,17 @@ class WtxExecutionBridgeTest {
 
     private static BigDecimal bd(double v) {
         return BigDecimal.valueOf(v);
+    }
+
+    /** Single-position IBKR portfolio snapshot — sized for the reconcile tests. */
+    private static IbkrPortfolioSnapshot snapshotWith(String contractDesc, BigDecimal position) {
+        IbkrPositionView pos = new IbkrPositionView(
+                "DU123", 12345L, contractDesc, "FUT",
+                position, BigDecimal.ZERO, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "USD");
+        return new IbkrPortfolioSnapshot(
+                true, "DU123", List.of(), bd(10000), bd(2000), bd(8000),
+                bd(8000), bd(0), bd(0), bd(0), "USD", List.of(pos), null);
     }
 
     /** Minimal in-memory TradeExecutionRepositoryPort for bridge unit tests. */

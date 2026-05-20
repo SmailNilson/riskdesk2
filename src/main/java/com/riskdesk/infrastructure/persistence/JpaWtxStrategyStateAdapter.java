@@ -58,7 +58,10 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 e.getEntryAtr(),
                 e.getBestFavorablePrice(),
                 e.getTrailingStopPrice(),
-                Boolean.TRUE.equals(e.getSwingBiasFilterEnabled())
+                Boolean.TRUE.equals(e.getSwingBiasFilterEnabled()),
+                e.getConfiguredOrderQty() != null && e.getConfiguredOrderQty() > 0
+                        ? e.getConfiguredOrderQty()
+                        : WtxStrategyState.DEFAULT_ORDER_QTY
         );
     }
 
@@ -80,5 +83,6 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         e.setBestFavorablePrice(s.bestFavorablePrice());
         e.setTrailingStopPrice(s.trailingStopPrice());
         e.setSwingBiasFilterEnabled(s.swingBiasFilterEnabled());
+        e.setConfiguredOrderQty(s.configuredOrderQty());
     }
 }

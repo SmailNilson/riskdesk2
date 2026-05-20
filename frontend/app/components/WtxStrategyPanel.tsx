@@ -7,6 +7,7 @@ import {
   updateWtxProfile,
   updateWtxAutoExecution,
   updateWtxSwingBiasFilter,
+  updateWtxOrderQty,
 } from '@/app/lib/api';
 import type {
   WtxStrategyStateView,
@@ -242,6 +243,8 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [profileBusy, setProfileBusy] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
   const [swingBiasBusy, setSwingBiasBusy] = useState(false);
+  const [qtyBusy, setQtyBusy] = useState(false);
+  const [qtyDraft, setQtyDraft] = useState<string>('');
 
   const loadState = useCallback(async () => {
     const s = await getWtxState(instrument, timeframe);
@@ -282,6 +285,42 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
       setSwingBiasBusy(false);
     }
   }, [instrument, timeframe, state]);
+
+  const commitQty = useCallback(async () => {
+    if (!state || qtyBusy) return;
+    const trimmed = qtyDraft.trim();
+    if (trimmed === '') {
+      setQtyDraft(String(state.configuredOrderQty));
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 100) {
+      setQtyDraft(String(state.configuredOrderQty));
+      return;
+    }
+    if (parsed === state.configuredOrderQty) {
+      setQtyDraft(String(state.configuredOrderQty));
+      return;
+    }
+    setQtyBusy(true);
+    try {
+      const updated = await updateWtxOrderQty(instrument, timeframe, parsed);
+      if (updated) {
+        setState(updated);
+        setQtyDraft(String(updated.configuredOrderQty));
+      } else {
+        setQtyDraft(String(state.configuredOrderQty));
+      }
+    } finally {
+      setQtyBusy(false);
+    }
+  }, [instrument, timeframe, qtyBusy, qtyDraft, state]);
+
+  useEffect(() => {
+    if (state && qtyDraft === '') {
+      setQtyDraft(String(state.configuredOrderQty));
+    }
+  }, [state, qtyDraft]);
 
   const onToggleAutoExec = useCallback(async () => {
     if (!state) return;
@@ -359,6 +398,30 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
                     <option key={p} value={p}>{p.replace('_', ' ')}</option>
                   ))}
                 </select>
+              </label>
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="Nombre de contrats envoyés à IBKR sur chaque OPEN / REVERSE (panneau spécifique)">
+                <span className="text-zinc-500">Qty</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={qtyDraft}
+                  onChange={e => setQtyDraft(e.target.value)}
+                  onBlur={commitQty}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      (e.target as HTMLInputElement).blur();
+                    }
+                    if (e.key === 'Escape') {
+                      setQtyDraft(String(state.configuredOrderQty));
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  disabled={qtyBusy}
+                  className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                />
               </label>
               <button
                 type="button"
