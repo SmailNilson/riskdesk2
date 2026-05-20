@@ -605,7 +605,13 @@ public class IbGatewayNativeClient {
             }
             // accountId changed (rare: master/sub account switch) — drop the stale subscription
             // before opening the new one to avoid running two concurrent persistent subs.
+            // Clear `persistentAccountCache` here, NOT after the new subscribe succeeds: if the
+            // new subscribe throws we've already unsubscribed the previous cache broker-side, so
+            // leaving the field pointing at the now-defunct cache would let the fast-path on the
+            // next call hand back stale snapshots indefinitely. Clearing forces the next caller
+            // to retry the bootstrap cleanly.
             if (existing != null) {
+                persistentAccountCache = null;
                 try {
                     localController.reqAccountUpdates(false, existing.accountId(), existing);
                 } catch (Exception e) {
@@ -622,6 +628,8 @@ public class IbGatewayNativeClient {
             } catch (Exception e) {
                 log.warn("Failed to start persistent account subscription for {}: {}",
                     accountId, e.getMessage());
+                // persistentAccountCache is already null (or was never set on first bootstrap).
+                // Next call will retry from scratch — no stale cache to read from.
                 return null;
             }
         }
