@@ -19,6 +19,7 @@ import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
 import { LiveAnalysisPanel } from './LiveAnalysisPanel';
+import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import TrailingStopStatsPanel from './TrailingStopStatsPanel';
@@ -256,6 +257,9 @@ export default function Dashboard() {
             snapshot={snapshot}
             livePrice={prices[instrument]}
           />
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
+          </div>
           <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />

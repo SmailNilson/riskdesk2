@@ -8,12 +8,11 @@ import { isSignalReview, isBehaviourReview, BEHAVIOUR_CATEGORIES } from '@/app/l
 import type { Instrument, Timeframe } from '@/app/lib/mentor';
 import MentorSignalPanel from './MentorSignalPanel';
 import MentorPanel from './MentorPanel';
-import PlaybookPanel from './PlaybookPanel';
 import StrategyPanel from './StrategyPanel';
 import TradeDecisionPanel from './TradeDecisionPanel';
 import SimulationDashboard from './SimulationDashboard';
 
-type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'PLAYBOOK' | 'STRATEGY' | 'DECISIONS' | 'SIMULATIONS';
+type TabKey = 'ALL' | 'SIGNALS' | 'BEHAVIOUR' | 'MANUAL' | 'STRATEGY' | 'DECISIONS' | 'SIMULATIONS';
 
 interface TabDef {
   key: TabKey;
@@ -26,7 +25,6 @@ const TABS: TabDef[] = [
   { key: 'SIGNALS', label: 'SIGNAUX', icon: '\uD83E\uDD16' },
   { key: 'BEHAVIOUR', label: 'BEHAVIOUR', icon: '\uD83D\uDCD0' },
   { key: 'MANUAL', label: 'MANUEL', icon: '\uD83D\uDC64' },
-  { key: 'PLAYBOOK', label: 'PLAYBOOK', icon: '\uD83D\uDCCB' },
   { key: 'STRATEGY', label: 'STRATEGY', icon: '\uD83C\uDFAF' },
   { key: 'DECISIONS', label: 'DECISIONS', icon: '\uD83D\uDCCA' },
   { key: 'SIMULATIONS', label: 'SIMULATIONS', icon: '\uD83E\uDDEA' },
@@ -87,7 +85,6 @@ export default function AiMentorDesk({
     SIGNALS: signalReviews.length,
     BEHAVIOUR: behaviourReviews.length,
     MANUAL: 0,
-    PLAYBOOK: 0,
     STRATEGY: 0,
     DECISIONS: 0,
     SIMULATIONS: 0,
@@ -194,12 +191,6 @@ export default function AiMentorDesk({
             prices={prices}
             alerts={alerts}
           />
-        )}
-
-        {activeTab === 'PLAYBOOK' && (
-          <div className="p-4">
-            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
-          </div>
         )}
 
         {activeTab === 'STRATEGY' && (
