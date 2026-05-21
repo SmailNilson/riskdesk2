@@ -242,11 +242,15 @@ public class WtxExecutionBridge {
         isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
-        // Pre-flight margin: for a REVERSE the close leg releases its margin as soon as IBKR
-        // fills it, so the net consumed margin for the position size is ~1× positionQty (the
-        // open leg of the reverse). The previous 2× estimate was double-counting and caused
-        // false "NO MARGIN" denials on accounts with just enough headroom for one position.
-        if (marginPreflight != null) {
+        // Pre-flight margin — only for true OPEN actions. A REVERSE flips an existing same-size
+        // position long↔short on the same instrument: the close leg releases exactly the margin
+        // the open leg needs, so the NET margin delta at IBKR is ≈ 0. Running our gross-estimate
+        // preflight on a REVERSE (with the 15 % buffer) trips on any account already holding the
+        // position it's trying to flip — exactly the false-denial pattern visible in the panel
+        // (NO MARGIN on a REVERSE after a prior OPEN_SHORT filled at IBKR). If IBKR genuinely
+        // rejects the open leg with code 201 the existing typed exception handling kicks in and
+        // surfaces SKIPPED_INSUFFICIENT_MARGIN with the broker's own message.
+        if (marginPreflight != null && !isReverse) {
             PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, positionQty, price);
             if (!decision.allowed()) {
                 log.warn("WTX [{} {}] routing denied by pre-flight — {}",
