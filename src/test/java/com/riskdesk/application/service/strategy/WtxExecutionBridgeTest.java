@@ -515,14 +515,18 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void preflightForReverse_usesPositionQtyNotDoubled() {
-        // Regression: previously the bridge sent 2× positionQty to the preflight estimator for a
-        // REVERSE. That double-counted the close-leg margin (which IBKR releases on the fill) and
-        // caused false NO MARGIN denials on accounts with just enough headroom for one position.
+    void preflightSkippedForReverse_evenWhenDeniedItRoutesThrough() {
+        // Regression — the preflight gross-margin estimate (15 % buffer × full position size) used
+        // to gate REVERSE orders, but a REVERSE flips an existing same-size position long↔short
+        // on the same instrument so the NET margin delta at IBKR is ≈ 0. Running preflight on a
+        // REVERSE produced false NO MARGIN denials whenever the account was already holding the
+        // position it was about to flip. A REVERSE must skip preflight and trust IBKR's own check
+        // (with our typed code-201 exception handling as the safety net).
         com.riskdesk.application.service.IbkrMarginPreflightService spy =
                 org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
         when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
-                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision.allow());
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision
+                        .deny("Equity 5000 < est. InitMargin 6600"));
         WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
                 ibkrOrderService, repo, ibkrProperties, wtxProperties, spy);
 
@@ -531,11 +535,35 @@ class WtxExecutionBridgeTest {
 
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
-        bridgeWithPreflight.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+        WtxRoutingResult result = bridgeWithPreflight.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
 
-        // Preflight must see qty=2, not qty=4. Single call (we never recurse).
-        verify(spy, times(1)).canAffordOrder(any(), any(),
-                org.mockito.ArgumentMatchers.eq(2), any());
+        // Preflight must NOT have been consulted for the REVERSE — neither leg gets the gate.
+        verify(spy, never()).canAffordOrder(any(), any(),
+                org.mockito.ArgumentMatchers.anyInt(), any());
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome(),
+                "REVERSE must route through even when preflight would have denied an OPEN of the same size");
+        // Both legs of the reverse were submitted.
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+    }
+
+    @Test
+    void preflightStillGatesPureOpen_denialBlocksOrder() {
+        // Counterpart: a plain OPEN must still respect the preflight. Without this guard the
+        // production bug at 09:20Z (Equity < InitMargin on a true OPEN) would resurface.
+        com.riskdesk.application.service.IbkrMarginPreflightService spy =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision
+                        .deny("Equity 5000 < est. InitMargin 6600"));
+        WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, spy);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = bridgeWithPreflight.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     // ── IBKR live-position reconcile ───────────────────────────────────────
