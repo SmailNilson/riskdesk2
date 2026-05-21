@@ -814,16 +814,36 @@ public class WtxExecutionBridge {
     }
 
     /**
-     * Quantity of the position that a REVERSE close-leg will flatten. Used by the preflight to
-     * size the margin check on the NET delta of the reverse (open-leg qty minus close-leg qty).
-     * Prefers the bridge's own open WTX row; falls back to {@code |liveIbkrPos|} when reconcile
-     * is about to synthesize the close leg from an IBKR-tracked-only position. Returns 0 when
-     * no prior position is identifiable — the preflight then treats the order as a pure OPEN.
+     * Quantity of the position the REVERSE close-leg will actually flatten <em>in this same
+     * routing call</em>. Used by the preflight to size the margin check on the NET delta of
+     * the reverse (open-leg qty minus close-leg qty).
+     *
+     * <p>Mirrors the exact condition under which {@link #handleEntry}'s REVERSE branch fires a
+     * close-leg order:</p>
+     * <ul>
+     *   <li>If an open WTX row exists and is <b>not</b> already {@code EXIT_SUBMITTED}, the
+     *       close leg will fire — return that row's quantity.</li>
+     *   <li>If the open WTX row is in {@code EXIT_SUBMITTED} (a flatten is already in flight from
+     *       a previous bar), {@link #handleEntry} skips the close-leg submission and the prior
+     *       position's margin won't be released in time for the new open. Return 0 so the
+     *       preflight gates on the full positionQty — exactly as for a pure OPEN.</li>
+     *   <li>If there is no WTX row but IBKR holds an opposite live position, reconcile will
+     *       synthesize a close leg for that position — return {@code |liveIbkrPos|}.</li>
+     *   <li>Otherwise return 0.</li>
+     * </ul>
      */
     private int priorReverseQty(WtxStrategyState state, String timeframe, BigDecimal liveIbkrPosition) {
         Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), timeframe);
-        if (prior.isPresent() && prior.get().getQuantity() != null && prior.get().getQuantity() > 0) {
-            return prior.get().getQuantity();
+        if (prior.isPresent()) {
+            TradeExecutionRecord row = prior.get();
+            // EXIT_SUBMITTED → no fresh close leg this call → no margin released → can't subtract.
+            if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                return 0;
+            }
+            if (row.getQuantity() != null && row.getQuantity() > 0) {
+                return row.getQuantity();
+            }
+            return 0;
         }
         if (liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
             return Math.max(0, liveIbkrPosition.abs().intValue());

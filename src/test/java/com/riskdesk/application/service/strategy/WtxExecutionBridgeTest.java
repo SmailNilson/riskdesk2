@@ -573,6 +573,35 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void preflightGatesFullQty_whenPriorRowIsAlreadyExitSubmitted() {
+        // Codex regression — handleEntry's REVERSE branch only fires a close leg when the prior
+        // row is not already EXIT_SUBMITTED. When a flatten is in flight from a previous bar, no
+        // margin will be released in time for the new open leg, so the delta subtraction would
+        // underestimate the real margin draw. The preflight must gate on the FULL positionQty
+        // in that state, not the delta.
+        com.riskdesk.application.service.IbkrMarginPreflightService spy =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision.allow());
+        WtxExecutionBridge bridgeWithPreflight = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, spy);
+
+        // Prior LONG of 2 is already EXIT_SUBMITTED (close leg in flight from a previous bar).
+        TradeExecutionRecord priorExiting = wtxRow("LONG", 2, ExecutionStatus.EXIT_SUBMITTED);
+        repo.createIfAbsent(priorExiting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(5), bd(1))
+                .withConfiguredOrderQty(5);
+        bridgeWithPreflight.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // Preflight must see the FULL open qty (5), not the delta (3) — the EXIT_SUBMITTED prior
+        // releases no margin in this call.
+        verify(spy, times(1)).canAffordOrder(any(), any(),
+                org.mockito.ArgumentMatchers.eq(5), any());
+    }
+
+    @Test
     void preflightSkippedForSizeDecreasingReverse() {
         // Symmetric case: REVERSE that shrinks the position releases margin. Delta ≤ 0 → no
         // preflight consultation, order goes through.
