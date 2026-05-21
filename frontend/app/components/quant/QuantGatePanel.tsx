@@ -171,7 +171,7 @@ function renderConfidencePill(confidence: 'LOW' | 'MEDIUM' | 'HIGH'): JSX.Elemen
 
 // ── Microstructure live telemetry parser helpers ──────────────────────────
 
-function parseDeltaAndTrend(gates: QuantGateView[]): { delta: number | null; trend: number[] } {
+export function parseDeltaAndTrend(gates: QuantGateView[]): { delta: number | null; trend: number[] } {
   const g3 = gates?.find((g) => g.gate === 'G3_DELTA_NEG');
   const l3 = gates?.find((g) => g.gate === 'L3_DELTA_POS');
   const gate = g3 || l3;
@@ -191,7 +191,7 @@ function parseDeltaAndTrend(gates: QuantGateView[]): { delta: number | null; tre
   return { delta, trend };
 }
 
-function parseBuyPct(gates: QuantGateView[]): number | null {
+export function parseBuyPct(gates: QuantGateView[]): number | null {
   const g4 = gates?.find((g) => g.gate === 'G4_BUY_PCT_LOW');
   const l4 = gates?.find((g) => g.gate === 'L4_BUY_PCT_HIGH');
   const gate = g4 || l4;
@@ -201,13 +201,13 @@ function parseBuyPct(gates: QuantGateView[]): number | null {
   return match ? parseFloat(match[1]) : null;
 }
 
-interface AbsorptionData {
+export interface AbsorptionData {
   n8: number | null;
   dominantSide: 'BULL' | 'BEAR' | null;
   maxScore: number | null;
 }
 
-function parseAbsorption(gates: QuantGateView[]): AbsorptionData {
+export function parseAbsorption(gates: QuantGateView[]): AbsorptionData {
   const g1 = gates?.find((g) => g.gate === 'G1_ABS_BEAR');
   const l1 = gates?.find((g) => g.gate === 'L1_ABS_BULL');
   const gate = g1 || l1;
@@ -231,14 +231,14 @@ function parseAbsorption(gates: QuantGateView[]): AbsorptionData {
   };
 }
 
-interface DistAccuData {
+export interface DistAccuData {
   type: 'ACCUMULATION' | 'DISTRIBUTION' | null;
   conf: number | null;
   threshold: number | null;
   status: 'BLOQUE' | 'PASS' | 'INACTIVE';
 }
 
-function parseDistAccu(gates: QuantGateView[]): DistAccuData {
+export function parseDistAccu(gates: QuantGateView[]): DistAccuData {
   const g5 = gates?.find((g) => g.gate === 'G5_ACCU_THRESHOLD');
   const l5 = gates?.find((g) => g.gate === 'L5_DIST_THRESHOLD');
 
