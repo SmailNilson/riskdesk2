@@ -242,24 +242,28 @@ function parseDistAccu(gates: QuantGateView[]): DistAccuData {
   const g5 = gates?.find((g) => g.gate === 'G5_ACCU_THRESHOLD');
   const l5 = gates?.find((g) => g.gate === 'L5_DIST_THRESHOLD');
 
-  if (g5 && g5.reason && g5.reason.includes('ACCU')) {
+  if (g5 && g5.reason) {
     const match = g5.reason.match(/ACCU\s+(\d+)%\s+vs\s+seuil=(\d+)%/);
-    return {
-      type: 'ACCUMULATION',
-      conf: match ? parseInt(match[1], 10) : null,
-      threshold: match ? parseInt(match[2], 10) : null,
-      status: g5.reason.includes('BLOQUE') ? 'BLOQUE' : 'PASS',
-    };
+    if (match) {
+      return {
+        type: 'ACCUMULATION',
+        conf: parseInt(match[1], 10),
+        threshold: parseInt(match[2], 10),
+        status: g5.reason.includes('BLOQUE') ? 'BLOQUE' : 'PASS',
+      };
+    }
   }
 
-  if (l5 && l5.reason && l5.reason.includes('DIST')) {
+  if (l5 && l5.reason) {
     const match = l5.reason.match(/DIST\s+(\d+)%\s+vs\s+seuil=(\d+)%/);
-    return {
-      type: 'DISTRIBUTION',
-      conf: match ? parseInt(match[1], 10) : null,
-      threshold: match ? parseInt(match[2], 10) : null,
-      status: l5.reason.includes('BLOQUE') ? 'BLOQUE' : 'PASS',
-    };
+    if (match) {
+      return {
+        type: 'DISTRIBUTION',
+        conf: parseInt(match[1], 10),
+        threshold: parseInt(match[2], 10),
+        status: l5.reason.includes('BLOQUE') ? 'BLOQUE' : 'PASS',
+      };
+    }
   }
 
   return { type: null, conf: null, threshold: null, status: 'INACTIVE' };
