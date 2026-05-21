@@ -26,6 +26,7 @@ interface QuantManualTradeModalProps {
 export default function QuantManualTradeModal(props: QuantManualTradeModalProps) {
   const { open, instrument, direction, snapshot, onClose, onPlaced } = props;
   const livePrice = snapshot?.price ?? null;
+  const precision = instrument === 'E6' ? 5 : 2;
 
   const initialEntry = direction === 'LONG' ? snapshot?.longEntry ?? null : snapshot?.entry ?? null;
   const initialSl = direction === 'LONG' ? snapshot?.longSl ?? null : snapshot?.sl ?? null;
@@ -45,13 +46,13 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
   useEffect(() => {
     if (!open) return;
     setEntryType('LIMIT');
-    setEntry(initialEntry !== null ? initialEntry.toFixed(2) : (livePrice ?? 0).toFixed(2));
-    setStopLoss(initialSl !== null ? initialSl.toFixed(2) : '');
-    setTp1(initialTp1 !== null ? initialTp1.toFixed(2) : '');
-    setTp2(initialTp2 !== null ? initialTp2.toFixed(2) : '');
+    setEntry(initialEntry !== null ? initialEntry.toFixed(precision) : (livePrice ?? 0).toFixed(precision));
+    setStopLoss(initialSl !== null ? initialSl.toFixed(precision) : '');
+    setTp1(initialTp1 !== null ? initialTp1.toFixed(precision) : '');
+    setTp2(initialTp2 !== null ? initialTp2.toFixed(precision) : '');
     setQuantity(1);
     setError(null);
-  }, [open, direction, initialEntry, initialSl, initialTp1, initialTp2, livePrice]);
+  }, [open, direction, initialEntry, initialSl, initialTp1, initialTp2, livePrice, precision]);
 
   const blocked = direction === 'LONG' ? snapshot?.longBlocked : snapshot?.shortBlocked;
   const blocks = direction === 'LONG' ? snapshot?.longStructuralBlocks ?? [] : snapshot?.structuralBlocks ?? [];
@@ -146,7 +147,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
 
         <div className="text-xs text-slate-400 mb-3">
           Live price: <span className="font-mono text-slate-200">
-            {livePrice !== null ? livePrice.toFixed(2) : '—'}
+            {livePrice !== null ? livePrice.toFixed(precision) : '—'}
           </span>
         </div>
 
@@ -191,7 +192,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
             <label className="block text-xs text-slate-400 mb-1">Entry</label>
             <input
               type="number"
-              step="0.01"
+              step="any"
               value={entry}
               onChange={(e) => setEntry(e.target.value)}
               disabled={busy || entryType === 'MARKET'}
@@ -199,7 +200,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
             />
             {entryType === 'MARKET' && (
               <div className="text-xs text-slate-500 mt-1">
-                MARKET will use the live price ({livePrice !== null ? livePrice.toFixed(2) : '—'}).
+                MARKET will use the live price ({livePrice !== null ? livePrice.toFixed(precision) : '—'}).
               </div>
             )}
           </div>
@@ -239,7 +240,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
               <label className="block text-xs text-slate-400 mb-1">Stop Loss</label>
               <input
                 type="number"
-                step="0.01"
+                step="any"
                 value={stopLoss}
                 onChange={(e) => setStopLoss(e.target.value)}
                 disabled={busy}
@@ -247,14 +248,14 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
               />
             </div>
             <div className="text-xs text-slate-500 font-mono pt-5">
-              {slDelta !== null ? (slDelta >= 0 ? `+${slDelta.toFixed(2)}` : slDelta.toFixed(2)) : '—'}
+              {slDelta !== null ? (slDelta >= 0 ? `+${slDelta.toFixed(precision)}` : slDelta.toFixed(precision)) : '—'}
             </div>
 
             <div>
               <label className="block text-xs text-slate-400 mb-1">Take Profit 1</label>
               <input
                 type="number"
-                step="0.01"
+                step="any"
                 value={tp1}
                 onChange={(e) => setTp1(e.target.value)}
                 disabled={busy}
@@ -262,14 +263,14 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
               />
             </div>
             <div className="text-xs text-slate-500 font-mono pt-5">
-              {tp1Delta !== null ? (tp1Delta >= 0 ? `+${tp1Delta.toFixed(2)}` : tp1Delta.toFixed(2)) : '—'}
+              {tp1Delta !== null ? (tp1Delta >= 0 ? `+${tp1Delta.toFixed(precision)}` : tp1Delta.toFixed(precision)) : '—'}
             </div>
 
             <div>
               <label className="block text-xs text-slate-400 mb-1">Take Profit 2 (optional)</label>
               <input
                 type="number"
-                step="0.01"
+                step="any"
                 value={tp2}
                 onChange={(e) => setTp2(e.target.value)}
                 disabled={busy}
@@ -277,7 +278,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
               />
             </div>
             <div className="text-xs text-slate-500 font-mono pt-5">
-              {tp2Delta !== null ? (tp2Delta >= 0 ? `+${tp2Delta.toFixed(2)}` : tp2Delta.toFixed(2)) : '—'}
+              {tp2Delta !== null ? (tp2Delta >= 0 ? `+${tp2Delta.toFixed(precision)}` : tp2Delta.toFixed(precision)) : '—'}
             </div>
           </div>
 
@@ -285,7 +286,7 @@ export default function QuantManualTradeModal(props: QuantManualTradeModalProps)
             <div>
               Risk:{' '}
               <span className="font-mono text-slate-200">
-                {riskPoints !== null ? `${riskPoints.toFixed(2)} pts` : '—'}
+                {riskPoints !== null ? `${riskPoints.toFixed(precision)} ${instrument === 'E6' ? 'px' : 'pts'}` : '—'}
               </span>
             </div>
             <div className="flex gap-3">

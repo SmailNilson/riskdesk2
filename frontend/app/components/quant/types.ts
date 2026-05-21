@@ -119,7 +119,7 @@ export interface QuantNarrationView {
   markdown: string;
 }
 
-export const QUANT_INSTRUMENTS = ['MNQ', 'MGC', 'MCL'] as const;
+export const QUANT_INSTRUMENTS = ['MNQ', 'MGC', 'MCL', 'E6'] as const;
 export type QuantInstrument = typeof QUANT_INSTRUMENTS[number];
 
 export const GATE_LABELS: Record<string, string> = {

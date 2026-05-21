@@ -48,7 +48,7 @@ public class QuantSetupNarrationService {
                                           QuantState state,
                                           com.riskdesk.domain.quant.model.MarketSnapshot marketSnapshot) {
         List<Double> recentPrices = recentPricesIncluding(instrument, snapshot);
-        PatternAnalysis pattern = patternDetector.detect(marketSnapshot, state, recentPrices);
+        PatternAnalysis pattern = patternDetector.detect(instrument, marketSnapshot, state, recentPrices);
         String markdown = narrator.narrate(instrument, snapshot, pattern);
         return new NarrationResult(pattern, markdown);
     }

@@ -27,12 +27,13 @@ const DIR_COLOR: Record<string, string> = {
   SHORT: 'text-red-400',
 };
 
-function fmt(v: number | null | undefined): string {
+function fmt(v: number | null | undefined, instrument: string): string {
   if (v == null) return '—';
+  if (instrument === 'E6') return v.toFixed(5);
   return v.toFixed(2);
 }
 
-function SetupCard({ setup }: { setup: SetupView }) {
+function SetupCard({ setup, instrument }: { setup: SetupView; instrument: string }) {
   const phaseColor = PHASE_COLOR[setup.phase] ?? 'text-zinc-400';
   const dirColor   = DIR_COLOR[setup.direction] ?? 'text-zinc-300';
 
@@ -51,15 +52,15 @@ function SetupCard({ setup }: { setup: SetupView }) {
       <div className="grid grid-cols-4 gap-1 text-zinc-300">
         <div className="flex flex-col items-center rounded bg-zinc-900/70 p-1.5">
           <span className="text-zinc-500 text-[10px] mb-0.5">ENTRY</span>
-          <span className="font-mono font-semibold">{fmt(setup.entryPrice)}</span>
+          <span className="font-mono font-semibold">{fmt(setup.entryPrice, instrument)}</span>
         </div>
         <div className="flex flex-col items-center rounded bg-zinc-900/70 p-1.5">
           <span className="text-zinc-500 text-[10px] mb-0.5">SL</span>
-          <span className="font-mono font-semibold text-red-400">{fmt(setup.slPrice)}</span>
+          <span className="font-mono font-semibold text-red-400">{fmt(setup.slPrice, instrument)}</span>
         </div>
         <div className="flex flex-col items-center rounded bg-zinc-900/70 p-1.5">
           <span className="text-zinc-500 text-[10px] mb-0.5">TP1</span>
-          <span className="font-mono font-semibold text-green-400">{fmt(setup.tp1Price)}</span>
+          <span className="font-mono font-semibold text-green-400">{fmt(setup.tp1Price, instrument)}</span>
         </div>
         <div className="flex flex-col items-center rounded bg-zinc-900/70 p-1.5">
           <span className="text-zinc-500 text-[10px] mb-0.5">R:R</span>
@@ -115,7 +116,7 @@ export default function SetupRecommendationPanel() {
       ) : (
         <div className="space-y-2">
           {active.map(s => (
-            <SetupCard key={s.id} setup={s} />
+            <SetupCard key={s.id} setup={s} instrument={activeInstrument} />
           ))}
         </div>
       )}
