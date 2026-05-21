@@ -242,15 +242,32 @@ public class WtxExecutionBridge {
         isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
-        // Pre-flight margin: for a REVERSE the close leg releases its margin as soon as IBKR
-        // fills it, so the net consumed margin for the position size is ~1× positionQty (the
-        // open leg of the reverse). The previous 2× estimate was double-counting and caused
-        // false "NO MARGIN" denials on accounts with just enough headroom for one position.
-        if (marginPreflight != null) {
-            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, positionQty, price);
+        // Pre-flight margin — sized by the NET margin delta the order will create.
+        //   • Pure OPEN              → delta = positionQty (full new position).
+        //   • Same-size REVERSE      → delta ≈ 0; close leg releases exactly what the open leg
+        //                              consumes, so preflight is skipped (this is the prod
+        //                              false-denial fix — running the 15 % gross-estimate gate
+        //                              tripped on any account already holding the position).
+        //   • Size-increasing REVERSE → delta = positionQty − priorQty; only the extra contracts
+        //                              consume fresh margin, so preflight checks that delta.
+        //                              Prevents the trap where the close leg succeeds but the
+        //                              larger open leg gets rejected at IBKR, leaving the user
+        //                              unintentionally flat.
+        //   • Size-decreasing REVERSE → delta ≤ 0; margin is freed, no preflight needed.
+        // priorQty for a REVERSE comes from the existing WTX row, or from the IBKR live position
+        // when reconcile is synthesizing the close leg.
+        int preflightQty;
+        if (isReverse) {
+            int priorQty = priorReverseQty(state, tf, liveIbkrPosition);
+            preflightQty = Math.max(0, positionQty - priorQty);
+        } else {
+            preflightQty = positionQty;
+        }
+        if (marginPreflight != null && preflightQty > 0) {
+            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, preflightQty, price);
             if (!decision.allowed()) {
-                log.warn("WTX [{} {}] routing denied by pre-flight — {}",
-                        state.instrument(), tf, decision.denyReason());
+                log.warn("WTX [{} {}] routing denied by pre-flight (delta qty={}) — {}",
+                        state.instrument(), tf, preflightQty, decision.denyReason());
                 return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
                         truncate(decision.denyReason(), 200));
             }
@@ -794,6 +811,44 @@ public class WtxExecutionBridge {
         log.warn("WTX [{} {}] reconcile: created tracking row for IBKR live position {} (qty={}) — "
                 + "future CLOSE/MAX_LOSS will flatten this row",
                 state.instrument(), timeframe, livePos, qty);
+    }
+
+    /**
+     * Quantity of the position the REVERSE close-leg will actually flatten <em>in this same
+     * routing call</em>. Used by the preflight to size the margin check on the NET delta of
+     * the reverse (open-leg qty minus close-leg qty).
+     *
+     * <p>Mirrors the exact condition under which {@link #handleEntry}'s REVERSE branch fires a
+     * close-leg order:</p>
+     * <ul>
+     *   <li>If an open WTX row exists and is <b>not</b> already {@code EXIT_SUBMITTED}, the
+     *       close leg will fire — return that row's quantity.</li>
+     *   <li>If the open WTX row is in {@code EXIT_SUBMITTED} (a flatten is already in flight from
+     *       a previous bar), {@link #handleEntry} skips the close-leg submission and the prior
+     *       position's margin won't be released in time for the new open. Return 0 so the
+     *       preflight gates on the full positionQty — exactly as for a pure OPEN.</li>
+     *   <li>If there is no WTX row but IBKR holds an opposite live position, reconcile will
+     *       synthesize a close leg for that position — return {@code |liveIbkrPos|}.</li>
+     *   <li>Otherwise return 0.</li>
+     * </ul>
+     */
+    private int priorReverseQty(WtxStrategyState state, String timeframe, BigDecimal liveIbkrPosition) {
+        Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), timeframe);
+        if (prior.isPresent()) {
+            TradeExecutionRecord row = prior.get();
+            // EXIT_SUBMITTED → no fresh close leg this call → no margin released → can't subtract.
+            if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                return 0;
+            }
+            if (row.getQuantity() != null && row.getQuantity() > 0) {
+                return row.getQuantity();
+            }
+            return 0;
+        }
+        if (liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
+            return Math.max(0, liveIbkrPosition.abs().intValue());
+        }
+        return 0;
     }
 
     /** Carrier for {@link #reconcileWithIbkr}. Exactly one of the fields is non-null. */
