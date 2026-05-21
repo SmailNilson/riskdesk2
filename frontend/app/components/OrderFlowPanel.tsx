@@ -19,6 +19,7 @@ import {
   parseAbsorption,
   parseDistAccu,
 } from './quant/QuantGatePanel';
+import { type QuantGateView } from './quant/types';
 
 const DEPTH_INSTRUMENTS = ['MNQ', 'MCL', 'MGC'] as const;
 const HISTORY_LIMIT = 20;
@@ -471,6 +472,301 @@ function CycleRowView({ event }: { event: CycleRow }) {
   );
 }
 
+function parseBuyPct(gates: QuantGateView[]): number | null {
+  const g4 = gates?.find((g) => g.gate === 'G4_BUY_PCT_LOW');
+  const l4 = gates?.find((g) => g.gate === 'L4_BUY_PCT_HIGH');
+  const gate = g4 || l4;
+  if (!gate || !gate.reason) return null;
+
+  const match = gate.reason.match(/buy%=([\d.]+)/);
+  return match ? parseFloat(match[1]) : null;
+}
+
+interface QuantTelemetryDashboardProps {
+  gates: QuantGateView[];
+  active: string;
+}
+
+function QuantTelemetryDashboard({ gates, active }: QuantTelemetryDashboardProps) {
+  const thresholds = INSTRUMENT_THRESHOLDS[active];
+  const { delta, trend } = parseDeltaAndTrend(gates);
+  const buyPct = parseBuyPct(gates);
+  const abs = parseAbsorption(gates);
+  const da = parseDistAccu(gates);
+
+  const strongDelta = thresholds?.strongDelta ?? 100;
+  const highDelta = thresholds?.highDelta ?? 200;
+
+  return (
+    <div className="bg-zinc-950/40 p-4 rounded-xl border border-zinc-800/60 backdrop-blur-md relative shadow-lg">
+      <div className="flex items-center justify-between mb-3 border-b border-zinc-800/40 pb-2">
+        <div className="flex items-center gap-2">
+          <div className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </div>
+          <span className="text-[11px] font-bold text-zinc-200 tracking-wider uppercase">LOB Microstructure Telemetry ({active})</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        {/* Widget 1: CVD Momentum */}
+        <div className="flex flex-col gap-2 p-3 bg-zinc-900/40 rounded-lg border border-zinc-800/40">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              <span className="text-[11px] font-bold text-zinc-300 font-sans">CVD Momentum (Delta)</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {trend.length > 0 && (
+                <div className="flex items-center gap-1">
+                  <span className="text-[8px] text-zinc-500 font-mono">Trend:</span>
+                  <div className="flex items-end gap-[2px] h-4 px-1 bg-zinc-950/60 rounded border border-zinc-800/40">
+                    {trend.map((val, idx) => {
+                      const heightPercent = Math.min(100, (Math.abs(val) / highDelta) * 100);
+                      const isPositive = val >= 0;
+                      const barBg = isPositive ? 'bg-cyan-500/75' : 'bg-rose-500/75';
+                      return (
+                        <div
+                          key={idx}
+                          className={`w-1 rounded-t transition-all duration-300 ${barBg}`}
+                          style={{ height: `${Math.max(20, heightPercent)}%` }}
+                          title={`Scan t-${trend.length - 1 - idx}: ${val >= 0 ? '+' : ''}${val}`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <span className={`text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded border ${
+                delta !== null && Math.abs(delta) >= strongDelta
+                  ? delta >= 0
+                    ? 'bg-cyan-950/80 text-cyan-300 border-cyan-700/80 shadow-[0_0_6px_rgba(34,211,238,0.25)]'
+                    : 'bg-rose-950/80 text-rose-300 border-rose-700/80 shadow-[0_0_6px_rgba(244,63,94,0.25)]'
+                  : 'bg-zinc-950/60 text-zinc-400 border-zinc-800/60'
+              }`}>
+                {delta !== null ? `Δ = ${delta >= 0 ? '+' : ''}${delta.toFixed(0)}` : 'Δ = —'}
+              </span>
+            </div>
+          </div>
+
+          <div className="relative mt-1">
+            <div className="h-1.5 w-full bg-zinc-950 rounded-full border border-zinc-800/50 overflow-hidden flex">
+              <div className="w-1/2 h-full flex justify-end">
+                {delta !== null && delta < 0 && (
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      Math.abs(delta) >= highDelta
+                        ? 'bg-gradient-to-l from-red-600 to-rose-500 shadow-[0_0_8px_#f43f5e]'
+                        : Math.abs(delta) >= strongDelta
+                        ? 'bg-gradient-to-l from-rose-500 to-rose-400 shadow-[0_0_4px_#fb7185]'
+                        : 'bg-gradient-to-l from-rose-400/80 to-zinc-800'
+                    }`}
+                    style={{ width: `${Math.min(100, (Math.abs(delta) / highDelta) * 100)}%` }}
+                  />
+                )}
+              </div>
+              <div className="w-[1px] h-full bg-zinc-700 z-10" />
+              <div className="w-1/2 h-full flex justify-start">
+                {delta !== null && delta > 0 && (
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      delta >= highDelta
+                        ? 'bg-gradient-to-r from-cyan-500 to-indigo-500 shadow-[0_0_8px_#06b6d4]'
+                        : delta >= strongDelta
+                        ? 'bg-gradient-to-r from-cyan-400 to-cyan-500 shadow-[0_0_4px_#22d3ee]'
+                        : 'bg-gradient-to-r from-cyan-400/80 to-zinc-800'
+                    }`}
+                    style={{ width: `${Math.min(100, (delta / highDelta) * 100)}%` }}
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center text-[7px] text-zinc-500 font-mono mt-1 px-0.5">
+              <span className="w-1/5 text-left">-High (±{highDelta})</span>
+              <span className="w-1/5 text-center">-Strong (±{strongDelta})</span>
+              <span className="w-1/5 text-center font-bold text-zinc-600">0</span>
+              <span className="w-1/5 text-center">+Strong (±{strongDelta})</span>
+              <span className="w-1/5 text-right">+High (±{highDelta})</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Widget 2: Order Flow Balance */}
+        <div className="flex flex-col gap-2 p-3 bg-zinc-900/40 rounded-lg border border-zinc-800/40">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" />
+              </svg>
+              <span className="text-[11px] font-bold text-zinc-300 font-sans">Order Flow Balance</span>
+            </div>
+            <div className="flex gap-1.5">
+              <span className="text-[9px] font-mono font-bold bg-emerald-950/60 text-emerald-400 border border-emerald-900/40 px-1 rounded">
+                B: {buyPct !== null ? `${buyPct.toFixed(1)}%` : '—'}
+              </span>
+              <span className="text-[9px] font-mono font-bold bg-rose-950/60 text-rose-400 border border-rose-900/40 px-1 rounded">
+                S: {buyPct !== null ? `${(100 - buyPct).toFixed(1)}%` : '—'}
+              </span>
+            </div>
+          </div>
+
+          <div className="relative mt-1">
+            <div className="h-1.5 w-full bg-zinc-950 rounded-full border border-zinc-800/50 overflow-hidden flex">
+              <div
+                className="h-full bg-gradient-to-r from-emerald-600 to-emerald-500 transition-all duration-500"
+                style={{ width: buyPct !== null ? `${buyPct}%` : '50%' }}
+              />
+              <div className="h-full bg-gradient-to-r from-rose-500 to-rose-600 transition-all duration-500 flex-1" />
+            </div>
+
+            <div className="absolute inset-0 top-0 h-1.5 pointer-events-none flex justify-between px-[2px]">
+              <div className="w-[1px] h-2.5 bg-zinc-600/40" style={{ marginLeft: '48%' }} />
+              <div className="w-[1px] h-2.5 bg-zinc-600/40" style={{ marginRight: '48%' }} />
+            </div>
+
+            <div className="flex justify-between items-center text-[7px] text-zinc-500 font-mono mt-1 px-0.5">
+              <span>0%</span>
+              <span className="text-rose-400/70 font-semibold">Bearish Limit (48%)</span>
+              <span className="font-bold text-zinc-600">50%</span>
+              <span className="text-emerald-400/70 font-semibold">Bullish Limit (52%)</span>
+              <span>100%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Widget 3: Passive LOB Absorption */}
+        <div className="flex flex-col gap-2 p-3 bg-zinc-900/40 rounded-lg border border-zinc-800/40">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              <span className="text-[11px] font-bold text-zinc-300 font-sans">Passive LOB Absorption</span>
+            </div>
+            {abs.n8 !== null && abs.n8 >= 8 && (
+              <span className={`text-[8px] font-mono font-extrabold px-1.5 py-0.5 rounded shadow-[0_0_6px_rgba(99,102,241,0.25)] animate-pulse ${
+                abs.dominantSide === 'BULL'
+                  ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/50'
+                  : 'bg-red-950/80 text-red-300 border border-red-800/50'
+              }`}>
+                🛡️ {abs.dominantSide === 'BULL' ? 'BULL ABS' : 'BEAR ABS'}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1 mt-0.5">
+            <div className="flex justify-between items-center text-[9px] text-zinc-400 font-mono mb-0.5">
+              <span>Passive Scans (n8): <strong className="text-zinc-200 font-semibold">{abs.n8 !== null ? abs.n8 : '—'}</strong> / 16</span>
+              <span className="text-zinc-500">Dominance: <strong className={abs.dominantSide === 'BULL' ? 'text-emerald-400' : abs.dominantSide === 'BEAR' ? 'text-rose-400' : 'text-zinc-400'}>{abs.dominantSide || 'None'}</strong></span>
+            </div>
+
+            <div className="flex gap-[2px] h-2.5 bg-zinc-950 p-[2px] rounded border border-zinc-800/50">
+              {Array.from({ length: 16 }).map((_, idx) => {
+                const isActive = abs.n8 !== null && idx < abs.n8;
+                const isThresholdZone = idx >= 8;
+
+                let blockColor = 'bg-zinc-900/30';
+                if (isActive) {
+                  if (abs.dominantSide === 'BULL') {
+                    blockColor = isThresholdZone
+                      ? 'bg-emerald-400 shadow-[0_0_4px_#34d399]'
+                      : 'bg-emerald-600/75';
+                  } else {
+                    blockColor = isThresholdZone
+                      ? 'bg-rose-500 shadow-[0_0_4px_#f43f5e]'
+                      : 'bg-rose-700/75';
+                  }
+                } else if (isThresholdZone) {
+                  blockColor = 'bg-zinc-950 border-l border-zinc-900/40';
+                }
+
+                return (
+                  <div
+                    key={idx}
+                    className={`flex-1 rounded-[1px] transition-all duration-300 ${blockColor}`}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="flex justify-between text-[7px] text-zinc-500 font-mono mt-0.5 px-0.5">
+              <span>0 (Low)</span>
+              <span className="text-indigo-400/70 font-semibold" style={{ marginRight: '34%' }}>Wall Threshold (8)</span>
+              <span>16 (Max)</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Widget 4: A/D Market Veto */}
+        <div className={`flex flex-col gap-2 p-3 rounded-lg border transition-all duration-500 ${
+          da.status === 'BLOQUE'
+            ? 'bg-amber-950/15 border-amber-800/60 shadow-[0_0_10px_rgba(217,119,6,0.12)]'
+            : 'bg-zinc-900/40 border-zinc-800/40'
+        }`}>
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <span className="text-[11px] font-bold text-zinc-300 font-sans">A/D Structural Veto</span>
+            </div>
+            {da.status === 'BLOQUE' ? (
+              <span className="text-[8px] font-mono font-extrabold bg-red-950 text-red-400 border border-red-800/50 px-1.5 py-0.5 rounded animate-pulse">
+                🚫 VETO ACTIVE
+              </span>
+            ) : da.type !== null ? (
+              <span className="text-[8px] font-mono font-bold bg-zinc-950 text-emerald-400 border border-emerald-900/40 px-1.5 py-0.5 rounded">
+                ✅ PASS
+              </span>
+            ) : null}
+          </div>
+
+          {da.type !== null ? (
+            <div className="flex flex-col gap-1 mt-0.5">
+              <div className="flex justify-between items-center text-[9px] font-mono">
+                <span className="text-zinc-400">Process: <strong className={da.type === 'ACCUMULATION' ? 'text-purple-400' : 'text-amber-400'}>{da.type}</strong></span>
+                <span className="text-zinc-400">Force: <strong className="text-zinc-200">{da.conf}%</strong></span>
+              </div>
+
+              <div className="relative h-1.5 w-full bg-zinc-950 rounded-full border border-zinc-800/50 overflow-hidden mt-0.5">
+                <div
+                  className={`h-full transition-all duration-500 ${
+                    da.status === 'BLOQUE'
+                      ? 'bg-gradient-to-r from-amber-600 to-red-600'
+                      : 'bg-gradient-to-r from-purple-600 to-indigo-500'
+                  }`}
+                  style={{ width: `${da.conf}%` }}
+                />
+
+                <div
+                  className="absolute inset-y-0 w-[2px] bg-red-500 shadow-[0_0_4px_#ef4444] z-10"
+                  style={{ left: da.threshold !== null ? `${da.threshold}%` : '50%' }}
+                />
+              </div>
+
+              <div className="flex justify-between text-[7px] text-zinc-500 font-mono mt-0.5 px-0.5">
+                <span>0%</span>
+                <span className="text-red-400/70 font-semibold" style={{ left: da.threshold !== null ? `${da.threshold}%` : '50%', transform: 'translateX(-50%)', position: 'absolute' }}>Veto Limit ({da.threshold}%)</span>
+                <span>100%</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-[34px] text-center px-1">
+              <p className="text-[9px] text-zinc-500 font-mono leading-tight">
+                No active accumulation or distribution scans.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main Panel
 // ---------------------------------------------------------------------------
@@ -637,6 +933,9 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
         <h3 className="text-sm font-semibold text-zinc-200">Order Flow</h3>
         <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} />
       </div>
+
+      {/* LOB Microstructure Telemetry Dashboard */}
+      <QuantTelemetryDashboard gates={activeGates} active={activeInstrument} />
 
       {/* Section 1: Delta Bars */}
       <div>
