@@ -242,19 +242,32 @@ public class WtxExecutionBridge {
         isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
-        // Pre-flight margin — only for true OPEN actions. A REVERSE flips an existing same-size
-        // position long↔short on the same instrument: the close leg releases exactly the margin
-        // the open leg needs, so the NET margin delta at IBKR is ≈ 0. Running our gross-estimate
-        // preflight on a REVERSE (with the 15 % buffer) trips on any account already holding the
-        // position it's trying to flip — exactly the false-denial pattern visible in the panel
-        // (NO MARGIN on a REVERSE after a prior OPEN_SHORT filled at IBKR). If IBKR genuinely
-        // rejects the open leg with code 201 the existing typed exception handling kicks in and
-        // surfaces SKIPPED_INSUFFICIENT_MARGIN with the broker's own message.
-        if (marginPreflight != null && !isReverse) {
-            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, positionQty, price);
+        // Pre-flight margin — sized by the NET margin delta the order will create.
+        //   • Pure OPEN              → delta = positionQty (full new position).
+        //   • Same-size REVERSE      → delta ≈ 0; close leg releases exactly what the open leg
+        //                              consumes, so preflight is skipped (this is the prod
+        //                              false-denial fix — running the 15 % gross-estimate gate
+        //                              tripped on any account already holding the position).
+        //   • Size-increasing REVERSE → delta = positionQty − priorQty; only the extra contracts
+        //                              consume fresh margin, so preflight checks that delta.
+        //                              Prevents the trap where the close leg succeeds but the
+        //                              larger open leg gets rejected at IBKR, leaving the user
+        //                              unintentionally flat.
+        //   • Size-decreasing REVERSE → delta ≤ 0; margin is freed, no preflight needed.
+        // priorQty for a REVERSE comes from the existing WTX row, or from the IBKR live position
+        // when reconcile is synthesizing the close leg.
+        int preflightQty;
+        if (isReverse) {
+            int priorQty = priorReverseQty(state, tf, liveIbkrPosition);
+            preflightQty = Math.max(0, positionQty - priorQty);
+        } else {
+            preflightQty = positionQty;
+        }
+        if (marginPreflight != null && preflightQty > 0) {
+            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, preflightQty, price);
             if (!decision.allowed()) {
-                log.warn("WTX [{} {}] routing denied by pre-flight — {}",
-                        state.instrument(), tf, decision.denyReason());
+                log.warn("WTX [{} {}] routing denied by pre-flight (delta qty={}) — {}",
+                        state.instrument(), tf, preflightQty, decision.denyReason());
                 return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
                         truncate(decision.denyReason(), 200));
             }
@@ -798,6 +811,24 @@ public class WtxExecutionBridge {
         log.warn("WTX [{} {}] reconcile: created tracking row for IBKR live position {} (qty={}) — "
                 + "future CLOSE/MAX_LOSS will flatten this row",
                 state.instrument(), timeframe, livePos, qty);
+    }
+
+    /**
+     * Quantity of the position that a REVERSE close-leg will flatten. Used by the preflight to
+     * size the margin check on the NET delta of the reverse (open-leg qty minus close-leg qty).
+     * Prefers the bridge's own open WTX row; falls back to {@code |liveIbkrPos|} when reconcile
+     * is about to synthesize the close leg from an IBKR-tracked-only position. Returns 0 when
+     * no prior position is identifiable — the preflight then treats the order as a pure OPEN.
+     */
+    private int priorReverseQty(WtxStrategyState state, String timeframe, BigDecimal liveIbkrPosition) {
+        Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), timeframe);
+        if (prior.isPresent() && prior.get().getQuantity() != null && prior.get().getQuantity() > 0) {
+            return prior.get().getQuantity();
+        }
+        if (liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
+            return Math.max(0, liveIbkrPosition.abs().intValue());
+        }
+        return 0;
     }
 
     /** Carrier for {@link #reconcileWithIbkr}. Exactly one of the fields is non-null. */
