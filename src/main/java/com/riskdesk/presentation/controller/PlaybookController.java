@@ -9,6 +9,8 @@ import com.riskdesk.domain.engine.playbook.agent.AgentContext;
 import com.riskdesk.domain.engine.playbook.model.FinalVerdict;
 import com.riskdesk.domain.engine.playbook.model.PlaybookEvaluation;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.presentation.dto.FinalVerdictView;
+import com.riskdesk.presentation.dto.PlaybookEvaluationView;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -31,15 +33,15 @@ public class PlaybookController {
     }
 
     @GetMapping("/{instrument}/{timeframe}")
-    public ResponseEntity<PlaybookEvaluation> getPlaybook(
+    public ResponseEntity<PlaybookEvaluationView> getPlaybook(
             @PathVariable Instrument instrument,
             @PathVariable String timeframe) {
         PlaybookEvaluation evaluation = playbookService.evaluate(instrument, timeframe);
-        return ResponseEntity.ok(evaluation);
+        return ResponseEntity.ok(PlaybookEvaluationView.from(evaluation, instrument));
     }
 
     @GetMapping("/{instrument}/{timeframe}/full")
-    public ResponseEntity<FinalVerdict> getFullPlaybook(
+    public ResponseEntity<FinalVerdictView> getFullPlaybook(
             @PathVariable Instrument instrument,
             @PathVariable String timeframe) {
         PlaybookEvaluation playbook = playbookService.evaluate(instrument, timeframe);
@@ -54,6 +56,6 @@ public class PlaybookController {
             atr != null ? atr : BigDecimal.ONE,
             playbook);
         FinalVerdict verdict = orchestratorService.orchestrate(playbook, context);
-        return ResponseEntity.ok(verdict);
+        return ResponseEntity.ok(FinalVerdictView.from(verdict, instrument));
     }
 }

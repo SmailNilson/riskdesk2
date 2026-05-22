@@ -1499,6 +1499,11 @@ export interface PlaybookPlan {
   riskPercent: number;
   slRationale: string;
   tp1Rationale: string;
+  // Contract spec (populated by PlaybookPlanView). Optional so the frontend
+  // degrades gracefully if a backend without the view DTO is in front.
+  contractMultiplier?: number;
+  tickSize?: number;
+  tickValue?: number;
 }
 
 export interface ChecklistItem {
