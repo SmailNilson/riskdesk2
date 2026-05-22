@@ -16,7 +16,8 @@ const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 
 interface State {
   rows: Quant7GatesSimulationView[];
-  stats: Quant7GatesSimulationStats | null;
+  /** Always non-null — derived locally from {@code rows} via {@code useMemo}. */
+  stats: Quant7GatesSimulationStats;
   connected: boolean;
 }
 
