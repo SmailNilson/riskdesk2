@@ -54,19 +54,6 @@ function cleanReasonText(reason: string | null | undefined): string {
   return reason;
 }
 
-interface FrontendThresholds {
-  stableBand: string;
-  strongDelta: number;
-  highDelta: number;
-}
-
-const INSTRUMENT_THRESHOLDS: Record<string, FrontendThresholds> = {
-  MNQ: { stableBand: '5.0 pts', strongDelta: 200, highDelta: 400 },
-  MGC: { stableBand: '1.0 pts', strongDelta: 50, highDelta: 100 },
-  MCL: { stableBand: '0.10 pts', strongDelta: 50, highDelta: 100 },
-  E6:  { stableBand: '0.00050 px', strongDelta: 50, highDelta: 100 },
-};
-
 type PatternAction = 'TRADE' | 'WAIT' | 'AVOID';
 
 /** Pattern action seen from {@code direction}. Reads {@code longAction} when
@@ -259,7 +246,6 @@ export function parseDistAccu(gates: QuantGateView[]): DistAccuData {
   return { type: null, conf: null, threshold: null, status: 'INACTIVE' };
 }
 
-
 interface DirectionSectionProps {
   label: 'SHORT' | 'LONG';
   score: number;
@@ -448,6 +434,7 @@ function DirectionSection(props: DirectionSectionProps) {
 export default function QuantGatePanel() {
   const [active, setActive] = useState<QuantInstrument>('MNQ');
 
+
   const { snapshots, narrations, advice: streamedAdvice, autoArm, connected } = useQuantStream();
   const [bootstrap, setBootstrap] = useState<Record<string, QuantSnapshotView>>({});
   const [manualAdvice, setManualAdvice] = useState<Record<string, AdviceView>>({});
@@ -577,25 +564,7 @@ export default function QuantGatePanel() {
             <span className="text-xs text-slate-500">{snapshot.scanTime ?? '—'}</span>
           </div>
 
-          {INSTRUMENT_THRESHOLDS[active] && (
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                <span className="text-slate-500 font-semibold uppercase tracking-wider">Parameters ({active}):</span>
-                <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                  <span className="text-slate-500">Stable Band:</span>
-                  <span className="text-slate-300 font-bold">{INSTRUMENT_THRESHOLDS[active].stableBand}</span>
-                </div>
-                <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                  <span className="text-slate-500">Strong Delta:</span>
-                  <span className="text-sky-400 font-bold">±{INSTRUMENT_THRESHOLDS[active].strongDelta}</span>
-                </div>
-                <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                  <span className="text-slate-500">High Delta:</span>
-                  <span className="text-violet-400 font-bold">±{INSTRUMENT_THRESHOLDS[active].highDelta}</span>
-                </div>
-              </div>
-            </div>
-          )}
+
 
           <div className="mb-3 flex items-center gap-2">
             <button

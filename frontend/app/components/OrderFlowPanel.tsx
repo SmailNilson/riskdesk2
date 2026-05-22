@@ -12,14 +12,15 @@ import {
   MomentumEvent,
   CycleEvent,
 } from '@/app/hooks/useOrderFlow';
-import { api } from '@/app/lib/api';
 import { useQuantStream } from '@/app/hooks/useQuantStream';
+import { api } from '@/app/lib/api';
 import {
   parseDeltaAndTrend,
   parseAbsorption,
   parseDistAccu,
 } from './quant/QuantGatePanel';
-import { type QuantGateView } from './quant/types';
+import QuantTelemetryDashboard, { INSTRUMENT_THRESHOLDS as QUANT_THRESHOLDS } from './quant/QuantTelemetryDashboard';
+import { QUANT_INSTRUMENTS, type QuantInstrument, type QuantGateView } from './quant/types';
 
 const DEPTH_INSTRUMENTS = ['MNQ', 'MCL', 'MGC'] as const;
 const HISTORY_LIMIT = 20;
@@ -785,6 +786,13 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
   } = useOrderFlow();
 
   const { snapshots } = useQuantStream();
+  const [showTelemetry, setShowTelemetry] = useState(true);
+  const telemetryInstrument: QuantInstrument =
+    selectedInstrument && (QUANT_INSTRUMENTS as readonly string[]).includes(selectedInstrument)
+      ? (selectedInstrument as QuantInstrument)
+      : 'MNQ';
+  const telemetryGates = snapshots[telemetryInstrument]?.gates ?? [];
+  const telemetryThresholds = QUANT_THRESHOLDS[telemetryInstrument];
 
   // Historical lists seeded on mount via REST, then kept fresh by merging
   // WebSocket events (prepend, cap at HISTORY_LIMIT).
@@ -934,8 +942,41 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
         <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} />
       </div>
 
-      {/* LOB Microstructure Telemetry Dashboard */}
-      <QuantTelemetryDashboard gates={activeGates} active={activeInstrument} />
+      {/* Section 0: LOB Microstructure Telemetry (live from Quant 7-Gates) */}
+      {showTelemetry ? (
+        <QuantTelemetryDashboard
+          gates={telemetryGates}
+          active={telemetryInstrument}
+          onClose={() => setShowTelemetry(false)}
+        />
+      ) : (
+        telemetryThresholds && (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className="text-slate-500 font-semibold uppercase tracking-wider">Parameters ({telemetryInstrument}):</span>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
+                <span className="text-slate-500">Stable Band:</span>
+                <span className="text-slate-300 font-bold">{telemetryThresholds.stableBand}</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
+                <span className="text-slate-500">Strong Delta:</span>
+                <span className="text-sky-400 font-bold">±{telemetryThresholds.strongDelta}</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
+                <span className="text-slate-500">High Delta:</span>
+                <span className="text-violet-400 font-bold">±{telemetryThresholds.highDelta}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowTelemetry(true)}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] border border-slate-700 text-slate-300 hover:text-white transition-colors font-mono"
+            >
+              📊 Expand Telemetry
+            </button>
+          </div>
+        )
+      )}
 
       {/* Section 1: Delta Bars */}
       <div>
