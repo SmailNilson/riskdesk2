@@ -26,6 +26,8 @@ public record Quant7GatesSimulationResponse(
     String priceSource,
     String status,
     Double exitPrice,
+    /** Origin of the latest priced reading (mark-to-market while OPEN, close price once resolved). */
+    String exitPriceSource,
     Instant closedAt,
     String exitReason,
     Double pnlPoints,
@@ -45,6 +47,7 @@ public record Quant7GatesSimulationResponse(
             s.priceSource(),
             s.status().name(),
             s.exitPrice(),
+            s.exitPriceSource(),
             s.closedAt(),
             s.exitReason(),
             s.pnlPoints(),

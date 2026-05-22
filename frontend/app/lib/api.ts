@@ -1360,6 +1360,8 @@ export interface Quant7GatesSimulationView {
     | 'CLOSED_TP2'
     | 'CLOSED_SL';
   exitPrice: number | null;
+  /** Origin of the latest priced reading (mark-to-market while OPEN, close price once resolved). */
+  exitPriceSource: string;
   closedAt: string | null;
   exitReason: string | null;
   /** Live P&L points (LONG: exit - entry, SHORT: entry - exit). Live-updated on OPEN rows. */

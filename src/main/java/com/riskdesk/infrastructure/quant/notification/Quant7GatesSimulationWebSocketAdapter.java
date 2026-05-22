@@ -56,6 +56,7 @@ public class Quant7GatesSimulationWebSocketAdapter implements Quant7GatesSimulat
         root.put("priceSource", s.priceSource());
         root.put("status", s.status().name());
         root.put("exitPrice", s.exitPrice());
+        root.put("exitPriceSource", s.exitPriceSource());
         root.put("closedAt", s.closedAt() != null ? s.closedAt().toString() : null);
         root.put("exitReason", s.exitReason());
         root.put("pnlPoints", s.pnlPoints());

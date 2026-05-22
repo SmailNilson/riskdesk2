@@ -170,6 +170,54 @@ class Quant7GatesSimulationServiceTest {
         assertThat(service.listOpen()).hasSize(1);
     }
 
+    @Test
+    void exitPriceSourceReflectsLatestSnapshotFeed() {
+        // Open on LIVE_PUSH.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25, "LIVE_PUSH"),
+            absorptionHaussiereHighConf());
+        Quant7GatesSimulation open = service.listOpen().get(0);
+        assertThat(open.priceSource()).isEqualTo("LIVE_PUSH");
+        assertThat(open.exitPriceSource()).isEmpty();
+
+        // Mark-to-market on a fallback tick — exitPriceSource should switch
+        // to DB_FALLBACK while priceSource (entry provenance) stays LIVE_PUSH.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.30, "DB_FALLBACK"),
+            absorptionHaussiereHighConf());
+        Quant7GatesSimulation marked = service.listOpen().get(0);
+        assertThat(marked.priceSource()).isEqualTo("LIVE_PUSH");
+        assertThat(marked.exitPriceSource()).isEqualTo("DB_FALLBACK");
+    }
+
+    @Test
+    void closeRetainsClosedAtForEvictionOrdering() {
+        // Direct record-level check that closedAt is set on close(). The
+        // service's capClosedHistory evicts by closedAt (fallback openedAt),
+        // so close() must produce a row whose closedAt is monotonically
+        // greater than openedAt — otherwise the comparator could keep a
+        // long-running trade out of the "recently closed" bucket.
+        java.time.Instant openedAt = java.time.Instant.parse("2026-05-22T10:00:00Z");
+        java.time.Instant closedAt = java.time.Instant.parse("2026-05-22T11:30:00Z");
+        Quant7GatesSimulation row = new Quant7GatesSimulation(
+            1L, Instrument.MNQ, Quant7GatesSimulation.Direction.LONG,
+            29687.25, 29662.25, 29727.25, 29767.25,
+            openedAt, "LONG · test", "LIVE_PUSH",
+            Quant7GatesSimulationStatus.OPEN, null, "", null, null, 0.0, 0.0);
+        Quant7GatesSimulation closedRow = row.close(
+            29727.25, "LIVE_PUSH", closedAt, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
+        assertThat(closedRow.openedAt()).isEqualTo(openedAt);
+        assertThat(closedRow.closedAt()).isEqualTo(closedAt);
+        assertThat(closedRow.closedAt()).isAfter(closedRow.openedAt());
+    }
+
+    private static QuantSnapshot snapshotAt(double price, String source) {
+        Map<Gate, GateResult> gates = new EnumMap<>(Gate.class);
+        return new QuantSnapshot(
+            Instrument.MNQ, gates, 4, 4,
+            price, source, 0.0,
+            ZonedDateTime.now(ZoneId.of("America/New_York"))
+        );
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private static PatternAnalysis absorptionHaussiereHighConf() {

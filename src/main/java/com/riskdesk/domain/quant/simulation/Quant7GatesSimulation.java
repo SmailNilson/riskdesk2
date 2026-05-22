@@ -29,9 +29,13 @@ import java.time.Instant;
  * <p>{@link #priceSource} preserves the {@code QuantSnapshot.priceSource()}
  * value at entry time so operators can tell whether the row was driven by
  * live IBKR ticks ({@code LIVE_PUSH}) or by a DB fallback during a feed
- * outage. Without this, simulation output is indistinguishable between live
- * and degraded modes — which can mislead anyone using the panel for decision
- * support.
+ * outage. {@link #exitPriceSource} tracks the source of the LATEST priced
+ * value — i.e. the mark-to-market reading on an OPEN row and the close
+ * price on a CLOSED row — so a trade entered on {@code LIVE_PUSH} but
+ * marked / closed on fallback prices renders its exit pill in degraded
+ * colour. Without this split, the source label always mirrored entry and
+ * silently misrepresented the source actually driving the displayed
+ * exit price / P&amp;L.
  *
  * <p>This aggregate intentionally lives outside {@code trade_simulations} —
  * it's a quant-evaluator validation harness, NOT a Mentor outcome tracker,
@@ -52,6 +56,13 @@ public record Quant7GatesSimulation(
     String priceSource,
     Quant7GatesSimulationStatus status,
     Double exitPrice,
+    /**
+     * Origin of the latest {@code exitPrice} reading — the mark-to-market
+     * snapshot while OPEN and the close price once resolved. Lets the UI
+     * surface a degraded pill on trades whose exit data fell back even
+     * though entry was live (or vice-versa).
+     */
+    String exitPriceSource,
     Instant closedAt,
     String exitReason,
     Double pnlPoints,
@@ -62,6 +73,7 @@ public record Quant7GatesSimulation(
 
     public Quant7GatesSimulation {
         priceSource = priceSource == null ? "" : priceSource;
+        exitPriceSource = exitPriceSource == null ? "" : exitPriceSource;
     }
 
     public boolean isOpen() {
@@ -74,6 +86,7 @@ public record Quant7GatesSimulation(
      * instrument contract multiplier.
      */
     public Quant7GatesSimulation close(double exitPrice,
+                                       String exitPriceSource,
                                        Instant now,
                                        String reason,
                                        Quant7GatesSimulationStatus newStatus) {
@@ -83,12 +96,13 @@ public record Quant7GatesSimulation(
         double mult = instrument.getContractMultiplier().doubleValue();
         return new Quant7GatesSimulation(
             id, instrument, direction, entryPrice, stopLoss, takeProfit1, takeProfit2,
-            openedAt, entryReason, priceSource, newStatus, exitPrice, now, reason,
-            signedPts, signedPts * mult);
+            openedAt, entryReason, priceSource, newStatus, exitPrice,
+            exitPriceSource == null ? "" : exitPriceSource,
+            now, reason, signedPts, signedPts * mult);
     }
 
     /** Marks-to-market against {@code livePrice} without changing status (read-only view). */
-    public Quant7GatesSimulation markToMarket(double livePrice) {
+    public Quant7GatesSimulation markToMarket(double livePrice, String livePriceSource) {
         if (!isOpen()) return this;
         double signedPts = direction == Direction.LONG
             ? (livePrice - entryPrice)
@@ -96,7 +110,8 @@ public record Quant7GatesSimulation(
         double mult = instrument.getContractMultiplier().doubleValue();
         return new Quant7GatesSimulation(
             id, instrument, direction, entryPrice, stopLoss, takeProfit1, takeProfit2,
-            openedAt, entryReason, priceSource, status, livePrice, closedAt, exitReason,
-            signedPts, signedPts * mult);
+            openedAt, entryReason, priceSource, status, livePrice,
+            livePriceSource == null ? "" : livePriceSource,
+            closedAt, exitReason, signedPts, signedPts * mult);
     }
 }

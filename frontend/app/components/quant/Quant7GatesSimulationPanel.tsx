@@ -155,7 +155,10 @@ function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: b
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${statusTone}`}>
           {row.status.replace('CLOSED_', '').replace(/_/g, ' ')}
         </span>
-        <PriceSourceBadge source={row.priceSource} />
+        <PriceSourceBadge source={row.priceSource} label="entry" />
+        {row.exitPriceSource && row.exitPriceSource !== row.priceSource && (
+          <PriceSourceBadge source={row.exitPriceSource} label={closed ? 'exit' : 'mark'} />
+        )}
         <span className="ml-auto text-[10px] font-mono text-slate-500" title={row.openedAt}>
           #{row.id} · {formatRelative(row.openedAt)}
         </span>
@@ -223,8 +226,12 @@ function PricePill({ label, value, tone }: { label: string; value: number; tone:
  * real IBKR tick ({@code LIVE_PUSH}) or a degraded DB fallback. During a
  * feed outage every other indicator looks normal, so without this badge it's
  * easy to misread a fallback-driven simulation as live signal.
+ *
+ * <p>{@code label} optionally distinguishes the entry source from the
+ * mark-to-market / exit source — relevant when entry was live but a later
+ * mark or close happened during a feed outage (or vice versa).
  */
-function PriceSourceBadge({ source }: { source: string | undefined }) {
+function PriceSourceBadge({ source, label }: { source: string | undefined; label?: string }) {
   if (!source) return null;
   const live = source === 'LIVE_PUSH';
   const tone = live
@@ -233,9 +240,9 @@ function PriceSourceBadge({ source }: { source: string | undefined }) {
   return (
     <span
       className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${tone}`}
-      title={live ? 'Live IBKR tick' : `Price source: ${source}`}
+      title={live ? `Live IBKR tick (${label ?? 'price'})` : `Price source (${label ?? 'price'}): ${source}`}
     >
-      {source}
+      {label ? `${label}: ${source}` : source}
     </span>
   );
 }

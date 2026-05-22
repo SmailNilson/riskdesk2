@@ -99,6 +99,7 @@ public class Quant7GatesSimulationService {
                                          PatternAnalysis pattern) {
         if (snapshot == null || snapshot.price() == null) return;
         double livePrice = snapshot.price();
+        String liveSource = snapshot.priceSource() == null ? "" : snapshot.priceSource();
         Instant now = Instant.now();
 
         // 1) Process exits on currently-open simulations.
@@ -106,13 +107,16 @@ public class Quant7GatesSimulationService {
         for (int i = 0; i < rows.size(); i++) {
             Quant7GatesSimulation sim = rows.get(i);
             if (!sim.isOpen()) continue;
-            Quant7GatesSimulation closed = maybeClose(sim, livePrice, pattern, now);
+            Quant7GatesSimulation closed = maybeClose(sim, livePrice, liveSource, pattern, now);
             if (closed != null) {
                 rows.set(i, closed);
                 publish(closed);
             } else {
-                // Refresh mark-to-market view so the frontend P&L stays live.
-                Quant7GatesSimulation mtm = sim.markToMarket(livePrice);
+                // Refresh mark-to-market view so the frontend P&L stays live —
+                // tag with the CURRENT snapshot's source, not the row's entry
+                // source. A trade entered LIVE_PUSH but marked on a fallback
+                // tick must surface the fallback pill until the feed recovers.
+                Quant7GatesSimulation mtm = sim.markToMarket(livePrice, liveSource);
                 rows.set(i, mtm);
                 publish(mtm);
             }
@@ -162,7 +166,9 @@ public class Quant7GatesSimulationService {
             // driven by a DB fallback during a feed outage.
             snapshot.priceSource() == null ? "" : snapshot.priceSource(),
             Quant7GatesSimulationStatus.OPEN,
-            null, null, null, 0.0, 0.0);
+            // exitPrice / exitPriceSource / closedAt / exitReason are unset on OPEN —
+            // P&L is 0 until the first markToMarket lands.
+            null, "", null, null, 0.0, 0.0);
         bucket(instrument).add(opened);
         log.info("quant-sim OPEN id={} instr={} dir={} entry={} src={} sl={} tp1={} tp2={} reason=\"{}\"",
             opened.id(), instrument, direction, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
@@ -171,30 +177,34 @@ public class Quant7GatesSimulationService {
 
     private Quant7GatesSimulation maybeClose(Quant7GatesSimulation sim,
                                               double livePrice,
+                                              String liveSource,
                                               PatternAnalysis pattern,
                                               Instant now) {
         Quant7GatesSimulation.Direction dir = sim.direction();
 
         // SL/TP first — they reflect the trade-plan exits the dashboard shows.
+        // The exit-price-source on close mirrors the CURRENT snapshot feed so
+        // a fallback-driven close on a live-entry row is still labelled
+        // correctly for the operator.
         if (dir == Quant7GatesSimulation.Direction.LONG) {
             if (livePrice <= sim.stopLoss()) {
-                return sim.close(livePrice, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
             }
             if (livePrice >= sim.takeProfit2()) {
-                return sim.close(livePrice, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
+                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
             }
             if (livePrice >= sim.takeProfit1()) {
-                return sim.close(livePrice, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
+                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
             }
         } else {
             if (livePrice >= sim.stopLoss()) {
-                return sim.close(livePrice, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
             }
             if (livePrice <= sim.takeProfit2()) {
-                return sim.close(livePrice, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
+                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
             }
             if (livePrice <= sim.takeProfit1()) {
-                return sim.close(livePrice, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
+                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
             }
         }
 
@@ -206,7 +216,7 @@ public class Quant7GatesSimulationService {
             PatternAnalysis.Action act = pattern.actionFor(bias);
             if (act == PatternAnalysis.Action.AVOID) {
                 String why = "flow AVOID — " + pattern.label();
-                return sim.close(livePrice, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
+                return sim.close(livePrice, liveSource, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
             }
         }
         return null;
@@ -257,8 +267,13 @@ public class Quant7GatesSimulationService {
         int closedCount = 0;
         for (Quant7GatesSimulation s : rows) if (!s.isOpen()) closedCount++;
         if (closedCount <= CLOSED_HISTORY_CAP) return;
-        // Drop oldest closed (by openedAt) until under cap.
-        rows.sort(Comparator.comparing(Quant7GatesSimulation::openedAt));
+        // Evict by close recency (oldest close first) rather than open time —
+        // a long-running trade that just closed must outrank older quick
+        // trades in the "recently closed" view. closedAt falls back to
+        // openedAt for safety (closedAt is always set once status != OPEN,
+        // but the fallback keeps the comparator total even on malformed rows).
+        rows.sort(Comparator.comparing(
+            (Quant7GatesSimulation s) -> s.closedAt() != null ? s.closedAt() : s.openedAt()));
         int toDrop = closedCount - CLOSED_HISTORY_CAP;
         for (int i = 0; i < rows.size() && toDrop > 0; ) {
             Quant7GatesSimulation s = rows.get(i);
