@@ -26,6 +26,13 @@ import java.time.Instant;
  * the live price crosses the configured offsets (mirroring the suggested plan
  * in {@code QuantSnapshot}).
  *
+ * <p>{@link #priceSource} preserves the {@code QuantSnapshot.priceSource()}
+ * value at entry time so operators can tell whether the row was driven by
+ * live IBKR ticks ({@code LIVE_PUSH}) or by a DB fallback during a feed
+ * outage. Without this, simulation output is indistinguishable between live
+ * and degraded modes — which can mislead anyone using the panel for decision
+ * support.
+ *
  * <p>This aggregate intentionally lives outside {@code trade_simulations} —
  * it's a quant-evaluator validation harness, NOT a Mentor outcome tracker,
  * so it does not pollute the {@code MentorSignalReviewRecord} schema (see
@@ -41,6 +48,8 @@ public record Quant7GatesSimulation(
     double takeProfit2,
     Instant openedAt,
     String entryReason,
+    /** Origin of {@code entryPrice} (e.g. {@code LIVE_PUSH}, {@code DB_FALLBACK}). Never null — empty string if unknown. */
+    String priceSource,
     Quant7GatesSimulationStatus status,
     Double exitPrice,
     Instant closedAt,
@@ -50,6 +59,10 @@ public record Quant7GatesSimulation(
 ) {
 
     public enum Direction { LONG, SHORT }
+
+    public Quant7GatesSimulation {
+        priceSource = priceSource == null ? "" : priceSource;
+    }
 
     public boolean isOpen() {
         return status == Quant7GatesSimulationStatus.OPEN;
@@ -70,7 +83,7 @@ public record Quant7GatesSimulation(
         double mult = instrument.getContractMultiplier().doubleValue();
         return new Quant7GatesSimulation(
             id, instrument, direction, entryPrice, stopLoss, takeProfit1, takeProfit2,
-            openedAt, entryReason, newStatus, exitPrice, now, reason,
+            openedAt, entryReason, priceSource, newStatus, exitPrice, now, reason,
             signedPts, signedPts * mult);
     }
 
@@ -83,7 +96,7 @@ public record Quant7GatesSimulation(
         double mult = instrument.getContractMultiplier().doubleValue();
         return new Quant7GatesSimulation(
             id, instrument, direction, entryPrice, stopLoss, takeProfit1, takeProfit2,
-            openedAt, entryReason, status, livePrice, closedAt, exitReason,
+            openedAt, entryReason, priceSource, status, livePrice, closedAt, exitReason,
             signedPts, signedPts * mult);
     }
 }

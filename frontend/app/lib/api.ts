@@ -1351,6 +1351,8 @@ export interface Quant7GatesSimulationView {
   takeProfit2: number;
   openedAt: string;
   entryReason: string;
+  /** Origin of {@link entryPrice} — e.g. "LIVE_PUSH" (real IBKR tick) or "DB_FALLBACK". */
+  priceSource: string;
   status:
     | 'OPEN'
     | 'CLOSED_FLOW_AVOID'

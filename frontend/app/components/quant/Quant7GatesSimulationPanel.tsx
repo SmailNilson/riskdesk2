@@ -155,6 +155,7 @@ function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: b
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${statusTone}`}>
           {row.status.replace('CLOSED_', '').replace(/_/g, ' ')}
         </span>
+        <PriceSourceBadge source={row.priceSource} />
         <span className="ml-auto text-[10px] font-mono text-slate-500" title={row.openedAt}>
           #{row.id} · {formatRelative(row.openedAt)}
         </span>
@@ -214,6 +215,28 @@ function PricePill({ label, value, tone }: { label: string; value: number; tone:
       <div className="text-[9px] text-slate-500 uppercase tracking-wider">{label}</div>
       <div className={`text-sm font-semibold ${tone}`}>{formatPrice(value)}</div>
     </div>
+  );
+}
+
+/**
+ * Provenance pill — tells the operator whether the row's prices come from a
+ * real IBKR tick ({@code LIVE_PUSH}) or a degraded DB fallback. During a
+ * feed outage every other indicator looks normal, so without this badge it's
+ * easy to misread a fallback-driven simulation as live signal.
+ */
+function PriceSourceBadge({ source }: { source: string | undefined }) {
+  if (!source) return null;
+  const live = source === 'LIVE_PUSH';
+  const tone = live
+    ? 'border-emerald-700 bg-emerald-950/30 text-emerald-300'
+    : 'border-amber-700 bg-amber-950/30 text-amber-300';
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${tone}`}
+      title={live ? 'Live IBKR tick' : `Price source: ${source}`}
+    >
+      {source}
+    </span>
   );
 }
 

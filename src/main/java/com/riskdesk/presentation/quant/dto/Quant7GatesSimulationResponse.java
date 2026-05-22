@@ -22,6 +22,8 @@ public record Quant7GatesSimulationResponse(
     double takeProfit2,
     Instant openedAt,
     String entryReason,
+    /** Origin of {@code entryPrice} — e.g. {@code LIVE_PUSH} (real IBKR tick) or {@code DB_FALLBACK}. */
+    String priceSource,
     String status,
     Double exitPrice,
     Instant closedAt,
@@ -40,6 +42,7 @@ public record Quant7GatesSimulationResponse(
             s.takeProfit2(),
             s.openedAt(),
             s.entryReason(),
+            s.priceSource(),
             s.status().name(),
             s.exitPrice(),
             s.closedAt(),

@@ -157,11 +157,15 @@ public class Quant7GatesSimulationService {
             tp2,
             now,
             describeEntry(pattern, direction),
+            // Carry the snapshot's price-source through so the panel and any
+            // downstream consumer can distinguish a live-tick entry from one
+            // driven by a DB fallback during a feed outage.
+            snapshot.priceSource() == null ? "" : snapshot.priceSource(),
             Quant7GatesSimulationStatus.OPEN,
             null, null, null, 0.0, 0.0);
         bucket(instrument).add(opened);
-        log.info("quant-sim OPEN id={} instr={} dir={} entry={} sl={} tp1={} tp2={} reason=\"{}\"",
-            opened.id(), instrument, direction, livePrice, sl, tp1, tp2, opened.entryReason());
+        log.info("quant-sim OPEN id={} instr={} dir={} entry={} src={} sl={} tp1={} tp2={} reason=\"{}\"",
+            opened.id(), instrument, direction, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
         publish(opened);
     }
 

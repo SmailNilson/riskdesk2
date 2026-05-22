@@ -51,6 +51,9 @@ class Quant7GatesSimulationServiceTest {
         // LONG plan: SL = entry - 25, TP1 = entry + 40
         assertThat(row.stopLoss()).isEqualTo(29687.25 - 25.0);
         assertThat(row.takeProfit1()).isEqualTo(29687.25 + 40.0);
+        // Provenance carries through from the snapshot — important for the
+        // panel to distinguish live ticks from DB-fallback during outages.
+        assertThat(row.priceSource()).isEqualTo("LIVE_PUSH");
     }
 
     @Test
