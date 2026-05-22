@@ -1324,7 +1324,58 @@ export const api = {
   // Backend: com.riskdesk.presentation.quant.QuantManualTradeController
   submitManualTrade: (instrument: string, payload: import('@/app/components/quant/types').ManualTradeRequest) =>
     post<TradeExecutionView>(`/api/quant/manual-trade/${instrument}`, payload),
+
+  // ── Quant 7-Gates simulation harness ──────────────────────────────────
+  // Backend: com.riskdesk.presentation.quant.Quant7GatesSimulationController
+  // Auto-runs simulated trades when the live snapshot stream signals
+  // (Abs Bull/Bear + Δ Confirmed + flow TRADE + HIGH confidence). Exits on
+  // flow AVOID or SL/TP. Lives in memory only — never touches Mentor /
+  // trade_simulations (Simulation Decoupling Rule).
+  listQuantSimulations: () =>
+    get<Quant7GatesSimulationView[]>(`/api/quant/simulations`),
+  listOpenQuantSimulations: () =>
+    get<Quant7GatesSimulationView[]>(`/api/quant/simulations/open`),
+  getQuantSimulationStats: () =>
+    get<Quant7GatesSimulationStats>(`/api/quant/simulations/stats`),
 };
+
+// ── Quant 7-Gates simulation types ──────────────────────────────────────
+/** Wire shape mirrors com.riskdesk.presentation.quant.dto.Quant7GatesSimulationResponse. */
+export interface Quant7GatesSimulationView {
+  id: number;
+  instrument: string;
+  direction: 'LONG' | 'SHORT';
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  openedAt: string;
+  entryReason: string;
+  status:
+    | 'OPEN'
+    | 'CLOSED_FLOW_AVOID'
+    | 'CLOSED_TP1'
+    | 'CLOSED_TP2'
+    | 'CLOSED_SL';
+  exitPrice: number | null;
+  closedAt: string | null;
+  exitReason: string | null;
+  /** Live P&L points (LONG: exit - entry, SHORT: entry - exit). Live-updated on OPEN rows. */
+  pnlPoints: number | null;
+  /** pnlPoints * contractMultiplier — convenient USD readout. */
+  pnlUsd: number | null;
+}
+
+export interface Quant7GatesSimulationStats {
+  closedCount: number;
+  wins: number;
+  losses: number;
+  /** Decided ratio in % (wins / (wins+losses)). Null when no rows are decided. */
+  winRatePct: number | null;
+  netPoints: number;
+  netUsd: number;
+  openCount: number;
+}
 
 // ── Active Positions types ──────────────────────────────────────────────
 export interface ActivePositionView {

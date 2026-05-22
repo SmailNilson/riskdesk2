@@ -74,6 +74,7 @@ public class QuantGateService {
     private final StructuralFilterEvaluator structuralEvaluator;
     private final org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider;
     private final org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider;
+    private final org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
@@ -132,7 +133,7 @@ public class QuantGateService {
         this(absorptionPort, distributionPort, cyclePort, deltaPort, livePricePort,
             statePort, notificationPort, historyStore, narrationService, sessionMemoryService,
             advisorService, evaluator, indicatorsPort, strategyPort, structuralEvaluator,
-            new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
+            new EmptyObjectProvider<>(), new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -152,7 +153,8 @@ public class QuantGateService {
                             StrategyPort strategyPort,
                             StructuralFilterEvaluator structuralEvaluator,
                             org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider,
-                            org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider) {
+                            org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider,
+                            org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
         this.cyclePort = cyclePort;
@@ -170,6 +172,7 @@ public class QuantGateService {
         this.structuralEvaluator = structuralEvaluator;
         this.autoArmServiceProvider = autoArmServiceProvider;
         this.setupOrchestrationProvider = setupOrchestrationProvider;
+        this.simulationServiceProvider = simulationServiceProvider;
     }
 
     /**
@@ -288,6 +291,22 @@ public class QuantGateService {
             }
         } catch (RuntimeException e) {
             log.warn("auto-arm onSnapshot failed instrument={}: {}", instrument, e.toString());
+        }
+
+        // Quant 7-Gates simulation harness — opens/closes simulated trades based
+        // on the live order-flow pattern (Abs Bull/Bear + Δ Confirmed + flow
+        // TRADE + HIGH confidence → entry; flow AVOID or SL/TP → exit). Lives
+        // in memory only and never writes to mentor / trade_simulations so the
+        // Simulation Decoupling Rule stays intact. ObjectProvider keeps tests
+        // that omit the bean working without the harness.
+        try {
+            com.riskdesk.application.quant.simulation.Quant7GatesSimulationService simSvc =
+                simulationServiceProvider.getIfAvailable();
+            if (simSvc != null) {
+                simSvc.onSnapshot(instrument, result, narration.pattern());
+            }
+        } catch (RuntimeException e) {
+            log.warn("quant-sim onSnapshot failed instrument={}: {}", instrument, e.toString());
         }
 
         // Setup orchestration pipeline (scalp/day-trading fusion — PR follows analysis doc).
