@@ -670,15 +670,15 @@ export interface TradeExecutionView {
   id: number;
   version: number | null;
   executionKey: string;
-  mentorSignalReviewId: number;
-  reviewAlertKey: string;
-  reviewRevision: number;
+  mentorSignalReviewId: number | null;
+  reviewAlertKey: string | null;
+  reviewRevision: number | null;
   brokerAccountId: string;
   instrument: string;
   timeframe: string;
   action: 'LONG' | 'SHORT';
   quantity: number | null;
-  triggerSource: 'MANUAL_ARMING';
+  triggerSource: 'MANUAL_ARMING' | 'WTX_AUTO' | 'PLAYBOOK_AUTO';
   requestedBy: string | null;
   status:
     | 'PENDING_ENTRY_SUBMISSION'
@@ -1157,6 +1157,47 @@ export const api = {
   getFullPlaybook: (instrument: string, timeframe: string) =>
     get<FinalVerdict>(`/api/playbook/${instrument}/${timeframe}/full`),
 
+  getPlaybookAutomation: async (instrument: string, timeframe: string) => {
+    const response = await fetch(
+      `${BASE}/api/playbook/automation/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}`,
+      { cache: 'no-store' },
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) return null;
+    return (await response.json()) as PlaybookAutomationView;
+  },
+
+  updatePlaybookAutomation: async (
+    instrument: string,
+    timeframe: string,
+    request: PlaybookAutomationUpdateRequest,
+  ) => {
+    const response = await fetch(
+      `${BASE}/api/playbook/automation/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      },
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) return null;
+    return (await response.json()) as PlaybookAutomationView;
+  },
+
+  getPlaybookAutomationDecisions: async (
+    instrument: string,
+    timeframe: string,
+    limit = 10,
+  ) => {
+    const response = await fetch(
+      `${BASE}/api/playbook/automation/${encodeURIComponent(instrument)}/${encodeURIComponent(timeframe)}/decisions?limit=${limit}`,
+      { cache: 'no-store' },
+    );
+    if (!response.ok) return [];
+    return (await response.json()) as PlaybookAutomationDecisionView[];
+  },
+
   // ── Strategy engine (new probabilistic engine — read-only) ────────
   getStrategyDecision: (instrument: string, timeframe: string) =>
     get<StrategyDecisionView>(`/api/strategy/${instrument}/${timeframe}`),
@@ -1481,6 +1522,80 @@ export interface FinalVerdict {
   agentVerdicts: AgentVerdictView[];
   warnings: string[];
   eligibility: string;
+}
+
+export interface PlaybookAutomationView {
+  instrument: string;
+  timeframe: string;
+  paperThreshold: number;
+  liveThreshold: number;
+  paperEnabled?: boolean;
+  autoIbkrEnabled: boolean;
+  quantity: number;
+  brokerAccountId?: string | null;
+  updatedAt: string | null;
+}
+
+export interface PlaybookAutomationUpdateRequest {
+  paperThreshold?: number;
+  liveThreshold?: number;
+  paperEnabled?: boolean;
+  autoIbkrEnabled?: boolean;
+  quantity?: number;
+  brokerAccountId?: string | null;
+}
+
+export type PlaybookAutomationRoutingOutcome =
+  | WtxRoutingOutcome
+  | 'PAPER_ONLY'
+  | 'SKIPPED_BELOW_PAPER_THRESHOLD'
+  | 'SKIPPED_BELOW_LIVE_THRESHOLD'
+  | 'SKIPPED_NO_PLAN'
+  | 'SKIPPED_NO_DECISION'
+  | string;
+
+export type PlaybookAutomationSimulationStatus =
+  | 'PENDING_ENTRY'
+  | 'ACTIVE'
+  | 'WIN'
+  | 'LOSS'
+  | 'MISSED'
+  | 'CANCELLED'
+  | 'REVERSED'
+  | string;
+
+export interface PlaybookAutomationProfitabilitySummaryView {
+  totalDecisions?: number | null;
+  paperCount?: number | null;
+  liveCount?: number | null;
+  wins?: number | null;
+  losses?: number | null;
+  winRate?: number | null;
+  totalPnl?: number | null;
+  averagePnl?: number | null;
+  profitFactor?: number | null;
+}
+
+export interface PlaybookAutomationDecisionView {
+  id: number | null;
+  createdAt: string | null;
+  instrument: string;
+  timeframe: string;
+  direction: 'LONG' | 'SHORT' | 'FLAT' | string | null;
+  checklistScore: number | null;
+  paperThreshold: number | null;
+  liveThreshold: number | null;
+  autoIbkrEnabled: boolean | null;
+  quantity: number | null;
+  brokerAccountId?: string | null;
+  routingOutcome: PlaybookAutomationRoutingOutcome | null;
+  routingErrorMessage: string | null;
+  simulationStatus: PlaybookAutomationSimulationStatus | null;
+  simulationPnl: number | null;
+  pnl: number | null;
+  rrRatio: number | null;
+  verdict: string | null;
+  profitabilitySummary: PlaybookAutomationProfitabilitySummaryView | null;
 }
 
 // ── Strategy Engine (new probabilistic engine) ────────────────────────────

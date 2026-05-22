@@ -110,6 +110,7 @@ These should stay transport-oriented only.
 - `application/service/MentorIntermarketService.java`
 - `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
 - `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/PlaybookService.java` — evaluates SMC playbook candidates from internal indicator/candle state. `PlaybookAutomationService` listens to `CandleClosed`, freezes qualifying `PlaybookDecision` rows, creates `ReviewType.PLAYBOOK` forward simulations at 4/7, and routes optional live entries through the existing execution/IBKR path only after explicit per-`(instrument,timeframe)` Auto-IBKR opt-in and broker preflight.
 - `application/service/strategy/WtxStrategyService.java` — WaveTrend XT strategy orchestrator. Listens to `CandleClosed` per instrument/timeframe, evaluates the configured profile (`BASELINE` / `SESSION_ATR` / `HTF` / `STRICT`), applies trailing-ATR exits, attaches filter decisions to the enrichment snapshot, and optionally routes through `WtxExecutionBridge` for IBKR. **State is per `(instrument, timeframe)`** — `WtxStrategyState` carries `timeframe` and `wtx_strategy_states` has a composite PK, so 5m and 10m each have their own position, profile, auto-execution toggle and daily max-loss. REST: `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`, `/auto-execution`).
 - `application/service/strategy/WtxExecutionBridge.java` — opt-in IBKR routing for WTX. Writes a `TradeExecutionRecord` (mentorSignalReviewId = null, triggerSource = WTX_AUTO) keyed by `wtx:<instrument>:<timeframe>:<signalTs>:<action>`, then calls `IbkrOrderService.submitEntryOrder`. Open-row lookups are timeframe-scoped (`findActiveByInstrumentAndTimeframeAndTriggerSource`). Disabled when `state.autoExecutionEnabled = false` (default). `submit(...)` returns a `WtxRoutingOutcome` (`ROUTED` / `ACK_PENDING` / `SKIPPED_*` / `FAILED_*`) — logged at INFO, persisted on `wtx_signal_history.routing_outcome`, and shown as a chip in the WTX panel so a non-routed signal is always diagnosable. `ACK_PENDING` means IBKR has an order id but the initial acknowledgement timed out; delayed `orderStatus` / `execDetails` callbacks can still reconcile the execution row.
 - Domain helpers in `domain/engine/strategy/wtx/`:
@@ -250,6 +251,20 @@ Current behavior:
   - `LOSS`
   - `MISSED`
   - `CANCELLED`
+
+### Playbook Auto-Simulation + Auto-IBKR contract
+
+PLAYBOOK automation is a playbook-specific workflow driven by `CandleClosed`, not frontend polling. It uses only internal candle/price state sourced from `IBKR Gateway -> PostgreSQL -> internal services`.
+
+Current behavior:
+
+- Per-panel state lives in `playbook_automation_states`: `paperThreshold=4`, `liveThreshold=5`, `paperEnabled=true`, `autoExecutionEnabled=false`, `configuredOrderQty=1`.
+- Qualifying decisions are frozen in `playbook_decisions` with setup identity, score, direction, entry/SL/TP, evaluated candle time, routing outcome, and price source.
+- Paper simulation uses `ReviewType.PLAYBOOK` and resolves the plan from `PlaybookDecision`; it does not write simulation state back to Mentor review/audit records.
+- Auto-IBKR is a second, explicit opt-in gate and requires a selected broker account, complete plan, score >= 5/7, positive quantity, non-late entry, live IBKR price source, no duplicate execution, IBKR enabled, and margin/preflight approval.
+- Every non-routed path exposes a stable diagnostic outcome such as `PAPER_ONLY`, `SKIPPED_NO_PLAN`, `SKIPPED_NO_QTY`, `SKIPPED_NO_ACCOUNT`, `SKIPPED_STALE_PRICE_SOURCE`, `SKIPPED_INSUFFICIENT_MARGIN`, or `SKIPPED_IBKR_DISABLED`.
+- REST: `GET/PUT /api/playbook/automation/{instrument}/{timeframe}` and `GET /api/playbook/automation/{instrument}/{timeframe}/decisions?limit=N`.
+- WebSocket: `/topic/playbook-decisions/{instrument}/{timeframe}`.
 
 ### Execution Foundation
 

@@ -1,6 +1,38 @@
 # AI Handoff
 
-Last updated: 2026-05-20
+Last updated: 2026-05-22
+
+## Playbook Auto-Simulation + Auto-IBKR (2026-05-22)
+
+PLAYBOOK now has a candle-close automation path that stays inside the internal
+IBKR/PostgreSQL data flow. It evaluates deterministic `PlaybookService` output
+on `CandleClosed`, persists a frozen `PlaybookDecision`, starts forward paper
+simulation at 4/7, and can route a live IBKR entry at 5/7 only when Auto-IBKR is
+explicitly enabled for that `(instrument,timeframe)`.
+
+What landed:
+
+- BDD acceptance coverage in `src/test/resources/features/playbook-auto-routing.feature`
+  with executable test glue under `src/test/java/com/riskdesk/bdd/steps/`.
+- Domain tests in `src/test/java/com/riskdesk/domain/playbook/automation/`.
+- `PlaybookAutomationService`, `PlaybookDecision`, and `playbook_automation_states`
+  / `playbook_decisions` persistence.
+- `ReviewType.PLAYBOOK` simulation resolution from `PlaybookDecision`, not fake
+  Mentor review JSON.
+- `ExecutionTriggerSource.PLAYBOOK_AUTO` live routing through the existing
+  `IbkrOrderService`, including ACK-pending handling and broker preflight reuse.
+- REST endpoints:
+  - `GET/PUT /api/playbook/automation/{instrument}/{timeframe}`
+  - `GET /api/playbook/automation/{instrument}/{timeframe}/decisions?limit=N`
+- WebSocket fan-out on `/topic/playbook-decisions/{instrument}/{timeframe}`.
+
+Important safety gates:
+
+- Auto-IBKR defaults OFF and requires an explicit account-bound toggle.
+- Live routing requires complete entry/SL/TP, score >= 5/7, positive quantity,
+  non-late entry, live IBKR price source, no active duplicate, IBKR enabled, and
+  broker preflight approval.
+- Paper simulation still records late entries for forward stats.
 
 ## IBKR — persistent account snapshot subscription (2026-05-20)
 

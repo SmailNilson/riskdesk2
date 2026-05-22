@@ -21,5 +21,10 @@ public enum ExecutionTriggerSource {
      * Auto-routed execution from the WTX strategy ({@link com.riskdesk.application.service.strategy.WtxExecutionBridge}).
      * Opt-in per instrument via the WTX panel "Auto-IBKR" toggle. No mentor review is involved.
      */
-    WTX_AUTO
+    WTX_AUTO,
+    /**
+     * Auto-routed execution from deterministic PLAYBOOK automation.
+     * Opt-in per instrument/timeframe via the PLAYBOOK panel. No mentor review is involved.
+     */
+    PLAYBOOK_AUTO
 }
