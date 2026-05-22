@@ -25,6 +25,18 @@ export default function Quant7GatesSimulationPanel() {
     for (const r of rows) {
       (r.status === 'OPEN' ? o : c).push(r);
     }
+    // The incoming list is globally ordered by openedAt, so a long-running
+    // trade that just closed would otherwise be pushed off the bottom by
+    // newer-opened but older-closed rows. Re-order closed by closedAt
+    // (fallback openedAt) before the 20-row slice in render so "recently
+    // closed" matches actual exit recency — same key the backend uses for
+    // history eviction, so the two views agree.
+    c.sort((a, b) => {
+      const ka = Date.parse(a.closedAt ?? a.openedAt);
+      const kb = Date.parse(b.closedAt ?? b.openedAt);
+      const diff = kb - ka;
+      return Number.isFinite(diff) ? diff : 0;
+    });
     return { open: o, closed: c };
   }, [rows]);
 
