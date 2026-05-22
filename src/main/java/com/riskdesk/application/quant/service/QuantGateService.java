@@ -74,6 +74,7 @@ public class QuantGateService {
     private final StructuralFilterEvaluator structuralEvaluator;
     private final org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider;
     private final org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider;
+    private final org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
@@ -132,7 +133,7 @@ public class QuantGateService {
         this(absorptionPort, distributionPort, cyclePort, deltaPort, livePricePort,
             statePort, notificationPort, historyStore, narrationService, sessionMemoryService,
             advisorService, evaluator, indicatorsPort, strategyPort, structuralEvaluator,
-            new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
+            new EmptyObjectProvider<>(), new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -152,7 +153,8 @@ public class QuantGateService {
                             StrategyPort strategyPort,
                             StructuralFilterEvaluator structuralEvaluator,
                             org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider,
-                            org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider) {
+                            org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider,
+                            org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
         this.cyclePort = cyclePort;
@@ -170,6 +172,7 @@ public class QuantGateService {
         this.structuralEvaluator = structuralEvaluator;
         this.autoArmServiceProvider = autoArmServiceProvider;
         this.setupOrchestrationProvider = setupOrchestrationProvider;
+        this.simulationServiceProvider = simulationServiceProvider;
     }
 
     /**
@@ -255,6 +258,27 @@ public class QuantGateService {
 
             publish(instrument, result, prevSignaled);
             notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
+
+            // Quant 7-Gates simulation harness — opens/closes simulated trades
+            // based on the live order-flow pattern (Abs Bull/Bear + Δ Confirmed
+            // + flow TRADE + HIGH confidence → entry; flow AVOID or SL/TP →
+            // exit). Held INSIDE the per-instrument lock so the harness sees
+            // ticks in the same order as the publish stream — without this,
+            // a slow advisor call on tick N could let tick N+1's simulation
+            // update commit first, producing out-of-order entries/exits and
+            // wrong P&L. Stateful aggregate → ordering matters more than
+            // throughput. Lives in memory only and never writes to mentor /
+            // trade_simulations so the Simulation Decoupling Rule stays intact.
+            // ObjectProvider keeps tests that omit the bean working.
+            try {
+                com.riskdesk.application.quant.simulation.Quant7GatesSimulationService simSvc =
+                    simulationServiceProvider.getIfAvailable();
+                if (simSvc != null) {
+                    simSvc.onSnapshot(instrument, result, narration.pattern());
+                }
+            } catch (RuntimeException e) {
+                log.warn("quant-sim onSnapshot failed instrument={}: {}", instrument, e.toString());
+            }
 
             // Decide-and-mark inside the lock so two concurrent scans can't
             // both pass the auto-advise gate for the same score.

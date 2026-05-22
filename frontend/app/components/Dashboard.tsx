@@ -10,6 +10,7 @@ import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import AiMentorDesk from './AiMentorDesk';
 import QuantGatePanel from './quant/QuantGatePanel';
+import Quant7GatesSimulationPanel from './quant/Quant7GatesSimulationPanel';
 import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
 import QuantSetupNotification from './quant/QuantSetupNotification';
 import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
@@ -283,6 +284,7 @@ export default function Dashboard() {
           <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
           <SetupRecommendationPanel />
           <QuantGatePanel />
+          <Quant7GatesSimulationPanel />
           <AiMentorDesk
             instrument={instrument}
             timeframe={timeframe}
