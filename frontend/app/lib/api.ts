@@ -1720,3 +1720,82 @@ export async function updateWtxOrderQty(instrument: string, timeframe: string, q
   if (!res.ok) return null;
   return res.json();
 }
+
+// ── Playbook Strategy ─────────────────────────────────────────────────────────
+
+export type PlaybookProfileType = 'BASELINE' | 'SESSION_ATR' | 'STRICT';
+
+export interface PlaybookStrategyStateView {
+  instrument: string;
+  timeframe: string;
+  currentDirection: 'FLAT' | 'LONG' | 'SHORT';
+  dailyPnl: number;
+  dayStartEquity: number;
+  currentEquity: number;
+  maxDailyLossUsd: number;
+  maxLossHit: boolean;
+  activeProfile: PlaybookProfileType;
+  autoExecutionEnabled: boolean;
+  configuredOrderQty: number;
+  canTrade: boolean;
+}
+
+export interface PlaybookSignalView {
+  id: string;
+  instrument: string;
+  timeframe: string;
+  direction: string;
+  checklistScore: number;
+  setupType: string;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  evaluatedAt: string;
+  routingOutcome: WtxRoutingOutcome | null;
+  routingErrorMessage: string | null;
+}
+
+export async function getPlaybookStrategyState(instrument: string, timeframe: string): Promise<PlaybookStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/playbook-strategy/state/${instrument}/${timeframe}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function getPlaybookStrategyRecentSignals(instrument: string, limit = 20, timeframe?: string): Promise<PlaybookSignalView[]> {
+  const tf = timeframe ? `&timeframe=${timeframe}` : '';
+  const res = await fetch(`${BASE}/api/playbook-strategy/signals/recent?instrument=${instrument}&limit=${limit}${tf}`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function updatePlaybookStrategyProfile(instrument: string, timeframe: string, profile: PlaybookProfileType): Promise<PlaybookStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/playbook-strategy/state/${instrument}/${timeframe}/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updatePlaybookStrategyAutoExecution(instrument: string, timeframe: string, enabled: boolean): Promise<PlaybookStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/playbook-strategy/state/${instrument}/${timeframe}/auto-execution`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updatePlaybookStrategyOrderQty(instrument: string, timeframe: string, qty: number): Promise<PlaybookStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/playbook-strategy/state/${instrument}/${timeframe}/order-qty`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qty }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+

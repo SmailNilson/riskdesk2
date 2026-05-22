@@ -18,6 +18,9 @@ import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
+import com.riskdesk.domain.engine.strategy.playbook.PlaybookSignal;
+import com.riskdesk.domain.engine.strategy.playbook.port.PlaybookSignalHistoryPort;
+import com.riskdesk.application.service.strategy.PlaybookStrategyService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -75,6 +78,8 @@ public class TradeSimulationService {
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
     private final TrailingStopProperties trailingStopProperties;
     private final TradeSimulationRepositoryPort simulationRepository;
+    private final ObjectProvider<PlaybookSignalHistoryPort> playbookHistoryProvider;
+    private final ObjectProvider<PlaybookStrategyService> playbookServiceProvider;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
@@ -82,7 +87,9 @@ public class TradeSimulationService {
                                   ObjectMapper objectMapper,
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider,
                                   TrailingStopProperties trailingStopProperties,
-                                  TradeSimulationRepositoryPort simulationRepository) {
+                                  TradeSimulationRepositoryPort simulationRepository,
+                                  ObjectProvider<PlaybookSignalHistoryPort> playbookHistoryProvider,
+                                  ObjectProvider<PlaybookStrategyService> playbookServiceProvider) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
@@ -90,6 +97,8 @@ public class TradeSimulationService {
         this.messagingProvider = messagingProvider;
         this.trailingStopProperties = trailingStopProperties;
         this.simulationRepository = simulationRepository;
+        this.playbookHistoryProvider = playbookHistoryProvider;
+        this.playbookServiceProvider = playbookServiceProvider;
     }
 
     /**
@@ -746,6 +755,185 @@ public class TradeSimulationService {
     }
 
     private record TradePlan(boolean isLong, BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {
+    }
+
+    @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
+    public void refreshPendingPlaybookSimulations() {
+        PlaybookStrategyService playbookService = playbookServiceProvider.getIfAvailable();
+        PlaybookSignalHistoryPort playbookHistory = playbookHistoryProvider.getIfAvailable();
+        if (playbookService == null || playbookHistory == null) {
+            return;
+        }
+
+        List<TradeSimulation> openPlaybookSims = simulationRepository.findByStatuses(List.of(
+            TradeSimulationStatus.PENDING_ENTRY,
+            TradeSimulationStatus.ACTIVE
+        )).stream().filter(s -> s.reviewType() == ReviewType.PLAYBOOK).toList();
+
+        Instant now = Instant.now();
+        List<TradeSimulation> surviving = cancelExpiredPlaybookSimulations(openPlaybookSims, now, playbookHistory, playbookService);
+        surviving = reverseConflictingPlaybookTrades(surviving, now, playbookHistory, playbookService);
+
+        for (TradeSimulation sim : surviving) {
+            try {
+                List<PlaybookSignal> recent = playbookHistory.findRecent(sim.instrument(), 50);
+                PlaybookSignal signal = recent.stream()
+                    .filter(sig -> sig.id().getMostSignificantBits() == sim.reviewId())
+                    .findFirst()
+                    .orElse(null);
+
+                if (signal == null) {
+                    continue;
+                }
+
+                Instrument instrument;
+                try {
+                    instrument = Instrument.valueOf(sim.instrument());
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+
+                Instant from = sim.activationTime() != null ? sim.activationTime() : sim.createdAt();
+                List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
+                if (candles.isEmpty()) {
+                    continue;
+                }
+
+                TradePlan plan = new TradePlan(
+                    "LONG".equalsIgnoreCase(signal.direction()),
+                    signal.entryPrice(),
+                    signal.stopLoss(),
+                    signal.takeProfit1()
+                );
+
+                SimulationResult result = evaluateWithPlan(plan, currentSimState(sim), candles);
+                if (hasSimulationChanged(sim, result)) {
+                    TradeSimulation next = applyResult(sim, result);
+                    TradeSimulation saved = simulationRepository.save(next);
+                    publishSimulationEvent(saved);
+
+                    if (isTerminal(saved.simulationStatus())) {
+                        BigDecimal exitPrice = getExitPrice(plan, saved);
+                        playbookService.handleVirtualExit(signal, saved.simulationStatus(), exitPrice);
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("Playbook simulation skipped for simulation {} (reviewId={}): {}",
+                    sim.id(), sim.reviewId(), e.getMessage());
+            }
+        }
+    }
+
+    private List<TradeSimulation> cancelExpiredPlaybookSimulations(
+            List<TradeSimulation> candidates,
+            Instant now,
+            PlaybookSignalHistoryPort playbookHistory,
+            PlaybookStrategyService playbookService) {
+        List<TradeSimulation> surviving = new ArrayList<>();
+        for (TradeSimulation sim : candidates) {
+            if (sim.simulationStatus() == TradeSimulationStatus.PENDING_ENTRY
+                    && sim.createdAt() != null
+                    && Duration.between(sim.createdAt(), now).compareTo(PENDING_ENTRY_TIMEOUT) > 0) {
+                TradeSimulation cancelled = sim.withStatus(TradeSimulationStatus.CANCELLED, now);
+                TradeSimulation saved = simulationRepository.save(cancelled);
+                publishSimulationEvent(saved);
+                log.info("Playbook Simulation {} CANCELLED — PENDING_ENTRY expired after 1h (reviewType={}, reviewId={}, instrument={}, action={})",
+                        saved.id(), saved.reviewType(), saved.reviewId(), saved.instrument(), saved.action());
+
+                resolveAndNotifyPlaybookExit(saved, playbookHistory, playbookService);
+            } else {
+                surviving.add(sim);
+            }
+        }
+        return surviving;
+    }
+
+    private List<TradeSimulation> reverseConflictingPlaybookTrades(
+            List<TradeSimulation> candidates,
+            Instant now,
+            PlaybookSignalHistoryPort playbookHistory,
+            PlaybookStrategyService playbookService) {
+        Map<String, List<TradeSimulation>> byInstrument = new HashMap<>();
+        for (TradeSimulation sim : candidates) {
+            if (sim.instrument() != null && sim.action() != null) {
+                byInstrument.computeIfAbsent(sim.instrument(), k -> new ArrayList<>()).add(sim);
+            }
+        }
+
+        List<TradeSimulation> toClose = new ArrayList<>();
+        for (List<TradeSimulation> group : byInstrument.values()) {
+            if (group.size() < 2) continue;
+            boolean hasLong = group.stream().anyMatch(s -> "LONG".equalsIgnoreCase(s.action()));
+            boolean hasShort = group.stream().anyMatch(s -> "SHORT".equalsIgnoreCase(s.action()));
+            if (!hasLong || !hasShort) continue;
+
+            group.sort(Comparator.comparing(s -> s.createdAt() != null ? s.createdAt() : Instant.MIN));
+
+            TradeSimulation newest = group.get(group.size() - 1);
+            for (TradeSimulation older : group) {
+                if (older == newest) continue;
+                if (older.action() != null && !older.action().equalsIgnoreCase(newest.action())) {
+                    toClose.add(older);
+                }
+            }
+        }
+
+        List<TradeSimulation> surviving = new ArrayList<>(candidates);
+        for (TradeSimulation stale : toClose) {
+            TradeSimulationStatus closeStatus = stale.simulationStatus() == TradeSimulationStatus.ACTIVE
+                    ? TradeSimulationStatus.REVERSED
+                    : TradeSimulationStatus.CANCELLED;
+            TradeSimulation closed = stale.withStatus(closeStatus, now);
+            TradeSimulation saved = simulationRepository.save(closed);
+            publishSimulationEvent(saved);
+            surviving.remove(stale);
+            log.info("Playbook Simulation {} {} — directional reversal on {} (was {}, newer {} signal exists)",
+                    saved.id(), closeStatus, saved.instrument(), saved.action(),
+                    "LONG".equalsIgnoreCase(saved.action()) ? "SHORT" : "LONG");
+
+            resolveAndNotifyPlaybookExit(saved, playbookHistory, playbookService);
+        }
+        return surviving;
+    }
+
+    private void resolveAndNotifyPlaybookExit(
+            TradeSimulation saved,
+            PlaybookSignalHistoryPort playbookHistory,
+            PlaybookStrategyService playbookService) {
+        try {
+            List<PlaybookSignal> recent = playbookHistory.findRecent(saved.instrument(), 50);
+            PlaybookSignal signal = recent.stream()
+                .filter(sig -> sig.id().getMostSignificantBits() == saved.reviewId())
+                .findFirst()
+                .orElse(null);
+            if (signal != null) {
+                BigDecimal exitPrice = signal.entryPrice();
+                playbookService.handleVirtualExit(signal, saved.simulationStatus(), exitPrice);
+            }
+        } catch (Exception e) {
+            log.error("Failed to notify playbook exit for simulation {}: {}", saved.id(), e.getMessage());
+        }
+    }
+
+    private boolean isTerminal(TradeSimulationStatus status) {
+        return status == TradeSimulationStatus.WIN
+            || status == TradeSimulationStatus.LOSS
+            || status == TradeSimulationStatus.MISSED
+            || status == TradeSimulationStatus.CANCELLED
+            || status == TradeSimulationStatus.REVERSED;
+    }
+
+    private BigDecimal getExitPrice(TradePlan plan, TradeSimulation saved) {
+        if (saved.trailingExitPrice() != null) {
+            return saved.trailingExitPrice();
+        }
+        if (saved.simulationStatus() == TradeSimulationStatus.WIN) {
+            return plan.takeProfit();
+        }
+        if (saved.simulationStatus() == TradeSimulationStatus.LOSS) {
+            return plan.stopLoss();
+        }
+        return plan.entryPrice();
     }
 
     public record SimulationResult(
