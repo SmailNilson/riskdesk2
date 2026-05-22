@@ -62,11 +62,11 @@ function StatsStrip({
   stats: ReturnType<typeof useQuant7GatesSimulations>['stats'];
   openCount: number;
 }) {
-  const closedCount = stats?.closedCount ?? 0;
-  const wins = stats?.wins ?? 0;
-  const losses = stats?.losses ?? 0;
-  const winRate = stats?.winRatePct ?? null;
-  const netUsd = stats?.netUsd ?? 0;
+  const closedCount = stats.closedCount;
+  const wins = stats.wins;
+  const losses = stats.losses;
+  const winRate = stats.winRatePct;
+  const netUsd = stats.netUsd;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 border border-slate-800 rounded bg-slate-950/60 p-2">
@@ -81,7 +81,7 @@ function StatsStrip({
       />
       <StatCell
         label="Net P&L"
-        value={`${netUsd >= 0 ? '+' : ''}$${Math.abs(netUsd).toFixed(0)}`}
+        value={formatSignedUsd(netUsd)}
         tone={netUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}
       />
     </div>
@@ -187,7 +187,7 @@ function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: b
         <div className={pnlTone}>
           {pnlPts >= 0 ? '+' : ''}{pnlPts.toFixed(2)} pts
           {row.pnlUsd != null && (
-            <span className="ml-2">({pnlUsd >= 0 ? '+' : ''}${Math.abs(pnlUsd).toFixed(0)})</span>
+            <span className="ml-2">({formatSignedUsd(pnlUsd)})</span>
           )}
         </div>
       </div>
@@ -225,6 +225,20 @@ function statusToneFor(status: Quant7GatesSimulationView['status']): string {
     case 'CLOSED_SL':         return 'border-rose-700 bg-rose-950/30 text-rose-300';
     case 'CLOSED_FLOW_AVOID': return 'border-slate-600 bg-slate-900/60 text-slate-300';
   }
+}
+
+/**
+ * Signed USD formatter that preserves the minus sign on losses.
+ *
+ * <p>Without this, the previous {@code Math.abs(...)} pattern made a -$420
+ * loss render as "$420" with only the surrounding text colour indicating
+ * direction — confusing in raw read and outright wrong when copy-pasted
+ * outside the dashboard. Returns "+$N" or "-$N" with no decimals.
+ */
+function formatSignedUsd(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  const sign = value >= 0 ? '+' : '-';
+  return `${sign}$${Math.abs(value).toFixed(0)}`;
 }
 
 function formatPrice(v: number | null): string {
