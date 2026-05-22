@@ -262,6 +262,7 @@ export default function Dashboard() {
               instrument={instrument}
               timeframe={timeframe}
               selectedBrokerAccountId={selectedIbkrAccountId}
+              livePrice={prices[instrument]?.price ?? null}
             />
           </div>
           <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
