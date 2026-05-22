@@ -25,6 +25,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -261,7 +262,12 @@ class TradeSimulationServiceSchedulerTest {
             playbookDecisionRepositoryProvider
         );
 
-        Instant createdAt = Instant.parse("2026-05-22T12:00:00Z");
+        // Use a relative timestamp so the simulation does not trip the 1h
+        // PENDING_ENTRY expiry guard. The previous hardcoded "2026-05-22T12:00:00Z"
+        // turned green on the day it was introduced but became a time-bomb the
+        // moment wall-clock crossed 13:00Z — all subsequent CI runs cancelled
+        // the sim before reaching the WIN logic.
+        Instant createdAt = Instant.now().minus(Duration.ofMinutes(30));
         TradeSimulation sim = new TradeSimulation(
             15L, 77L, ReviewType.PLAYBOOK, "MCL", "LONG",
             TradeSimulationStatus.PENDING_ENTRY,
