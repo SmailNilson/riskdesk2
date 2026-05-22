@@ -39,7 +39,23 @@ export function useQuant7GatesSimulations(): State {
       .listQuantSimulations()
       .then(initial => {
         if (cancelled) return;
-        setRows(initial);
+        // Merge by id rather than overwriting — on a fast WS connect / slow
+        // HTTP boot, live updates can land BEFORE the REST snapshot resolves.
+        // Last-write-wins on duplicates would clobber freshly-opened or
+        // freshly-closed rows the WS already delivered. Live state takes
+        // precedence; REST only fills in rows the WS hasn't pushed yet.
+        setRows(prev => {
+          const seen = new Set(prev.map(r => r.id));
+          const merged = prev.slice();
+          for (const r of initial) {
+            if (!seen.has(r.id)) merged.push(r);
+          }
+          merged.sort((a, b) => {
+            const at = Date.parse(b.openedAt) - Date.parse(a.openedAt);
+            return Number.isFinite(at) ? at : 0;
+          });
+          return merged;
+        });
       })
       .catch(err => console.warn('quant-sim bootstrap failed', err));
     api

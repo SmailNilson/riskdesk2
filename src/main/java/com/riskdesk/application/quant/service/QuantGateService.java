@@ -259,6 +259,27 @@ public class QuantGateService {
             publish(instrument, result, prevSignaled);
             notificationPort.publishNarration(instrument, result, narration.pattern(), narration.markdown());
 
+            // Quant 7-Gates simulation harness — opens/closes simulated trades
+            // based on the live order-flow pattern (Abs Bull/Bear + Δ Confirmed
+            // + flow TRADE + HIGH confidence → entry; flow AVOID or SL/TP →
+            // exit). Held INSIDE the per-instrument lock so the harness sees
+            // ticks in the same order as the publish stream — without this,
+            // a slow advisor call on tick N could let tick N+1's simulation
+            // update commit first, producing out-of-order entries/exits and
+            // wrong P&L. Stateful aggregate → ordering matters more than
+            // throughput. Lives in memory only and never writes to mentor /
+            // trade_simulations so the Simulation Decoupling Rule stays intact.
+            // ObjectProvider keeps tests that omit the bean working.
+            try {
+                com.riskdesk.application.quant.simulation.Quant7GatesSimulationService simSvc =
+                    simulationServiceProvider.getIfAvailable();
+                if (simSvc != null) {
+                    simSvc.onSnapshot(instrument, result, narration.pattern());
+                }
+            } catch (RuntimeException e) {
+                log.warn("quant-sim onSnapshot failed instrument={}: {}", instrument, e.toString());
+            }
+
             // Decide-and-mark inside the lock so two concurrent scans can't
             // both pass the auto-advise gate for the same score.
             shouldAdvise = shouldAutoAdvise(instrument, result);
@@ -291,22 +312,6 @@ public class QuantGateService {
             }
         } catch (RuntimeException e) {
             log.warn("auto-arm onSnapshot failed instrument={}: {}", instrument, e.toString());
-        }
-
-        // Quant 7-Gates simulation harness — opens/closes simulated trades based
-        // on the live order-flow pattern (Abs Bull/Bear + Δ Confirmed + flow
-        // TRADE + HIGH confidence → entry; flow AVOID or SL/TP → exit). Lives
-        // in memory only and never writes to mentor / trade_simulations so the
-        // Simulation Decoupling Rule stays intact. ObjectProvider keeps tests
-        // that omit the bean working without the harness.
-        try {
-            com.riskdesk.application.quant.simulation.Quant7GatesSimulationService simSvc =
-                simulationServiceProvider.getIfAvailable();
-            if (simSvc != null) {
-                simSvc.onSnapshot(instrument, result, narration.pattern());
-            }
-        } catch (RuntimeException e) {
-            log.warn("quant-sim onSnapshot failed instrument={}: {}", instrument, e.toString());
         }
 
         // Setup orchestration pipeline (scalp/day-trading fusion — PR follows analysis doc).
