@@ -234,7 +234,9 @@ export default function MentorSignalPanel({
       setExecutionsByReviewId(prev => {
         const next = { ...prev };
         for (const execution of executions) {
-          next[execution.mentorSignalReviewId] = execution;
+          if (execution.mentorSignalReviewId != null) {
+            next[execution.mentorSignalReviewId] = execution;
+          }
         }
         return next;
       });
@@ -410,7 +412,7 @@ export default function MentorSignalPanel({
       });
       setExecutionsByReviewId(prev => ({
         ...prev,
-        [execution.mentorSignalReviewId]: execution,
+        [review.id]: execution,
       }));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Impossible de creer l'execution Slice 1.");
@@ -425,10 +427,13 @@ export default function MentorSignalPanel({
 
     try {
       const updated = await api.submitTradeExecutionEntry(execution.id);
-      setExecutionsByReviewId(prev => ({
-        ...prev,
-        [updated.mentorSignalReviewId]: updated,
-      }));
+      const reviewId = updated.mentorSignalReviewId;
+      if (reviewId != null) {
+        setExecutionsByReviewId(prev => ({
+          ...prev,
+          [reviewId]: updated,
+        }));
+      }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Impossible de soumettre l'ordre d'entree.");
     } finally {
