@@ -7,6 +7,8 @@ import com.riskdesk.domain.analysis.port.MentorSignalReviewRepositoryPort;
 import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
+import com.riskdesk.domain.playbook.automation.PlaybookDecision;
+import com.riskdesk.domain.playbook.automation.port.PlaybookDecisionRepositoryPort;
 import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
@@ -25,6 +27,7 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -68,6 +71,12 @@ class TradeSimulationServiceSchedulerTest {
 
     @Mock
     private TradeSimulationRepositoryPort simulationRepository;
+
+    @Mock
+    private PlaybookDecisionRepositoryPort playbookDecisionRepository;
+
+    @Mock
+    private ObjectProvider<PlaybookDecisionRepositoryPort> playbookDecisionRepositoryProvider;
 
     private TradeSimulationService service;
 
@@ -238,6 +247,56 @@ class TradeSimulationServiceSchedulerTest {
         verify(messagingTemplate, never()).convertAndSend(eq("/topic/simulations"), (Object) any());
     }
 
+    @Test
+    void playbookSimulation_resolvesFromFrozenDecisionPlan() {
+        when(playbookDecisionRepositoryProvider.getIfAvailable()).thenReturn(playbookDecisionRepository);
+        TradeSimulationService playbookService = new TradeSimulationService(
+            reviewRepository,
+            auditRepository,
+            candleRepositoryPort,
+            new ObjectMapper(),
+            messagingProvider,
+            new TrailingStopProperties(),
+            simulationRepository,
+            playbookDecisionRepositoryProvider
+        );
+
+        Instant createdAt = Instant.parse("2026-05-22T12:00:00Z");
+        TradeSimulation sim = new TradeSimulation(
+            15L, 77L, ReviewType.PLAYBOOK, "MCL", "LONG",
+            TradeSimulationStatus.PENDING_ENTRY,
+            null, null, BigDecimal.ZERO, null, null, null,
+            createdAt
+        );
+        PlaybookDecision decision = playbookDecision(77L, createdAt);
+
+        when(simulationRepository.findByStatuses(any())).thenReturn(List.of(sim));
+        when(playbookDecisionRepository.findById(eq(77L))).thenReturn(Optional.of(decision));
+        when(candleRepositoryPort.findCandles(eq(com.riskdesk.domain.model.Instrument.MCL), eq("5m"), eq(createdAt)))
+            .thenReturn(List.of(new com.riskdesk.domain.model.Candle(
+                com.riskdesk.domain.model.Instrument.MCL,
+                "5m",
+                createdAt.plusSeconds(300),
+                new BigDecimal("62.40"),
+                new BigDecimal("63.50"),
+                new BigDecimal("62.20"),
+                new BigDecimal("63.20"),
+                10
+            )));
+        when(simulationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        playbookService.refreshPendingPlaybookSimulations();
+
+        verify(reviewRepository, never()).findById(any());
+        verify(auditRepository, never()).findById(any());
+        ArgumentCaptor<TradeSimulation> captor = ArgumentCaptor.forClass(TradeSimulation.class);
+        verify(simulationRepository).save(captor.capture());
+        TradeSimulation saved = captor.getValue();
+        assertThat(saved.reviewType()).isEqualTo(ReviewType.PLAYBOOK);
+        assertThat(saved.simulationStatus()).isEqualTo(TradeSimulationStatus.WIN);
+        assertThat(saved.activationTime()).isEqualTo(createdAt.plusSeconds(300));
+    }
+
     // ── Directional reversal ─────────────────────────────────────────────
 
     @Test
@@ -269,5 +328,34 @@ class TradeSimulationServiceSchedulerTest {
         TradeSimulation saved = captor.getValue();
         assertThat(saved.id()).isEqualTo(10L);
         assertThat(saved.simulationStatus()).isEqualTo(TradeSimulationStatus.REVERSED);
+    }
+
+    private static PlaybookDecision playbookDecision(long id, Instant now) {
+        return new PlaybookDecision(
+            id,
+            "playbook:MCL:10m:1779451200:LONG:ZONE_RETEST:test",
+            "MCL",
+            "10m",
+            "MCL:10m:1779451200:LONG:ZONE_RETEST:test",
+            "ZONE_RETEST",
+            "Test OB",
+            "LONG",
+            6,
+            "TRADE",
+            new BigDecimal("62.40"),
+            new BigDecimal("61.90"),
+            new BigDecimal("63.40"),
+            new BigDecimal("64.40"),
+            new BigDecimal("2.0"),
+            new BigDecimal("0.005"),
+            false,
+            "LIVE_IBKR",
+            now,
+            now,
+            now,
+            null,
+            null,
+            null
+        );
     }
 }

@@ -258,7 +258,11 @@ export default function Dashboard() {
             livePrice={prices[instrument]}
           />
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-            <PlaybookPanel instrument={instrument} timeframe={timeframe} />
+            <PlaybookPanel
+              instrument={instrument}
+              timeframe={timeframe}
+              selectedBrokerAccountId={selectedIbkrAccountId}
+            />
           </div>
           <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
           <OrderFlowPanel selectedInstrument={instrument} />

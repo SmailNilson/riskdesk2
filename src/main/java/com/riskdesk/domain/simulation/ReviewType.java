@@ -11,5 +11,7 @@ public enum ReviewType {
     /** Auto review persisted in {@code mentor_signal_reviews}. */
     SIGNAL,
     /** Manual "Ask Mentor" review persisted in {@code mentor_audits}. */
-    AUDIT
+    AUDIT,
+    /** Deterministic PLAYBOOK decision persisted in {@code playbook_decisions}. */
+    PLAYBOOK
 }

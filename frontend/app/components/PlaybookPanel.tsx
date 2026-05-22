@@ -1,11 +1,26 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { api, PlaybookEvaluation, FinalVerdict, ChecklistItem, SetupCandidate } from '../lib/api';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { Client } from '@stomp/stompjs';
+import SockJS from 'sockjs-client';
+import {
+  api,
+  PlaybookEvaluation,
+  FinalVerdict,
+  ChecklistItem,
+  SetupCandidate,
+  PlaybookAutomationView,
+  PlaybookAutomationDecisionView,
+  PlaybookAutomationRoutingOutcome,
+  PlaybookAutomationSimulationStatus,
+  PlaybookAutomationProfitabilitySummaryView,
+} from '../lib/api';
+import { API_BASE, WS_BASE } from '../lib/runtimeConfig';
 
 interface PlaybookPanelProps {
   instrument: string;
   timeframe: string;
+  selectedBrokerAccountId?: string | null;
 }
 
 // Auto-run agents when the setup crosses this checklist score.
@@ -14,6 +29,24 @@ const AUTO_TRIGGER_MIN_SCORE = 5;
 // Delay after a setup becomes "good" before auto-triggering, so that a setup that
 // flickers in and out doesn't burn calls every tick.
 const AUTO_TRIGGER_DEBOUNCE_MS = 2_000;
+const AUTOMATION_POLL_MS = 5_000;
+const PLAYBOOK_WS_URL = buildWsUrl(WS_BASE, API_BASE);
+const DEFAULT_AUTOMATION: PlaybookAutomationView = {
+  instrument: '',
+  timeframe: '',
+  paperThreshold: 4,
+  liveThreshold: 5,
+  autoIbkrEnabled: false,
+  quantity: 1,
+  brokerAccountId: null,
+  updatedAt: null,
+};
+
+function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined) {
+  const base = (wsBase || apiBase || '').replace(/\/$/, '');
+  if (!base) return '/ws';
+  return base.endsWith('/ws') ? base : `${base}/ws`;
+}
 
 // Key that identifies a "materially same" setup. Score drift (6/7 → 7/7 on the
 // same zone) does NOT invalidate a cached agent verdict; a different zone or
@@ -28,14 +61,18 @@ function setupIdentity(
   return [instrument, timeframe, playbook.bestSetup.zoneName, direction].join('|');
 }
 
-export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelProps) {
+export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAccountId }: PlaybookPanelProps) {
   const [playbook, setPlaybook] = useState<PlaybookEvaluation | null>(null);
+  const [automation, setAutomation] = useState<PlaybookAutomationView | null>(null);
+  const [automationDecisions, setAutomationDecisions] = useState<PlaybookAutomationDecisionView[]>([]);
   const [fullVerdict, setFullVerdict] = useState<FinalVerdict | null>(null);
   const [verdictRunAt, setVerdictRunAt] = useState<number | null>(null);
   const [agentsCollapsed, setAgentsCollapsed] = useState(false);
   const [, setNowTick] = useState(0); // forces re-render for the relative timestamp
   const [loading, setLoading] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [qtyDraft, setQtyDraft] = useState('1');
   const [error, setError] = useState<string | null>(null);
   // Remembers the last (zoneName|score|direction) that was auto-run so we don't
   // re-trigger Gemini on every 30s poll while nothing material has changed.
@@ -43,6 +80,7 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
   // The setup identity the currently-cached fullVerdict was run against.
   // When the setup identity changes, the cached verdict is stale and cleared.
   const verdictSetupKeyRef = useRef<string | null>(null);
+  const automationDraftPanelRef = useRef<string>('');
 
   const fetchPlaybook = useCallback(async () => {
     setLoading(true);
@@ -61,11 +99,55 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
     }
   }, [instrument, timeframe]);
 
+  const fetchAutomation = useCallback(async () => {
+    try {
+      const [config, decisions] = await Promise.all([
+        api.getPlaybookAutomation(instrument, timeframe),
+        api.getPlaybookAutomationDecisions(instrument, timeframe, 10),
+      ]);
+      setAutomation(config ?? {
+        ...DEFAULT_AUTOMATION,
+        instrument,
+        timeframe,
+      });
+      setAutomationDecisions(decisions);
+    } catch {
+      setAutomation({
+        ...DEFAULT_AUTOMATION,
+        instrument,
+        timeframe,
+      });
+      setAutomationDecisions([]);
+    }
+  }, [instrument, timeframe]);
+
   useEffect(() => {
     fetchPlaybook();
     const interval = setInterval(fetchPlaybook, 30000);
     return () => clearInterval(interval);
   }, [fetchPlaybook]);
+
+  useEffect(() => {
+    fetchAutomation();
+    const interval = setInterval(fetchAutomation, AUTOMATION_POLL_MS);
+    return () => clearInterval(interval);
+  }, [fetchAutomation]);
+
+  useEffect(() => {
+    const client = new Client({
+      webSocketFactory: () => new SockJS(PLAYBOOK_WS_URL),
+      reconnectDelay: 5000,
+      onConnect: () => {
+        client.subscribe(`/topic/playbook-decisions/${instrument}/${timeframe}`, () => {
+          void fetchAutomation();
+        });
+      },
+    });
+    client.activate();
+    return () => {
+      void client.deactivate();
+    };
+  }, [fetchAutomation, instrument, timeframe]);
 
   // Reset everything when the user switches instrument/timeframe — the cached
   // verdict is for a different context and must not be shown.
@@ -75,7 +157,21 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
     setFullVerdict(null);
     setVerdictRunAt(null);
     setAgentsCollapsed(false);
+    setAutomation(null);
+    setAutomationDecisions([]);
+    setQtyDraft('1');
+    automationDraftPanelRef.current = '';
   }, [instrument, timeframe]);
+
+  useEffect(() => {
+    if (!automation) return;
+    if (automation.instrument !== instrument || automation.timeframe !== timeframe) return;
+    const panelId = `${automation.instrument}:${automation.timeframe}`;
+    if (automationDraftPanelRef.current !== panelId) {
+      automationDraftPanelRef.current = panelId;
+      setQtyDraft(String(automation.quantity));
+    }
+  }, [automation, instrument, timeframe]);
 
   // Clear the cached verdict when the best-setup identity changes to a new one.
   // Setup temporarily disappearing (bestSetup === null) does NOT clear the
@@ -111,6 +207,53 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
       setAgentsLoading(false);
     }
   }, [instrument, timeframe, playbook]);
+
+  const updateAutomation = useCallback(async (patch: Partial<PlaybookAutomationView>) => {
+    const current = automation ?? { ...DEFAULT_AUTOMATION, instrument, timeframe };
+    const next = { ...current, ...patch };
+    setAutomationBusy(true);
+    try {
+      const updated = await api.updatePlaybookAutomation(instrument, timeframe, {
+        autoIbkrEnabled: next.autoIbkrEnabled,
+        quantity: next.quantity,
+        brokerAccountId: next.brokerAccountId ?? null,
+      });
+      setAutomation(updated ?? next);
+    } finally {
+      setAutomationBusy(false);
+    }
+  }, [automation, instrument, timeframe]);
+
+  const onToggleAutoIbkr = useCallback(async () => {
+    const current = automation ?? { ...DEFAULT_AUTOMATION, instrument, timeframe };
+    const turningOn = !current.autoIbkrEnabled;
+    const brokerAccountId = current.brokerAccountId ?? selectedBrokerAccountId ?? null;
+    if (turningOn) {
+      if (!brokerAccountId) {
+        setError('Select an IBKR account before enabling PLAYBOOK Auto-IBKR.');
+        return;
+      }
+      const confirmed = window.confirm(
+        `Enable PLAYBOOK Auto-IBKR for ${instrument} ${timeframe}?\n\n` +
+        `Eligible playbook decisions at ${current.liveThreshold}/7 or better may submit REAL IBKR orders.\n\n` +
+        `Paper simulation starts at ${current.paperThreshold}/7. Auto-IBKR stays off by default and remains active until you turn it off.`
+      );
+      if (!confirmed) return;
+    }
+    setError(null);
+    await updateAutomation({ autoIbkrEnabled: turningOn, brokerAccountId });
+  }, [automation, instrument, timeframe, selectedBrokerAccountId, updateAutomation]);
+
+  const commitQty = useCallback(async () => {
+    const current = automation ?? { ...DEFAULT_AUTOMATION, instrument, timeframe };
+    const parsed = Number(qtyDraft.trim());
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 100) {
+      setQtyDraft(String(current.quantity));
+      return;
+    }
+    if (parsed === current.quantity) return;
+    await updateAutomation({ quantity: parsed });
+  }, [automation, instrument, timeframe, qtyDraft, updateAutomation]);
 
   // ── Auto-trigger the 4-agent gate when a qualified setup appears ──────
   // Fires once per (instrument, timeframe, zoneName, score, direction) combination
@@ -148,6 +291,11 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
   if (!playbook) return null;
 
   const f = playbook.filters;
+  const automationState = automation ?? { ...DEFAULT_AUTOMATION, instrument, timeframe };
+  const latestAutomationDecision = automationDecisions[0] ?? null;
+  const summary = latestAutomationDecision?.profitabilitySummary ?? summarizeAutomationDecisions(automationDecisions);
+  const autoIbkrOn = automationState.autoIbkrEnabled === true;
+  const activeBrokerAccountId = automationState.brokerAccountId ?? selectedBrokerAccountId ?? null;
 
   return (
     <div className="space-y-3">
@@ -172,6 +320,85 @@ export default function PlaybookPanel({ instrument, timeframe }: PlaybookPanelPr
         'border-emerald-800 bg-emerald-950/30 text-emerald-400'
       }`}>
         {playbook.verdict}
+      </div>
+      {error && (
+        <div className="text-xs rounded border border-red-800 bg-red-950/30 p-2 text-red-300">
+          {error}
+        </div>
+      )}
+
+      {/* Automation controls */}
+      <div className={`border rounded p-2 space-y-2 ${
+        autoIbkrOn ? 'border-red-700/70 bg-red-950/10' : 'border-cyan-900/40 bg-zinc-950/40'
+      }`}>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] font-semibold text-cyan-300 uppercase tracking-wider">Automation</div>
+            <div className="text-[10px] text-zinc-500">
+              Paper {automationState.paperThreshold}/7 · Live {automationState.liveThreshold}/7 · Acct {activeBrokerAccountId ?? 'none'}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onToggleAutoIbkr}
+            disabled={automationBusy}
+            aria-pressed={autoIbkrOn}
+            title={autoIbkrOn ? 'Disable PLAYBOOK Auto-IBKR routing' : 'Enable PLAYBOOK Auto-IBKR routing (confirmation required)'}
+            className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+              autoIbkrOn
+                ? 'border-red-600/70 bg-red-950/40 text-red-300 hover:bg-red-950/60'
+                : 'border-zinc-700 text-zinc-400 hover:border-emerald-700 hover:text-emerald-300'
+            }`}
+          >
+            Auto-IBKR: {autoIbkrOn ? 'ON' : 'OFF'}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <ThresholdControl
+            label="Paper"
+            value={automationState.paperThreshold}
+          />
+          <ThresholdControl
+            label="Live"
+            value={automationState.liveThreshold}
+          />
+          <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="Contracts submitted for PLAYBOOK Auto-IBKR live decisions">
+            <span className="text-zinc-500">Qty</span>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              value={qtyDraft}
+              onChange={event => setQtyDraft(event.target.value)}
+              onBlur={commitQty}
+              onKeyDown={event => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  (event.target as HTMLInputElement).blur();
+                }
+                if (event.key === 'Escape') {
+                  setQtyDraft(String(automationState.quantity));
+                  (event.target as HTMLInputElement).blur();
+                }
+              }}
+              disabled={automationBusy}
+              className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+            />
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <StatusBox label="Routing">
+            <RoutingChip outcome={latestAutomationDecision?.routingOutcome ?? null} errorMessage={latestAutomationDecision?.routingErrorMessage ?? null} />
+          </StatusBox>
+          <StatusBox label="Simulation">
+            <SimulationChip status={latestAutomationDecision?.simulationStatus ?? null} />
+          </StatusBox>
+        </div>
+
+        <ProfitabilitySummary summary={summary} />
       </div>
 
       {/* Filters */}
@@ -346,6 +573,161 @@ function PlanRow({ label, value, className }: { label: string; value: number | n
       <span className={className || 'text-zinc-200'}>{value != null ? value.toFixed(2) : '—'}</span>
     </div>
   );
+}
+
+function ThresholdControl({
+  label,
+  value,
+}: {
+  label: string;
+  value: number;
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+      <span className="text-zinc-500">{label}</span>
+      <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200">
+        {value}/7
+      </span>
+    </label>
+  );
+}
+
+function StatusBox({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1">
+      <div className="text-[9px] text-zinc-600 uppercase tracking-wider">{label}</div>
+      <div className="mt-1 min-h-5 flex items-center">
+        {children || <span className="text-[10px] text-zinc-600">No decision</span>}
+      </div>
+    </div>
+  );
+}
+
+function RoutingChip({
+  outcome,
+  errorMessage,
+}: {
+  outcome: PlaybookAutomationRoutingOutcome | null;
+  errorMessage?: string | null;
+}) {
+  if (!outcome) return <span className="text-[10px] text-zinc-600">No routing yet</span>;
+  const normalized = outcome.toUpperCase();
+  const style =
+    normalized === 'ROUTED' || normalized === 'PAPER_ONLY'
+      ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
+      : normalized === 'ACK_PENDING'
+        ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+        : normalized.startsWith('FAILED')
+          ? 'bg-red-950/70 text-red-300 border-red-800/60'
+          : 'bg-amber-950/70 text-amber-300 border-amber-800/60';
+  const label =
+    normalized === 'ROUTED'
+      ? 'IBKR OK'
+      : normalized === 'PAPER_ONLY'
+        ? 'PAPER'
+        : normalized.replace(/^SKIPPED_/, '').replace(/_/g, ' ');
+  return (
+    <span
+      title={errorMessage ? `${outcome}\n${errorMessage}` : outcome}
+      className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${style}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function SimulationChip({ status }: { status: PlaybookAutomationSimulationStatus | null }) {
+  if (!status) return <span className="text-[10px] text-zinc-600">No simulation yet</span>;
+  const normalized = status.toUpperCase();
+  const style =
+    normalized === 'WIN'
+      ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
+      : normalized === 'LOSS' || normalized === 'CANCELLED'
+        ? 'bg-red-950/70 text-red-300 border-red-800/60'
+        : normalized === 'ACTIVE'
+          ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+          : 'bg-zinc-800 text-zinc-300 border-zinc-700';
+  return (
+    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${style}`}>
+      {normalized.replace(/_/g, ' ')}
+    </span>
+  );
+}
+
+function ProfitabilitySummary({
+  summary,
+}: {
+  summary: PlaybookAutomationProfitabilitySummaryView | null;
+}) {
+  if (!summary) {
+    return <div className="text-[10px] text-zinc-600 italic">No PLAYBOOK automation results yet</div>;
+  }
+  return (
+    <div className="grid grid-cols-4 gap-2 text-[10px]">
+      <Metric label="Decisions" value={formatMetric(summary.totalDecisions)} />
+      <Metric label="Win rate" value={formatPct(summary.winRate)} />
+      <Metric label="P&L" value={formatCurrency(summary.totalPnl)} accent={(summary.totalPnl ?? 0) >= 0 ? 'good' : 'bad'} />
+      <Metric label="PF" value={formatMetric(summary.profitFactor, 2)} />
+    </div>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: 'good' | 'bad';
+}) {
+  const color = accent === 'good' ? 'text-emerald-300' : accent === 'bad' ? 'text-red-300' : 'text-zinc-200';
+  return (
+    <div className="rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1">
+      <div className="text-[9px] text-zinc-600 uppercase tracking-wider">{label}</div>
+      <div className={`font-mono ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function summarizeAutomationDecisions(
+  decisions: PlaybookAutomationDecisionView[],
+): PlaybookAutomationProfitabilitySummaryView | null {
+  if (decisions.length === 0) return null;
+  const resolved = decisions.filter(d => d.simulationStatus === 'WIN' || d.simulationStatus === 'LOSS');
+  const wins = resolved.filter(d => d.simulationStatus === 'WIN').length;
+  const losses = resolved.filter(d => d.simulationStatus === 'LOSS').length;
+  const pnlValues = decisions
+    .map(d => d.simulationPnl ?? d.pnl)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const totalPnl = pnlValues.reduce((sum, value) => sum + value, 0);
+  const grossWins = pnlValues.filter(value => value > 0).reduce((sum, value) => sum + value, 0);
+  const grossLosses = Math.abs(pnlValues.filter(value => value < 0).reduce((sum, value) => sum + value, 0));
+  return {
+    totalDecisions: decisions.length,
+    wins,
+    losses,
+    winRate: resolved.length > 0 ? wins / resolved.length : null,
+    totalPnl: pnlValues.length > 0 ? totalPnl : null,
+    averagePnl: pnlValues.length > 0 ? totalPnl / pnlValues.length : null,
+    profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? Infinity : null,
+  };
+}
+
+function formatMetric(value: number | null | undefined, digits = 0): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return value.toFixed(digits);
+}
+
+function formatPct(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const pct = value <= 1 ? value * 100 : value;
+  return `${pct.toFixed(0)}%`;
+}
+
+function formatCurrency(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${value >= 0 ? '+' : ''}${value.toFixed(0)}$`;
 }
 
 // Human-readable "run 2m ago" / "run 45s ago" for the cached agent verdict.

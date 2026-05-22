@@ -14,12 +14,15 @@ import com.riskdesk.domain.model.MentorAudit;
 import com.riskdesk.domain.model.MentorSignalReviewRecord;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.model.TrailingStopResult;
+import com.riskdesk.domain.playbook.automation.PlaybookDecision;
+import com.riskdesk.domain.playbook.automation.port.PlaybookDecisionRepositoryPort;
 import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -75,6 +78,7 @@ public class TradeSimulationService {
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
     private final TrailingStopProperties trailingStopProperties;
     private final TradeSimulationRepositoryPort simulationRepository;
+    private final PlaybookDecisionRepositoryPort playbookDecisionRepository;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
@@ -83,6 +87,19 @@ public class TradeSimulationService {
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider,
                                   TrailingStopProperties trailingStopProperties,
                                   TradeSimulationRepositoryPort simulationRepository) {
+        this(reviewRepository, auditRepository, candleRepositoryPort, objectMapper,
+            messagingProvider, trailingStopProperties, simulationRepository, null);
+    }
+
+    @Autowired
+    public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
+                                  MentorAuditRepositoryPort auditRepository,
+                                  CandleRepositoryPort candleRepositoryPort,
+                                  ObjectMapper objectMapper,
+                                  ObjectProvider<SimpMessagingTemplate> messagingProvider,
+                                  TrailingStopProperties trailingStopProperties,
+                                  TradeSimulationRepositoryPort simulationRepository,
+                                  ObjectProvider<PlaybookDecisionRepositoryPort> playbookDecisionRepositoryProvider) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
@@ -90,6 +107,9 @@ public class TradeSimulationService {
         this.messagingProvider = messagingProvider;
         this.trailingStopProperties = trailingStopProperties;
         this.simulationRepository = simulationRepository;
+        this.playbookDecisionRepository = playbookDecisionRepositoryProvider == null
+            ? null
+            : playbookDecisionRepositoryProvider.getIfAvailable();
     }
 
     /**
@@ -471,6 +491,58 @@ public class TradeSimulationService {
     }
 
     /**
+     * PLAYBOOK simulations resolve against the frozen {@link PlaybookDecision}
+     * plan, never by constructing a fake mentor review. This keeps forward
+     * profitability tied to the deterministic candle-close decision that created
+     * the simulation.
+     */
+    @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
+    public void refreshPendingPlaybookSimulations() {
+        if (playbookDecisionRepository == null) {
+            return;
+        }
+        List<TradeSimulation> openPlaybookSims = simulationRepository.findByStatuses(List.of(
+            TradeSimulationStatus.PENDING_ENTRY,
+            TradeSimulationStatus.ACTIVE
+        )).stream().filter(s -> s.reviewType() == ReviewType.PLAYBOOK).toList();
+
+        Instant now = Instant.now();
+        List<TradeSimulation> surviving = cancelExpiredPendingEntries(openPlaybookSims, now);
+        surviving = reverseConflictingTrades(surviving, now);
+
+        for (TradeSimulation sim : surviving) {
+            try {
+                PlaybookDecision decision = playbookDecisionRepository.findById(sim.reviewId()).orElse(null);
+                if (decision == null) {
+                    continue;
+                }
+                Instrument instrument;
+                try {
+                    instrument = Instrument.valueOf(sim.instrument());
+                } catch (IllegalArgumentException ex) {
+                    continue;
+                }
+                Instant from = sim.activationTime() != null ? sim.activationTime() : sim.createdAt();
+                List<Candle> candles = candleRepositoryPort.findCandles(instrument, SIMULATION_TIMEFRAME, from);
+                if (candles.isEmpty()) {
+                    continue;
+                }
+
+                SimulationResult result = evaluateWithPlan(extractPlanFromPlaybookDecision(decision),
+                    currentSimState(sim), candles);
+                if (hasSimulationChanged(sim, result)) {
+                    TradeSimulation next = applyResult(sim, result);
+                    TradeSimulation saved = simulationRepository.save(next);
+                    publishSimulationEvent(saved);
+                }
+            } catch (Exception e) {
+                log.debug("PLAYBOOK simulation skipped for simulation {} (decisionId={}): {}",
+                    sim.id(), sim.reviewId(), e.getMessage());
+            }
+        }
+    }
+
+    /**
      * Publishes a simulation update on {@code /topic/simulations}. Phase 3
      * removed the legacy {@code /topic/mentor-alerts} push for simulation
      * events — that topic is now reserved for non-simulation mentor events.
@@ -547,6 +619,22 @@ public class TradeSimulationService {
 
     private TradePlan extractPlanFromAudit(MentorAudit audit) {
         return extractPlanFromJson(audit.getResponseJson(), audit.getAction());
+    }
+
+    private TradePlan extractPlanFromPlaybookDecision(PlaybookDecision decision) {
+        if (decision == null
+            || decision.entryPrice() == null
+            || decision.stopLoss() == null
+            || decision.takeProfit1() == null
+            || decision.direction() == null) {
+            return null;
+        }
+        return new TradePlan(
+            "LONG".equalsIgnoreCase(decision.direction()),
+            decision.entryPrice(),
+            decision.stopLoss(),
+            decision.takeProfit1()
+        );
     }
 
     private TradePlan extractPlanFromJson(String analysisJson, String action) {

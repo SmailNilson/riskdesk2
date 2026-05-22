@@ -297,6 +297,32 @@ When introducing real-order execution:
 - freeze execution quantity on the execution aggregate itself before any broker submission
 - when submitting an entry order, lock the execution row before the external broker side effect so two concurrent triggers cannot place two orders
 
+### Playbook Auto-Simulation + Auto-IBKR Rule
+
+Playbook evaluation may create a deterministic simulation request before it ever touches broker routing. Keep that workflow layered:
+
+- domain owns the playbook eligibility/routing decision vocabulary
+- application orchestrates simulation creation, idempotence, preflight, and optional execution submission
+- presentation exposes toggle/submit/read DTOs only
+- infrastructure remains the IBKR adapter and persistence implementation
+
+Rules:
+
+1. Auto-simulation and Auto-IBKR are separate gates. Enabling playbook auto-simulation must never enable IBKR routing by implication.
+2. Auto-IBKR must be opt-in, explicit, and diagnosable. Every skipped route needs a stable outcome/reason for the UI and logs.
+3. A live order must require an actionable playbook plan with complete entry, stop, target, direction, instrument, timeframe, quantity, and internal price context.
+4. A live order must pass broker preflight/margin checks before IBKR submission.
+5. Simulation state belongs to the `TradeSimulation` aggregate and `TradeSimulationService` transition path. Do not add playbook simulation fields to Mentor review/audit records.
+6. Idempotence must be keyed by the playbook signal/plan identity so candle replay, page refresh, or scheduler retry cannot submit duplicates.
+7. Use only the internal IBKR/PostgreSQL market-data path. Do not introduce external feeds or synthetic production fallbacks to make playbook routing easier to test.
+
+Do not:
+
+- submit a broker order just because a playbook verdict is favorable
+- let controller code decide trading eligibility
+- hide margin/preflight denial behind a generic failure
+- couple playbook simulations to WTX-specific trigger sources or state rows
+
 ### WTX Auto-Execution Rule
 
 WTX is paper-trading by default. Routing to IBKR is opt-in per instrument:
