@@ -454,9 +454,12 @@ public class WtxRsiStrategyService {
     }
 
     private void publishState(WtxRsiStrategyState state) {
+        // Single topic — the payload carries instrument + timeframe so the client
+        // keys by (instrument, timeframe) itself. Same fanout shape as the signals
+        // topic and avoids the wildcard-subscription portability concerns that a
+        // per-tuple topic ({i}/{tf}) introduces with Spring's SimpleBroker.
         try {
-            ws.convertAndSend("/topic/wtxrsi-state/" + state.instrument() + "/" + state.timeframe(),
-                    toStatePayload(state));
+            ws.convertAndSend("/topic/wtxrsi-state", toStatePayload(state));
         } catch (Exception e) {
             log.debug("WTX-RSI WS state publish failed", e);
         }

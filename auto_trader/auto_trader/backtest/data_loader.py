@@ -1,30 +1,88 @@
-"""OHLCV loading + timeframe resampling."""
+"""OHLCV loading from the internal PostgreSQL ``candles`` table + timeframe resampling.
+
+**No CSV / external feed.** The project's `AGENTS.md` mandates a single
+provenance path for market data: IBKR Gateway → PostgreSQL → internal services.
+This loader reads the same ``candles`` table the Java backend persists from
+the IBKR ingestion pipeline, so the Python prototype operates on bit-identical
+inputs to the production engine and cannot accidentally pick up a third-party
+file.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
+from datetime import datetime, timezone
 
 import pandas as pd
 
 REQUIRED_COLS = ["open", "high", "low", "close", "volume"]
 
 
-def load_ohlcv_csv(path: str | Path, *, timestamp_col: str = "timestamp") -> pd.DataFrame:
-    """Load a CSV with columns timestamp,open,high,low,close,volume.
-
-    Timestamps are parsed as UTC. Returned DataFrame is indexed on a
-    UTC DatetimeIndex and sorted ascending.
+def _connect():
+    """Lazy import psycopg so the rest of the package stays loadable in environments
+    where Postgres isn't installed (unit tests, indicator playground, etc.).
     """
-    df = pd.read_csv(path)
-    if timestamp_col not in df.columns:
-        raise ValueError(f"CSV missing '{timestamp_col}' column; got {list(df.columns)}")
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
-    df = df.set_index(timestamp_col).sort_index()
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"CSV missing columns: {missing}")
-    return df[REQUIRED_COLS].astype(
-        {"open": "float64", "high": "float64", "low": "float64", "close": "float64", "volume": "float64"}
+    try:
+        import psycopg  # noqa: WPS433
+    except ImportError as exc:  # pragma: no cover - import error path
+        raise RuntimeError(
+            "psycopg is required to load candles from PostgreSQL. "
+            "Install it with `pip install psycopg[binary]` or use the Java "
+            "backtest endpoint instead."
+        ) from exc
+
+    dsn = os.environ.get(
+        "RISKDESK_DB_URL",
+        "postgresql://riskdesk:riskdesk@localhost:5432/riskdesk",
+    )
+    return psycopg.connect(dsn)
+
+
+def load_ohlcv_pg(
+    instrument: str,
+    timeframe: str,
+    *,
+    from_ts: datetime,
+    to_ts: datetime,
+) -> pd.DataFrame:
+    """Load candles for ``[from_ts, to_ts]`` from the internal ``candles`` table.
+
+    The same table the Java backend (``CandleRepository``) writes from IBKR.
+    Returned DataFrame is indexed on a UTC :class:`pandas.DatetimeIndex` sorted
+    ascending — same shape the rest of the Python prototype expects.
+    """
+    if from_ts.tzinfo is None:
+        from_ts = from_ts.replace(tzinfo=timezone.utc)
+    if to_ts.tzinfo is None:
+        to_ts = to_ts.replace(tzinfo=timezone.utc)
+
+    query = """
+        SELECT timestamp, open, high, low, close, volume
+          FROM candles
+         WHERE instrument = %s AND timeframe = %s
+           AND timestamp >= %s AND timestamp <= %s
+         ORDER BY timestamp ASC
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(query, (instrument, timeframe, from_ts, to_ts))
+        rows = cur.fetchall()
+
+    if not rows:
+        return pd.DataFrame(columns=REQUIRED_COLS).set_index(
+            pd.DatetimeIndex([], name="timestamp", tz="UTC")
+        )
+
+    df = pd.DataFrame(rows, columns=["timestamp", *REQUIRED_COLS])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.set_index("timestamp").sort_index()
+    return df.astype(
+        {
+            "open": "float64",
+            "high": "float64",
+            "low": "float64",
+            "close": "float64",
+            "volume": "float64",
+        }
     )
 
 
@@ -37,5 +95,4 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "close": "last",
         "volume": "sum",
     }
-    out = df.resample(rule, label="left", closed="left").agg(agg).dropna(subset=["open"])
-    return out
+    return df.resample(rule, label="left", closed="left").agg(agg).dropna(subset=["open"])

@@ -121,12 +121,23 @@ public final class WtxRsiBacktestEngine {
 
             equityCurve.add(new EquityPoint(bar.getTimestamp(), equity));
 
-            // ── 4) Queue new entries (cannot pyramid on same side) ───────────
+            // ── 4) Queue new entries.
+            //
+            // Mirror the live orchestrator: only one position at a time, regardless
+            // of side. A SHORT signal while a LONG is open (and vice versa) must be
+            // suppressed in non-REVERSAL TP modes — otherwise the backtest hedges
+            // opposite sides simultaneously while the live engine would not, and
+            // backtest PnL drifts from the production behaviour we're trying to
+            // measure. REVERSAL mode handles opposite signals in section 3 by
+            // closing the open leg on the next bar's open before evaluating the
+            // entry, so by the time we get here the slot is already free.
+            boolean flat = longPos == null && shortPos == null
+                    && pendingLong == null && pendingShort == null;
             WtxRsiSignal sig = signalsByBar.get(i);
-            if (sig != null) {
-                if (sig.side() == WtxRsiSignal.Side.LONG && longPos == null && pendingLong == null) {
+            if (sig != null && flat) {
+                if (sig.side() == WtxRsiSignal.Side.LONG) {
                     pendingLong = sig;
-                } else if (sig.side() == WtxRsiSignal.Side.SHORT && shortPos == null && pendingShort == null) {
+                } else {
                     pendingShort = sig;
                 }
             }

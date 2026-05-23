@@ -30,16 +30,24 @@ cp .env.example .env  # ajuste si besoin
 
 ## Backtest
 
-```bash
-auto-trader backtest --config config/strategy_5m.yaml --data data/mnq_5m.csv
-```
+Le loader lit directement la table `candles` du PostgreSQL du backend Java
+(seul flux autorisé par `AGENTS.md` — pas de CSV externe, pas de scraping).
 
-Input CSV minimal columns: `timestamp,open,high,low,close,volume` (timestamps UTC ISO 8601).
+```bash
+export RISKDESK_DB_URL='postgresql://riskdesk:riskdesk@localhost:5432/riskdesk'
+
+auto-trader backtest \
+  --config config/strategy_5m.yaml \
+  --instrument MNQ \
+  --source-timeframe 1m \
+  --from 2025-03-01T00:00:00Z --to 2025-05-01T00:00:00Z \
+  --resample 5min
+```
 
 ## Live (paper d'abord)
 
 ```bash
-auto-trader live --config config/strategy_5m.yaml
+auto-trader live --config config/strategy_5m.yaml --instrument MNQ
 ```
 
 Tant que `AUTO_TRADER_LIVE=0` les ordres sont **simulés** (log seulement). Mettre `=1` pour vraiment router à IBKR.
@@ -62,7 +70,7 @@ auto_trader/
 │   └── state.py         # Position ouverte par TF
 ├── backtest/
 │   ├── engine.py        # Simulateur bar-par-bar
-│   ├── data_loader.py   # CSV/parquet → DataFrame
+│   ├── data_loader.py   # PostgreSQL `candles` table → DataFrame (no external CSV)
 │   └── metrics.py       # Win rate, profit factor, max drawdown
 ├── live/
 │   ├── ibkr_client.py   # Connexion IB Gateway via Tailscale

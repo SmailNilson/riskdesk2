@@ -28,6 +28,33 @@ class WtxRsiBacktestEngineTest {
     }
 
     @Test
+    void at_most_one_position_open_across_both_sides() {
+        // Regression for the backtest hedge bug: an opposite-side signal must not
+        // open a second position while the first is still in flight. The live
+        // orchestrator suppresses these, the backtest must mirror that or PnL drifts
+        // away from the production behaviour we're trying to measure.
+        List<Candle> bars = SyntheticCandles.mnq(800, 7);
+        Result result = new WtxRsiBacktestEngine(WtxRsiConfig.defaults5m()).run(bars);
+        record Event(java.time.Instant t, int delta) {}
+        java.util.List<Event> events = new java.util.ArrayList<>();
+        for (WtxRsiTrade t : result.trades()) {
+            events.add(new Event(t.entryTime(), 1));
+            events.add(new Event(t.exitTime(), -1));
+        }
+        // Exits sort before entries when timestamps tie so a back-to-back close/open
+        // at the same instant doesn't briefly read as 2 open.
+        events.sort((a, b) -> {
+            int c = a.t().compareTo(b.t());
+            return c != 0 ? c : Integer.compare(a.delta(), b.delta());
+        });
+        int open = 0;
+        for (Event e : events) {
+            open += e.delta();
+            assertTrue(open <= 1, "more than one position open simultaneously at " + e.t());
+        }
+    }
+
+    @Test
     void no_concurrent_trades_per_side() {
         List<Candle> bars = SyntheticCandles.mnq(800, 7);
         Result result = new WtxRsiBacktestEngine(WtxRsiConfig.defaults5m()).run(bars);

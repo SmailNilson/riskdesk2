@@ -167,12 +167,14 @@ Switchable via config or per-request override on the backtest endpoint
 (`"biasSource": "SMC_ENGINE"`).
 
 The current bias is persisted on the state row (`lastSwingBias`) and pushed on
-`/topic/wtxrsi-state/{instrument}/{timeframe}` after every closed candle so the
-UI can show a BULLISH / BEARISH / NEUTRAL badge regardless of the toggle position.
+`/topic/wtxrsi-state` after every closed candle so the UI can show a
+BULLISH / BEARISH / NEUTRAL badge regardless of the toggle position.
 
-WebSocket topics:
+WebSocket topics (single fanout per concern — payload carries
+`instrument` + `timeframe`; clients route by those fields, no wildcard
+subscription required):
 - `/topic/wtxrsi-signals` — each fired signal (OPEN/CLOSE/NONE)
-- `/topic/wtxrsi-state/{instrument}/{timeframe}` — state mutations
+- `/topic/wtxrsi-state` — state mutations
 
 ## Status / Next slices
 
