@@ -159,56 +159,70 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
                 .findActiveByInstrumentAndTimeframeAndTriggerSource(
                         state.instrument(), state.timeframe(), ExecutionTriggerSource.WTXRSI_AUTO);
         if (openRow.isEmpty()) {
+            log.info("WTX-RSI [{} {}] CLOSE requested ({}) but no open WTX-RSI execution row found — "
+                    + "skipping IBKR submission to avoid a naked order",
+                    state.instrument(), state.timeframe(), action);
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW);
         }
-
         TradeExecutionRecord row = openRow.get();
+        // Guard against a second flatten while the first close is still in flight.
+        // ExecutionFillTrackingService reconciles EXIT_SUBMITTED → CLOSED on the
+        // broker fill callback, so a duplicate submit would race the reconciler
+        // and could leave a phantom row behind.
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            log.info("WTX-RSI [{} {}] CLOSE requested ({}) but row {} is already EXIT_SUBMITTED — "
+                    + "skipping duplicate flatten",
+                    state.instrument(), state.timeframe(), action, row.getId());
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
+        }
+
+        int qty = row.getQuantity() != null && row.getQuantity() > 0
+                ? row.getQuantity() : state.entryQty().intValue();
+        BigDecimal exitPrice = referencePrice != null ? referencePrice : row.getNormalizedEntryPrice();
+        if (exitPrice == null) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
         String closeAction = state.currentPosition() == WtxRsiPosition.LONG ? "SHORT" : "LONG";
-        int qty = state.entryQty().intValue();
-        BigDecimal exitPrice = referencePrice;
-        String executionKey = executionKey(state.instrument(), state.timeframe(),
-                Instant.now(), action.name());
 
-        TradeExecutionRecord candidate = new TradeExecutionRecord();
-        candidate.setExecutionKey(executionKey);
-        candidate.setBrokerAccountId(row.getBrokerAccountId());
-        candidate.setInstrument(state.instrument());
-        candidate.setTimeframe(state.timeframe());
-        candidate.setAction(closeAction);
-        candidate.setQuantity(qty);
-        candidate.setTriggerSource(ExecutionTriggerSource.WTXRSI_AUTO);
-        candidate.setRequestedBy(REQUESTED_BY);
-        candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
-        candidate.setStatusReason("WTXRSI " + action.name() + " armed");
-        candidate.setNormalizedEntryPrice(exitPrice);
-        candidate.setCreatedAt(Instant.now());
-        candidate.setUpdatedAt(Instant.now());
-        TradeExecutionRecord closeRow = executionRepository.createIfAbsent(candidate);
-
+        // CRITICAL: transition the EXISTING open row to EXIT_SUBMITTED. Do NOT
+        // create a new row — ExecutionFillTrackingService only marks EXIT_SUBMITTED
+        // rows as CLOSED; a fresh ENTRY_SUBMITTED row would reconcile to ACTIVE,
+        // leaving the original row non-terminal and inflating the open-position
+        // count. Same contract as WtxExecutionBridge#submitCloseLeg.
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
-                    closeRow.getId(), closeRow.getExecutionKey(), closeRow.getBrokerAccountId(),
-                    closeRow.getInstrument(), closeAction, qty, exitPrice));
-            closeRow.setEntryOrderId(sub.brokerOrderId());
+                    row.getId(),
+                    row.getExecutionKey(),
+                    row.getBrokerAccountId(),
+                    row.getInstrument(),
+                    closeAction,
+                    qty,
+                    exitPrice));
+            Instant now = Instant.now();
+            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
             if (sub.brokerOrderId() != null) {
-                closeRow.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
+                // Fill tracker locates rows by ibkrOrderId — must be on the SAME
+                // row we're transitioning so the fill callback reconciles here.
+                row.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
             }
-            closeRow.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            closeRow.setStatusReason("WTXRSI " + action.name() + " submitted: " + sub.brokerOrderStatus());
-            closeRow.setEntrySubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : Instant.now());
-            closeRow.setUpdatedAt(Instant.now());
-            executionRepository.save(closeRow);
-            log.info("WTX-RSI [{} {}] CLOSE submitted — direction={} qty={} brokerOrderId={}",
-                    state.instrument(), state.timeframe(), closeAction, qty, sub.brokerOrderId());
+            row.setStatusReason("WTXRSI " + action.name()
+                    + " — IBKR close submitted: " + sub.brokerOrderStatus()
+                    + " (broker order " + sub.brokerOrderId() + ")");
+            row.setExitSubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : now);
+            row.setUpdatedAt(now);
+            executionRepository.save(row);
+            log.info("WTX-RSI [{} {}] CLOSE submitted — direction={} qty={} executionId={} brokerOrderId={}",
+                    state.instrument(), state.timeframe(), closeAction, qty, row.getId(), sub.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (RuntimeException e) {
+            // Keep the row non-terminal on failure so the open position stays
+            // visible and the close is retryable on the next bar / next signal.
             String msg = truncate(e.getMessage(), 200);
-            closeRow.setStatus(ExecutionStatus.FAILED);
-            closeRow.setStatusReason("WTXRSI CLOSE failed: " + msg);
-            closeRow.setUpdatedAt(Instant.now());
-            executionRepository.save(closeRow);
-            log.error("WTX-RSI [{} {}] CLOSE failed: {}",
-                    state.instrument(), state.timeframe(), msg, e);
+            row.setStatusReason("WTXRSI " + action.name() + " close failed: " + msg);
+            row.setUpdatedAt(Instant.now());
+            executionRepository.save(row);
+            log.error("WTX-RSI [{} {}] CLOSE failed (row {} left non-terminal for retry): {}",
+                    state.instrument(), state.timeframe(), row.getId(), msg, e);
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, msg);
         }
     }
