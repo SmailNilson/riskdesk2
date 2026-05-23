@@ -1,0 +1,44 @@
+# MNQ 10-minute strategy configuration.
+
+instrument:
+  symbol: MNQ
+  exchange: CME
+  currency: USD
+  tick_size: 0.25
+  tick_value: 0.50
+
+timeframe: 10m
+
+wavetrend:
+  channel_length: 10
+  average_length: 21
+  overbought: 53
+  oversold: -53
+
+rsi:
+  length: 14
+  sma_length: 14
+  source: close
+
+confirmation:
+  enabled: true
+  kind: chaikin
+  chaikin_fast: 3
+  chaikin_slow: 10
+
+signals:
+  lookback_bars: 2          # tighter sync on higher TF
+  wt_strict_zone: true
+
+risk:
+  base_contracts: 1
+  confirmed_multiplier: 2
+  swing_lookback: 8
+  swing_buffer_ticks: 2
+  take_profit_r_multiple: null
+  trailing_atr_period: null
+  trailing_atr_multiplier: null
+
+execution:
+  entry_mode: next_bar_open
+  max_concurrent_per_direction: 1

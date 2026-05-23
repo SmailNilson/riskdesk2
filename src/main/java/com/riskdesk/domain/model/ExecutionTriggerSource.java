@@ -26,5 +26,12 @@ public enum ExecutionTriggerSource {
      * Auto-routed execution from deterministic PLAYBOOK automation.
      * Opt-in per instrument/timeframe via the PLAYBOOK panel. No mentor review is involved.
      */
-    PLAYBOOK_AUTO
+    PLAYBOOK_AUTO,
+    /**
+     * Auto-routed execution from the WTX+RSI strategy
+     * ({@link com.riskdesk.application.service.strategy.wtxrsi.WtxRsiExecutionBridge}).
+     * Opt-in per (instrument, timeframe) via the WTX+RSI panel "Auto-IBKR" toggle.
+     * No mentor review is involved.
+     */
+    WTXRSI_AUTO
 }

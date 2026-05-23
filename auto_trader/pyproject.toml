@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto_trader"
+version = "0.1.0"
+description = "MNQ WaveTrend/RSI automated trading system (backtest + IBKR live)"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "RiskDesk" }]
+
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pandas-ta>=0.3.14b",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "python-dotenv>=1.0",
+    "ib_insync>=0.9.86",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+auto-trader = "auto_trader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_trader*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
