@@ -1895,3 +1895,126 @@ export async function updateWtxOrderQty(instrument: string, timeframe: string, q
   if (!res.ok) return null;
   return res.json();
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// WTX + RSI strategy — live executor panel
+// Mirrors the WTX endpoints but the server side uses POST (not PUT) for the
+// toggles. See WtxRsiStrategyController and docs/WTX_RSI_STRATEGY.md.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type WtxRsiPosition = 'FLAT' | 'LONG' | 'SHORT';
+export type WtxRsiSwingBias = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+export type WtxRsiBiasSource = 'FRACTAL_HH_HL' | 'SMC_ENGINE';
+export type WtxRsiAction = 'OPEN_LONG' | 'OPEN_SHORT' | 'CLOSE_LONG' | 'CLOSE_SHORT' | 'NONE';
+
+export interface WtxRsiStrategyStateView {
+  instrument: string;
+  timeframe: string;
+  currentPosition: WtxRsiPosition;
+  entryPrice: number | null;
+  entryQty: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  cumulativeRealizedPnl: number;
+  lastCandleTs: string | null;
+  updatedAt: string | null;
+  autoExecutionEnabled: boolean;
+  configuredOrderQty: number;
+  swingBiasFilterEnabled: boolean;
+  lastSwingBias: WtxRsiSwingBias | null;
+  // Pushed on WebSocket but not on REST GET; OK to be optional client-side
+  biasSource?: WtxRsiBiasSource | null;
+}
+
+export interface WtxRsiSignalView {
+  instrument: string;
+  timeframe: string;
+  signalTs: string;
+  side: 'LONG' | 'SHORT';
+  action: WtxRsiAction;
+  wt1: number | null;
+  wt2: number | null;
+  rsi: number | null;
+  rsiSma: number | null;
+  chaikin: number | null;
+  chaikinConfirmed: boolean;
+  entryPrice: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  contracts: number;
+  routingOutcome: WtxRoutingOutcome | null;
+  routingErrorMessage: string | null;
+}
+
+export async function getWtxRsiState(
+  instrument: string,
+  timeframe: string,
+): Promise<WtxRsiStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function getWtxRsiRecentSignals(
+  instrument: string,
+  limit = 20,
+  timeframe?: string,
+): Promise<WtxRsiSignalView[]> {
+  const tf = timeframe ? `&timeframe=${timeframe}` : '';
+  const res = await fetch(
+    `${BASE}/api/strategy/wtxrsi/signals/${instrument}?limit=${limit}${tf}`,
+  );
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function updateWtxRsiAutoExecution(
+  instrument: string,
+  timeframe: string,
+  enabled: boolean,
+): Promise<WtxRsiStrategyStateView | null> {
+  const res = await fetch(
+    `${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}/auto-execution`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxRsiSwingBiasFilter(
+  instrument: string,
+  timeframe: string,
+  enabled: boolean,
+): Promise<WtxRsiStrategyStateView | null> {
+  const res = await fetch(
+    `${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}/swing-bias-filter`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxRsiOrderQty(
+  instrument: string,
+  timeframe: string,
+  quantity: number,
+): Promise<WtxRsiStrategyStateView | null> {
+  const res = await fetch(
+    `${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}/order-qty`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quantity }),
+    },
+  );
+  if (!res.ok) return null;
+  return res.json();
+}

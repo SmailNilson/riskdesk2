@@ -1,0 +1,49 @@
+# MNQ 5-minute strategy configuration.
+# All parameters are overrideable. Defaults are the brief's spec values.
+
+instrument:
+  symbol: MNQ
+  exchange: CME
+  currency: USD
+  tick_size: 0.25
+  tick_value: 0.50          # USD per tick per contract
+
+timeframe: 5m
+
+wavetrend:
+  channel_length: 10
+  average_length: 21
+  overbought: 53
+  oversold: -53
+
+rsi:
+  length: 14
+  sma_length: 14
+  source: close
+
+confirmation:
+  enabled: true
+  kind: chaikin             # chaikin | delta | none
+  chaikin_fast: 3
+  chaikin_slow: 10
+
+signals:
+  # Symmetric lookback window between WT cross and RSI/SMA cross.
+  lookback_bars: 3
+  # Require the WT cross strictly inside the OB/OS band (LazyBear).
+  wt_strict_zone: true
+
+risk:
+  base_contracts: 1
+  confirmed_multiplier: 2
+  swing_lookback: 10        # Y — bars used for swing low/high
+  swing_buffer_ticks: 2     # add buffer below/above swing
+  # Optional risk extensions (disabled by default; see strategy/risk.py)
+  take_profit_r_multiple: null    # e.g. 2.0 for 2R fixed TP
+  trailing_atr_period: null       # e.g. 14
+  trailing_atr_multiplier: null   # e.g. 2.5
+
+execution:
+  # Enter at the open of the bar AFTER signal confirmation closes.
+  entry_mode: next_bar_open
+  max_concurrent_per_direction: 1
