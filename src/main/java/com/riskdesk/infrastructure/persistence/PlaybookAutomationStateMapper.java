@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.persistence;
 
 import com.riskdesk.domain.playbook.automation.PlaybookAutomationState;
+import com.riskdesk.domain.playbook.automation.PlaybookExecutionProfile;
 import com.riskdesk.infrastructure.persistence.entity.PlaybookAutomationStateEntity;
 
 final class PlaybookAutomationStateMapper {
@@ -23,6 +24,8 @@ final class PlaybookAutomationStateMapper {
                 ? PlaybookAutomationState.DEFAULT_ORDER_QTY
                 : e.getConfiguredOrderQty(),
             e.getBrokerAccountId(),
+            PlaybookExecutionProfile.parseOrDefault(e.getArmedProfile()),
+            Boolean.TRUE.equals(e.getScalpProfileValidated()),
             e.getUpdatedAt()
         );
     }
@@ -36,6 +39,8 @@ final class PlaybookAutomationStateMapper {
         e.setAutoExecutionEnabled(state.autoExecutionEnabled());
         e.setConfiguredOrderQty(state.configuredOrderQty());
         e.setBrokerAccountId(state.brokerAccountId());
+        e.setArmedProfile(state.armedProfile().name());
+        e.setScalpProfileValidated(state.scalpProfileValidated());
         e.setUpdatedAt(state.updatedAt());
     }
 }

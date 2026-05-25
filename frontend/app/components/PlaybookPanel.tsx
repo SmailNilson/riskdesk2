@@ -15,6 +15,7 @@ import {
   PlaybookAutomationRoutingOutcome,
   PlaybookAutomationSimulationStatus,
   PlaybookAutomationProfitabilitySummaryView,
+  PlaybookExecutionProfile,
 } from '../lib/api';
 import { API_BASE, WS_BASE } from '../lib/runtimeConfig';
 
@@ -41,6 +42,8 @@ const DEFAULT_AUTOMATION: PlaybookAutomationView = {
   autoIbkrEnabled: false,
   quantity: 1,
   brokerAccountId: null,
+  armedProfile: 'LEGACY',
+  scalpProfileValidated: false,
   updatedAt: null,
 };
 
@@ -196,6 +199,8 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
         autoIbkrEnabled: next.autoIbkrEnabled,
         quantity: next.quantity,
         brokerAccountId: next.brokerAccountId ?? null,
+        armedProfile: next.armedProfile ?? 'LEGACY',
+        scalpProfileValidated: next.scalpProfileValidated ?? false,
       });
       setAutomation(updated ?? next);
     } finally {
@@ -212,8 +217,13 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
         setError('Select an IBKR account before enabling PLAYBOOK Auto-IBKR.');
         return;
       }
+      if (current.armedProfile === 'MGC_10M_SCALP_0_5R' && !current.scalpProfileValidated) {
+        setError('Manual validation is required before enabling PLAYBOOK Auto-IBKR for MGC 10m Scalp 0.5R.');
+        return;
+      }
       const confirmed = window.confirm(
         `Enable PLAYBOOK Auto-IBKR for ${instrument} ${timeframe}?\n\n` +
+        `Armed profile: ${formatProfileLabel(current.armedProfile ?? 'LEGACY')}.\n\n` +
         `Eligible playbook decisions at ${current.liveThreshold}/7 or better may submit REAL IBKR orders.\n\n` +
         `Paper simulation starts at ${current.paperThreshold}/7. Auto-IBKR stays off by default and remains active until you turn it off.`
       );
@@ -261,6 +271,31 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
     () => computeTradeStats(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null, automationState.quantity, livePrice ?? null),
     [playbook?.plan, playbook?.filters?.tradeDirection, automationState.quantity, livePrice],
   );
+  const profileControlsAvailable = instrument === 'MGC' && timeframe === '10m';
+  const currentSetupSupportsProfileTargets =
+    profileControlsAvailable
+    && playbook?.bestSetup?.type === 'BREAK_RETEST';
+  const profileTargets = useMemo(
+    () => currentSetupSupportsProfileTargets
+      ? computeProfileTargets(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null)
+      : null,
+    [currentSetupSupportsProfileTargets, playbook?.plan, playbook?.filters?.tradeDirection],
+  );
+
+  const onChangeExecutionProfile = useCallback(async (profile: PlaybookExecutionProfile) => {
+    setError(null);
+    await updateAutomation({ armedProfile: profile });
+  }, [updateAutomation]);
+
+  const onValidateScalpProfile = useCallback(async () => {
+    const confirmed = window.confirm(
+      'Manually validate MGC 10m Scalp 0.5R for PLAYBOOK Auto-IBKR?\n\n' +
+      'This does not enable Auto-IBKR by itself. It only allows the selected profile to route after you turn Auto-IBKR ON.'
+    );
+    if (!confirmed) return;
+    setError(null);
+    await updateAutomation({ scalpProfileValidated: true });
+  }, [updateAutomation]);
 
   if (loading && !playbook) {
     return <div className="text-zinc-500 text-sm p-4">Loading playbook...</div>;
@@ -436,10 +471,15 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
         commitQty={commitQty}
         onToggleAutoIbkr={onToggleAutoIbkr}
         latestDecision={latestAutomationDecision}
+        decisions={automationDecisions}
         summary={summary}
         collapsed={automationCollapsed}
         setCollapsed={setAutomationCollapsed}
         activeBrokerAccountId={activeBrokerAccountId}
+        profileControlsAvailable={profileControlsAvailable}
+        profileTargets={profileTargets}
+        onChangeExecutionProfile={onChangeExecutionProfile}
+        onValidateScalpProfile={onValidateScalpProfile}
       />
     </div>
   );
@@ -455,6 +495,12 @@ interface TradeStats {
   notionalUsd: number | null;
   livePnlPts: number | null;
   livePnlUsd: number | null;
+}
+
+interface ProfileTargets {
+  legacyTp: number;
+  scalp05RTp: number;
+  benchmark1RTp: number;
 }
 
 function computeTradeStats(
@@ -479,6 +525,21 @@ function computeTradeStats(
     livePnlUsd = mult != null ? livePnlPts * mult * qty : null;
   }
   return { riskPts, rewardPts, rrRatio, riskUsd, notionalUsd, livePnlPts, livePnlUsd };
+}
+
+function computeProfileTargets(
+  plan: PlaybookPlan | null,
+  direction: 'LONG' | 'SHORT' | null,
+): ProfileTargets | null {
+  if (!plan || !direction) return null;
+  const riskPts = Math.abs(plan.entryPrice - plan.stopLoss);
+  if (riskPts <= 0) return null;
+  const sign = direction === 'LONG' ? 1 : -1;
+  return {
+    legacyTp: plan.takeProfit1,
+    scalp05RTp: plan.entryPrice + sign * riskPts * 0.5,
+    benchmark1RTp: plan.entryPrice + sign * riskPts,
+  };
 }
 
 function TradeBlueprint({
@@ -677,7 +738,8 @@ function Tick({ pct, color, label, tall }: { pct: string; color: string; label?:
 
 function AutomationFooter({
   autoIbkrOn, automationBusy, automation, qtyDraft, setQtyDraft, commitQty,
-  onToggleAutoIbkr, latestDecision, summary, collapsed, setCollapsed, activeBrokerAccountId,
+  onToggleAutoIbkr, latestDecision, decisions, summary, collapsed, setCollapsed, activeBrokerAccountId,
+  profileControlsAvailable, profileTargets, onChangeExecutionProfile, onValidateScalpProfile,
 }: {
   autoIbkrOn: boolean;
   automationBusy: boolean;
@@ -687,11 +749,17 @@ function AutomationFooter({
   commitQty: () => Promise<void>;
   onToggleAutoIbkr: () => Promise<void>;
   latestDecision: PlaybookAutomationDecisionView | null;
+  decisions: PlaybookAutomationDecisionView[];
   summary: PlaybookAutomationProfitabilitySummaryView | null;
   collapsed: boolean;
   setCollapsed: (next: boolean) => void;
   activeBrokerAccountId: string | null;
+  profileControlsAvailable: boolean;
+  profileTargets: ProfileTargets | null;
+  onChangeExecutionProfile: (profile: PlaybookExecutionProfile) => Promise<void>;
+  onValidateScalpProfile: () => Promise<void>;
 }) {
+  const armedProfile = automation.armedProfile ?? 'LEGACY';
   return (
     <div className={`border rounded text-[10px] ${autoIbkrOn ? 'border-red-700/70 bg-red-950/10' : 'border-zinc-800 bg-zinc-950/40'}`}>
       <div className="flex items-center justify-between gap-2 px-2 py-1.5">
@@ -711,7 +779,7 @@ function AutomationFooter({
             ● Auto-IBKR {autoIbkrOn ? 'ON' : 'OFF'}
           </button>
           <span className="text-zinc-500">
-            Paper {automation.paperThreshold} · Live {automation.liveThreshold} · {automation.quantity}ct · {activeBrokerAccountId ?? 'no acct'}
+            {formatProfileLabel(armedProfile)} · Paper {automation.paperThreshold} · Live {automation.liveThreshold} · {automation.quantity}ct · {activeBrokerAccountId ?? 'no acct'}
           </span>
           {latestDecision && (
             <>
@@ -733,6 +801,55 @@ function AutomationFooter({
       </div>
       {!collapsed && (
         <div className="border-t border-zinc-800 px-2 py-2 space-y-2">
+          {profileControlsAvailable && (
+            <div className="rounded border border-cyan-900/50 bg-cyan-950/10 px-2 py-2 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-zinc-500">Execution profile</span>
+                <select
+                  value={armedProfile === 'MGC_10M_NORMAL_1R_BENCHMARK' ? 'LEGACY' : armedProfile}
+                  onChange={event => {
+                    void onChangeExecutionProfile(event.target.value as PlaybookExecutionProfile);
+                  }}
+                  disabled={automationBusy || autoIbkrOn}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                  title={autoIbkrOn ? 'Disable Auto-IBKR before changing execution profile' : 'Profile armed for PLAYBOOK Auto-IBKR'}
+                >
+                  <option value="LEGACY">Legacy</option>
+                  <option value="MGC_10M_SCALP_0_5R">MGC 10m Scalp 0.5R</option>
+                </select>
+                {armedProfile === 'MGC_10M_SCALP_0_5R' && !automation.scalpProfileValidated && (
+                  <button
+                    type="button"
+                    onClick={() => { void onValidateScalpProfile(); }}
+                    disabled={automationBusy}
+                    className="rounded border border-amber-700/70 bg-amber-950/30 px-1.5 py-0.5 font-semibold text-amber-300 hover:bg-amber-950/50 disabled:opacity-50"
+                  >
+                    Validate manually
+                  </button>
+                )}
+                {armedProfile === 'MGC_10M_SCALP_0_5R' && automation.scalpProfileValidated && (
+                  <span className="rounded border border-emerald-800/60 bg-emerald-950/40 px-1.5 py-0.5 font-semibold text-emerald-300">
+                    Manual validation OK
+                  </span>
+                )}
+              </div>
+              {profileTargets && (
+                <div className="grid grid-cols-3 gap-2">
+                  <Metric label="Legacy TP" value={profileTargets.legacyTp.toFixed(2)} />
+                  <Metric label="0.5R TP" value={profileTargets.scalp05RTp.toFixed(2)} accent="good" />
+                  <Metric label="1R benchmark" value={profileTargets.benchmark1RTp.toFixed(2)} />
+                </div>
+              )}
+              {!profileTargets && (
+                <div className="text-[10px] text-zinc-500">
+                  Targets appear when the current best setup is BREAK_RETEST.
+                </div>
+              )}
+              <div className="text-[10px] text-zinc-500">
+                1R is benchmark-only until candle replay is implemented.
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2 flex-wrap">
             <label className="flex items-center gap-1.5 text-zinc-400" title="Contracts submitted for Auto-IBKR live decisions">
               <span className="text-zinc-500">Qty</span>
@@ -761,6 +878,7 @@ function AutomationFooter({
             <span className="text-zinc-600">Thresholds are read-only (driven by backend config)</span>
           </div>
           <ProfitabilitySummary summary={summary} />
+          <RecentSimulationResults decisions={decisions} />
         </div>
       )}
     </div>
@@ -877,6 +995,54 @@ function ProfitabilitySummary({
   );
 }
 
+function RecentSimulationResults({
+  decisions,
+}: {
+  decisions: PlaybookAutomationDecisionView[];
+}) {
+  if (decisions.length === 0) {
+    return null;
+  }
+  return (
+    <div className="rounded border border-zinc-800 bg-zinc-950/40">
+      <div className="grid grid-cols-[3.5rem_4rem_1fr_1fr_1fr_1fr_3rem_4rem] gap-1 border-b border-zinc-800 px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-600">
+        <span>Result</span>
+        <span>Side</span>
+        <span>E</span>
+        <span>SL</span>
+        <span>TP1</span>
+        <span>TP2</span>
+        <span>R:R</span>
+        <span>P&L</span>
+      </div>
+      {decisions.slice(0, 5).map(decision => (
+        <div
+          key={decision.id ?? `${decision.createdAt}-${decision.direction}`}
+          className="grid grid-cols-[3.5rem_4rem_1fr_1fr_1fr_1fr_3rem_4rem] gap-1 border-b border-zinc-900 px-2 py-1 font-mono text-[10px] last:border-b-0"
+          title={decision.verdict ?? undefined}
+        >
+          <span className={simulationTextColor(decision.simulationStatus)}>
+            {shortSimulationStatus(decision.simulationStatus)}
+          </span>
+          <span className={decision.direction === 'LONG' ? 'text-emerald-300' : decision.direction === 'SHORT' ? 'text-red-300' : 'text-zinc-500'}>
+            {decision.direction ?? '-'}
+          </span>
+          <span className="text-zinc-300">{formatPrice(decision.entryPrice)}</span>
+          <span className="text-red-300">{formatPrice(decision.stopLoss)}</span>
+          <span className="text-emerald-300">{formatPrice(decision.takeProfit1)}</span>
+          <span className="text-emerald-500/80">{formatPrice(decision.takeProfit2)}</span>
+          <span className={(decision.rrRatio ?? 0) >= 1 ? 'text-amber-300' : 'text-red-300'}>
+            {formatMetric(decision.rrRatio, 2)}
+          </span>
+          <span className={(decision.pnl ?? decision.simulationPnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}>
+            {formatCurrency(decision.pnl ?? decision.simulationPnl)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -893,6 +1059,27 @@ function Metric({
       <div className={`font-mono ${color}`}>{value}</div>
     </div>
   );
+}
+
+function formatPrice(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '-';
+  return value.toFixed(2);
+}
+
+function shortSimulationStatus(status: PlaybookAutomationSimulationStatus | null): string {
+  if (!status) return '-';
+  const normalized = status.toUpperCase();
+  if (normalized === 'PENDING_ENTRY') return 'PEND';
+  return normalized.slice(0, 5);
+}
+
+function simulationTextColor(status: PlaybookAutomationSimulationStatus | null): string {
+  const normalized = status?.toUpperCase();
+  if (normalized === 'WIN') return 'text-emerald-300';
+  if (normalized === 'LOSS' || normalized === 'CANCELLED') return 'text-red-300';
+  if (normalized === 'ACTIVE') return 'text-cyan-300';
+  if (normalized === 'MISSED' || normalized === 'PENDING_ENTRY') return 'text-amber-300';
+  return 'text-zinc-500';
 }
 
 function summarizeAutomationDecisions(
@@ -922,6 +1109,18 @@ function summarizeAutomationDecisions(
 function formatMetric(value: number | null | undefined, digits = 0): string {
   if (value == null || !Number.isFinite(value)) return '—';
   return value.toFixed(digits);
+}
+
+function formatProfileLabel(profile: PlaybookExecutionProfile): string {
+  switch (profile) {
+    case 'MGC_10M_SCALP_0_5R':
+      return 'Scalp 0.5R';
+    case 'MGC_10M_NORMAL_1R_BENCHMARK':
+      return '1R benchmark';
+    case 'LEGACY':
+    default:
+      return 'Legacy';
+  }
 }
 
 function formatPct(value: number | null | undefined): string {

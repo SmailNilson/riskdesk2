@@ -13,6 +13,8 @@ public record PlaybookAutomationStateView(
     boolean autoIbkrEnabled,
     int quantity,
     String brokerAccountId,
+    String armedProfile,
+    boolean scalpProfileValidated,
     Instant updatedAt
 ) {
     public static PlaybookAutomationStateView from(PlaybookAutomationState state) {
@@ -25,6 +27,8 @@ public record PlaybookAutomationStateView(
             state.autoExecutionEnabled(),
             state.configuredOrderQty(),
             state.brokerAccountId(),
+            state.armedProfile().name(),
+            state.scalpProfileValidated(),
             state.updatedAt()
         );
     }

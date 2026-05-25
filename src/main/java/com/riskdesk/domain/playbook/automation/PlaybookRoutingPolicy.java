@@ -17,6 +17,22 @@ public final class PlaybookRoutingPolicy {
         if (!state.autoExecutionEnabled()) {
             return PlaybookRoutingDecision.paperOnly(PlaybookRoutingOutcome.PAPER_ONLY, null);
         }
+        PlaybookExecutionProfile profile = state.armedProfile();
+        if (!profile.supports(decision)) {
+            return PlaybookRoutingDecision.paperOnly(
+                PlaybookRoutingOutcome.SKIPPED_PROFILE_SCOPE,
+                profile.name() + " only applies to MGC 10m BREAK_RETEST");
+        }
+        if (!profile.executable()) {
+            return PlaybookRoutingDecision.paperOnly(
+                PlaybookRoutingOutcome.SKIPPED_PROFILE_NOT_EXECUTABLE,
+                profile.name() + " is benchmark-only");
+        }
+        if (profile.manualValidationRequired() && !state.scalpProfileValidated()) {
+            return PlaybookRoutingDecision.paperOnly(
+                PlaybookRoutingOutcome.SKIPPED_PROFILE_NOT_VALIDATED,
+                profile.name() + " requires manual validation before Auto-IBKR");
+        }
         if (decision.checklistScore() < state.liveThreshold()) {
             return PlaybookRoutingDecision.paperOnly(
                 PlaybookRoutingOutcome.SKIPPED_BELOW_LIVE_THRESHOLD,

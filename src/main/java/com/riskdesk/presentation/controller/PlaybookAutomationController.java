@@ -46,7 +46,7 @@ public class PlaybookAutomationController {
                                          @PathVariable String timeframe,
                                          @RequestBody(required = false) PlaybookAutomationUpdateRequest request) {
         PlaybookAutomationUpdateRequest body = request == null
-            ? new PlaybookAutomationUpdateRequest(null, null, null, null, null, null)
+            ? new PlaybookAutomationUpdateRequest(null, null, null, null, null, null, null, null)
             : request;
         try {
             PlaybookAutomationState state = automationService.updateState(
@@ -55,7 +55,9 @@ public class PlaybookAutomationController {
                 body.paperEnabled(),
                 body.autoIbkrEnabled(),
                 body.quantity(),
-                body.brokerAccountId());
+                body.brokerAccountId(),
+                body.armedProfile(),
+                body.scalpProfileValidated());
             return ResponseEntity.ok(PlaybookAutomationStateView.from(state));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));

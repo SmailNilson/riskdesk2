@@ -16,6 +16,9 @@ import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.playbook.automation.PlaybookAutomationState;
 import com.riskdesk.domain.playbook.automation.PlaybookDecision;
 import com.riskdesk.domain.playbook.automation.PlaybookDecisionSummary;
+import com.riskdesk.domain.playbook.automation.PlaybookExecutionProfile;
+import com.riskdesk.domain.playbook.automation.PlaybookProfilePlan;
+import com.riskdesk.domain.playbook.automation.PlaybookProfilePlanner;
 import com.riskdesk.domain.playbook.automation.PlaybookRoutingDecision;
 import com.riskdesk.domain.playbook.automation.PlaybookRoutingOutcome;
 import com.riskdesk.domain.playbook.automation.PlaybookRoutingPolicy;
@@ -37,9 +40,11 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 @Service
 public class PlaybookAutomationService {
@@ -47,6 +52,12 @@ public class PlaybookAutomationService {
     private static final Logger log = LoggerFactory.getLogger(PlaybookAutomationService.class);
     private static final String REQUESTED_BY = "playbook-auto";
     private static final PlaybookRoutingPolicy ROUTING_POLICY = new PlaybookRoutingPolicy();
+    private static final Set<ExecutionTriggerSource> CROSS_STRATEGY_BLOCKING_SOURCES = EnumSet.of(
+        ExecutionTriggerSource.PLAYBOOK_AUTO,
+        ExecutionTriggerSource.WTX_AUTO,
+        ExecutionTriggerSource.WTXRSI_AUTO,
+        ExecutionTriggerSource.QUANT_AUTO_ARM
+    );
 
     private final PlaybookService playbookService;
     private final PlaybookAutomationStatePort statePort;
@@ -149,7 +160,9 @@ public class PlaybookAutomationService {
                                                Boolean paperEnabled,
                                                Boolean autoExecutionEnabled,
                                                Integer configuredOrderQty,
-                                               String brokerAccountId) {
+                                               String brokerAccountId,
+                                               String armedProfile,
+                                               Boolean scalpProfileValidated) {
         PlaybookAutomationState current = getState(instrument, timeframe);
         String account = brokerAccountId == null ? current.brokerAccountId() : brokerAccountId;
         if (Boolean.TRUE.equals(autoExecutionEnabled) && (account == null || account.isBlank())) {
@@ -158,8 +171,18 @@ public class PlaybookAutomationService {
         if (configuredOrderQty != null && (configuredOrderQty <= 0 || configuredOrderQty > 100)) {
             throw new IllegalArgumentException("configuredOrderQty must be between 1 and 100");
         }
+        PlaybookExecutionProfile profile = armedProfile == null
+            ? null
+            : PlaybookExecutionProfile.parseOrDefault(armedProfile);
+        if (profile != null && profile != PlaybookExecutionProfile.LEGACY
+            && (!"MGC".equalsIgnoreCase(current.instrument()) || !"10m".equalsIgnoreCase(current.timeframe()))) {
+            throw new IllegalArgumentException("non-legacy PLAYBOOK profiles are only available for MGC 10m");
+        }
+        if (profile != null && profile.benchmarkOnly()) {
+            throw new IllegalArgumentException("1R profile is benchmark-only and cannot be armed");
+        }
         PlaybookAutomationState updated = current.withSettings(
-            paperEnabled, autoExecutionEnabled, configuredOrderQty, brokerAccountId);
+            paperEnabled, autoExecutionEnabled, configuredOrderQty, brokerAccountId, profile, scalpProfileValidated);
         return statePort.save(updated);
     }
 
@@ -298,6 +321,14 @@ public class PlaybookAutomationService {
                     null);
             }
         }
+        Optional<TradeExecutionRecord> crossStrategyConflict = findCrossStrategyConflict(decision, state);
+        if (crossStrategyConflict.isPresent()) {
+            TradeExecutionRecord active = crossStrategyConflict.get();
+            return decision.withRouting(
+                PlaybookRoutingOutcome.SKIPPED_DUPLICATE,
+                "active " + active.getTriggerSource() + " execution already exists: " + active.getId(),
+                active.getId());
+        }
         Optional<TradeExecutionRecord> active = executionRepository
             .findActiveByInstrumentAndTimeframeAndTriggerSource(
                 decision.instrument(), decision.timeframe(), ExecutionTriggerSource.PLAYBOOK_AUTO);
@@ -308,7 +339,8 @@ public class PlaybookAutomationService {
                 active.get().getId());
         }
 
-        String executionKey = decision.decisionKey();
+        PlaybookProfilePlan profilePlan = PlaybookProfilePlanner.planFor(decision, state.armedProfile());
+        String executionKey = executionKey(decision, state.armedProfile());
         Optional<TradeExecutionRecord> existingExecution = executionRepository.findByExecutionKey(executionKey);
         if (existingExecution.isPresent()) {
             return decision.withRouting(
@@ -331,10 +363,11 @@ public class PlaybookAutomationService {
         candidate.setTriggerSource(ExecutionTriggerSource.PLAYBOOK_AUTO);
         candidate.setRequestedBy(REQUESTED_BY);
         candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
-        candidate.setStatusReason("PLAYBOOK score " + decision.checklistScore() + "/7 armed");
+        candidate.setStatusReason("PLAYBOOK " + state.armedProfile().name()
+            + " score " + decision.checklistScore() + "/7 armed");
         candidate.setNormalizedEntryPrice(normalizeToTick(decision.entryPrice(), instrument));
         candidate.setVirtualStopLoss(normalizeToTick(decision.stopLoss(), instrument));
-        candidate.setVirtualTakeProfit(normalizeToTick(decision.takeProfit1(), instrument));
+        candidate.setVirtualTakeProfit(normalizeToTick(profilePlan.takeProfit(), instrument));
         candidate.setLastReliableLivePrice(decision.entryPrice());
         candidate.setLastReliableLivePriceAt(decision.priceTimestamp());
         candidate.setCreatedAt(now);
@@ -375,6 +408,24 @@ public class PlaybookAutomationService {
             executionRepository.save(persisted);
             return decision.withRouting(PlaybookRoutingOutcome.FAILED, message, persisted.getId());
         }
+    }
+
+    private Optional<TradeExecutionRecord> findCrossStrategyConflict(PlaybookDecision decision,
+                                                                     PlaybookAutomationState state) {
+        String account = state.brokerAccountId();
+        return executionRepository.findAllActive().stream()
+            .filter(row -> sameIgnoreCase(row.getInstrument(), decision.instrument()))
+            .filter(row -> CROSS_STRATEGY_BLOCKING_SOURCES.contains(row.getTriggerSource()))
+            .filter(row -> account == null || row.getBrokerAccountId() == null
+                || sameIgnoreCase(row.getBrokerAccountId(), account))
+            .findFirst();
+    }
+
+    private static String executionKey(PlaybookDecision decision, PlaybookExecutionProfile profile) {
+        if (profile == null || profile == PlaybookExecutionProfile.LEGACY) {
+            return decision.decisionKey();
+        }
+        return decision.decisionKey() + ":" + profile.name();
     }
 
     private PlaybookDecision handleBrokerRejection(PlaybookDecision decision,
@@ -550,6 +601,10 @@ public class PlaybookAutomationService {
 
     private static String blankFallback(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static boolean sameIgnoreCase(String left, String right) {
+        return left != null && right != null && left.equalsIgnoreCase(right);
     }
 
     private static boolean sameInstant(Instant left, Instant right) {

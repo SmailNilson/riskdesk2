@@ -6,6 +6,8 @@ public record PlaybookAutomationUpdateRequest(
     Boolean paperEnabled,
     Boolean autoIbkrEnabled,
     Integer quantity,
-    String brokerAccountId
+    String brokerAccountId,
+    String armedProfile,
+    Boolean scalpProfileValidated
 ) {
 }

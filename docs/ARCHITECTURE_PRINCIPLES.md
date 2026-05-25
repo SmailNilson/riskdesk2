@@ -312,9 +312,11 @@ Rules:
 2. Auto-IBKR must be opt-in, explicit, and diagnosable. Every skipped route needs a stable outcome/reason for the UI and logs.
 3. A live order must require an actionable playbook plan with complete entry, stop, target, direction, instrument, timeframe, quantity, and internal price context.
 4. A live order must pass broker preflight/margin checks before IBKR submission.
-5. Simulation state belongs to the `TradeSimulation` aggregate and `TradeSimulationService` transition path. Do not add playbook simulation fields to Mentor review/audit records.
-6. Idempotence must be keyed by the playbook signal/plan identity so candle replay, page refresh, or scheduler retry cannot submit duplicates.
-7. Use only the internal IBKR/PostgreSQL market-data path. Do not introduce external feeds or synthetic production fallbacks to make playbook routing easier to test.
+5. Non-legacy execution profiles must be scoped explicitly. `MGC_10M_SCALP_0_5R` is the only non-legacy executable profile today and requires manual validation; `MGC_10M_NORMAL_1R_BENCHMARK` is benchmark-only.
+6. Live Playbook routing must prevent cross-strategy stacking on the same instrument/account across Playbook, WTX, WTX+RSI, and Quant auto-arm execution sources.
+7. Simulation state belongs to the `TradeSimulation` aggregate and `TradeSimulationService` transition path. Do not add playbook simulation fields to Mentor review/audit records.
+8. Idempotence must be keyed by the playbook signal/plan identity so candle replay, page refresh, or scheduler retry cannot submit duplicates.
+9. Use only the internal IBKR/PostgreSQL market-data path. Do not introduce external feeds or synthetic production fallbacks to make playbook routing easier to test.
 
 Do not:
 
