@@ -23,6 +23,8 @@ class PlaybookAutomationStateTest {
         assertTrue(state.paperEnabled(), "Auto-simulation should default on for paper tracking");
         assertFalse(state.autoExecutionEnabled(), "Auto-IBKR must default off");
         assertEquals(PlaybookAutomationState.DEFAULT_ORDER_QTY, state.configuredOrderQty());
+        assertEquals(PlaybookExecutionProfile.LEGACY, state.armedProfile());
+        assertFalse(state.scalpProfileValidated());
     }
 
     @Test
@@ -64,6 +66,24 @@ class PlaybookAutomationStateTest {
         assertNull(changed.brokerAccountId());
         assertEquals(3, changed.paperThreshold());
         assertEquals(6, changed.liveThreshold());
+        assertEquals(PlaybookExecutionProfile.LEGACY, changed.armedProfile());
+        assertFalse(changed.scalpProfileValidated());
+    }
+
+    @Test
+    void withSettings_canArmScalpProfileWithoutChangingLegacyDefaults() {
+        PlaybookAutomationState state = PlaybookAutomationState.initial("MGC", "10m");
+
+        PlaybookAutomationState changed = state.withSettings(
+            null,
+            null,
+            null,
+            null,
+            PlaybookExecutionProfile.MGC_10M_SCALP_0_5R,
+            true);
+
+        assertEquals(PlaybookExecutionProfile.MGC_10M_SCALP_0_5R, changed.armedProfile());
+        assertTrue(changed.scalpProfileValidated());
     }
 
     @Test

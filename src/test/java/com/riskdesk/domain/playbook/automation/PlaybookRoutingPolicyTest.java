@@ -66,7 +66,58 @@ class PlaybookRoutingPolicyTest {
         assertEquals(PlaybookRoutingOutcome.SKIPPED_NO_ACCOUNT, result.outcome());
     }
 
+    @Test
+    void scalpProfileRequiresManualValidationBeforeLive() {
+        PlaybookRoutingDecision result = policy.evaluate(
+            breakRetestDecision("MGC", "10m"),
+            state(true, "DU123", 1, PlaybookExecutionProfile.MGC_10M_SCALP_0_5R, false));
+
+        assertTrue(result.paperSimulationAllowed());
+        assertFalse(result.liveRoutingAllowed());
+        assertEquals(PlaybookRoutingOutcome.SKIPPED_PROFILE_NOT_VALIDATED, result.outcome());
+    }
+
+    @Test
+    void validatedScalpProfileCanRouteForMgcTenMinuteBreakRetest() {
+        PlaybookRoutingDecision result = policy.evaluate(
+            breakRetestDecision("MGC", "10m"),
+            state(true, "DU123", 1, PlaybookExecutionProfile.MGC_10M_SCALP_0_5R, true));
+
+        assertTrue(result.paperSimulationAllowed());
+        assertTrue(result.liveRoutingAllowed());
+    }
+
+    @Test
+    void benchmarkProfileCannotRouteLive() {
+        PlaybookRoutingDecision result = policy.evaluate(
+            breakRetestDecision("MGC", "10m"),
+            state(true, "DU123", 1, PlaybookExecutionProfile.MGC_10M_NORMAL_1R_BENCHMARK, true));
+
+        assertTrue(result.paperSimulationAllowed());
+        assertFalse(result.liveRoutingAllowed());
+        assertEquals(PlaybookRoutingOutcome.SKIPPED_PROFILE_NOT_EXECUTABLE, result.outcome());
+    }
+
+    @Test
+    void scopedProfileCannotRouteNonMgcBreakRetest() {
+        PlaybookRoutingDecision result = policy.evaluate(
+            breakRetestDecision("MNQ", "10m"),
+            state(true, "DU123", 1, PlaybookExecutionProfile.MGC_10M_SCALP_0_5R, true));
+
+        assertTrue(result.paperSimulationAllowed());
+        assertFalse(result.liveRoutingAllowed());
+        assertEquals(PlaybookRoutingOutcome.SKIPPED_PROFILE_SCOPE, result.outcome());
+    }
+
     private static PlaybookAutomationState state(boolean autoIbkr, String account, int qty) {
+        return state(autoIbkr, account, qty, PlaybookExecutionProfile.LEGACY, false);
+    }
+
+    private static PlaybookAutomationState state(boolean autoIbkr,
+                                                String account,
+                                                int qty,
+                                                PlaybookExecutionProfile profile,
+                                                boolean scalpValidated) {
         return new PlaybookAutomationState(
             "MCL",
             "10m",
@@ -76,7 +127,39 @@ class PlaybookRoutingPolicyTest {
             autoIbkr,
             qty,
             account,
+            profile,
+            scalpValidated,
             Instant.parse("2026-05-22T12:00:00Z")
+        );
+    }
+
+    private static PlaybookDecision breakRetestDecision(String instrument, String timeframe) {
+        Instant now = Instant.parse("2026-05-22T12:00:00Z");
+        return new PlaybookDecision(
+            1L,
+            "playbook:" + instrument + ":" + timeframe + ":1779451200:LONG:BREAK_RETEST:test",
+            instrument,
+            timeframe,
+            instrument + ":" + timeframe + ":1779451200:LONG:BREAK_RETEST:test",
+            "BREAK_RETEST",
+            "BOS Retest",
+            "LONG",
+            6,
+            "TRADE",
+            new BigDecimal("4513.40"),
+            new BigDecimal("4462.40"),
+            new BigDecimal("4518.40"),
+            new BigDecimal("4564.40"),
+            new BigDecimal("0.1"),
+            new BigDecimal("0.005"),
+            false,
+            "LIVE_IBKR",
+            now,
+            now,
+            now,
+            null,
+            null,
+            null
         );
     }
 

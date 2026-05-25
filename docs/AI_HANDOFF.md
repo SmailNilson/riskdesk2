@@ -1,6 +1,6 @@
 # AI Handoff
 
-Last updated: 2026-05-22
+Last updated: 2026-05-25
 
 ## Playbook Auto-Simulation + Auto-IBKR (2026-05-22)
 
@@ -25,6 +25,10 @@ What landed:
   - `GET/PUT /api/playbook/automation/{instrument}/{timeframe}`
   - `GET /api/playbook/automation/{instrument}/{timeframe}/decisions?limit=N`
 - WebSocket fan-out on `/topic/playbook-decisions/{instrument}/{timeframe}`.
+- Execution profile state on `playbook_automation_states`: `LEGACY` by default,
+  optional `MGC_10M_SCALP_0_5R` for `MGC 10m BREAK_RETEST` after manual
+  validation, and `MGC_10M_NORMAL_1R_BENCHMARK` reserved as non-executable
+  benchmark until replay support lands.
 
 Important safety gates:
 
@@ -32,6 +36,12 @@ Important safety gates:
 - Live routing requires complete entry/SL/TP, score >= 5/7, positive quantity,
   non-late entry, live IBKR price source, no active duplicate, IBKR enabled, and
   broker preflight approval.
+- Non-legacy Playbook profiles are scoped to `MGC 10m`; the 0.5R scalp profile
+  cannot route live until `scalpProfileValidated=true`, and the 1R profile is
+  not armable.
+- Playbook live routing also checks active executions from `PLAYBOOK_AUTO`,
+  `WTX_AUTO`, `WTXRSI_AUTO`, and `QUANT_AUTO_ARM` for the same instrument/account
+  before submitting a new IBKR entry.
 - Paper simulation still records late entries for forward stats.
 
 ## IBKR — persistent account snapshot subscription (2026-05-20)

@@ -1593,8 +1593,15 @@ export interface PlaybookAutomationView {
   autoIbkrEnabled: boolean;
   quantity: number;
   brokerAccountId?: string | null;
+  armedProfile?: PlaybookExecutionProfile;
+  scalpProfileValidated?: boolean;
   updatedAt: string | null;
 }
+
+export type PlaybookExecutionProfile =
+  | 'LEGACY'
+  | 'MGC_10M_SCALP_0_5R'
+  | 'MGC_10M_NORMAL_1R_BENCHMARK';
 
 export interface PlaybookAutomationUpdateRequest {
   paperThreshold?: number;
@@ -1603,6 +1610,8 @@ export interface PlaybookAutomationUpdateRequest {
   autoIbkrEnabled?: boolean;
   quantity?: number;
   brokerAccountId?: string | null;
+  armedProfile?: PlaybookExecutionProfile;
+  scalpProfileValidated?: boolean;
 }
 
 export type PlaybookAutomationRoutingOutcome =
@@ -1648,6 +1657,10 @@ export interface PlaybookAutomationDecisionView {
   autoIbkrEnabled: boolean | null;
   quantity: number | null;
   brokerAccountId?: string | null;
+  entryPrice: number | null;
+  stopLoss: number | null;
+  takeProfit1: number | null;
+  takeProfit2: number | null;
   routingOutcome: PlaybookAutomationRoutingOutcome | null;
   routingErrorMessage: string | null;
   simulationStatus: PlaybookAutomationSimulationStatus | null;

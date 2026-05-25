@@ -39,6 +39,12 @@ public class PlaybookAutomationStateEntity {
     @Column(length = 64)
     private String brokerAccountId;
 
+    @Column(length = 48)
+    private String armedProfile;
+
+    @Column
+    private Boolean scalpProfileValidated;
+
     @Column(nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
     private Instant updatedAt;
 
@@ -104,6 +110,22 @@ public class PlaybookAutomationStateEntity {
 
     public void setBrokerAccountId(String brokerAccountId) {
         this.brokerAccountId = brokerAccountId;
+    }
+
+    public String getArmedProfile() {
+        return armedProfile;
+    }
+
+    public void setArmedProfile(String armedProfile) {
+        this.armedProfile = armedProfile;
+    }
+
+    public Boolean getScalpProfileValidated() {
+        return scalpProfileValidated;
+    }
+
+    public void setScalpProfileValidated(Boolean scalpProfileValidated) {
+        this.scalpProfileValidated = scalpProfileValidated;
     }
 
     public Instant getUpdatedAt() {

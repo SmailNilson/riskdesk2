@@ -258,10 +258,12 @@ PLAYBOOK automation is a playbook-specific workflow driven by `CandleClosed`, no
 
 Current behavior:
 
-- Per-panel state lives in `playbook_automation_states`: `paperThreshold=4`, `liveThreshold=5`, `paperEnabled=true`, `autoExecutionEnabled=false`, `configuredOrderQty=1`.
+- Per-panel state lives in `playbook_automation_states`: `paperThreshold=4`, `liveThreshold=5`, `paperEnabled=true`, `autoExecutionEnabled=false`, `configuredOrderQty=1`, `armedProfile=LEGACY`, `scalpProfileValidated=false`.
 - Qualifying decisions are frozen in `playbook_decisions` with setup identity, score, direction, entry/SL/TP, evaluated candle time, routing outcome, and price source.
 - Paper simulation uses `ReviewType.PLAYBOOK` and resolves the plan from `PlaybookDecision`; it does not write simulation state back to Mentor review/audit records.
 - Auto-IBKR is a second, explicit opt-in gate and requires a selected broker account, complete plan, score >= 5/7, positive quantity, non-late entry, live IBKR price source, no duplicate execution, IBKR enabled, and margin/preflight approval.
+- `MGC 10m BREAK_RETEST` can arm the `MGC_10M_SCALP_0_5R` execution profile after manual validation; `MGC_10M_NORMAL_1R_BENCHMARK` remains benchmark-only until candle-by-candle replay lands. Other instruments/timeframes remain `LEGACY`.
+- Live Playbook routing blocks when an active execution already exists for the same instrument/account across `PLAYBOOK_AUTO`, `WTX_AUTO`, `WTXRSI_AUTO`, or `QUANT_AUTO_ARM`.
 - Every non-routed path exposes a stable diagnostic outcome such as `PAPER_ONLY`, `SKIPPED_NO_PLAN`, `SKIPPED_NO_QTY`, `SKIPPED_NO_ACCOUNT`, `SKIPPED_STALE_PRICE_SOURCE`, `SKIPPED_INSUFFICIENT_MARGIN`, or `SKIPPED_IBKR_DISABLED`.
 - REST: `GET/PUT /api/playbook/automation/{instrument}/{timeframe}` and `GET /api/playbook/automation/{instrument}/{timeframe}/decisions?limit=N`.
 - WebSocket: `/topic/playbook-decisions/{instrument}/{timeframe}`.
