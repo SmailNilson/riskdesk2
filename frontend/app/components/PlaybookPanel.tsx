@@ -271,15 +271,15 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
     () => computeTradeStats(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null, automationState.quantity, livePrice ?? null),
     [playbook?.plan, playbook?.filters?.tradeDirection, automationState.quantity, livePrice],
   );
-  const profileScopeAvailable =
-    instrument === 'MGC'
-    && timeframe === '10m'
-    && playbook?.bestSetup?.type === 'BREAK_RETEST'
-    && playbook?.plan != null
-    && playbook?.filters?.tradeDirection != null;
+  const profileControlsAvailable = instrument === 'MGC' && timeframe === '10m';
+  const currentSetupSupportsProfileTargets =
+    profileControlsAvailable
+    && playbook?.bestSetup?.type === 'BREAK_RETEST';
   const profileTargets = useMemo(
-    () => computeProfileTargets(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null),
-    [playbook?.plan, playbook?.filters?.tradeDirection],
+    () => currentSetupSupportsProfileTargets
+      ? computeProfileTargets(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null)
+      : null,
+    [currentSetupSupportsProfileTargets, playbook?.plan, playbook?.filters?.tradeDirection],
   );
 
   const onChangeExecutionProfile = useCallback(async (profile: PlaybookExecutionProfile) => {
@@ -476,7 +476,7 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
         collapsed={automationCollapsed}
         setCollapsed={setAutomationCollapsed}
         activeBrokerAccountId={activeBrokerAccountId}
-        profileScopeAvailable={profileScopeAvailable}
+        profileControlsAvailable={profileControlsAvailable}
         profileTargets={profileTargets}
         onChangeExecutionProfile={onChangeExecutionProfile}
         onValidateScalpProfile={onValidateScalpProfile}
@@ -739,7 +739,7 @@ function Tick({ pct, color, label, tall }: { pct: string; color: string; label?:
 function AutomationFooter({
   autoIbkrOn, automationBusy, automation, qtyDraft, setQtyDraft, commitQty,
   onToggleAutoIbkr, latestDecision, decisions, summary, collapsed, setCollapsed, activeBrokerAccountId,
-  profileScopeAvailable, profileTargets, onChangeExecutionProfile, onValidateScalpProfile,
+  profileControlsAvailable, profileTargets, onChangeExecutionProfile, onValidateScalpProfile,
 }: {
   autoIbkrOn: boolean;
   automationBusy: boolean;
@@ -754,7 +754,7 @@ function AutomationFooter({
   collapsed: boolean;
   setCollapsed: (next: boolean) => void;
   activeBrokerAccountId: string | null;
-  profileScopeAvailable: boolean;
+  profileControlsAvailable: boolean;
   profileTargets: ProfileTargets | null;
   onChangeExecutionProfile: (profile: PlaybookExecutionProfile) => Promise<void>;
   onValidateScalpProfile: () => Promise<void>;
@@ -801,7 +801,7 @@ function AutomationFooter({
       </div>
       {!collapsed && (
         <div className="border-t border-zinc-800 px-2 py-2 space-y-2">
-          {profileScopeAvailable && (
+          {profileControlsAvailable && (
             <div className="rounded border border-cyan-900/50 bg-cyan-950/10 px-2 py-2 space-y-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-zinc-500">Execution profile</span>
@@ -838,6 +838,11 @@ function AutomationFooter({
                   <Metric label="Legacy TP" value={profileTargets.legacyTp.toFixed(2)} />
                   <Metric label="0.5R TP" value={profileTargets.scalp05RTp.toFixed(2)} accent="good" />
                   <Metric label="1R benchmark" value={profileTargets.benchmark1RTp.toFixed(2)} />
+                </div>
+              )}
+              {!profileTargets && (
+                <div className="text-[10px] text-zinc-500">
+                  Targets appear when the current best setup is BREAK_RETEST.
                 </div>
               )}
               <div className="text-[10px] text-zinc-500">
