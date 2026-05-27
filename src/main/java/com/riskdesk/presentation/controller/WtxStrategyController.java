@@ -147,7 +147,7 @@ public class WtxStrategyController {
         view.put("maxLossHit", false);
         view.put("activeProfile", WtxProfile.BASELINE.name());
         view.put("autoExecutionEnabled", false);
-        view.put("telegramNotificationsEnabled", true);
+        view.put("telegramNotificationsEnabled", WtxStrategyState.defaultTelegramEnabledFor(instrument));
         view.put("canTrade", true);
         return view;
     }

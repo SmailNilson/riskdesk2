@@ -39,10 +39,23 @@ public record WtxStrategyState(
         /**
          * When false, the Telegram notification listener skips signals for this
          * (instrument, timeframe) — used by the per-panel Telegram toggle.
-         * Defaults to true on initial state so historical behaviour is preserved.
+         * Default is instrument-scoped: ON for MNQ / MCL (the actively traded
+         * pairs), OFF elsewhere — see {@link #defaultTelegramEnabledFor(String)}.
+         * The operator can flip it per panel at runtime regardless of the default.
          */
         boolean telegramNotificationsEnabled
 ) {
+    /**
+     * Instrument-scoped default for the Telegram notification toggle.
+     * Only MNQ and MCL receive WTX Telegram alerts out of the box; other
+     * instruments (MGC, 6E, …) start muted so the channel stays focused on
+     * the pairs the operator actively trades. The per-panel toggle still
+     * lets the operator opt in for any instrument at runtime.
+     */
+    public static boolean defaultTelegramEnabledFor(String instrument) {
+        return "MNQ".equalsIgnoreCase(instrument) || "MCL".equalsIgnoreCase(instrument);
+    }
+
     public static WtxStrategyState initial(String instrument, String timeframe, BigDecimal startEquity) {
         return new WtxStrategyState(
                 instrument,
@@ -57,7 +70,7 @@ public record WtxStrategyState(
                 WtxProfile.BASELINE,
                 false,
                 null, null, null,
-                true
+                defaultTelegramEnabledFor(instrument)
         );
     }
 

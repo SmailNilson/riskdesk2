@@ -97,13 +97,35 @@ class TradeNotificationListenerTest {
     }
 
     @Test
-    void wtxNotificationDefaultsToEnabledWhenStateMissing() {
+    void wtxNotificationDefaultsToEnabledForMnqWhenStateMissing() {
+        // MNQ is a "primary" pair — default = ON when no row exists yet.
         when(wtxStatePort.load("MNQ", "5m")).thenReturn(Optional.empty());
 
         WtxSignalDetectedEvent event = wtxEvent("MNQ", "5m");
         listener.onWtxSignal(event);
 
         verify(notificationPort).sendWtxSignal(event);
+    }
+
+    @Test
+    void wtxNotificationDefaultsToEnabledForMclWhenStateMissing() {
+        // MCL is the other "primary" pair — default = ON when no row exists yet.
+        when(wtxStatePort.load("MCL", "10m")).thenReturn(Optional.empty());
+
+        WtxSignalDetectedEvent event = wtxEvent("MCL", "10m");
+        listener.onWtxSignal(event);
+
+        verify(notificationPort).sendWtxSignal(event);
+    }
+
+    @Test
+    void wtxNotificationDefaultsToDisabledForNonPrimaryInstrumentWhenStateMissing() {
+        // MGC / 6E / etc. start muted by default — operator opts in via the toggle.
+        when(wtxStatePort.load("MGC", "10m")).thenReturn(Optional.empty());
+
+        listener.onWtxSignal(wtxEvent("MGC", "10m"));
+
+        verify(notificationPort, never()).sendWtxSignal(any());
     }
 
     @Test

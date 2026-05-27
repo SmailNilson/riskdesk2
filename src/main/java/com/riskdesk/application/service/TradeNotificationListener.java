@@ -1,5 +1,6 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import com.riskdesk.domain.engine.strategy.wtx.port.WtxStrategyStatePort;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
@@ -58,11 +59,12 @@ public class TradeNotificationListener {
     public void onWtxSignal(WtxSignalDetectedEvent event) {
         // Per-(instrument, timeframe) Telegram toggle — load the persisted state
         // and skip when the operator has opted out for this panel. State may be
-        // missing (very first signal ever for the pair), in which case the
-        // default is to notify (matches WtxStrategyState.initial()).
+        // missing (very first signal ever for the pair), in which case we fall
+        // back to the instrument-scoped default (ON for MNQ / MCL, OFF for the
+        // other tickers — see WtxStrategyState.defaultTelegramEnabledFor).
         boolean enabled = wtxStatePort.load(event.instrument(), event.timeframe())
                 .map(s -> s.telegramNotificationsEnabled())
-                .orElse(true);
+                .orElseGet(() -> WtxStrategyState.defaultTelegramEnabledFor(event.instrument()));
         if (!enabled) {
             log.debug("WTX telegram disabled for {} {} — skipping notification",
                 event.instrument(), event.timeframe());

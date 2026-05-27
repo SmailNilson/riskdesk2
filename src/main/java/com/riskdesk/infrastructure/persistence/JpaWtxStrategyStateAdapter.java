@@ -58,9 +58,12 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 e.getEntryAtr(),
                 e.getBestFavorablePrice(),
                 e.getTrailingStopPrice(),
-                // Default-on: legacy rows (column null) keep receiving Telegram alerts.
+                // Legacy rows (column null) fall back to the instrument-scoped
+                // default: ON for MNQ / MCL, OFF for the other tickers. Once the
+                // operator flips the toggle the explicit value wins.
                 e.getTelegramNotificationsEnabled() == null
-                        || Boolean.TRUE.equals(e.getTelegramNotificationsEnabled())
+                        ? WtxStrategyState.defaultTelegramEnabledFor(e.getInstrument())
+                        : Boolean.TRUE.equals(e.getTelegramNotificationsEnabled())
         );
     }
 
