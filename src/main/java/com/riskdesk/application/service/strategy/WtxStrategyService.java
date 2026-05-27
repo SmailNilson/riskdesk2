@@ -347,6 +347,17 @@ public class WtxStrategyService {
         return updated;
     }
 
+    public WtxStrategyState updateTelegramNotifications(String instrument, String timeframe, boolean enabled) {
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        WtxStrategyState updated = state.withTelegramNotifications(enabled);
+        statePort.save(updated);
+        log.info("WTX [{} {}] telegram notifications {}", instrument, timeframe,
+                enabled ? "ENABLED" : "DISABLED");
+        publishState(updated, properties.toConfig());
+        return updated;
+    }
+
     /**
      * Current swing bias for an (instrument, timeframe), derived from the most recent
      * signal's enrichment. Returns null when no signal exists yet or the enrichment did

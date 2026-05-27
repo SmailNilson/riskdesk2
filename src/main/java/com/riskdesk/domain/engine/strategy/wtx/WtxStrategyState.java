@@ -49,10 +49,29 @@ public record WtxStrategyState(
          * existing row's quantity, not this value, so changing the panel size never causes
          * a partial flatten of an open position.
          */
-        int configuredOrderQty
+        int configuredOrderQty,
+        /**
+         * When false, the Telegram notification listener skips WTX signals for this
+         * (instrument, timeframe) — used by the per-panel Telegram toggle.
+         * Default is instrument-scoped: ON for MNQ / MCL (the actively traded
+         * pairs), OFF elsewhere — see {@link #defaultTelegramEnabledFor(String)}.
+         * The operator can flip it per panel at runtime regardless of the default.
+         */
+        boolean telegramNotificationsEnabled
 ) {
     /** Panel default — matches what the user sees on first load. */
     public static final int DEFAULT_ORDER_QTY = 2;
+
+    /**
+     * Instrument-scoped default for the Telegram notification toggle.
+     * Only MNQ and MCL receive WTX Telegram alerts out of the box; other
+     * instruments (MGC, 6E, …) start muted so the channel stays focused on
+     * the pairs the operator actively trades. The per-panel toggle still
+     * lets the operator opt in for any instrument at runtime.
+     */
+    public static boolean defaultTelegramEnabledFor(String instrument) {
+        return "MNQ".equalsIgnoreCase(instrument) || "MCL".equalsIgnoreCase(instrument);
+    }
 
     public static WtxStrategyState initial(String instrument, String timeframe, BigDecimal startEquity) {
         return new WtxStrategyState(
@@ -69,7 +88,8 @@ public record WtxStrategyState(
                 false,
                 null, null, null,
                 false,
-                DEFAULT_ORDER_QTY
+                DEFAULT_ORDER_QTY,
+                defaultTelegramEnabledFor(instrument)
         );
     }
 
@@ -78,7 +98,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withPosition(WtxPosition pos, BigDecimal entryPrice, BigDecimal qty, BigDecimal entryAtr) {
@@ -86,7 +107,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withFlat(BigDecimal realizedPnlAdd) {
@@ -96,7 +118,8 @@ public record WtxStrategyState(
                 dayStartEquity, newEquity, newRealized, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withDayReset(BigDecimal newStartEquity) {
@@ -104,7 +127,8 @@ public record WtxStrategyState(
                 newStartEquity, newStartEquity, BigDecimal.ZERO, false, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withMaxLossHit() {
@@ -112,7 +136,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, true, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withLastCandleTs(Instant ts) {
@@ -120,7 +145,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, ts, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withProfile(WtxProfile profile) {
@@ -128,7 +154,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 profile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withAutoExecution(boolean enabled) {
@@ -136,7 +163,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, enabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withSwingBiasFilter(boolean enabled) {
@@ -144,7 +172,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                enabled, configuredOrderQty);
+                enabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withTrailing(BigDecimal bestFavorablePrice, BigDecimal trailingStopPrice) {
@@ -152,7 +181,8 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, configuredOrderQty);
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled);
     }
 
     public WtxStrategyState withConfiguredOrderQty(int qty) {
@@ -161,7 +191,17 @@ public record WtxStrategyState(
                 dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
-                swingBiasFilterEnabled, sanitized);
+                swingBiasFilterEnabled, sanitized,
+                telegramNotificationsEnabled);
+    }
+
+    public WtxStrategyState withTelegramNotifications(boolean enabled) {
+        return new WtxStrategyState(instrument, timeframe, currentPosition, entryPrice, entryQty,
+                dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, configuredOrderQty,
+                enabled);
     }
 
     /** Daily P&L = current equity - day start equity */

@@ -1801,6 +1801,12 @@ export interface WtxStrategyStateView {
   currentSwingBias: 'BULLISH' | 'BEARISH' | null;
   /** User-configured contracts to submit on the next OPEN / REVERSE open leg for this panel. */
   configuredOrderQty: number;
+  /**
+   * Per-panel Telegram toggle for WTX signals. Default is instrument-scoped
+   * (ON for MNQ / MCL, OFF elsewhere) — the user can flip it at runtime via
+   * the Telegram button on the panel.
+   */
+  telegramNotificationsEnabled: boolean;
 }
 
 export type WtxRoutingOutcome =
@@ -1904,6 +1910,16 @@ export async function updateWtxOrderQty(instrument: string, timeframe: string, q
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ qty }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxTelegramNotifications(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/telegram-notifications`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
   });
   if (!res.ok) return null;
   return res.json();

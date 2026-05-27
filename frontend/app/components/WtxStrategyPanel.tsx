@@ -8,6 +8,7 @@ import {
   updateWtxAutoExecution,
   updateWtxSwingBiasFilter,
   updateWtxOrderQty,
+  updateWtxTelegramNotifications,
 } from '@/app/lib/api';
 import type {
   WtxStrategyStateView,
@@ -243,6 +244,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [profileBusy, setProfileBusy] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
   const [swingBiasBusy, setSwingBiasBusy] = useState(false);
+  const [telegramBusy, setTelegramBusy] = useState(false);
   const [qtyBusy, setQtyBusy] = useState(false);
   const [qtyDraft, setQtyDraft] = useState<string>('');
   // Tracks the (instrument, timeframe) tuple the qty draft is currently tied to. When the
@@ -360,6 +362,18 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     }
   }, [instrument, timeframe, state]);
 
+  const onToggleTelegram = useCallback(async () => {
+    if (!state) return;
+    const turningOn = !state.telegramNotificationsEnabled;
+    setTelegramBusy(true);
+    try {
+      const updated = await updateWtxTelegramNotifications(instrument, timeframe, turningOn);
+      if (updated) setState(updated);
+    } finally {
+      setTelegramBusy(false);
+    }
+  }, [instrument, timeframe, state]);
+
   // Merge live WS signals (already filtered by TF) on top of server-side filtered history
   const merged = [
     ...liveSignals.filter(s => s.instrument === instrument && s.timeframe === timeframe),
@@ -367,6 +381,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   ].filter((s, i, arr) => arr.findIndex(x => x.signalTs === s.signalTs) === i).slice(0, 20);
 
   const autoExecOn = state?.autoExecutionEnabled === true;
+  const telegramOn = state?.telegramNotificationsEnabled === true;
 
   return (
     <div className={`border rounded-lg p-3 space-y-2 ${autoExecOn ? 'border-red-700/70 bg-red-950/10' : 'border-cyan-900/40 bg-zinc-900/80'}`}>
@@ -454,6 +469,20 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
                 }`}
               >
                 Auto-IBKR : {autoExecOn ? 'ON' : 'OFF'}
+              </button>
+              <button
+                type="button"
+                onClick={onToggleTelegram}
+                disabled={telegramBusy}
+                aria-pressed={telegramOn}
+                title={telegramOn ? 'Désactiver les notifications Telegram pour ce panneau' : 'Activer les notifications Telegram pour ce panneau'}
+                className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                  telegramOn
+                    ? 'border-sky-600/70 bg-sky-950/40 text-sky-300 hover:bg-sky-950/60'
+                    : 'border-zinc-700 text-zinc-400 hover:border-sky-700 hover:text-sky-300'
+                }`}
+              >
+                Telegram : {telegramOn ? 'ON' : 'OFF'}
               </button>
               <SwingBiasControl
                 enabled={state.swingBiasFilterEnabled}

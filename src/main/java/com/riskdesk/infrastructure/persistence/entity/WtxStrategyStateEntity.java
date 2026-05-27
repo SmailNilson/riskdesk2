@@ -91,6 +91,15 @@ public class WtxStrategyStateEntity {
     @Column
     private Integer configuredOrderQty;
 
+    /**
+     * Nullable for the same {@code ddl-auto=update} reason as {@link #autoExecutionEnabled}.
+     * Legacy rows read back as {@code null} → resolved by the adapter to the
+     * instrument-scoped default (ON for MNQ / MCL, OFF elsewhere) so the channel
+     * stays focused on the actively traded pairs without manual back-fill.
+     */
+    @Column
+    private Boolean telegramNotificationsEnabled;
+
     public WtxStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -146,4 +155,7 @@ public class WtxStrategyStateEntity {
 
     public Integer getConfiguredOrderQty() { return configuredOrderQty; }
     public void setConfiguredOrderQty(Integer configuredOrderQty) { this.configuredOrderQty = configuredOrderQty; }
+
+    public Boolean getTelegramNotificationsEnabled() { return telegramNotificationsEnabled; }
+    public void setTelegramNotificationsEnabled(Boolean telegramNotificationsEnabled) { this.telegramNotificationsEnabled = telegramNotificationsEnabled; }
 }

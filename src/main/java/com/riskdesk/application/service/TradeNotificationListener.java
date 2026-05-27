@@ -1,5 +1,7 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
+import com.riskdesk.domain.engine.strategy.wtx.port.WtxStrategyStatePort;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
@@ -23,9 +25,12 @@ public class TradeNotificationListener {
     private static final Logger log = LoggerFactory.getLogger(TradeNotificationListener.class);
 
     private final NotificationPort notificationPort;
+    private final WtxStrategyStatePort wtxStatePort;
 
-    public TradeNotificationListener(NotificationPort notificationPort) {
+    public TradeNotificationListener(NotificationPort notificationPort,
+                                     WtxStrategyStatePort wtxStatePort) {
         this.notificationPort = notificationPort;
+        this.wtxStatePort = wtxStatePort;
     }
 
     @Async
@@ -52,6 +57,31 @@ public class TradeNotificationListener {
     @Async
     @EventListener
     public void onWtxSignal(WtxSignalDetectedEvent event) {
+        // Per-(instrument, timeframe) Telegram toggle — load the persisted state
+        // and skip when the operator has opted out for this panel. State may be
+        // missing (very first signal ever for the pair), in which case we fall
+        // back to the instrument-scoped default (ON for MNQ / MCL, OFF for the
+        // other tickers — see WtxStrategyState.defaultTelegramEnabledFor).
+        //
+        // Fail-open on lookup error: a transient DB outage must NOT silently
+        // suppress every WTX alert. We swallow the exception, log a warning,
+        // and apply the instrument-scoped default so MNQ / MCL still notify
+        // even when the state row can't be read.
+        boolean enabled;
+        try {
+            enabled = wtxStatePort.load(event.instrument(), event.timeframe())
+                    .map(WtxStrategyState::telegramNotificationsEnabled)
+                    .orElseGet(() -> WtxStrategyState.defaultTelegramEnabledFor(event.instrument()));
+        } catch (Exception e) {
+            log.warn("WTX telegram state lookup failed for {} {} — falling back to instrument default ({}). Cause: {}",
+                event.instrument(), event.timeframe(), e.getMessage(), e.getClass().getSimpleName());
+            enabled = WtxStrategyState.defaultTelegramEnabledFor(event.instrument());
+        }
+        if (!enabled) {
+            log.debug("WTX telegram disabled for {} {} — skipping notification",
+                event.instrument(), event.timeframe());
+            return;
+        }
         try {
             notificationPort.sendWtxSignal(event);
         } catch (Exception e) {
