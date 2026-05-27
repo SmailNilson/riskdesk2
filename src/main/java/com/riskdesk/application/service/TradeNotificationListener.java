@@ -62,9 +62,21 @@ public class TradeNotificationListener {
         // missing (very first signal ever for the pair), in which case we fall
         // back to the instrument-scoped default (ON for MNQ / MCL, OFF for the
         // other tickers — see WtxStrategyState.defaultTelegramEnabledFor).
-        boolean enabled = wtxStatePort.load(event.instrument(), event.timeframe())
-                .map(WtxStrategyState::telegramNotificationsEnabled)
-                .orElseGet(() -> WtxStrategyState.defaultTelegramEnabledFor(event.instrument()));
+        //
+        // Fail-open on lookup error: a transient DB outage must NOT silently
+        // suppress every WTX alert. We swallow the exception, log a warning,
+        // and apply the instrument-scoped default so MNQ / MCL still notify
+        // even when the state row can't be read.
+        boolean enabled;
+        try {
+            enabled = wtxStatePort.load(event.instrument(), event.timeframe())
+                    .map(WtxStrategyState::telegramNotificationsEnabled)
+                    .orElseGet(() -> WtxStrategyState.defaultTelegramEnabledFor(event.instrument()));
+        } catch (Exception e) {
+            log.warn("WTX telegram state lookup failed for {} {} — falling back to instrument default ({}). Cause: {}",
+                event.instrument(), event.timeframe(), e.getMessage(), e.getClass().getSimpleName());
+            enabled = WtxStrategyState.defaultTelegramEnabledFor(event.instrument());
+        }
         if (!enabled) {
             log.debug("WTX telegram disabled for {} {} — skipping notification",
                 event.instrument(), event.timeframe());

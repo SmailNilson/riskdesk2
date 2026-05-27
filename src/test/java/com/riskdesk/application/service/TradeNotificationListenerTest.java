@@ -129,6 +129,32 @@ class TradeNotificationListenerTest {
     }
 
     @Test
+    void wtxNotificationFailsOpenOnStateLookupErrorForPrimaryInstrument() {
+        // Transient DB outage: lookup throws. We must NOT silently drop the
+        // alert — fall back to the instrument-scoped default. MNQ is primary,
+        // so the notification still fires.
+        when(wtxStatePort.load("MNQ", "10m"))
+            .thenThrow(new RuntimeException("DB unavailable"));
+
+        WtxSignalDetectedEvent event = wtxEvent("MNQ", "10m");
+        listener.onWtxSignal(event);
+
+        verify(notificationPort).sendWtxSignal(event);
+    }
+
+    @Test
+    void wtxNotificationFailsOpenOnStateLookupErrorForNonPrimaryStaysMuted() {
+        // Same lookup outage, non-primary instrument: instrument default is OFF
+        // so we keep the channel muted (consistent with the no-row case).
+        when(wtxStatePort.load("MGC", "10m"))
+            .thenThrow(new RuntimeException("DB unavailable"));
+
+        listener.onWtxSignal(wtxEvent("MGC", "10m"));
+
+        verify(notificationPort, never()).sendWtxSignal(any());
+    }
+
+    @Test
     void wtxNotificationSwallowsAdapterException() {
         when(wtxStatePort.load("MNQ", "10m"))
             .thenReturn(Optional.of(state("MNQ", "10m", true)));
