@@ -172,6 +172,28 @@ public class WtxStrategyController {
         return ResponseEntity.ok(toStateView(updated));
     }
 
+    @PutMapping("/state/{instrument}/{timeframe}/telegram-notifications")
+    public ResponseEntity<Map<String, Object>> updateTelegramNotifications(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null || !body.containsKey("enabled")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'enabled' boolean field"));
+        }
+        boolean enabled;
+        Object raw = body.get("enabled");
+        if (raw instanceof Boolean b) {
+            enabled = b;
+        } else if (raw instanceof String s) {
+            enabled = Boolean.parseBoolean(s);
+        } else {
+            return ResponseEntity.badRequest().body(Map.of("error", "'enabled' must be boolean"));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateTelegramNotifications(instrument, timeframe, enabled);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
     private Map<String, Object> toStateView(WtxStrategyState state) {
         Map<String, Object> view = new HashMap<>();
         view.put("instrument", state.instrument());
@@ -188,6 +210,7 @@ public class WtxStrategyController {
         view.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         view.put("currentSwingBias", wtxStrategyService.currentSwingBias(state.instrument(), state.timeframe()));
         view.put("configuredOrderQty", state.configuredOrderQty());
+        view.put("telegramNotificationsEnabled", state.telegramNotificationsEnabled());
         view.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return view;
     }
@@ -207,6 +230,7 @@ public class WtxStrategyController {
         view.put("swingBiasFilterEnabled", false);
         view.put("currentSwingBias", null);
         view.put("configuredOrderQty", com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState.DEFAULT_ORDER_QTY);
+        view.put("telegramNotificationsEnabled", WtxStrategyState.defaultTelegramEnabledFor(instrument));
         view.put("canTrade", true);
         return view;
     }

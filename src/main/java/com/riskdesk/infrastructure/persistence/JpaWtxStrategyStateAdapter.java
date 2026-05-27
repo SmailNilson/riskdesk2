@@ -61,7 +61,13 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 Boolean.TRUE.equals(e.getSwingBiasFilterEnabled()),
                 e.getConfiguredOrderQty() != null && e.getConfiguredOrderQty() > 0
                         ? e.getConfiguredOrderQty()
-                        : WtxStrategyState.DEFAULT_ORDER_QTY
+                        : WtxStrategyState.DEFAULT_ORDER_QTY,
+                // Legacy rows (column null) fall back to the instrument-scoped
+                // default: ON for MNQ / MCL, OFF for the other tickers. Once the
+                // operator flips the toggle the explicit value wins.
+                e.getTelegramNotificationsEnabled() == null
+                        ? WtxStrategyState.defaultTelegramEnabledFor(e.getInstrument())
+                        : Boolean.TRUE.equals(e.getTelegramNotificationsEnabled())
         );
     }
 
@@ -84,5 +90,6 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         e.setTrailingStopPrice(s.trailingStopPrice());
         e.setSwingBiasFilterEnabled(s.swingBiasFilterEnabled());
         e.setConfiguredOrderQty(s.configuredOrderQty());
+        e.setTelegramNotificationsEnabled(s.telegramNotificationsEnabled());
     }
 }
