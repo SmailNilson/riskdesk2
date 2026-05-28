@@ -1,6 +1,40 @@
 # AI Handoff
 
-Last updated: 2026-05-25
+Last updated: 2026-05-28
+
+## Client-side trim: MentorDesk removed, Engine v2 deleted, Exec/Sim gated (2026-05-28)
+
+Driven by excessive client-side resource use and the operator decision that AI
+MentorDesk is no longer useful. Three coordinated changes:
+
+**Frontend (resource reduction).**
+
+- Deleted the AI MentorDesk panel and its subtree: `AiMentorDesk.tsx`,
+  `MentorPanel.tsx`, `MentorSignalPanel.tsx` (the ~47KB review UI),
+  `TradeDecisionPanel.tsx`, `SimulationDashboard.tsx`, `TrailingStopStatsPanel.tsx`.
+- `useWebSocket.ts` no longer holds the 1000-item review buffer, no longer sorts
+  on every message, dropped the `/topic/mentor-alerts` subscription and the two
+  30s Mentor polls. `/topic/prices` is now coalesced via `requestAnimationFrame`.
+- 1s `setInterval` clock tickers (`ExternalSetupPanel`, `QuantGatePanel`) only run
+  while a countdown is actually active, then stop.
+- `OrderFlowPanel`, `Chart`, `IndicatorPanel`, `QuantGatePanel` wrapped in
+  `React.memo` to stop per-tick re-renders.
+
+**Engine v2 deleted.** `SignalConfluenceBuffer` (the weighted accumulate/flush
+`@Scheduled` engine) is removed. `AlertService` now triggers a unitary
+`captureInitialReview(...)` per qualified directional alert — no consolidation.
+`MentorSignalReviewService.captureConsolidatedReview(...)` (only caller was the
+buffer) deleted. `riskdesk.confluence.*` config removed. The `SignalWeight` enum
+is **kept** (shared with `SignalPreFilterService`).
+
+**Mentor / Execution / Simulation isolated behind `riskdesk.mentor.enabled`**
+(default `false`, reversible). When off: `MentorSignalReviewService` capture +
+cleanup scheduler early-return; all three `TradeSimulationService` schedulers
+early-return (no 60s polling); `ExecutionManagerService` is dormant (HTTP-only,
+no UI caller after the frontend trim). No DB schema changes —
+`mentor_signal_reviews` / `trade_executions` tables are retained.
+
+See `docs/SPEC_CONFLUENCE_BUFFER.md` (marked removed) for the historical buffer spec.
 
 ## Playbook Auto-Simulation + Auto-IBKR (2026-05-22)
 

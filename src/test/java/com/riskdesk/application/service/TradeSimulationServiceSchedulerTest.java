@@ -12,6 +12,7 @@ import com.riskdesk.domain.playbook.automation.port.PlaybookDecisionRepositoryPo
 import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
+import com.riskdesk.infrastructure.config.MentorProperties;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -259,7 +260,8 @@ class TradeSimulationServiceSchedulerTest {
             messagingProvider,
             new TrailingStopProperties(),
             simulationRepository,
-            playbookDecisionRepositoryProvider
+            playbookDecisionRepositoryProvider,
+            new MentorProperties()
         );
 
         // Use a relative timestamp so the simulation does not trip the 1h

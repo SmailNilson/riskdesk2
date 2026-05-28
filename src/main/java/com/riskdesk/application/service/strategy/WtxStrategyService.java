@@ -31,7 +31,7 @@ import java.util.Optional;
 
 /**
  * Orchestrator for the WaveTrend XT strategy.
- * Completely independent from AlertService, SignalConfluenceBuffer, and MentorSignalReviewService.
+ * Completely independent from AlertService and MentorSignalReviewService.
  * Enabled via riskdesk.wtx.enabled=true.
  */
 @Service

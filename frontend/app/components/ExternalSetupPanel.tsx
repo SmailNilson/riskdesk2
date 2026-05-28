@@ -67,11 +67,13 @@ export default function ExternalSetupPanel() {
     return () => clearInterval(id);
   }, [reload]);
 
-  // Tick the local clock every second so countdowns refresh smoothly.
+  // Tick the local clock every second so countdowns refresh smoothly —
+  // only while there are pending setups to count down, otherwise idle.
   useEffect(() => {
+    if (setups.length === 0) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [setups.length]);
 
   const sorted = useMemo(
     () => [...setups].sort((a, b) =>

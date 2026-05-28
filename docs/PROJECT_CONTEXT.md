@@ -104,12 +104,12 @@ These should stay transport-oriented only.
 - `application/service/MarketDataService.java`
 - `application/service/HistoricalDataService.java`
 - `application/service/PositionService.java`
-- `application/service/AlertService.java`
+- `application/service/AlertService.java` — publishes indicator alerts and triggers a **unitary** Mentor capture per qualified directional alert. The `SignalConfluenceBuffer` (Engine v2) was deleted, so there is no weighted accumulation/consolidation.
 - `application/service/MentorAnalysisService.java`
-- `application/service/MentorSignalReviewService.java`
+- `application/service/MentorSignalReviewService.java` — capture + cleanup scheduler **gated by `riskdesk.mentor.enabled`** (early-return when off, default off).
 - `application/service/MentorIntermarketService.java`
-- `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains.
-- `application/service/ExecutionManagerService.java` — arming + entry submission for live executions.
+- `application/service/TradeSimulationService.java` — sole owner of simulation state transitions. Post Phase 3 it reads open simulations via `TradeSimulationRepositoryPort.findByStatuses(...)` and writes exclusively to the simulation aggregate. No legacy sim write path remains. All three `@Scheduled` pollers are **gated by `riskdesk.mentor.enabled`** (no 60s polling when off).
+- `application/service/ExecutionManagerService.java` — arming + entry submission for live executions. **Dormant**: HTTP-only, no scheduler, and the frontend arming UI was removed, so nothing calls it by default.
 - `application/service/PlaybookService.java` — evaluates SMC playbook candidates from internal indicator/candle state. `PlaybookAutomationService` listens to `CandleClosed`, freezes qualifying `PlaybookDecision` rows, creates `ReviewType.PLAYBOOK` forward simulations at 4/7, and routes optional live entries through the existing execution/IBKR path only after explicit per-`(instrument,timeframe)` Auto-IBKR opt-in and broker preflight.
 - `application/service/strategy/WtxStrategyService.java` — WaveTrend XT strategy orchestrator. Listens to `CandleClosed` per instrument/timeframe, evaluates the configured profile (`BASELINE` / `SESSION_ATR` / `HTF` / `STRICT`), applies trailing-ATR exits, attaches filter decisions to the enrichment snapshot, and optionally routes through `WtxExecutionBridge` for IBKR. **State is per `(instrument, timeframe)`** — `WtxStrategyState` carries `timeframe` and `wtx_strategy_states` has a composite PK, so 5m and 10m each have their own position, profile, auto-execution toggle and daily max-loss. REST: `/api/wtx/state/{instrument}/{timeframe}` (+ `/profile`, `/auto-execution`).
 - `application/service/strategy/WtxExecutionBridge.java` — opt-in IBKR routing for WTX. Writes a `TradeExecutionRecord` (mentorSignalReviewId = null, triggerSource = WTX_AUTO) keyed by `wtx:<instrument>:<timeframe>:<signalTs>:<action>`, then calls `IbkrOrderService.submitEntryOrder`. Open-row lookups are timeframe-scoped (`findActiveByInstrumentAndTimeframeAndTriggerSource`). Disabled when `state.autoExecutionEnabled = false` (default). `submit(...)` returns a `WtxRoutingOutcome` (`ROUTED` / `ACK_PENDING` / `SKIPPED_*` / `FAILED_*`) — logged at INFO, persisted on `wtx_signal_history.routing_outcome`, and shown as a chip in the WTX panel so a non-routed signal is always diagnosable. `ACK_PENDING` means IBKR has an order id but the initial acknowledgement timed out; delayed `orderStatus` / `execDetails` callbacks can still reconcile the execution row.
@@ -174,10 +174,16 @@ Schema of `trade_simulations` (unique constraint `(review_id, review_type)`):
 
 - `frontend/app/page.tsx`
 - `frontend/app/components/Dashboard.tsx`
-- `frontend/app/components/MentorPanel.tsx`
-- `frontend/app/components/MentorSignalPanel.tsx`
 - `frontend/app/lib/api.ts`
 - `frontend/app/hooks/useWebSocket.ts`
+
+> **AI MentorDesk UI removed (2026-05-28).** `AiMentorDesk.tsx`, `MentorPanel.tsx`,
+> `MentorSignalPanel.tsx`, `TradeDecisionPanel.tsx`, `SimulationDashboard.tsx`, and
+> `TrailingStopStatsPanel.tsx` were deleted to cut client-side resource use.
+> `useWebSocket.ts` no longer subscribes to `/topic/mentor-alerts` or polls Mentor
+> reviews. The Mentor backend (capture, narration, simulation) is isolated behind
+> `riskdesk.mentor.enabled` (default off). The Mentor-related subsections below
+> describe the **backend** capture behaviour, which only runs when the flag is on.
 
 ### Frontend responsibilities
 

@@ -8,7 +8,7 @@ import RolloverBanner from './RolloverBanner';
 import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
-import AiMentorDesk from './AiMentorDesk';
+import StrategyPanel from './StrategyPanel';
 import QuantGatePanel from './quant/QuantGatePanel';
 import Quant7GatesSimulationPanel from './quant/Quant7GatesSimulationPanel';
 import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
@@ -23,7 +23,6 @@ import { LiveAnalysisPanel } from './LiveAnalysisPanel';
 import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
-import TrailingStopStatsPanel from './TrailingStopStatsPanel';
 import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
 import WtxStrategyPanel from './WtxStrategyPanel';
@@ -74,9 +73,9 @@ export default function Dashboard() {
   }, [instrument, purging]);
 
   const {
-    prices, alerts, mentorSignalReviews, wtxSignals,
+    prices, alerts, wtxSignals,
     wtxRsiSignals, wtxRsiStates,
-    connected, refresh,
+    connected,
   } = useWebSocket();
 
   // Zone collapse state is hoisted so the grid's track widths follow the
@@ -87,7 +86,7 @@ export default function Dashboard() {
   const rightZone = useCollapsibleZoneState('right-ai-desk');
 
   // Track widths (lg and up). The right zone is wider than the left because
-  // AiMentorDesk renders a dense tab bar + verbose mentor review cards.
+  // it stacks several dense strategy/quant panels.
   const leftTrack = leftZone.collapsed ? '2.5rem' : '320px';
   const rightTrack = rightZone.collapsed ? '2.5rem' : '440px';
   const gridTemplateColumns = `${leftTrack} minmax(0, 1fr) ${rightTrack}`;
@@ -302,21 +301,8 @@ export default function Dashboard() {
           <SetupRecommendationPanel />
           <QuantGatePanel />
           <Quant7GatesSimulationPanel />
-          <AiMentorDesk
-            instrument={instrument}
-            timeframe={timeframe}
-            timezone={timezone}
-            connected={connected}
-            summary={summary}
-            snapshot={snapshot}
-            prices={prices}
-            alerts={alerts}
-            reviews={mentorSignalReviews}
-            selectedBrokerAccountId={selectedIbkrAccountId}
-            onRefresh={refresh}
-          />
+          <StrategyPanel instrument={instrument} timeframe={timeframe} />
           <ExternalSetupPanel />
-          <TrailingStopStatsPanel />
         </CollapsibleZone>
       </div>
 

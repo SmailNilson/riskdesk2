@@ -19,6 +19,7 @@ import com.riskdesk.domain.playbook.automation.port.PlaybookDecisionRepositoryPo
 import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
+import com.riskdesk.infrastructure.config.MentorProperties;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,6 +80,7 @@ public class TradeSimulationService {
     private final TrailingStopProperties trailingStopProperties;
     private final TradeSimulationRepositoryPort simulationRepository;
     private final PlaybookDecisionRepositoryPort playbookDecisionRepository;
+    private final MentorProperties mentorProperties;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
@@ -88,7 +90,8 @@ public class TradeSimulationService {
                                   TrailingStopProperties trailingStopProperties,
                                   TradeSimulationRepositoryPort simulationRepository) {
         this(reviewRepository, auditRepository, candleRepositoryPort, objectMapper,
-            messagingProvider, trailingStopProperties, simulationRepository, null);
+            messagingProvider, trailingStopProperties, simulationRepository, null,
+            new MentorProperties());
     }
 
     @Autowired
@@ -99,7 +102,8 @@ public class TradeSimulationService {
                                   ObjectProvider<SimpMessagingTemplate> messagingProvider,
                                   TrailingStopProperties trailingStopProperties,
                                   TradeSimulationRepositoryPort simulationRepository,
-                                  ObjectProvider<PlaybookDecisionRepositoryPort> playbookDecisionRepositoryProvider) {
+                                  ObjectProvider<PlaybookDecisionRepositoryPort> playbookDecisionRepositoryProvider,
+                                  MentorProperties mentorProperties) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
@@ -110,6 +114,7 @@ public class TradeSimulationService {
         this.playbookDecisionRepository = playbookDecisionRepositoryProvider == null
             ? null
             : playbookDecisionRepositoryProvider.getIfAvailable();
+        this.mentorProperties = mentorProperties;
     }
 
     /**
@@ -336,6 +341,7 @@ public class TradeSimulationService {
      */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingSimulations() {
+        if (!mentorProperties.isEnabled()) return;
         List<TradeSimulation> openSignalSims = simulationRepository.findByStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
@@ -453,6 +459,7 @@ public class TradeSimulationService {
      */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingAuditSimulations() {
+        if (!mentorProperties.isEnabled()) return;
         List<TradeSimulation> openAuditSims = simulationRepository.findByStatuses(List.of(
             TradeSimulationStatus.PENDING_ENTRY,
             TradeSimulationStatus.ACTIVE
@@ -498,6 +505,7 @@ public class TradeSimulationService {
      */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingPlaybookSimulations() {
+        if (!mentorProperties.isEnabled()) return;
         if (playbookDecisionRepository == null) {
             return;
         }

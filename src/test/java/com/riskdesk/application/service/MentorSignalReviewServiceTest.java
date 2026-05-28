@@ -94,6 +94,10 @@ class MentorSignalReviewServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /** Mentor master switch — enabled so capture entry points run during tests. */
+    private final com.riskdesk.infrastructure.config.MentorProperties mentorProperties =
+        new com.riskdesk.infrastructure.config.MentorProperties();
+
     @Test
     void reanalyzeAlert_rebuildsLivePayloadAndPreservesOriginalAlertContext() throws Exception {
         MentorSignalReviewService service = new MentorSignalReviewService(
@@ -110,6 +114,7 @@ class MentorSignalReviewServiceTest {
             tickDataPortProvider,
             eventPublisher,
             strategyEngineServiceProvider,
+            mentorProperties,
             true
         );
 
@@ -273,6 +278,7 @@ class MentorSignalReviewServiceTest {
             tickDataPortProvider,
             eventPublisher,
             strategyEngineServiceProvider,
+            mentorProperties,
             true
         );
 
@@ -444,6 +450,7 @@ class MentorSignalReviewServiceTest {
             tickDataPortProvider,
             eventPublisher,
             strategyEngineServiceProvider,
+            mentorProperties,
             true
         );
         service.setAutoAnalysisEnabled(true);
@@ -509,7 +516,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, mentorProperties, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -560,7 +567,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, false
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, mentorProperties, false
         );
 
         BehaviourAlertSignal signal = new BehaviourAlertSignal(
@@ -596,7 +603,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, mentorProperties, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -621,7 +628,7 @@ class MentorSignalReviewServiceTest {
         MentorSignalReviewService service = new MentorSignalReviewService(
             mentorAnalysisService, indicatorService, mentorIntermarketService,
             marketDataServiceProvider, candleRepositoryPort, contractRegistry,
-            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, true
+            reviewRepository, simulationRepository, messagingTemplate, objectMapper, tickDataPortProvider, eventPublisher, strategyEngineServiceProvider, mentorProperties, true
         );
         service.setAutoAnalysisEnabled(true);
 
@@ -765,6 +772,7 @@ class MentorSignalReviewServiceTest {
             tickDataPortProvider,
             eventPublisher,
             strategyEngineServiceProvider,
+            mentorProperties,
             true
         );
     }

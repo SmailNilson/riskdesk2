@@ -64,7 +64,7 @@ public class TradeDecisionService {
     /**
      * Persist a new decision (revision 1) and narrate it.
      *
-     * <p>Called by {@code SignalConfluenceBuffer} after the agent gate passes. Never throws —
+     * <p>Called after the agent gate passes. Never throws —
      * on any persistence error, logs and returns empty so the upstream flow (Mentor review,
      * WebSocket publish, Telegram) proceeds unaffected.
      */

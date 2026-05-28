@@ -22,8 +22,8 @@ import java.math.BigDecimal;
  * delegates to the pure-domain {@link StrategyEngine}.
  *
  * <p><b>Coexistence rule</b>: while the legacy {@code PlaybookService} is still live,
- * this service is <i>read-only</i> — it never touches {@code ExecutionManagerService},
- * {@code SignalConfluenceBuffer}, or the {@code mentor_signal_reviews} table. That
+ * this service is <i>read-only</i> — it never touches {@code ExecutionManagerService}
+ * or the {@code mentor_signal_reviews} table. That
  * isolation is the whole point of slicing the migration.
  */
 @Service

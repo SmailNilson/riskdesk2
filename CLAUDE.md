@@ -93,7 +93,7 @@ The domain layer publishes events consumed by application services:
 |---|---|
 | `/topic/prices` | Live market data snapshots |
 | `/topic/alerts` | Individual indicator alerts |
-| `/topic/mentor-alerts` | AI mentor review updates |
+| `/topic/mentor-alerts` | AI mentor review updates *(backend-only; no UI subscriber, silent when `riskdesk.mentor.enabled=false`)* |
 | `/topic/rollover` | Contract rollover events |
 
 ### Backend Service Map
@@ -102,27 +102,28 @@ The domain layer publishes events consumed by application services:
 |---|---|
 | `MarketDataService` | Live price polls, DXY synthesis, WebSocket publication |
 | `HistoricalDataService` | Candle backfill and refresh coordination from IBKR (Phase 1 gap-fill vs Phase 2 deep backfill with throttling) |
-| `SignalConfluenceBuffer` | Weighted signal buffering — accumulates alerts per (instrument, timeframe, direction) before flushing to Mentor |
 | `PositionService` | Position P&L, exposure, risk calculations |
-| `AlertService` | Indicator alert publishing + Mentor review batching by direction |
-| `MentorSignalReviewService` | Persisted review snapshots, re-analysis revisions |
+| `AlertService` | Indicator alert publishing + per-signal Mentor review capture (unitary; signal consolidation removed) |
+| `MentorSignalReviewService` | Persisted review snapshots, re-analysis revisions *(gated by `riskdesk.mentor.enabled`)* |
 | `MentorIntermarketService` | Macro correlation context (DXY-backed, no external HTTP) |
 | `DxyMarketService` | Synthetic DXY computation, persistence, REST + WebSocket publication |
-| `ExecutionManagerService` | Trade execution lifecycle — arming, IBKR order submission, idempotence |
-| `TradeSimulationService` | Post-trade outcome replay using internal 1m candles |
+| `ExecutionManagerService` | Trade execution lifecycle — arming, IBKR order submission, idempotence *(dormant: frontend arming removed)* |
+| `TradeSimulationService` | Post-trade outcome replay using internal 1m candles *(schedulers gated by `riskdesk.mentor.enabled`)* |
 | `GeminiMentorClient` | Gemini API calls with dynamic per-asset-class system prompts |
 | `IbGatewayNativeClient` | Native IB Gateway TCP connection (infra) |
+
+> **Mentor / Execution / Simulation are isolated behind `riskdesk.mentor.enabled`** (default `false`). When off: no Mentor capture, no review scheduler, no simulation polling. Flip to `true` to reactivate (reversible). The **Confluence Engine v2** (`SignalConfluenceBuffer`) was **deleted** — qualified alerts now trigger unitary Mentor captures with no consolidation.
 
 ### Frontend Component Map
 
 | Component | Purpose |
 |---|---|
 | `Dashboard.tsx` | Main layout; composes all panels |
-| `MentorPanel.tsx` | Live Mentor analysis (non-persisted) |
-| `MentorSignalPanel.tsx` | Persisted reviews grouped by instrument/timeframe/direction (90s window) |
 | `DxyPanel.tsx` | Synthetic DXY trend direction + 24h % change |
-| `useWebSocket.ts` | STOMP over SockJS hook; subscribes to all `/topic/*` streams |
+| `useWebSocket.ts` | STOMP over SockJS hook; subscribes to `/topic/{prices,alerts,rollover}` |
 | `lib/api.ts` | REST API client |
+
+> **AI MentorDesk UI removed.** `AiMentorDesk.tsx`, `MentorPanel.tsx`, `MentorSignalPanel.tsx`, `TradeDecisionPanel.tsx`, `SimulationDashboard.tsx`, and `TrailingStopStatsPanel.tsx` were deleted to cut client-side resource use. `useWebSocket.ts` no longer subscribes to `/topic/mentor-alerts` or polls Mentor reviews.
 
 ### Market Data — Critical Constraint
 
@@ -141,10 +142,10 @@ Computed internally from 6 IBKR FX quotes (EURUSD, USDJPY, GBPUSD, USDCAD, USDSE
 State management uses React hooks only (no Redux/Zustand). Key files:
 - `frontend/app/components/Dashboard.tsx` — central orchestrator, owns instrument/timeframe state, polls portfolio (5s) and indicators (30s)
 - `frontend/app/lib/api.ts` — all REST calls via native `fetch` (no axios), 30+ endpoints
-- `frontend/app/hooks/useWebSocket.ts` — STOMP/SockJS client, subscribes to `/topic/{prices,alerts,mentor-alerts}`
+- `frontend/app/hooks/useWebSocket.ts` — STOMP/SockJS client, subscribes to `/topic/{prices,alerts,rollover}` (Mentor topic/poll removed)
 - `frontend/app/hooks/useRollover.ts` — polls rollover status every 5 min
-- `frontend/app/components/Chart.tsx` — TradingView `lightweight-charts` with SMC overlays (order blocks, liquidity, structure breaks)
-- `frontend/app/components/MentorSignalPanel.tsx` — largest component (~47KB), AI signal review UI with execution arming
+- `frontend/app/components/Chart.tsx` — TradingView `lightweight-charts` with SMC overlays (order blocks, liquidity, structure breaks); wrapped in `React.memo`
+- `frontend/app/components/{OrderFlowPanel,IndicatorPanel,quant/QuantGatePanel}.tsx` — heavy panels, wrapped in `React.memo` to avoid re-render on every parent tick
 
 Styling: Tailwind CSS with dark (default) / light theme toggle. `output: 'standalone'` in `next.config.mjs` for Docker.
 
@@ -201,16 +202,15 @@ These paths use different persistence tables and endpoints. Do not merge them.
 - **Qualified alert families**: SMC (BOS/CHoCH), MACD cross, WaveTrend cross/extremes, RSI extremes, Order Block + VWAP, Chaikin Behaviour (CMF), Stochastic cross/extremes.
 - **Mentor reviews are snapshot-based**: first review uses a frozen payload at alert time. `Reanalyse` creates a new revision with live data + original context.
 
-### Confluence Buffer
+### Confluence Buffer — REMOVED
 
-Qualified alerts route through `SignalConfluenceBuffer` before triggering Mentor reviews. Each alert carries a weight; the buffer accumulates signals per `(instrument, timeframe, direction)` key within a fixed time window.
+The **Confluence Engine v2** (`SignalConfluenceBuffer`) has been **deleted**. Qualified,
+directional alerts now trigger a **unitary** Mentor review capture directly via
+`MentorSignalReviewService.captureInitialReview(...)` — there is no weighted accumulation,
+no `(instrument, timeframe, direction)` buffering, and no consolidated review. The
+`SignalWeight` enum is retained (shared with `SignalPreFilterService`).
 
-- **Flush rules**: cumulative weight >= 3.0 → immediate flush; window expires with weight < 3.0 → no review (logged for backtest)
-- **Non-cumul**: signals in the same family (e.g., EMA + MACD = Momentum) count only the max weight, not both
-- **H1 bypass**: H1 alerts skip the confluence buffer and go directly to Mentor review (structural setups don't need confirmation)
-- **5m kill zones**: 5m alerts only evaluate during ICT kill zones (London 02:00-05:00 ET, NY 08:30-11:00 ET)
-- **Active timeframes**: 5m (kill zones only), 10m (always), 1H (bypass). 30m is removed. 4H is a passive trend filter for 1H signals
-- Full spec: `docs/SPEC_CONFLUENCE_BUFFER.md`
+Historical spec kept for reference: `docs/SPEC_CONFLUENCE_BUFFER.md` (marked removed).
 
 ## Trade Simulation (Outcome Tracker)
 
@@ -220,7 +220,7 @@ Qualified alert reviews with valid Entry/SL/TP plans are tracked as simulated tr
 - Pessimistic rule: if one candle crosses both SL and TP, result is `LOSS`
 - If TP is hit before Entry, result is `MISSED`
 - `maxDrawdownPoints` records worst adverse excursion before resolution
-- Scheduled backend service (`TradeSimulationService`) polls reviews in `PENDING_ENTRY` or `ACTIVE`
+- Scheduled backend service (`TradeSimulationService`) polls reviews in `PENDING_ENTRY` or `ACTIVE` — **gated by `riskdesk.mentor.enabled`**: all three schedulers early-return when the flag is off, so no polling runs by default
 
 ### Trailing Stop (Dual-Track)
 
@@ -245,6 +245,8 @@ Qualified alert reviews with valid Entry/SL/TP plans are tracked as simulated tr
 5. `TradeSimulationService` is the sole writer of simulation state after initial `PENDING_ENTRY`
 
 ## Execution Workflow
+
+> **Dormant.** The frontend arming UI was removed alongside the Mentor panel. `ExecutionManagerService` has no scheduler — it only acts on HTTP calls to `/api/mentor/executions/*`, which the UI no longer issues. The `trade_executions` table is retained (no schema change); re-enabling execution would require restoring the arming UI.
 
 - Live execution state lives in a dedicated `trade_executions` table — not on `MentorSignalReview`.
 - Idempotence key: `mentorSignalReviewId`. One review → max one execution.

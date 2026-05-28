@@ -257,8 +257,8 @@ public class GeminiNarrator implements DecisionNarratorPort {
 
     private RestTemplate buildRestTemplate(MentorProperties properties) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        // Narrator is even lighter than agents — tight timeout keeps the SignalConfluenceBuffer
-        // flush responsive when Gemini hiccups.
+        // Narrator is even lighter than agents — tight timeout keeps the review
+        // flow responsive when Gemini hiccups.
         int timeout = Math.max(4_000, properties.getTimeoutMs() / 3);
         factory.setConnectTimeout(timeout);
         factory.setReadTimeout(timeout);

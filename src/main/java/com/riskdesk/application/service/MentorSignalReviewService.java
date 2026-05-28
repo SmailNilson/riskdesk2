@@ -35,6 +35,7 @@ import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
+import com.riskdesk.infrastructure.config.MentorProperties;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,6 +92,12 @@ public class MentorSignalReviewService {
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     /**
+     * Master Mentor switch ({@code riskdesk.mentor.enabled}). When false, all
+     * review-capture entry points and the periodic cleanup job short-circuit so
+     * no Mentor work runs. Reversible — flip the flag back to true to re-enable.
+     */
+    private final MentorProperties mentorProperties;
+    /**
      * Optional collaborator — provides the probabilistic-engine view of the same
      * (instrument, timeframe). Injected via {@link ObjectProvider} so a test /
      * boot configuration that disables the strategy wiring still creates a valid
@@ -129,6 +136,7 @@ public class MentorSignalReviewService {
                                      ApplicationEventPublisher eventPublisher,
                                      ObjectProvider<com.riskdesk.application.service.strategy.StrategyEngineService>
                                          strategyEngineServiceProvider,
+                                     MentorProperties mentorProperties,
                                      @Value("${riskdesk.mentor.auto-analysis-enabled:true}") boolean autoAnalysisEnabled) {
         this.mentorAnalysisService = mentorAnalysisService;
         this.indicatorService = indicatorService;
@@ -143,6 +151,7 @@ public class MentorSignalReviewService {
         this.tickDataPortProvider = tickDataPortProvider;
         this.eventPublisher = eventPublisher;
         this.strategyEngineServiceProvider = strategyEngineServiceProvider;
+        this.mentorProperties = mentorProperties;
         this.autoAnalysisEnabled = autoAnalysisEnabled;
     }
 
@@ -157,6 +166,7 @@ public class MentorSignalReviewService {
     /** Safety net: mark reviews stuck in ANALYZING for > 5 minutes as ERROR (runs every 2 min). */
     @Scheduled(fixedDelay = 120_000, initialDelay = 300_000)
     void cleanupStaleAnalyzingReviewsPeriodic() {
+        if (!mentorProperties.isEnabled()) return;
         Instant cutoff = Instant.now().minusSeconds(300);
         int cleaned = reviewRepository.markStaleAnalyzingAsError(
                 "Analysis timed out (stuck > 5 min).", cutoff);
@@ -169,126 +179,11 @@ public class MentorSignalReviewService {
         captureInitialReview(alert, null);
     }
 
-    /**
-     * Confluence Engine entry point — receives a consolidated batch of signals
-     * from {@link SignalConfluenceBuffer} after the weight threshold is reached.
-     * Standalone signals (weight 3.0) flush immediately; secondary signals
-     * need confluence to reach the threshold.
-     */
-    public void captureConsolidatedReview(List<Alert> signals,
-                                           IndicatorSnapshot snap,
-                                           float confluenceWeight,
-                                           Alert primary,
-                                           float opposingBufferWeight) {
-        if (primary == null || signals.isEmpty()) return;
-        if (primary.timestamp() != null &&
-                primary.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
-            return;
-        }
-
-        AlertReviewCandidate candidate = classify(primary);
-        if (candidate == null) return;
-
-        String alertKey = primary.timestamp() + ":CONFLUENCE:"
-                + primary.instrument() + ":" + primary.category().name() + ":" + candidate.action();
-        if (reviewRepository.existsByAlertKey(alertKey)) return;
-
-        // Semantic dedup on quadruplet (instrument, category, direction, timeframe)
-        long dedupWindowSeconds = semanticDedupWindowSeconds(candidate.timeframe());
-        if (reviewRepository.existsRecentReview(
-                candidate.instrument().name(), primary.category().name(),
-                candidate.action(), Instant.now().minusSeconds(dedupWindowSeconds))) {
-            log.info("Confluence dedup: skipping {} {} {} — already analyzed within {}s window",
-                     candidate.instrument(), primary.category(), candidate.action(), dedupWindowSeconds);
-            return;
-        }
-
-        if (!autoAnalysisEnabled) {
-            MentorSignalReviewRecord skipped = newReviewRecord(
-                    alertKey, 1, TRIGGER_INITIAL, STATUS_ERROR,
-                    primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, "{}");
-            skipped.setCompletedAt(Instant.now());
-            skipped.setErrorMessage("Auto-analyse desactivee au moment de l'alerte.");
-            reviewRepository.save(skipped);
-            return;
-        }
-
-        JsonNode payload = null;
-        String snapshotJson = "{}";
-        String snapshotError = null;
-        try {
-            payload = buildPayload(candidate, primary, snap, AUTO_SELECTED_TIMEZONE);
-            // Enrich with confluence data
-            if (payload instanceof com.fasterxml.jackson.databind.node.ObjectNode payloadNode) {
-                var csArray = objectMapper.createArrayNode();
-                for (Alert signal : signals) {
-                    var sw = com.riskdesk.domain.alert.model.SignalWeight.fromAlert(signal);
-                    var sigNode = objectMapper.createObjectNode();
-                    sigNode.put("category", signal.category().name());
-                    sigNode.put("message", signal.message());
-                    sigNode.put("weight", sw != null ? sw.weight() : 0f);
-                    sigNode.put("fired_at", signal.timestamp().toString());
-                    csArray.add(sigNode);
-                }
-                payloadNode.set("confluence_signals", csArray);
-                payloadNode.put("confluence_strength", signals.size());
-                payloadNode.put("confluence_weight", confluenceWeight);
-                payloadNode.put("primary_signal", primary.category().name());
-                payloadNode.put("opposing_buffer_weight", opposingBufferWeight);
-            }
-            snapshotJson = objectMapper.writeValueAsString(payload);
-        } catch (Exception e) {
-            snapshotError = "Confluence review payload failed: " + errorMessage(e);
-        }
-
-        String consolidatedMessage = buildConsolidatedMessage(signals, candidate);
-
-        MentorSignalReviewRecord pending = newReviewRecord(
-                alertKey, 1, TRIGGER_INITIAL, STATUS_ANALYZING,
-                primary, candidate, Instant.now(), AUTO_SELECTED_TIMEZONE, snapshotJson);
-        pending.setMessage(consolidatedMessage);
-        pending.setTriggerPrice(resolveTriggerPrice(snap));
-        if (snapshotError != null) {
-            pending.setStatus(STATUS_ERROR);
-            pending.setCompletedAt(Instant.now());
-            pending.setErrorMessage(snapshotError);
-        }
-
-        MentorSignalReviewRecord saved = reviewRepository.save(pending);
-        publish(saved);
-
-        if (snapshotError == null && payload != null) {
-            JsonNode reviewPayload = payload;
-            submitAnalysis(saved.getId(), reviewPayload);
-        }
-    }
-
-    /**
-     * Builds a human-readable consolidated message from all signals in a confluence flush.
-     * Example: "MNQ [10m] — Swing CHoCH: CHOCH_BULLISH — WaveTrend Bearish Cross"
-     */
-    private String buildConsolidatedMessage(List<Alert> signals, AlertReviewCandidate candidate) {
-        if (signals.isEmpty()) return "";
-        String prefix = candidate.instrument().name() + " [" + candidate.timeframe() + "]";
-        // Extract short description from each signal message, removing the instrument/timeframe prefix
-        List<String> parts = new ArrayList<>();
-        for (Alert signal : signals) {
-            String msg = signal.message();
-            // Strip common prefix patterns like "Micro E-mini Nasdaq-100 [10m] — "
-            int dashIdx = msg.indexOf(" — ");
-            if (dashIdx >= 0 && dashIdx < msg.length() - 3) {
-                parts.add(msg.substring(dashIdx + 3).trim());
-            } else {
-                parts.add(msg);
-            }
-        }
-        return prefix + " — " + String.join(" — ", parts);
-    }
-
     /** Maximum age of an alert eligible for auto-analysis (10 minutes). */
     private static final long MAX_ALERT_AGE_SECONDS = 600;
 
     public void captureInitialReview(Alert alert, IndicatorSnapshot focusSnapshot) {
+        if (!mentorProperties.isEnabled()) return;
         // Reject stale alerts (e.g. data bursts replaying old signals)
         if (alert.timestamp() != null &&
                 alert.timestamp().isBefore(Instant.now().minusSeconds(MAX_ALERT_AGE_SECONDS))) {
@@ -375,6 +270,7 @@ public class MentorSignalReviewService {
     public void captureBehaviourReview(BehaviourAlertSignal signal,
                                        String timeframe,
                                        IndicatorSnapshot focusSnapshot) {
+        if (!mentorProperties.isEnabled()) return;
         Instrument instrument;
         try {
             instrument = Instrument.valueOf(signal.instrument().toUpperCase(java.util.Locale.ROOT));
