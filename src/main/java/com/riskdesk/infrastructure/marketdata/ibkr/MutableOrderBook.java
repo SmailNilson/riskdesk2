@@ -47,6 +47,12 @@ public class MutableOrderBook {
     // Seqlock generation counter — odd means write in progress
     private volatile int generation;
 
+    // Wall-clock millis of the last real depth mutation from IBKR. Drives staleness
+    // detection: a silently frozen L2 feed stops bumping this even though the arrays
+    // still hold (stale) levels. Initialised to construction time so a never-updated
+    // book reads as "just born" rather than 1970.
+    private volatile long lastUpdateMillis = System.currentTimeMillis();
+
     // Wall state tracking
     private final boolean[] bidWasWall = new boolean[MAX_DEPTH];
     private final boolean[] askWasWall = new boolean[MAX_DEPTH];
@@ -75,6 +81,9 @@ public class MutableOrderBook {
         }
 
         boolean isBid = "BUY".equals(side);
+
+        // Record arrival of real depth data (used by the freshness watchdog).
+        lastUpdateMillis = System.currentTimeMillis();
 
         // Begin write: increment to odd
         generation++;
@@ -224,14 +233,14 @@ public class MutableOrderBook {
             return new DepthMetrics(
                 instrument, totalBidSize, totalAskSize, depthImbalance,
                 bestBid, bestAsk, spread, spreadTicks,
-                bidWall, askWall, Instant.now()
+                bidWall, askWall, Instant.ofEpochMilli(lastUpdateMillis)
             );
         }
 
         log.warn("Seqlock retries exhausted for {} — returning zero-value metrics", instrument);
         return new DepthMetrics(
             instrument, 0, 0, 0, 0, 0, 0, 0,
-            null, null, Instant.now()
+            null, null, Instant.ofEpochMilli(lastUpdateMillis)
         );
     }
 

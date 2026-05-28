@@ -18,6 +18,8 @@ export interface OrderFlowMetrics {
   buyRatioPct: number;
   deltaTrend: string;
   source: string;
+  // ISO timestamp of the last real tick in the window — drives the STALE badge.
+  dataTimestamp?: string;
 }
 
 export interface DepthMetrics {
@@ -28,6 +30,8 @@ export interface DepthMetrics {
   spread: number;
   bidWall?: { price: number; size: number };
   askWall?: { price: number; size: number };
+  // ISO timestamp of the last real L2 update — drives the STALE badge.
+  dataTimestamp?: string;
 }
 
 export interface AbsorptionEvent {

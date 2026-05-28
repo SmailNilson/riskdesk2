@@ -40,6 +40,7 @@ import org.springframework.stereotype.Service;
 import jakarta.annotation.PostConstruct;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -116,6 +117,8 @@ public class OrderFlowOrchestrator {
     /** Per-instrument market-depth subscription tracking. Same rationale as tick-by-tick. */
     private final Set<Instrument> subscribedDepth = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<Instrument, Long> depthSubscribedAt = new ConcurrentHashMap<>();
+    /** Consecutive stale-eviction count per instrument — escalates when re-subscribe isn't recovering. */
+    private final ConcurrentHashMap<Instrument, Integer> depthStaleStrikes = new ConcurrentHashMap<>();
 
     public OrderFlowOrchestrator(IbGatewayNativeClient nativeClient,
                                   IbGatewayContractResolver contractResolver,
@@ -301,6 +304,71 @@ public class OrderFlowOrchestrator {
     }
 
     // -------------------------------------------------------------------------
+    // Depth freshness watchdog — UC-OF-016
+    // -------------------------------------------------------------------------
+
+    /**
+     * Detects a silently frozen L2 depth feed (socket alive but no updates flowing —
+     * typical of an overloaded TWS) and forces recovery by cancelling and re-subscribing.
+     * <p>
+     * This is the depth equivalent of {@code TickByTickClient}'s internal watchdog, which
+     * already self-heals the tick feed. Depth had no such path: {@link #ensureDepthSubscriptions}
+     * only subscribes <i>missing</i> instruments, and {@code subscribeDepth} short-circuits on
+     * the still-present native subscription — so a frozen book never recovered. Here we use the
+     * book's real {@code timestamp} (see {@code MutableOrderBook}) to detect staleness, then
+     * {@link IbGatewayNativeClient#unsubscribeDepth} clears the native subscription so the
+     * re-subscribe actually takes effect.
+     */
+    @Scheduled(fixedDelayString = "${riskdesk.order-flow.freshness.check-interval-ms:15000}", initialDelay = 120_000)
+    public void checkDepthFreshness() {
+        if (!properties.getFreshness().isEnabled()) return;
+        if (!properties.getDepth().isEnabled()) return;
+        if (!nativeClient.isConnected()) return;
+
+        MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
+        if (depthPort == null) return;
+
+        long now = System.currentTimeMillis();
+        long graceMs = properties.getFreshness().getGraceSeconds() * 1000L;
+        long staleMs = properties.getFreshness().getDepthStalenessSeconds() * 1000L;
+        int maxStrikes = properties.getFreshness().getMaxStrikes();
+
+        boolean evictedAny = false;
+        for (Instrument instrument : List.copyOf(subscribedDepth)) {
+            Long subscribedAt = depthSubscribedAt.get(instrument);
+            if (subscribedAt == null || (now - subscribedAt) < graceMs) continue;
+
+            Optional<DepthMetrics> depth = depthPort.currentDepth(instrument);
+            Instant lastData = depth.map(DepthMetrics::timestamp).orElse(null);
+            boolean stale = (lastData == null) || (now - lastData.toEpochMilli() > staleMs);
+
+            if (!stale) {
+                depthStaleStrikes.remove(instrument);
+                continue;
+            }
+
+            long ageSec = lastData == null ? -1 : (now - lastData.toEpochMilli()) / 1000;
+            log.warn("Depth freshness watchdog: {} frozen ({}s since last update) — cancelling + re-subscribing",
+                     instrument, ageSec);
+            nativeClient.unsubscribeDepth(instrument);
+            subscribedDepth.remove(instrument);
+            depthSubscribedAt.remove(instrument);
+            evictedAny = true;
+
+            int strikes = depthStaleStrikes.merge(instrument, 1, Integer::sum);
+            if (strikes >= maxStrikes) {
+                log.error("Depth freshness watchdog: {} stale {}x in a row — IB Gateway/TWS may be frozen; "
+                        + "re-subscription is not recovering. Manual restart may be required.", instrument, strikes);
+            }
+        }
+
+        // Re-subscribe now rather than waiting for the next ensureDepthSubscriptions cycle.
+        if (evictedAny) {
+            ensureDepthSubscriptions();
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // WebSocket publication — /topic/order-flow
     // -------------------------------------------------------------------------
 
@@ -329,6 +397,9 @@ public class OrderFlowOrchestrator {
             payload.put("divergenceDetected", a.divergenceDetected());
             payload.put("divergenceType", a.divergenceType());
             payload.put("source", a.source());
+            // Real timestamp of the last tick in the window (for frontend staleness detection).
+            // Distinct from "timestamp" below, which is publish time and always fresh.
+            payload.put("dataTimestamp", a.windowEnd() != null ? a.windowEnd().toString() : null);
             payload.put("timestamp", java.time.Instant.now().toString());
 
             messagingTemplate.convertAndSend("/topic/order-flow", payload);
@@ -599,7 +670,11 @@ public class OrderFlowOrchestrator {
                 if (d.askWall() != null) {
                     payload.put("askWall", Map.of("price", d.askWall().price(), "size", d.askWall().size()));
                 }
-                payload.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : java.time.Instant.now().toString());
+                // d.timestamp() is now the real last-update time (see MutableOrderBook),
+                // so it doubles as the staleness signal for the frontend STALE badge.
+                String dataTs = d.timestamp() != null ? d.timestamp().toString() : null;
+                payload.put("dataTimestamp", dataTs);
+                payload.put("timestamp", dataTs != null ? dataTs : java.time.Instant.now().toString());
 
                 messagingTemplate.convertAndSend("/topic/depth", payload);
             } catch (Exception e) {

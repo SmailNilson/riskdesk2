@@ -1124,6 +1124,31 @@ public class IbGatewayNativeClient {
         }
     }
 
+    /**
+     * Cancels the active depth subscription for the given instrument so it can be
+     * re-subscribed cleanly. Without this, {@link #subscribeDepth} short-circuits on
+     * the still-present {@code depthSubscriptions} key and a re-subscription is a no-op
+     * — which is exactly why a silently frozen L2 feed never recovered. The registry
+     * entry is intentionally left in place so a reconnect still restores depth.
+     */
+    public void unsubscribeDepth(Instrument instrument) {
+        synchronized (streamingLock) {
+            var it = depthSubscriptions.entrySet().iterator();
+            while (it.hasNext()) {
+                var entry = it.next();
+                if (entry.getValue().instrument == instrument) {
+                    try {
+                        controller.cancelDeepMktData(false, entry.getValue());
+                    } catch (Exception e) {
+                        log.warn("cancelDeepMktData failed for {}: {}", instrument, e.getMessage());
+                    }
+                    it.remove();
+                    log.info("IB Gateway market depth cancelled for {} (will re-subscribe)", instrument);
+                }
+            }
+        }
+    }
+
     private final class DepthSubscription implements ApiController.IDeepMktDataHandler {
         private final Instrument instrument;
 
