@@ -21,6 +21,7 @@ public class OrderFlowProperties {
     private Distribution distribution = new Distribution();
     private Momentum momentum = new Momentum();
     private Cycle cycle = new Cycle();
+    private Freshness freshness = new Freshness();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -38,6 +39,8 @@ public class OrderFlowProperties {
     public void setMomentum(Momentum momentum) { this.momentum = momentum; }
     public Cycle getCycle() { return cycle; }
     public void setCycle(Cycle cycle) { this.cycle = cycle; }
+    public Freshness getFreshness() { return freshness; }
+    public void setFreshness(Freshness freshness) { this.freshness = freshness; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -194,5 +197,34 @@ public class OrderFlowProperties {
         public void setCooldownMinutes(int v) { this.cooldownMinutes = v; }
         public int getMinConfidence() { return minConfidence; }
         public void setMinConfidence(int v) { this.minConfidence = v; }
+    }
+
+    /**
+     * Freshness watchdog for the L2 depth feed. Detects a silently frozen book
+     * (socket alive, no updates flowing — typical of an overloaded TWS) and forces a
+     * cancel + re-subscribe. The tick-by-tick feed already self-heals via
+     * {@code TickByTickClient}'s internal watchdog, so this only governs depth.
+     */
+    public static class Freshness {
+        private boolean enabled = true;
+        /** Watchdog cadence. */
+        private long checkIntervalMs = 15_000;
+        /** Depth is considered frozen when its last real update is older than this. */
+        private int depthStalenessSeconds = 20;
+        /** Don't evaluate an instrument until this long after its (re)subscription — avoids churn. */
+        private int graceSeconds = 45;
+        /** Consecutive stale evictions before escalating to an error log (re-subscribe not recovering). */
+        private int maxStrikes = 3;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public long getCheckIntervalMs() { return checkIntervalMs; }
+        public void setCheckIntervalMs(long v) { this.checkIntervalMs = v; }
+        public int getDepthStalenessSeconds() { return depthStalenessSeconds; }
+        public void setDepthStalenessSeconds(int v) { this.depthStalenessSeconds = v; }
+        public int getGraceSeconds() { return graceSeconds; }
+        public void setGraceSeconds(int v) { this.graceSeconds = v; }
+        public int getMaxStrikes() { return maxStrikes; }
+        public void setMaxStrikes(int v) { this.maxStrikes = v; }
     }
 }

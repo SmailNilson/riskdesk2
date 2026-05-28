@@ -67,6 +67,31 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
+// Staleness thresholds (seconds). Depth re-quotes constantly even in thin markets, so a
+// short threshold is a strong freeze signal; trades have legitimate gaps overnight, so
+// delta tolerates more. Both sit slightly above the backend watchdog's evict threshold
+// so the badge flags only a genuine freeze, then clears on recovery.
+const DEPTH_STALE_SEC = 30;
+const DELTA_STALE_SEC = 120;
+
+function ageSeconds(iso?: string): number | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  return Math.max(0, (Date.now() - then) / 1000);
+}
+
+function StaleBadge({ ageSec }: { ageSec: number }) {
+  return (
+    <span
+      className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-900/60 text-red-300 animate-pulse"
+      title={`No fresh data for ${Math.round(ageSec)}s — feed may be frozen`}
+    >
+      STALE {Math.round(ageSec)}s
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Live metric sub-components
 // ---------------------------------------------------------------------------
@@ -76,6 +101,8 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
   const buyPct = totalVolume > 0 ? (metrics.buyVolume / totalVolume) * 100 : 50;
   const sellPct = 100 - buyPct;
   const isRealTicks = metrics.source === 'REAL_TICKS';
+  const age = ageSeconds(metrics.dataTimestamp);
+  const stale = age != null && age > DELTA_STALE_SEC;
 
   return (
     <div className="flex flex-col gap-1 p-2 rounded bg-zinc-800/60">
@@ -85,6 +112,7 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
           <span className={metrics.delta >= 0 ? 'text-emerald-400' : 'text-red-400'}>
             {metrics.delta >= 0 ? '+' : ''}{metrics.delta.toLocaleString()}
           </span>
+          {stale && <StaleBadge ageSec={age} />}
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
             isRealTicks ? 'bg-emerald-900/60 text-emerald-400' : 'bg-yellow-900/60 text-yellow-400'
           }`}>
@@ -117,12 +145,17 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
 function DepthGauge({ metrics }: { metrics: DepthMetrics }) {
   // imbalance is -1 to +1; map to 0-100 for gauge position
   const gaugePosition = ((metrics.imbalance + 1) / 2) * 100;
+  const age = ageSeconds(metrics.dataTimestamp);
+  const stale = age != null && age > DEPTH_STALE_SEC;
 
   return (
     <div className="flex flex-col gap-1.5 p-2 rounded bg-zinc-800/60">
       <div className="flex items-center justify-between text-xs">
         <span className="font-medium text-zinc-300">{metrics.instrument}</span>
-        <span className="text-zinc-500">Spread: {metrics.spread.toFixed(2)}</span>
+        <div className="flex items-center gap-2">
+          {stale && <StaleBadge ageSec={age} />}
+          <span className="text-zinc-500">Spread: {metrics.spread.toFixed(2)}</span>
+        </div>
       </div>
 
       {/* Imbalance gauge */}
@@ -384,6 +417,14 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
 
   const { snapshots: quantSnapshots } = useQuantStream();
   const [showTelemetry, setShowTelemetry] = useState(true);
+
+  // Heartbeat: re-render every 5s so the STALE badge appears/updates even when the feed
+  // is frozen and no new WebSocket messages arrive to trigger a render.
+  const [, setHeartbeat] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setHeartbeat(t => t + 1), 5000);
+    return () => clearInterval(id);
+  }, []);
   const telemetryInstrument: QuantInstrument =
     selectedInstrument && (QUANT_INSTRUMENTS as readonly string[]).includes(selectedInstrument)
       ? (selectedInstrument as QuantInstrument)
