@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -116,6 +117,101 @@ class HistoricalDataServiceTest {
 
         assertEquals(2, result.get("5m"), "All candles should be saved when no HWM exists");
         verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+    }
+
+    @Test
+    void deepBackfillTimeframe_purgesExistingAndRefetchesFullWindow() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(true);
+        // existing pre-purge data
+        when(candlePort.findCandles(eq(Instrument.MNQ), eq("10m"), any())).thenReturn(List.of(
+                candle(Instrument.MNQ, "10m", "2026-05-26T01:50:00Z", "29810.75"),
+                candle(Instrument.MNQ, "10m", "2026-05-26T02:00:00Z", "29812.00")
+        ));
+        when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt())).thenReturn(List.of(
+                candle(Instrument.MNQ, "10m", "2026-02-26T01:50:00Z", "29000.00"),
+                candle(Instrument.MNQ, "10m", "2026-02-26T02:00:00Z", "29010.00"),
+                candle(Instrument.MNQ, "10m", "2026-02-26T02:10:00Z", "29020.00")
+        ));
+        when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.of("202606"));
+        when(candlePort.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        ReflectionTestUtils.setField(service, "enabled", true);
+        ReflectionTestUtils.setField(service, "backfillDays10m", 90);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
+
+        assertEquals("ok", result.get("status"));
+        assertEquals("MNQ", result.get("instrument"));
+        assertEquals("10m", result.get("timeframe"));
+        assertEquals(2, result.get("purged"), "Should report purged count");
+        assertEquals(3, result.get("fetched"), "Should report fetched count");
+        verify(candlePort, times(1)).deleteByInstrumentAndTimeframe(Instrument.MNQ, "10m");
+        verify(historicalProvider, times(1)).fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt());
+        verify(candlePort, times(1)).saveAll(anyList());
+    }
+
+    @Test
+    void deepBackfillTimeframe_rejectsUnsupportedPair() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        when(historicalProvider.supports(Instrument.MNQ, "1m")).thenReturn(false);
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        ReflectionTestUtils.setField(service, "enabled", true);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "1m");
+
+        assertEquals("error", result.get("status"));
+        assertTrue(((String) result.get("message")).contains("does not support"));
+        verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+        verify(historicalProvider, never()).fetchHistory(any(), any(), anyInt());
+    }
+
+    @Test
+    void deepBackfillTimeframe_returnsDisabledWhenServiceDisabled() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        ReflectionTestUtils.setField(service, "enabled", false);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
+
+        assertEquals("disabled", result.get("status"));
+        verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+        verify(historicalProvider, never()).fetchHistory(any(), any(), anyInt());
+    }
+
+    @Test
+    void deepBackfillTimeframe_skipsSaveWhenFetchReturnsEmpty() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(true);
+        when(candlePort.findCandles(eq(Instrument.MNQ), eq("10m"), any())).thenReturn(List.of());
+        when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt())).thenReturn(List.of());
+        when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        ReflectionTestUtils.setField(service, "enabled", true);
+        ReflectionTestUtils.setField(service, "backfillDays10m", 90);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
+
+        assertEquals("ok", result.get("status"));
+        assertEquals(0, result.get("purged"));
+        assertEquals(0, result.get("fetched"));
+        verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+        verify(candlePort, never()).saveAll(anyList());
     }
 
     private static Candle candle(Instrument instrument, String timeframe, String timestamp, String close) {

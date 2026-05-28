@@ -267,6 +267,82 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     // -------------------------------------------------------------------------
+    // Deep backfill (purge + full window re-fetch for a single TF/instrument)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Non-destructive (per other TFs) deep backfill: purges the (instrument,timeframe)
+     * pair only, then re-fetches the full configured window from IBKR.
+     *
+     * <p>Use when {@link #refreshAll()} can't help (its gap-fill only fetches the
+     * delta since the last in-DB candle). Typical use case: a truncated TF table
+     * where the high-water mark is recent but coverage is shallow.</p>
+     *
+     * <p>Caller is responsible for choosing a sensible timeframe — IBKR pacing rules
+     * apply, so very large windows (e.g. 1m over 90 days) will be slow.</p>
+     *
+     * @return a status map: {status, instrument, timeframe, purged, fetched, savedAt}
+     */
+    public Map<String, Object> deepBackfillTimeframe(Instrument instrument, String timeframe) {
+        if (!enabled) {
+            return Map.of("status", "disabled",
+                    "message", "Historical data fetch is disabled.");
+        }
+        if (instrument == null || timeframe == null || timeframe.isBlank()) {
+            return Map.of("status", "error",
+                    "message", "instrument and timeframe must be provided.");
+        }
+        if (!historicalProvider.supports(instrument, timeframe)) {
+            return Map.of("status", "error",
+                    "instrument", instrument.name(),
+                    "timeframe", timeframe,
+                    "message", "Historical provider does not support this instrument/timeframe.");
+        }
+
+        int target = candlesTargetFor(timeframe);
+
+        List<Candle> existing = candlePort.findCandles(instrument, timeframe, Instant.EPOCH);
+        int purged = existing.size();
+        if (purged > 0) {
+            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+            log.info("HistoricalDataService [deep-backfill]: purged {} {} {} candles before re-fetch.",
+                    purged, instrument, timeframe);
+        }
+
+        List<Candle> fetched;
+        try {
+            fetched = historicalProvider.fetchHistory(instrument, timeframe, target);
+        } catch (Exception e) {
+            log.warn("HistoricalDataService [deep-backfill]: {} {} fetch failed -- {}",
+                    instrument, timeframe, e.getMessage());
+            return Map.of("status", "error",
+                    "instrument", instrument.name(),
+                    "timeframe", timeframe,
+                    "purged", purged,
+                    "message", "fetchHistory failed: " + e.getMessage());
+        }
+        fetched = tagWithContractMonth(fetched, instrument);
+        fetched = deduplicate(fetched);
+
+        if (!fetched.isEmpty()) {
+            candlePort.saveAll(fetched);
+            realDataLoaded.set(true);
+        }
+
+        log.info("HistoricalDataService [deep-backfill]: {} {} purged {} candles, saved {} fresh candles (target={}).",
+                instrument, timeframe, purged, fetched.size(), target);
+
+        return Map.of(
+                "status", "ok",
+                "instrument", instrument.name(),
+                "timeframe", timeframe,
+                "purged", purged,
+                "fetched", fetched.size(),
+                "target", target
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Mentor refresh (bounded, gap-fill)
     // -------------------------------------------------------------------------
 

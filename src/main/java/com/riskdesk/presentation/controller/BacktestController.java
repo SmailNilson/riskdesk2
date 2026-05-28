@@ -68,6 +68,33 @@ public class BacktestController {
         return historicalDataService.refreshAll();
     }
 
+    /**
+     * Force a deep backfill of a single (instrument, timeframe) pair: purges the
+     * existing candles for that pair only and re-fetches the configured window
+     * from IBKR. Other timeframes are left untouched.
+     *
+     * <p>Use when {@code /refresh-db} (gap-fill) can't help because the table is
+     * truncated but the high-water mark is recent.</p>
+     *
+     * <p>Example: {@code POST /api/backtest/deep-backfill/MNQ/10m}.</p>
+     */
+    @PostMapping("/deep-backfill/{instrument}/{timeframe}")
+    public Map<String, Object> deepBackfill(
+            @PathVariable String instrument,
+            @PathVariable String timeframe
+    ) {
+        Instrument inst;
+        try {
+            inst = Instrument.valueOf(instrument.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return Map.of("status", "error", "message", "Unknown instrument: " + instrument);
+        }
+        if (timeframe == null || timeframe.isBlank()) {
+            return Map.of("status", "error", "message", "Timeframe must not be blank.");
+        }
+        return historicalDataService.deepBackfillTimeframe(inst, timeframe);
+    }
+
     @DeleteMapping("/purge/{instrument}")
     public Map<String, Object> purgeInstrument(@PathVariable String instrument) {
         Instrument inst;
