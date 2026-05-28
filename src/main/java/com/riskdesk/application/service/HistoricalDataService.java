@@ -271,17 +271,23 @@ public class HistoricalDataService implements ApplicationRunner {
     // -------------------------------------------------------------------------
 
     /**
-     * Non-destructive (per other TFs) deep backfill: purges the (instrument,timeframe)
-     * pair only, then re-fetches the full configured window from IBKR.
+     * Non-destructive (per other TFs) deep backfill: re-fetches the full configured
+     * window from IBKR for one (instrument, timeframe) pair, then swaps the table
+     * contents. Other timeframes are left untouched.
      *
      * <p>Use when {@link #refreshAll()} can't help (its gap-fill only fetches the
      * delta since the last in-DB candle). Typical use case: a truncated TF table
      * where the high-water mark is recent but coverage is shallow.</p>
      *
+     * <p><b>Failure safety</b>: the existing candles are kept intact unless we have
+     * a non-empty replacement set in hand. IBKR can return an empty list rather
+     * than throw on session/contract issues, so we guard against turning a shallow
+     * but usable timeframe into an empty one.</p>
+     *
      * <p>Caller is responsible for choosing a sensible timeframe — IBKR pacing rules
      * apply, so very large windows (e.g. 1m over 90 days) will be slow.</p>
      *
-     * @return a status map: {status, instrument, timeframe, purged, fetched, savedAt}
+     * @return a status map: {status, instrument, timeframe, purged, fetched, target}
      */
     public Map<String, Object> deepBackfillTimeframe(Instrument instrument, String timeframe) {
         if (!enabled) {
@@ -301,33 +307,46 @@ public class HistoricalDataService implements ApplicationRunner {
 
         int target = candlesTargetFor(timeframe);
 
-        List<Candle> existing = candlePort.findCandles(instrument, timeframe, Instant.EPOCH);
-        int purged = existing.size();
-        if (purged > 0) {
-            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
-            log.info("HistoricalDataService [deep-backfill]: purged {} {} {} candles before re-fetch.",
-                    purged, instrument, timeframe);
-        }
-
+        // Step 1: fetch FIRST. If this fails or returns empty, leave existing data alone.
         List<Candle> fetched;
         try {
             fetched = historicalProvider.fetchHistory(instrument, timeframe, target);
         } catch (Exception e) {
-            log.warn("HistoricalDataService [deep-backfill]: {} {} fetch failed -- {}",
+            log.warn("HistoricalDataService [deep-backfill]: {} {} fetch failed -- existing data preserved -- {}",
                     instrument, timeframe, e.getMessage());
             return Map.of("status", "error",
                     "instrument", instrument.name(),
                     "timeframe", timeframe,
-                    "purged", purged,
-                    "message", "fetchHistory failed: " + e.getMessage());
+                    "purged", 0,
+                    "fetched", 0,
+                    "message", "fetchHistory failed; existing data preserved: " + e.getMessage());
         }
         fetched = tagWithContractMonth(fetched, instrument);
         fetched = deduplicate(fetched);
 
-        if (!fetched.isEmpty()) {
-            candlePort.saveAll(fetched);
-            realDataLoaded.set(true);
+        if (fetched.isEmpty()) {
+            log.warn("HistoricalDataService [deep-backfill]: {} {} fetch returned no candles -- existing data preserved.",
+                    instrument, timeframe);
+            return Map.of("status", "error",
+                    "instrument", instrument.name(),
+                    "timeframe", timeframe,
+                    "purged", 0,
+                    "fetched", 0,
+                    "target", target,
+                    "message", "fetchHistory returned no candles; existing data preserved.");
         }
+
+        // Step 2: replacement set in hand — now safe to purge and save.
+        List<Candle> existing = candlePort.findCandles(instrument, timeframe, Instant.EPOCH);
+        int purged = existing.size();
+        if (purged > 0) {
+            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+            log.info("HistoricalDataService [deep-backfill]: purged {} {} {} candles before saving fresh batch.",
+                    purged, instrument, timeframe);
+        }
+
+        candlePort.saveAll(fetched);
+        realDataLoaded.set(true);
 
         log.info("HistoricalDataService [deep-backfill]: {} {} purged {} candles, saved {} fresh candles (target={}).",
                 instrument, timeframe, purged, fetched.size(), target);

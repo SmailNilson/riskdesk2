@@ -191,13 +191,13 @@ class HistoricalDataServiceTest {
     }
 
     @Test
-    void deepBackfillTimeframe_skipsSaveWhenFetchReturnsEmpty() {
+    void deepBackfillTimeframe_preservesExistingWhenFetchReturnsEmpty() {
         HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
 
         when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(true);
-        when(candlePort.findCandles(eq(Instrument.MNQ), eq("10m"), any())).thenReturn(List.of());
+        // Empty fetch (e.g. IBKR session/contract issue silently returning [])
         when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt())).thenReturn(List.of());
         when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
 
@@ -207,11 +207,40 @@ class HistoricalDataServiceTest {
 
         Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
 
-        assertEquals("ok", result.get("status"));
+        // Existing data must be preserved — never call delete or save when fetch is empty.
+        assertEquals("error", result.get("status"));
         assertEquals(0, result.get("purged"));
         assertEquals(0, result.get("fetched"));
+        assertTrue(((String) result.get("message")).contains("returned no candles"));
         verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
         verify(candlePort, never()).saveAll(anyList());
+        verify(candlePort, never()).findCandles(any(), any(), any());
+    }
+
+    @Test
+    void deepBackfillTimeframe_preservesExistingWhenFetchThrows() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(true);
+        when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt()))
+                .thenThrow(new RuntimeException("IBKR pacing violation"));
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        ReflectionTestUtils.setField(service, "enabled", true);
+        ReflectionTestUtils.setField(service, "backfillDays10m", 90);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
+
+        // Existing data must be preserved on fetch exception.
+        assertEquals("error", result.get("status"));
+        assertEquals(0, result.get("purged"));
+        assertEquals(0, result.get("fetched"));
+        assertTrue(((String) result.get("message")).contains("existing data preserved"));
+        verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+        verify(candlePort, never()).saveAll(anyList());
+        verify(candlePort, never()).findCandles(any(), any(), any());
     }
 
     private static Candle candle(Instrument instrument, String timeframe, String timestamp, String close) {
