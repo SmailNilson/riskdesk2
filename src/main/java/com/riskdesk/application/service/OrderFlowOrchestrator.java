@@ -343,7 +343,18 @@ public class OrderFlowOrchestrator {
             boolean stale = (lastData == null) || (now - lastData.toEpochMilli() > staleMs);
 
             if (!stale) {
+                // Data is flowing again — clear strikes so the watchdog re-arms.
                 depthStaleStrikes.remove(instrument);
+                continue;
+            }
+
+            // Backoff: once re-subscription has failed maxStrikes times in a row, stop churning
+            // the subscription. Repeated cancel/re-subscribe won't revive a genuinely frozen TWS,
+            // and during an expected no-quote period (e.g. MCL's 17:00 ET session break) it would
+            // spam IBKR ~once per grace interval. We leave the existing subscription in place so
+            // data resumes automatically when the feed wakes up (which resets strikes above), and
+            // the error below has already flagged it for a possible manual restart.
+            if (depthStaleStrikes.getOrDefault(instrument, 0) >= maxStrikes) {
                 continue;
             }
 
@@ -358,7 +369,7 @@ public class OrderFlowOrchestrator {
             int strikes = depthStaleStrikes.merge(instrument, 1, Integer::sum);
             if (strikes >= maxStrikes) {
                 log.error("Depth freshness watchdog: {} stale {}x in a row — IB Gateway/TWS may be frozen; "
-                        + "re-subscription is not recovering. Manual restart may be required.", instrument, strikes);
+                        + "re-subscription is not recovering. Backing off; manual restart may be required.", instrument, strikes);
             }
         }
 
@@ -386,23 +397,34 @@ public class OrderFlowOrchestrator {
             if (agg.isEmpty()) continue;
 
             TickAggregation a = agg.get();
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("instrument", instrument.name());
-            payload.put("delta", a.delta());
-            payload.put("cumulativeDelta", a.cumulativeDelta());
-            payload.put("buyVolume", a.buyVolume());
-            payload.put("sellVolume", a.sellVolume());
-            payload.put("buyRatioPct", a.buyRatioPct());
-            payload.put("deltaTrend", a.deltaTrend());
-            payload.put("divergenceDetected", a.divergenceDetected());
-            payload.put("divergenceType", a.divergenceType());
-            payload.put("source", a.source());
-            // Real timestamp of the last tick in the window (for frontend staleness detection).
-            // Distinct from "timestamp" below, which is publish time and always fresh.
-            payload.put("dataTimestamp", a.windowEnd() != null ? a.windowEnd().toString() : null);
-            payload.put("timestamp", java.time.Instant.now().toString());
+            // An empty rolling window returns a synthetic snapshot (zero volume, windowEnd == now —
+            // see TickByTickAggregator.aggregateSince). Publishing it would reset the frontend's
+            // staleness clock and hide a frozen/quiet feed, so we skip the /topic/order-flow emit
+            // when there are no real trades. The last genuine dataTimestamp then keeps aging on the
+            // client → STALE badge appears. Every stored tick is BUY/SELL-classified, so
+            // buyVolume + sellVolume == 0 uniquely identifies the synthetic window. Cycle/absorption
+            // timeouts below still run regardless of this gate.
+            boolean hasRealFlow = (a.buyVolume() + a.sellVolume()) > 0;
+            if (hasRealFlow) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("instrument", instrument.name());
+                payload.put("delta", a.delta());
+                payload.put("cumulativeDelta", a.cumulativeDelta());
+                payload.put("buyVolume", a.buyVolume());
+                payload.put("sellVolume", a.sellVolume());
+                payload.put("buyRatioPct", a.buyRatioPct());
+                payload.put("deltaTrend", a.deltaTrend());
+                payload.put("divergenceDetected", a.divergenceDetected());
+                payload.put("divergenceType", a.divergenceType());
+                payload.put("source", a.source());
+                // windowEnd is the last real tick's timestamp (non-synthetic here because
+                // hasRealFlow), so it drives the frontend STALE badge. Distinct from "timestamp"
+                // below, which is publish time and always fresh.
+                payload.put("dataTimestamp", a.windowEnd() != null ? a.windowEnd().toString() : null);
+                payload.put("timestamp", java.time.Instant.now().toString());
 
-            messagingTemplate.convertAndSend("/topic/order-flow", payload);
+                messagingTemplate.convertAndSend("/topic/order-flow", payload);
+            }
 
             // Evaluate absorption on a SHORT window (transient detection), not the 5 min snapshot
             int absWindowSec = properties.getAbsorption().getWindowSeconds();
