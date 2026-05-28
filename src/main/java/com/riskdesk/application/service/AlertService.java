@@ -48,7 +48,6 @@ public class AlertService {
     private final AlertDeduplicator         deduplicator;
     private final SignalPreFilterService    signalPreFilterService;
     private final MentorSignalReviewService mentorSignalReviewService;
-    private final SignalConfluenceBuffer    confluenceBuffer;
     private final SimpMessagingTemplate     messagingTemplate;
     private final MarketRegimeDetector      regimeDetector = new MarketRegimeDetector();
 
@@ -65,7 +64,6 @@ public class AlertService {
                         AlertDeduplicator deduplicator,
                         SignalPreFilterService signalPreFilterService,
                         MentorSignalReviewService mentorSignalReviewService,
-                        SignalConfluenceBuffer confluenceBuffer,
                         SimpMessagingTemplate messagingTemplate) {
         this.positionService           = positionService;
         this.indicatorService          = indicatorService;
@@ -74,7 +72,6 @@ public class AlertService {
         this.deduplicator              = deduplicator;
         this.signalPreFilterService    = signalPreFilterService;
         this.mentorSignalReviewService = mentorSignalReviewService;
-        this.confluenceBuffer          = confluenceBuffer;
         this.messagingTemplate         = messagingTemplate;
     }
 
@@ -160,14 +157,9 @@ public class AlertService {
                         String direction = SignalPreFilterService.extractDirection(alert);
                         if (sw == null || direction == null) continue;
 
-                        if ("1h".equals(timeframe)) {
-                            // H1: every qualified signal triggers a Mentor review immediately
-                            // (no confluence buffer — H1 signals are rare and high-value)
-                            mentorSignalReviewService.captureInitialReview(alert, snap);
-                        } else {
-                            // 5m/10m: route to confluence buffer — standalone signals (3.0) flush immediately
-                            confluenceBuffer.accumulate(alert, timeframe, direction, snap, sw);
-                        }
+                        // Every qualified, directional signal triggers a unitary Mentor
+                        // review (Confluence Engine v2 removed — no signal consolidation).
+                        mentorSignalReviewService.captureInitialReview(alert, snap);
                     }
                 }
             } catch (Exception e) {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { IndicatorSnapshot, OrderBlockView, api } from '@/app/lib/api';
 import { breakerOriginalType, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 
@@ -66,7 +66,7 @@ function biasColor(bias: string | null): 'green' | 'red' | 'gray' {
   return 'gray';
 }
 
-export default function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
+function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
   const [mutedTimeframes, setMutedTimeframes] = useState<Set<string>>(new Set());
   const [muteError, setMuteError] = useState<string | null>(null);
   const [mutePending, setMutePending] = useState(false);
@@ -662,3 +662,5 @@ function Section({ title, children, fullWidth }: {
     </div>
   );
 }
+
+export default memo(IndicatorPanel);

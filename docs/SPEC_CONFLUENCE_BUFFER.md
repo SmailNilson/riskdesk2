@@ -2,7 +2,21 @@
 
 **Auteur**: PO + BA + Architecte + Dev
 **Date**: 2026-04-06 (weights revised 2026-04-16 after standalone-signal tuning)
-**Status**: VALIDÉ — implémenté; section 2.3 mise à jour pour refléter le code actuel
+**Status**: ❌ **SUPPRIMÉ (2026-05-28)** — l'Engine v2 (`SignalConfluenceBuffer`) a été retiré du code.
+
+---
+
+> ## ⚠️ Cette fonctionnalité a été supprimée
+> **Décision opérateur (2026-05-28)** : le Confluence Engine v2 (`SignalConfluenceBuffer`)
+> est **supprimé**. Les alertes qualifiées et directionnelles déclenchent désormais une
+> review Mentor **unitaire** directe via `MentorSignalReviewService.captureInitialReview(...)` :
+> plus d'accumulation pondérée, plus de buffer par `(instrument, timeframe, direction)`,
+> plus de review consolidée. L'enum `SignalWeight` est **conservé** (partagé avec
+> `SignalPreFilterService`). La config `riskdesk.confluence.*` est retirée.
+>
+> Par ailleurs, tout le sous-système Mentor (capture, narration, simulation) est isolé
+> derrière le flag `riskdesk.mentor.enabled` (off par défaut). Le document ci-dessous est
+> conservé **à titre historique uniquement**.
 
 ---
 

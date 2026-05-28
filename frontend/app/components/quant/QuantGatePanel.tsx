@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { api } from '@/app/lib/api';
 import { useQuantStream, type AutoArmInstrumentState } from '@/app/hooks/useQuantStream';
 import QuantAdvisorBadge from './QuantAdvisorBadge';
@@ -342,7 +342,7 @@ function DirectionSection(props: DirectionSectionProps) {
  * LONG side-by-side) plus the suggested plan when the corresponding score
  * reaches 6/7.
  */
-export default function QuantGatePanel() {
+function QuantGatePanel() {
   const [active, setActive] = useState<QuantInstrument>('MNQ');
   const { snapshots, narrations, advice: streamedAdvice, autoArm, connected } = useQuantStream();
   const [bootstrap, setBootstrap] = useState<Record<string, QuantSnapshotView>>({});
@@ -691,3 +691,5 @@ function AutoArmCard(props: {
     </div>
   );
 }
+
+export default memo(QuantGatePanel);

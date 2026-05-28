@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
   IChartApi,
@@ -99,7 +99,7 @@ function mergeLivePrice(previous: CandlePoint | null, update: PriceUpdate, timef
   };
 }
 
-export default function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: Props) {
+function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: Props) {
   const dark = theme === 'dark';
   const pricePaneRef = useRef<HTMLDivElement>(null);
   const priceContainerRef = useRef<HTMLDivElement>(null);
@@ -891,3 +891,5 @@ function Tag({ color, label, active = true, onClick }: {
     </button>
   );
 }
+
+export default memo(Chart);

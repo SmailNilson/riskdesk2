@@ -25,7 +25,7 @@ import java.util.List;
  *   <li>Reference timeframe {@code 5m} AND not in a kill zone → veto
  *       "5m-outside-kill-zone". Rationale: 5m setups in low-liquidity chop are
  *       the single biggest source of bad trades in the legacy data; the
- *       {@code SignalConfluenceBuffer} was originally designed around this
+ *       legacy confluence engine was originally designed around this
  *       exact gate</li>
  *   <li>Low liquidity (Asian session / CLOSE phase) → small negative
  *       directional vote (magnitude 10) with low confidence. Doesn't block the

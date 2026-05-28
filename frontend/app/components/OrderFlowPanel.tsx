@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import {
   useOrderFlow,
   OrderFlowMetrics,
@@ -369,7 +369,7 @@ function CycleRowView({ event }: { event: CycleRow }) {
 // Main Panel
 // ---------------------------------------------------------------------------
 
-export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
+function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
   const {
     orderFlowData,
     depthData,
@@ -715,3 +715,5 @@ export default function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelPro
     </div>
   );
 }
+
+export default memo(OrderFlowPanel);

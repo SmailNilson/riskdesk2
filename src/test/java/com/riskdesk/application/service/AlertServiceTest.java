@@ -58,9 +58,6 @@ class AlertServiceTest {
     private MentorSignalReviewService mentorSignalReviewService;
 
     @Mock
-    private SignalConfluenceBuffer confluenceBuffer;
-
-    @Mock
     private SimpMessagingTemplate messagingTemplate;
 
     @Test
@@ -74,7 +71,7 @@ class AlertServiceTest {
     }
 
     @Test
-    void confluenceBufferAcceptsDirectAccumulation() {
+    void orderBlockSignalWeightAndDirectionResolved() {
         Alert orderBlockAlert = new Alert(
             "ob:mitigated:MNQ:10m",
             AlertSeverity.INFO,
@@ -117,7 +114,6 @@ class AlertServiceTest {
             deduplicator,
             null,
             null,
-            null,
             new SimpMessagingTemplate(channel)
         );
 
@@ -152,7 +148,6 @@ class AlertServiceTest {
             deduplicator,
             signalPreFilterService,
             mentorSignalReviewService,
-            confluenceBuffer,
             messagingTemplate
         );
     }

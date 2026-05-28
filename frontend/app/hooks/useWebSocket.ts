@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
-import { MentorSignalReview } from '@/app/lib/api';
 import type { WtxSignalView, WtxRsiSignalView, WtxRsiStrategyStateView } from '@/app/lib/api';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
 
@@ -32,13 +31,14 @@ function buildWsUrl(wsBase: string | undefined, apiBase: string | undefined) {
 
 const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 const API_URL = API_BASE ?? '';
-const MENTOR_REVIEW_HISTORY_LIMIT = 1000;
 
 export function useWebSocket() {
   const clientRef = useRef<Client | null>(null);
+  // Coalesce high-frequency price ticks into one render per animation frame.
+  const pendingPricesRef = useRef<Record<string, PriceUpdate>>({});
+  const priceFlushRef = useRef<number | null>(null);
   const [prices, setPrices] = useState<Record<string, PriceUpdate>>({});
   const [alerts, setAlerts] = useState<AlertMessage[]>([]);
-  const [mentorSignalReviews, setMentorSignalReviews] = useState<MentorSignalReview[]>([]);
   const [wtxSignals, setWtxSignals] = useState<WtxSignalView[]>([]);
   const [wtxRsiSignals, setWtxRsiSignals] = useState<WtxRsiSignalView[]>([]);
   // Keyed by `${instrument}:${timeframe}` — the only WS topic shape the
@@ -59,23 +59,6 @@ export function useWebSocket() {
       .catch(() => {});
   }, []);
 
-  const loadRecentMentorReviews = useCallback(() => {
-    fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
-      .then(r => r.ok ? r.json() : [])
-      .then((recent: MentorSignalReview[]) => {
-        setMentorSignalReviews(prev => {
-          const byId = new Map(prev.map(review => [review.id, review]));
-          for (const review of recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT)) {
-            byId.set(review.id, review);
-          }
-          return Array.from(byId.values())
-            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-            .slice(0, MENTOR_REVIEW_HISTORY_LIMIT);
-        });
-      })
-      .catch(() => {});
-  }, []);
-
   const connect = useCallback(() => {
     const client = new Client({
       webSocketFactory: () => new SockJS(WS_URL),
@@ -83,24 +66,23 @@ export function useWebSocket() {
       onConnect: () => {
         setConnected(true);
         loadRecentAlerts();
-        loadRecentMentorReviews();
 
         client.subscribe('/topic/prices', (msg: IMessage) => {
           const update: PriceUpdate = JSON.parse(msg.body);
-          setPrices(prev => ({ ...prev, [update.instrument]: update }));
+          pendingPricesRef.current[update.instrument] = update;
+          if (priceFlushRef.current === null) {
+            priceFlushRef.current = requestAnimationFrame(() => {
+              priceFlushRef.current = null;
+              const batch = pendingPricesRef.current;
+              pendingPricesRef.current = {};
+              setPrices(prev => ({ ...prev, ...batch }));
+            });
+          }
         });
 
         client.subscribe('/topic/alerts', (msg: IMessage) => {
           const alert: AlertMessage = JSON.parse(msg.body);
           setAlerts(prev => [alert, ...prev].slice(0, 50)); // keep last 50
-        });
-
-        client.subscribe('/topic/mentor-alerts', (msg: IMessage) => {
-          const review: MentorSignalReview = JSON.parse(msg.body);
-          setMentorSignalReviews(prev => {
-            const filtered = prev.filter(item => item.id !== review.id);
-            return [review, ...filtered].slice(0, MENTOR_REVIEW_HISTORY_LIMIT);
-          });
         });
 
         client.subscribe('/topic/wtx-signals', (msg: IMessage) => {
@@ -134,37 +116,31 @@ export function useWebSocket() {
 
     client.activate();
     clientRef.current = client;
-  }, [loadRecentAlerts, loadRecentMentorReviews]);
+  }, [loadRecentAlerts]);
 
   useEffect(() => {
     loadRecentAlerts();
-    loadRecentMentorReviews();
     connect();
 
-    // Periodic polls — recover from WebSocket disconnects
-    const reviewPoll = setInterval(loadRecentMentorReviews, 30_000);
+    // Periodic poll — recover from WebSocket disconnects
     const alertPoll = setInterval(loadRecentAlerts, 30_000);
 
     return () => {
-      clearInterval(reviewPoll);
       clearInterval(alertPoll);
+      if (priceFlushRef.current !== null) cancelAnimationFrame(priceFlushRef.current);
       clientRef.current?.deactivate();
     };
-  }, [connect, loadRecentAlerts, loadRecentMentorReviews]);
+  }, [connect, loadRecentAlerts]);
 
   const refresh = useCallback(() => {
     fetch(`${API_URL}/api/alerts/recent`)
       .then(r => r.ok ? r.json() : [])
       .then((recent: AlertMessage[]) => setAlerts(recent.slice(0, 50)))
       .catch(() => {});
-    fetch(`${API_URL}/api/mentor/auto-alerts/recent?limit=${MENTOR_REVIEW_HISTORY_LIMIT}`)
-      .then(r => r.ok ? r.json() : [])
-      .then((recent: MentorSignalReview[]) => setMentorSignalReviews(recent.slice(0, MENTOR_REVIEW_HISTORY_LIMIT)))
-      .catch(() => {});
   }, []);
 
   return {
-    prices, alerts, mentorSignalReviews,
+    prices, alerts,
     wtxSignals, wtxRsiSignals, wtxRsiStates,
     connected, refresh,
   };
