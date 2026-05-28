@@ -53,6 +53,14 @@ public class HistoricalDataService implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(HistoricalDataService.class);
 
     private static final List<String> TIMEFRAMES       = List.of("5m", "10m", "1h", "4h", "1d");
+    /**
+     * Explicit allow-list for {@link #deepBackfillTimeframe}. Mirrors {@link #TIMEFRAMES}.
+     * <p>Needed because {@link HistoricalDataProvider#supports(Instrument, String)} may
+     * return {@code true} for any timeframe (provider impls fall back to a default
+     * bar size on unknown values), which would silently store mis-tagged candles.</p>
+     */
+    private static final java.util.Set<String> DEEP_BACKFILL_TIMEFRAMES =
+            java.util.Set.copyOf(TIMEFRAMES);
     private static final int          DEFAULT_CANDLES_PER_PAIR = 500;
     private static final int          GAP_FILL_BUFFER  = 100;
 
@@ -302,6 +310,17 @@ public class HistoricalDataService implements ApplicationRunner {
         if (instrument == null || timeframe == null || timeframe.isBlank()) {
             return Map.of("status", "error",
                     "message", "instrument and timeframe must be provided.");
+        }
+        // Validate against our explicit allow-list BEFORE consulting the provider:
+        // providers like IbkrHistoricalProvider.supports() return true for any
+        // exchange-traded future and silently fall back to a default bar size
+        // (e.g. "1 hour / 1w") on unknown timeframes, which would persist
+        // mis-tagged candles (1h bars stored as "15m"). Reject typos upfront.
+        if (!DEEP_BACKFILL_TIMEFRAMES.contains(timeframe)) {
+            return Map.of("status", "error",
+                    "instrument", instrument.name(),
+                    "timeframe", timeframe,
+                    "message", "Unsupported timeframe for deep-backfill. Allowed: " + DEEP_BACKFILL_TIMEFRAMES);
         }
         if (!historicalProvider.supports(instrument, timeframe)) {
             return Map.of("status", "error",

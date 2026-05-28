@@ -165,12 +165,13 @@ class HistoricalDataServiceTest {
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
 
-        when(historicalProvider.supports(Instrument.MNQ, "1m")).thenReturn(false);
+        // Use an allowed TF so we pass the allow-list, then have the provider reject.
+        when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(false);
 
         HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
 
-        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "1m");
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
 
         assertEquals("error", result.get("status"));
         assertTrue(((String) result.get("message")).contains("does not support"));
@@ -242,6 +243,31 @@ class HistoricalDataServiceTest {
         assertEquals(0, result.get("purged"));
         assertEquals(0, result.get("fetched"));
         assertTrue(((String) result.get("message")).contains("existing data preserved"));
+        verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
+        verify(candlePort, never()).saveAll(anyList());
+        verify(candlePort, never()).findCandles(any(), any(), any());
+    }
+
+    @Test
+    void deepBackfillTimeframe_rejectsUnknownTimeframeBeforeFetching() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+
+        // Provider would lie and say it "supports" anything for a futures instrument
+        // (matches IbkrHistoricalProvider behavior). We must reject upfront anyway.
+        when(historicalProvider.supports(any(), any())).thenReturn(true);
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
+        ReflectionTestUtils.setField(service, "enabled", true);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "15m");
+
+        assertEquals("error", result.get("status"));
+        assertTrue(((String) result.get("message")).contains("Unsupported timeframe"));
+        assertTrue(((String) result.get("message")).contains("10m"), "Should list allowed TFs");
+        // Crucially: provider was NEVER called, no fetch / no delete / no save
+        verify(historicalProvider, never()).fetchHistory(any(), any(), anyInt());
         verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
         verify(candlePort, never()).saveAll(anyList());
         verify(candlePort, never()).findCandles(any(), any(), any());
