@@ -14,6 +14,8 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -57,6 +59,7 @@ public class HistoricalDataService implements ApplicationRunner {
     private final HistoricalDataProvider historicalProvider;
     private final CandleRepositoryPort   candlePort;
     private final ActiveContractRegistry contractRegistry;
+    private final TransactionTemplate    txTemplate;
 
     @Value("${riskdesk.market-data.historical.enabled:false}")
     private boolean enabled;
@@ -90,10 +93,12 @@ public class HistoricalDataService implements ApplicationRunner {
 
     public HistoricalDataService(HistoricalDataProvider historicalProvider,
                                  CandleRepositoryPort candlePort,
-                                 ActiveContractRegistry contractRegistry) {
+                                 ActiveContractRegistry contractRegistry,
+                                 PlatformTransactionManager transactionManager) {
         this.historicalProvider = historicalProvider;
         this.candlePort         = candlePort;
         this.contractRegistry   = contractRegistry;
+        this.txTemplate         = new TransactionTemplate(transactionManager);
     }
 
     @Override
@@ -336,16 +341,22 @@ public class HistoricalDataService implements ApplicationRunner {
                     "message", "fetchHistory returned no candles; existing data preserved.");
         }
 
-        // Step 2: replacement set in hand — now safe to purge and save.
-        List<Candle> existing = candlePort.findCandles(instrument, timeframe, Instant.EPOCH);
-        int purged = existing.size();
-        if (purged > 0) {
-            candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
-            log.info("HistoricalDataService [deep-backfill]: purged {} {} {} candles before saving fresh batch.",
-                    purged, instrument, timeframe);
+        // Step 2: replacement set in hand — swap atomically (delete + save in one TX).
+        int purged;
+        try {
+            purged = swapCandlesAtomically(instrument, timeframe, fetched);
+        } catch (RuntimeException e) {
+            // The @Transactional rolled back: existing rows are still there.
+            log.warn("HistoricalDataService [deep-backfill]: {} {} swap failed -- existing data preserved by TX rollback -- {}",
+                    instrument, timeframe, e.getMessage());
+            return Map.of("status", "error",
+                    "instrument", instrument.name(),
+                    "timeframe", timeframe,
+                    "purged", 0,
+                    "fetched", 0,
+                    "target", target,
+                    "message", "swap failed; existing data preserved by transaction rollback: " + e.getMessage());
         }
-
-        candlePort.saveAll(fetched);
         realDataLoaded.set(true);
 
         log.info("HistoricalDataService [deep-backfill]: {} {} purged {} candles, saved {} fresh candles (target={}).",
@@ -359,6 +370,29 @@ public class HistoricalDataService implements ApplicationRunner {
                 "fetched", fetched.size(),
                 "target", target
         );
+    }
+
+    /**
+     * Atomic swap: deletes the existing (instrument,timeframe) rows then persists
+     * the provided replacement set inside a single transaction. If the save phase
+     * throws, the delete is rolled back so the table is never left empty.
+     *
+     * <p>Uses {@link TransactionTemplate} (programmatic TX) rather than
+     * {@code @Transactional} to sidestep Spring's self-invocation proxy trap:
+     * {@code deepBackfillTimeframe} calls this method from within the same bean,
+     * which would bypass the proxy and silently disable {@code @Transactional}.</p>
+     */
+    int swapCandlesAtomically(Instrument instrument, String timeframe, List<Candle> replacement) {
+        Integer purged = txTemplate.execute(status -> {
+            List<Candle> existing = candlePort.findCandles(instrument, timeframe, Instant.EPOCH);
+            int count = existing.size();
+            if (count > 0) {
+                candlePort.deleteByInstrumentAndTimeframe(instrument, timeframe);
+            }
+            candlePort.saveAll(replacement);
+            return count;
+        });
+        return purged == null ? 0 : purged;
     }
 
     // -------------------------------------------------------------------------

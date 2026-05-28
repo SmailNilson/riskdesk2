@@ -7,6 +7,9 @@ import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -20,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -43,7 +47,7 @@ class HistoricalDataServiceTest {
         when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(Optional.of("202606"));
         when(candlePort.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "mentorRefreshTimeoutMs", 1000L);
         ReflectionTestUtils.setField(service, "mentorRefreshCooldownMs", 60_000L);
@@ -79,7 +83,7 @@ class HistoricalDataServiceTest {
         when(contractRegistry.getContractMonth(Instrument.MGC)).thenReturn(Optional.of("202606"));
         when(candlePort.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "mentorRefreshTimeoutMs", 2000L);
         ReflectionTestUtils.setField(service, "mentorRefreshCooldownMs", 0L);
@@ -107,7 +111,7 @@ class HistoricalDataServiceTest {
         when(contractRegistry.getContractMonth(Instrument.MCL)).thenReturn(Optional.of("202606"));
         when(candlePort.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "mentorRefreshTimeoutMs", 2000L);
         ReflectionTestUtils.setField(service, "mentorRefreshCooldownMs", 0L);
@@ -139,7 +143,7 @@ class HistoricalDataServiceTest {
         when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.of("202606"));
         when(candlePort.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "backfillDays10m", 90);
 
@@ -163,7 +167,7 @@ class HistoricalDataServiceTest {
 
         when(historicalProvider.supports(Instrument.MNQ, "1m")).thenReturn(false);
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
 
         Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "1m");
@@ -180,7 +184,7 @@ class HistoricalDataServiceTest {
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
         ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", false);
 
         Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
@@ -201,7 +205,7 @@ class HistoricalDataServiceTest {
         when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt())).thenReturn(List.of());
         when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "backfillDays10m", 90);
 
@@ -227,7 +231,7 @@ class HistoricalDataServiceTest {
         when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt()))
                 .thenThrow(new RuntimeException("IBKR pacing violation"));
 
-        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry);
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, simpleTxManager());
         ReflectionTestUtils.setField(service, "enabled", true);
         ReflectionTestUtils.setField(service, "backfillDays10m", 90);
 
@@ -241,6 +245,61 @@ class HistoricalDataServiceTest {
         verify(candlePort, never()).deleteByInstrumentAndTimeframe(any(), any());
         verify(candlePort, never()).saveAll(anyList());
         verify(candlePort, never()).findCandles(any(), any(), any());
+    }
+
+    @Test
+    void deepBackfillTimeframe_rollsBackPurgeWhenSaveFails() {
+        HistoricalDataProvider historicalProvider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        TxRollbackTracker txManager = new TxRollbackTracker();
+
+        when(historicalProvider.supports(Instrument.MNQ, "10m")).thenReturn(true);
+        when(candlePort.findCandles(eq(Instrument.MNQ), eq("10m"), any())).thenReturn(List.of(
+                candle(Instrument.MNQ, "10m", "2026-05-26T01:50:00Z", "29810.75")
+        ));
+        when(historicalProvider.fetchHistory(eq(Instrument.MNQ), eq("10m"), anyInt())).thenReturn(List.of(
+                candle(Instrument.MNQ, "10m", "2026-02-26T01:50:00Z", "29000.00")
+        ));
+        when(contractRegistry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+        // saveAll throws — TX must roll back, delete is undone
+        doThrow(new RuntimeException("PG connection drop"))
+                .when(candlePort).saveAll(anyList());
+
+        HistoricalDataService service = new HistoricalDataService(historicalProvider, candlePort, contractRegistry, txManager);
+        ReflectionTestUtils.setField(service, "enabled", true);
+        ReflectionTestUtils.setField(service, "backfillDays10m", 90);
+
+        Map<String, Object> result = service.deepBackfillTimeframe(Instrument.MNQ, "10m");
+
+        assertEquals("error", result.get("status"));
+        assertEquals(0, result.get("purged"));
+        assertEquals(0, result.get("fetched"));
+        assertTrue(((String) result.get("message")).contains("preserved by transaction rollback"));
+        assertTrue(txManager.rolledBack, "TX must have been rolled back when saveAll failed");
+        // delete was called inside the TX, but since TX rolled back, the existing rows survive (verified by rolledBack flag)
+        verify(candlePort, times(1)).deleteByInstrumentAndTimeframe(Instrument.MNQ, "10m");
+        verify(candlePort, times(1)).saveAll(anyList());
+    }
+
+    private static PlatformTransactionManager simpleTxManager() {
+        return new PlatformTransactionManager() {
+            @Override public TransactionStatus getTransaction(org.springframework.transaction.TransactionDefinition def) {
+                return new SimpleTransactionStatus();
+            }
+            @Override public void commit(TransactionStatus status) {}
+            @Override public void rollback(TransactionStatus status) {}
+        };
+    }
+
+    /** TX manager that records whether rollback was called — for rollback-on-error tests. */
+    private static class TxRollbackTracker implements PlatformTransactionManager {
+        boolean rolledBack = false;
+        @Override public TransactionStatus getTransaction(org.springframework.transaction.TransactionDefinition def) {
+            return new SimpleTransactionStatus();
+        }
+        @Override public void commit(TransactionStatus status) {}
+        @Override public void rollback(TransactionStatus status) { rolledBack = true; }
     }
 
     private static Candle candle(Instrument instrument, String timeframe, String timestamp, String close) {
