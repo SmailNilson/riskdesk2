@@ -342,7 +342,10 @@ public class WtxExecutionBridge {
                         + truncate(marginDenyReason, 150);
                 log.warn("WTX [{} {}] reverse flattened, open leg skipped — insufficient margin for new "
                         + "position (delta qty={})", state.instrument(), tf, preflightQty);
-                return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED, msg);
+                // ROUTED_FLATTEN_ONLY (not ROUTED): the caller optimistically moved the virtual
+                // state to the new side before routing — it must correct it back to FLAT so the
+                // virtual position/PnL matches the broker, which is now flat.
+                return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY, msg);
             }
             // Nothing flattened this call (prior already EXIT_SUBMITTED / no opposite position)
             // and the open can't be afforded → decline. Any in-flight close still brings the

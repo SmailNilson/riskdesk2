@@ -568,7 +568,9 @@ class WtxExecutionBridgeTest {
         // Preflight ran on delta=4 (5 − 1) and denied → open leg skipped, but the close leg fires.
         verify(spy, times(1)).canAffordOrder(any(), any(),
                 org.mockito.ArgumentMatchers.eq(4), any());
-        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // ROUTED_FLATTEN_ONLY (not ROUTED): broker is FLAT and the caller must correct the
+        // virtual strategy state back to FLAT rather than tracking the never-opened new side.
+        assertEquals(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY, result.outcome());
         assertNotNull(result.errorMessage());
         assertTrue(result.errorMessage().toLowerCase().contains("reversed to flat"),
                 "errorMessage must explain the user was flattened, open leg skipped for margin");
