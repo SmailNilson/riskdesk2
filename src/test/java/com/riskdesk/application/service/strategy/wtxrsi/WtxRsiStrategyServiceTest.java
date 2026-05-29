@@ -221,6 +221,43 @@ class WtxRsiStrategyServiceTest {
                 "OPEN actions with toggle ON must record SKIPPED_BRIDGE_UNAVAILABLE when no bridge bean");
     }
 
+    @Test
+    void chaikin_required_blocks_unconfirmed_entries_but_keeps_exits() {
+        // Entry-only gate: with chaikin-required on (chaikin-enabled defaults true),
+        // only Chaikin-confirmed signals may OPEN. Exits keep their mechanism.
+        properties.setChaikinRequired(true);
+        deliverAll();
+
+        // The gate must have fired at least once over 800 noisy bars: blocked
+        // entries are logged as NONE with a chaikin-required reason.
+        boolean gateFired = historyPort.store.stream().anyMatch(r ->
+                r.action() == WtxRsiSignalRecord.Action.NONE
+                        && r.routingErrorMessage() != null
+                        && r.routingErrorMessage().startsWith("chaikin-required:"));
+        assertTrue(gateFired, "expected at least one entry blocked by chaikin-required");
+
+        // Every position actually OPENED must be Chaikin-confirmed.
+        boolean anyOpen = historyPort.store.stream().anyMatch(this::isOpen);
+        assertTrue(anyOpen, "confirmed signals should still open positions");
+        assertTrue(historyPort.store.stream().filter(this::isOpen)
+                        .allMatch(WtxRsiSignalRecord::chaikinConfirmed),
+                "chaikin-required must only open Chaikin-confirmed entries");
+
+        // Exits (SL / TP / reversal) are unaffected — closes still occur.
+        assertTrue(historyPort.store.stream().anyMatch(this::isClose),
+                "exits must still fire with the entry gate on");
+    }
+
+    private boolean isOpen(WtxRsiSignalRecord r) {
+        return r.action() == WtxRsiSignalRecord.Action.OPEN_LONG
+                || r.action() == WtxRsiSignalRecord.Action.OPEN_SHORT;
+    }
+
+    private boolean isClose(WtxRsiSignalRecord r) {
+        return r.action() == WtxRsiSignalRecord.Action.CLOSE_LONG
+                || r.action() == WtxRsiSignalRecord.Action.CLOSE_SHORT;
+    }
+
     // ── tiny synthetic candle fixture (duplicated here so the application tests
     //    don't depend on test code from the domain test source set) ────────────
     static final class SyntheticCandlesFixture {

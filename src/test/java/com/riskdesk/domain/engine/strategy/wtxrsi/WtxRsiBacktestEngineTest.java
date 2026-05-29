@@ -105,6 +105,64 @@ class WtxRsiBacktestEngineTest {
     }
 
     @Test
+    void chaikin_required_only_opens_confirmed_entries() {
+        List<Candle> bars = SyntheticCandles.mnq(1500, 9);
+        WtxRsiConfig base = WtxRsiConfig.defaults5m();
+
+        Result ungated = new WtxRsiBacktestEngine(base).run(bars);
+        Result gated = new WtxRsiBacktestEngine(withChaikin(base, true, true)).run(bars);
+
+        // Confirmed trades carry the ×2 size (RiskCalculator), unconfirmed carry ×1.
+        int confirmedSize = base.baseContracts() * base.confirmedMultiplier();
+        long ungatedUnconfirmed = ungated.trades().stream()
+                .filter(t -> t.contracts() != confirmedSize).count();
+
+        // Fixture sanity: the ungated run must contain unconfirmed entries, otherwise
+        // the gate would have nothing to prove.
+        assertTrue(ungatedUnconfirmed > 0, "fixture should produce unconfirmed trades to filter");
+
+        // Core guarantee: with the gate on, every OPENED trade is Chaikin-confirmed.
+        for (WtxRsiTrade t : gated.trades()) {
+            assertEquals(confirmedSize, t.contracts(),
+                    "chaikin-required must only open confirmed (×2) entries");
+        }
+        // The gate removes entries — it never adds them.
+        assertTrue(gated.trades().size() <= ungated.trades().size());
+    }
+
+    @Test
+    void chaikin_required_is_noop_when_chaikin_disabled() {
+        // Requiring confirmation that is never computed must not block everything —
+        // the gate is inert unless chaikin-enabled is also true.
+        List<Candle> bars = SyntheticCandles.mnq(800, 7);
+        WtxRsiConfig base = WtxRsiConfig.defaults5m();
+
+        Result disabledBaseline = new WtxRsiBacktestEngine(withChaikin(base, false, false)).run(bars);
+        Result disabledButRequired = new WtxRsiBacktestEngine(withChaikin(base, false, true)).run(bars);
+
+        assertEquals(disabledBaseline.trades().size(), disabledButRequired.trades().size(),
+                "chaikin-required must be a no-op when chaikin-enabled=false");
+    }
+
+    /** Rebuilds {@code base} overriding only the Chaikin enabled / required flags. */
+    private static WtxRsiConfig withChaikin(WtxRsiConfig base, boolean enabled, boolean required) {
+        return new WtxRsiConfig(
+                base.wtN1(), base.wtN2(), base.wtSignalPeriod(),
+                base.wtOverbought(), base.wtOversold(),
+                base.rsiLength(), base.rsiSmaLength(),
+                base.syncLookbackBars(),
+                base.zoneMode(), base.zoneLookbackBars(),
+                base.fractalLeftRight(), base.fractalMaxLookback(),
+                base.swingBufferTicks(), base.tickSize(), base.tickValueUsd(),
+                base.baseContracts(), base.confirmedMultiplier(),
+                base.tpMode(), base.tpRMultiple(),
+                base.chaikinFast(), base.chaikinSlow(), enabled,
+                base.biasSource(),
+                required
+        );
+    }
+
+    @Test
     void metrics_sum_trades_and_pnl() {
         List<Candle> bars = SyntheticCandles.mnq(800, 7);
         Result result = new WtxRsiBacktestEngine(WtxRsiConfig.defaults5m()).run(bars);

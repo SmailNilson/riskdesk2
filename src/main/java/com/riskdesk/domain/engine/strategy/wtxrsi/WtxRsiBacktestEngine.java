@@ -134,7 +134,7 @@ public final class WtxRsiBacktestEngine {
             boolean flat = longPos == null && shortPos == null
                     && pendingLong == null && pendingShort == null;
             WtxRsiSignal sig = signalsByBar.get(i);
-            if (sig != null && flat) {
+            if (sig != null && flat && !entryBlockedByChaikin(sig)) {
                 if (sig.side() == WtxRsiSignal.Side.LONG) {
                     pendingLong = sig;
                 } else {
@@ -161,6 +161,16 @@ public final class WtxRsiBacktestEngine {
     }
 
     // ── helpers ────────────────────────────────────────────────────────────
+
+    /**
+     * Entry-only Chaikin gate. When {@code chaikinRequired} is on, a fresh
+     * position may open only if the signal is Chaikin-confirmed. Exits
+     * (reversal / SL / TP) are handled elsewhere and stay unaffected. No-op
+     * when Chaikin confirmation isn't computed ({@code chaikinEnabled=false}).
+     */
+    private boolean entryBlockedByChaikin(WtxRsiSignal sig) {
+        return config.chaikinRequired() && config.chaikinEnabled() && !sig.confirmed();
+    }
 
     private OpenPosition openPosition(WtxRsiSignal sig, List<Candle> candles, BigDecimal entryPrice) {
         return WtxRsiRiskCalculator.build(sig, candles, entryPrice, config)

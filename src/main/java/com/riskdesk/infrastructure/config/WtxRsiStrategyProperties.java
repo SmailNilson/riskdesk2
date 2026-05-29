@@ -56,6 +56,13 @@ public class WtxRsiStrategyProperties {
     private int chaikinFast = 3;
     private int chaikinSlow = 10;
     private boolean chaikinEnabled = true;
+    // Entry gate: when true, only Chaikin-confirmed signals may OPEN a position.
+    // Exits (reversal / SL / TP) keep their current mechanism. Only effective when
+    // chaikinEnabled=true (confirmation must actually be computed).
+    // NOTE: this field initialiser is the programmatic fallback (false); the
+    // shipped application.properties baseline ENABLES it (chaikin-required=true).
+    // Reversible — override to false per env / profile to disable the gate.
+    private boolean chaikinRequired = false;
 
     // Bias source for the optional swingBiasFilter toggle.
     // FRACTAL_HH_HL keeps the strategy domain-pure (no IndicatorService dependency).
@@ -75,7 +82,8 @@ public class WtxRsiStrategyProperties {
                 baseContracts, confirmedMultiplier,
                 tpMode, tpRMultiple,
                 chaikinFast, chaikinSlow, chaikinEnabled,
-                biasSource
+                biasSource,
+                chaikinRequired
         );
     }
 
@@ -130,6 +138,8 @@ public class WtxRsiStrategyProperties {
     public void setChaikinSlow(int chaikinSlow) { this.chaikinSlow = chaikinSlow; }
     public boolean isChaikinEnabled() { return chaikinEnabled; }
     public void setChaikinEnabled(boolean chaikinEnabled) { this.chaikinEnabled = chaikinEnabled; }
+    public boolean isChaikinRequired() { return chaikinRequired; }
+    public void setChaikinRequired(boolean chaikinRequired) { this.chaikinRequired = chaikinRequired; }
     public WtxRsiBiasSource getBiasSource() { return biasSource; }
     public void setBiasSource(WtxRsiBiasSource biasSource) { this.biasSource = biasSource; }
 }

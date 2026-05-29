@@ -637,6 +637,17 @@ public class OrderFlowOrchestrator {
      */
     @Scheduled(fixedDelayString = "${riskdesk.order-flow.iceberg.eval-interval-ms:2000}", initialDelay = 95_000)
     public void evaluateBookManipulation() {
+        evaluateBookManipulation(Instant.now());
+    }
+
+    /**
+     * Seam for deterministic testing: evaluate book manipulation as of {@code now}
+     * instead of reading the wall clock. The public no-arg overload delegates with
+     * {@link Instant#now()}. Mirrors {@code evaluateFlashCrash(..., Instant)}, which
+     * already injects time — without this, tests that pin wall events to a fixed
+     * instant rot the moment real time passes that instant + the lookback window.
+     */
+    void evaluateBookManipulation(Instant now) {
         boolean icebergEnabled = properties.getIceberg().isEnabled();
         boolean spoofingEnabled = properties.getSpoofing().isEnabled();
         if (!icebergEnabled && !spoofingEnabled) return;
@@ -644,7 +655,6 @@ public class OrderFlowOrchestrator {
         MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
         if (depthPort == null) return;
 
-        Instant now = Instant.now();
         int lookbackSec = Math.max(
             properties.getIceberg().getLookbackSeconds(),
             properties.getSpoofing().getLookbackSeconds());

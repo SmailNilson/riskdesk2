@@ -29,5 +29,6 @@ public record WtxRsiBacktestRequest(
         WtxRsiTpMode tpMode,
         BigDecimal tpRMultiple,
         Boolean chaikinEnabled,
-        WtxRsiBiasSource biasSource
+        WtxRsiBiasSource biasSource,
+        Boolean chaikinRequired
 ) {}
