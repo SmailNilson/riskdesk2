@@ -263,13 +263,23 @@ public class WtxExecutionBridge {
         } else {
             preflightQty = positionQty;
         }
+        // A margin denial never aborts a REVERSE: the close leg still fires (flatten =
+        // protect the user), only the open leg is skipped. A pure OPEN with no affordable
+        // margin is declined outright — there is no position to flatten.
+        boolean openLegAffordable = true;
+        String marginDenyReason = null;
         if (marginPreflight != null && preflightQty > 0) {
             PreflightDecision decision = marginPreflight.canAffordOrder(instrument, orderAction, preflightQty, price);
             if (!decision.allowed()) {
-                log.warn("WTX [{} {}] routing denied by pre-flight (delta qty={}) — {}",
-                        state.instrument(), tf, preflightQty, decision.denyReason());
-                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
-                        truncate(decision.denyReason(), 200));
+                openLegAffordable = false;
+                marginDenyReason = decision.denyReason();
+                log.warn("WTX [{} {}] open leg denied by pre-flight (delta qty={}) — {}",
+                        state.instrument(), tf, preflightQty, marginDenyReason);
+                if (!isReverse) {
+                    // Pure OPEN — nothing to flatten; decline before any broker side effect.
+                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
+                            truncate(marginDenyReason, 200));
+                }
             }
         }
 
@@ -277,6 +287,7 @@ public class WtxExecutionBridge {
         // new one. Every open-leg precondition is already validated above, so the close leg
         // only fires once we know the open will proceed. If the close leg is rejected we abort
         // — nothing is opened and the live position keeps its active row for the next bar.
+        boolean closeLegFired = false;
         if (isReverse) {
             Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), tf);
             // Reconcile fallback: WTX has no open row but IBKR does. Synthesize a phantom row
@@ -318,7 +329,26 @@ public class WtxExecutionBridge {
                             state.instrument(), tf, closeResult.outcomeOnFailure());
                     return WtxRoutingResult.of(closeResult.outcomeOnFailure(), closeResult.errorMessage());
                 }
+                closeLegFired = true;
             }
+        }
+
+        // REVERSE flatten-first: the prior position has now been flattened. If the open leg
+        // can't be afforded, stop here — the user ends up FLAT (protected) rather than stuck
+        // in the position the strategy told them to exit. Pure OPEN already returned above.
+        if (!openLegAffordable) {
+            if (closeLegFired) {
+                String msg = "reversed to flat — open leg skipped (insufficient margin): "
+                        + truncate(marginDenyReason, 150);
+                log.warn("WTX [{} {}] reverse flattened, open leg skipped — insufficient margin for new "
+                        + "position (delta qty={})", state.instrument(), tf, preflightQty);
+                return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED, msg);
+            }
+            // Nothing flattened this call (prior already EXIT_SUBMITTED / no opposite position)
+            // and the open can't be afforded → decline. Any in-flight close still brings the
+            // account flat on its own fill.
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
+                    truncate(marginDenyReason, 200));
         }
 
         TradeExecutionRecord candidate = new TradeExecutionRecord();
@@ -537,7 +567,11 @@ public class WtxExecutionBridge {
             String shortMsg = truncate(brokerText, 200);
             Long brokerOrderId = e.brokerOrderId();
             WtxRoutingOutcome outcome = switch (e.kind()) {
-                case INSUFFICIENT_MARGIN -> WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN;
+                // A close/flatten REDUCES exposure — it can never legitimately require margin.
+                // An IBKR margin code on a reducing order is spurious (typically a late async
+                // reject after a timeout); treat it as a retryable broker reject, NOT a
+                // "no margin" skip, so the UI never tells the user a close was blocked for funds.
+                case INSUFFICIENT_MARGIN -> WtxRoutingOutcome.FAILED_BROKER_REJECT;
                 case TIMEOUT -> brokerOrderId != null
                         ? WtxRoutingOutcome.ACK_PENDING
                         : WtxRoutingOutcome.FAILED_TIMEOUT;
@@ -552,8 +586,9 @@ public class WtxExecutionBridge {
                         row.getInstrument(), row.getTimeframe(), brokerOrderId);
             } else if (outcome == WtxRoutingOutcome.FAILED_TIMEOUT) {
                 suffix = " close timeout — ack lost, manual reconcile required";
-            } else if (outcome == WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN) {
-                suffix = " close skipped — insufficient margin: " + shortMsg;
+            } else if (e.kind() == IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN) {
+                suffix = " close rejected by IBKR with a margin code on a reducing order "
+                        + "(spurious — left active for retry): " + shortMsg;
             } else {
                 suffix = " close failed: " + shortMsg;
             }

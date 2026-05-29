@@ -411,11 +411,13 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void reverseToShort_closeLegInsufficientMargin_skipsOpenLeg_priorRowStaysActive() {
+    void reverseToShort_closeLegMarginCode_isBrokerReject_notNoMargin_priorRowStaysActive() {
         // Seed an open LONG that the reverse must flatten before going SHORT.
         TradeExecutionRecord priorLong = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorLong);
 
+        // IBKR returns a margin code on the close (reducing) leg. This is spurious — a flatten
+        // can never need margin — so the bridge must NOT surface it as NO MARGIN.
         when(ibkrOrderService.submitEntryOrder(any()))
                 .thenThrow(new IbkrOrderRejectionException(
                         IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201,
@@ -426,12 +428,12 @@ class WtxExecutionBridgeTest {
                 .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
         WtxRoutingResult result = bridge.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
 
-        // The bug at 09:20Z manifested here: close leg reject → no open leg → typed outcome.
-        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        // Reducing-order margin code → retryable broker reject, never SKIPPED_INSUFFICIENT_MARGIN.
+        assertEquals(WtxRoutingOutcome.FAILED_BROKER_REJECT, result.outcome());
         assertNotNull(result.errorMessage());
         // Prior row left ACTIVE — close leg failed, position remains visible for next bar.
         assertEquals(ExecutionStatus.ACTIVE, repo.byId(priorLong.getId()).getStatus(),
-                "prior row stays ACTIVE when the close leg is rejected on margin");
+                "prior row stays ACTIVE when the close leg is rejected — retryable next bar");
         // Only one broker call (the close leg) — no open leg submission.
         verify(ibkrOrderService, times(1)).submitEntryOrder(any());
     }
@@ -541,12 +543,11 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void preflightStillRunsForSizeIncreasingReverse_andDenialBlocksOrder() {
-        // Regression guard: if the user bumped the panel qty before a REVERSE, the open leg is
-        // larger than the close leg. Skipping preflight here would let the close leg succeed and
-        // then the larger open leg get rejected at IBKR, leaving the account unintentionally
-        // flat. The preflight must run on the DELTA (open qty − prior qty) and block the whole
-        // thing before any broker side effect.
+    void preflightDeniedSizeIncreasingReverse_flattensToFlat_skipsOpenLeg() {
+        // If the user bumped the panel qty before a REVERSE, the open leg is larger than the
+        // close leg, so the open's NET margin delta may be unaffordable. The user still wants
+        // out of the current position — "flatten au minimum". The bridge must fire the close
+        // leg (go FLAT, protected) and skip ONLY the open leg, never leaving the user stuck.
         com.riskdesk.application.service.IbkrMarginPreflightService spy =
                 org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
         when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
@@ -556,20 +557,25 @@ class WtxExecutionBridgeTest {
                 ibkrOrderService, repo, ibkrProperties, wtxProperties, spy);
 
         // Prior LONG of 1 to flatten; new SHORT sized to 5 contracts (panel qty was bumped).
-        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ACTIVE));
+        TradeExecutionRecord priorLong = wtxRow("LONG", 1, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorLong);
 
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.SHORT, bd(100), bd(5), bd(1))
                 .withConfiguredOrderQty(5);
         WtxRoutingResult result = bridgeWithPreflight.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
 
-        // Preflight ran on delta=4 (5 − 1) and denied → no broker order at all.
+        // Preflight ran on delta=4 (5 − 1) and denied → open leg skipped, but the close leg fires.
         verify(spy, times(1)).canAffordOrder(any(), any(),
                 org.mockito.ArgumentMatchers.eq(4), any());
-        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
-        verify(ibkrOrderService, never()).submitEntryOrder(any());
-        // Prior LONG row stays ACTIVE — no close leg was sent, position is intact.
-        assertEquals(ExecutionStatus.ACTIVE, repo.all().get(0).getStatus());
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        assertNotNull(result.errorMessage());
+        assertTrue(result.errorMessage().toLowerCase().contains("reversed to flat"),
+                "errorMessage must explain the user was flattened, open leg skipped for margin");
+        // Exactly one broker order — the close (flatten) leg. The open leg was NOT submitted.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+        // Prior LONG row is now EXIT_SUBMITTED — the flatten was sent.
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.byId(priorLong.getId()).getStatus());
     }
 
     @Test
