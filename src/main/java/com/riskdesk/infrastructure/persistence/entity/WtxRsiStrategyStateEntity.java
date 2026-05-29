@@ -64,6 +64,13 @@ public class WtxRsiStrategyStateEntity {
     @Column(length = 10)
     private String lastSwingBias;
 
+    /** Entry-only Chaikin gate per (instrument, timeframe). Nullable for the same
+     *  ddl-auto=update reason as the other boolean toggles — existing rows get NULL
+     *  when the column is added; the adapter coerces null to the global config
+     *  default ({@code riskdesk.wtxrsi.chaikin-required}). */
+    @Column
+    private Boolean chaikinRequired;
+
     public WtxRsiStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -94,4 +101,6 @@ public class WtxRsiStrategyStateEntity {
     public void setSwingBiasFilterEnabled(Boolean swingBiasFilterEnabled) { this.swingBiasFilterEnabled = swingBiasFilterEnabled; }
     public String getLastSwingBias() { return lastSwingBias; }
     public void setLastSwingBias(String lastSwingBias) { this.lastSwingBias = lastSwingBias; }
+    public Boolean getChaikinRequired() { return chaikinRequired; }
+    public void setChaikinRequired(Boolean chaikinRequired) { this.chaikinRequired = chaikinRequired; }
 }
