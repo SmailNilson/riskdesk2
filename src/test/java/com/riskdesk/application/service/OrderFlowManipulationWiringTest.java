@@ -112,7 +112,7 @@ class OrderFlowManipulationWiringTest {
             null, null, now);
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
 
-        orchestrator.evaluateBookManipulation();
+        orchestrator.evaluateBookManipulation(now);
 
         verify(eventPublisher, atLeastOnce()).publishEvent(any(IcebergDetected.class));
         verify(eventPublisher, atLeastOnce()).publishEvent(any(SpoofingDetected.class));
@@ -131,8 +131,8 @@ class OrderFlowManipulationWiringTest {
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.empty());
 
         // Two scans back-to-back (well inside the 60s dedup window) → emit once.
-        orchestrator.evaluateBookManipulation();
-        orchestrator.evaluateBookManipulation();
+        orchestrator.evaluateBookManipulation(now);
+        orchestrator.evaluateBookManipulation(now);
 
         verify(eventPublisher, atLeastOnce()).publishEvent(any(IcebergDetected.class));
         // The second scan of the same still-in-window pattern must NOT double-fire.
