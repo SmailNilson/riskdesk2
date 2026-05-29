@@ -15,7 +15,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * Live operational endpoints for the WTX+RSI strategy.
@@ -28,6 +27,8 @@ import java.util.Optional;
  *   <li>{@code GET /state/{instrument}/{timeframe}} — current persisted state</li>
  *   <li>{@code POST /state/{instrument}/{timeframe}/auto-execution} — flip the IBKR toggle</li>
  *   <li>{@code POST /state/{instrument}/{timeframe}/order-qty}     — set panel quantity</li>
+ *   <li>{@code POST /state/{instrument}/{timeframe}/swing-bias-filter} — flip the swing-bias filter</li>
+ *   <li>{@code POST /state/{instrument}/{timeframe}/chaikin-required}  — flip the Chaikin entry gate</li>
  *   <li>{@code GET /signals/{instrument}}                          — recent signal log</li>
  * </ul>
  */
@@ -45,9 +46,9 @@ public class WtxRsiStrategyController {
     @GetMapping("/state/{instrument}/{timeframe}")
     public ResponseEntity<WtxRsiStrategyState> getState(
             @PathVariable String instrument, @PathVariable String timeframe) {
-        Optional<WtxRsiStrategyState> state = service.getState(instrument, timeframe);
-        return state.map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.ok(WtxRsiStrategyState.initial(instrument, timeframe)));
+        // Seeded fallback so an un-persisted panel reflects the configured
+        // Chaikin-gate default rather than a hard-coded one.
+        return ResponseEntity.ok(service.getStateOrInitial(instrument, timeframe));
     }
 
     @PostMapping("/state/{instrument}/{timeframe}/auto-execution")
@@ -72,6 +73,14 @@ public class WtxRsiStrategyController {
             @RequestBody Map<String, Boolean> body) {
         boolean enabled = Boolean.TRUE.equals(body.get("enabled"));
         return ResponseEntity.ok(service.toggleSwingBiasFilter(instrument, timeframe, enabled));
+    }
+
+    @PostMapping("/state/{instrument}/{timeframe}/chaikin-required")
+    public ResponseEntity<WtxRsiStrategyState> toggleChaikinRequired(
+            @PathVariable String instrument, @PathVariable String timeframe,
+            @RequestBody Map<String, Boolean> body) {
+        boolean enabled = Boolean.TRUE.equals(body.get("enabled"));
+        return ResponseEntity.ok(service.toggleChaikinRequired(instrument, timeframe, enabled));
     }
 
     @GetMapping("/signals/{instrument}")

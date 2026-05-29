@@ -36,6 +36,13 @@ qualified signal opens and Chaikin merely scales the contract count. This is
 **entry-only**: exits keep their existing mechanism (reversal-on-opposite-signal
 and SL/TP fire regardless). The gate is a no-op unless `chaikin-enabled=true`
 (confirmation that is never computed would otherwise block every entry).
+
+The gate is also a **per-panel runtime toggle** ("Chaikin-req : ON/OFF" in the
+WtxRsiStrategyPanel, like Swing-bias): `POST /state/{instrument}/{timeframe}/chaikin-required`
+flips it for that (instrument, timeframe) without a restart, persisted on the
+strategy state. The `chaikin-required` config value is the **inherited default**
+for panels that have never been toggled. The live executor reads the per-panel
+state; the backtest reads the config (`chaikinRequired` request override).
 Honoured by both the live executor
 and the backtest (`chaikinRequired` request override).
 

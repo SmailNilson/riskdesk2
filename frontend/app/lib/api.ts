@@ -1951,6 +1951,8 @@ export interface WtxRsiStrategyStateView {
   autoExecutionEnabled: boolean;
   configuredOrderQty: number;
   swingBiasFilterEnabled: boolean;
+  /** Entry-only Chaikin gate (per panel). ON = only Chaikin-confirmed signals open. */
+  chaikinRequired: boolean;
   lastSwingBias: WtxRsiSwingBias | null;
   // Pushed on WebSocket but not on REST GET; OK to be optional client-side
   biasSource?: WtxRsiBiasSource | null;
@@ -2022,6 +2024,23 @@ export async function updateWtxRsiSwingBiasFilter(
 ): Promise<WtxRsiStrategyStateView | null> {
   const res = await fetch(
     `${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}/swing-bias-filter`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function updateWtxRsiChaikinRequired(
+  instrument: string,
+  timeframe: string,
+  enabled: boolean,
+): Promise<WtxRsiStrategyStateView | null> {
+  const res = await fetch(
+    `${BASE}/api/strategy/wtxrsi/state/${instrument}/${timeframe}/chaikin-required`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

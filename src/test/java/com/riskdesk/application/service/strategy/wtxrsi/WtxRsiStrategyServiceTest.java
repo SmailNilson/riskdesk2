@@ -179,6 +179,25 @@ class WtxRsiStrategyServiceTest {
     }
 
     @Test
+    void toggle_chaikin_required_persists_state() {
+        // properties default (test) is false, so a fresh state seeds false.
+        WtxRsiStrategyState off = service.toggleChaikinRequired("MNQ", "5m", false);
+        assertFalse(off.chaikinRequired());
+        assertFalse(statePort.load("MNQ", "5m").orElseThrow().chaikinRequired());
+        WtxRsiStrategyState on = service.toggleChaikinRequired("MNQ", "5m", true);
+        assertTrue(on.chaikinRequired());
+        assertTrue(statePort.load("MNQ", "5m").orElseThrow().chaikinRequired());
+    }
+
+    @Test
+    void fresh_state_inherits_global_chaikin_required_default() {
+        properties.setChaikinRequired(true);
+        WtxRsiStrategyState seeded = service.getStateOrInitial("MNQ", "5m");
+        assertTrue(seeded.chaikinRequired(),
+                "an un-persisted panel must inherit the global chaikin-required default");
+    }
+
+    @Test
     void swing_bias_is_recorded_on_state_after_each_candle() {
         deliverAll();
         WtxRsiStrategyState end = statePort.load("MNQ", "5m").orElseThrow();
