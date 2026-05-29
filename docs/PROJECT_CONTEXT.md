@@ -72,11 +72,11 @@ Important settings today:
 - backend port: `8080`
 - PostgreSQL DB: `riskdesk`
 - IBKR mode: `IB_GATEWAY`
-- native host: `100.113.139.64` (riskdesk-prod via Tailscale — NOT localhost)
+- native host: a reachable IB Gateway (see note — NOT localhost)
 - native port: `4003`
 - native client id: `7`
 
-Note: IB Gateway runs on the `riskdesk-prod` server, reachable via Tailscale at `100.113.139.64:4003`. Verify with `tailscale status | grep riskdesk-prod`.
+Note: prod now runs on **`riskdesk-prod-v2`** (Tailscale `100.69.177.128`, API/nginx `:3000`); the old `riskdesk-prod` (`100.113.139.64`) is **deprecated** (Tailscale idle). On prod the IB Gateway runs as a Docker container reached internally as `ibkr-gateway:4003` (confirm via `GET /api/ibkr/auth/status` → `socket://ibkr-gateway:4003`) — it is **NOT** exposed on the host's Tailscale IP (`nc -z 100.69.177.128 4003` fails). For local dev, point `native-host` at a gateway you can reach and verify with `nc -z <host> 4003`.
 
 ## Environment Variables Used
 

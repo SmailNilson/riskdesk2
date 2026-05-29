@@ -983,9 +983,9 @@ Operational note:
 ### Current good news
 
 - the reconnect storm around `clientId=7` appears fixed at the application level
-- IB Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale — NOT on localhost
-- local `application-local.properties` must set `riskdesk.ibkr.native-host=100.113.139.64` and `riskdesk.ibkr.native-port=4003`
-- verify Tailscale connectivity: `tailscale status | grep riskdesk-prod` and `nc -z 100.113.139.64 4003`
+- prod host is now `riskdesk-prod-v2` (Tailscale `100.69.177.128`, API/nginx `:3000`); old `riskdesk-prod` (`100.113.139.64`) is deprecated (Tailscale idle)
+- on prod the IB Gateway runs as a Docker container reached internally as `ibkr-gateway:4003` (`GET /api/ibkr/auth/status` → `socket://ibkr-gateway:4003`); it is NOT exposed on the host's Tailscale IP (`nc -z 100.69.177.128 4003` fails)
+- local `application-local.properties` must set `riskdesk.ibkr.native-host` to a reachable IB Gateway and `riskdesk.ibkr.native-port=4003`; verify with `nc -z <host> 4003`
 
 ### Current remaining issue
 
