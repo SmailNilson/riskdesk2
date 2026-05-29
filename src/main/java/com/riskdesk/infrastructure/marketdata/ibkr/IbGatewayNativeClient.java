@@ -852,6 +852,19 @@ public class IbGatewayNativeClient {
             kind = IbkrOrderRejectionException.Kind.BROKER_REJECT;
             detail = error.get();
         } else if (!completed) {
+            // The ack window elapsed without any explicit broker reject (no 201, no margin text,
+            // no Cancelled). If the order actually reached IBKR — it has a broker order id — it is
+            // WORKING there, not failed: return it as a PENDING submission so the execution row is
+            // tracked (ENTRY_SUBMITTED / EXIT_SUBMITTED) and the live-order fill tracker resolves it
+            // to ACTIVE / CLOSED / CANCELLED on the broker's Filled / Cancelled callback. This stops
+            // a slow ack from being mislabelled a timeout (and a REVERSE from being declared "lost")
+            // for an order that is genuinely live at IBKR. Only a missing order id (never placed) is
+            // a real timeout we must surface as a failure.
+            if (order.orderId() > 0) {
+                log.warn("IB Gateway order {} (ref={}) not acked within {} — left PENDING at broker; "
+                        + "fill tracker will reconcile on Filled/Cancelled", order.orderId(), orderRef, orderTimeout());
+                return new NativeOrderSubmission((long) order.orderId(), "PendingSubmit", orderRef, Instant.now());
+            }
             kind = IbkrOrderRejectionException.Kind.TIMEOUT;
             detail = "IBKR order submission timed out without acknowledgement.";
         } else {

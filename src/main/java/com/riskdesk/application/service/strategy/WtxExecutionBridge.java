@@ -910,8 +910,17 @@ public class WtxExecutionBridge {
         Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), timeframe);
         if (prior.isPresent()) {
             TradeExecutionRecord row = prior.get();
-            // EXIT_SUBMITTED → no fresh close leg this call → no margin released → can't subtract.
+            // EXIT_SUBMITTED → a close leg from a previous bar is already in flight (ack-pending).
+            // If IBKR STILL holds the position, the flatten has not completed, so the contracts
+            // are really there — size against the live broker position so the reverse's delta is
+            // correct (a same-size reverse then nets to ~0 and skips the heuristic preflight),
+            // instead of treating them as already gone (the old return 0 under-counted and made a
+            // 1→1 reverse gate the full qty). Only when IBKR confirms flat (or the snapshot is
+            // unavailable) do we fall back to 0.
             if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                if (liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
+                    return liveIbkrPosition.abs().intValue();
+                }
                 return 0;
             }
             if (row.getQuantity() != null && row.getQuantity() > 0) {

@@ -649,6 +649,38 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void exitSubmittedPriorButIbkrStillHolds_sizesReverseAgainstLivePosition_skipsPreflight() {
+        // Prod cascade fix: a previous reverse's close leg ack-pended (prior row EXIT_SUBMITTED)
+        // but IBKR STILL holds the position. A new same-size REVERSE_TO_SHORT must size its margin
+        // delta against the LIVE broker position (1 − 1 = 0) and SKIP the preflight. The old code
+        // returned 0 for any EXIT_SUBMITTED prior → priorQty=0 → preflightQty=1 → the heuristic
+        // ran and produced a false NO MARGIN (the exact 10:00 prod denial).
+        com.riskdesk.application.service.IbkrMarginPreflightService spy =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision
+                        .deny("would have denied if consulted"));
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(1))); // IBKR still long 1
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, spy, portfolio);
+
+        // Prior LONG whose close is already in flight (ack-pending from a previous bar).
+        TradeExecutionRecord priorExiting = wtxRow("LONG", 1, ExecutionStatus.EXIT_SUBMITTED);
+        repo.createIfAbsent(priorExiting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // delta = positionQty(1) − liveIbkrPos(1) = 0 → the preflight is NEVER consulted.
+        verify(spy, never()).canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        // Open leg proceeds (the prior close is already in flight, so no new close leg fires).
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+    }
+
+    @Test
     void preflightSkippedForSizeDecreasingReverse() {
         // Symmetric case: REVERSE that shrinks the position releases margin. Delta ≤ 0 → no
         // preflight consultation, order goes through.
