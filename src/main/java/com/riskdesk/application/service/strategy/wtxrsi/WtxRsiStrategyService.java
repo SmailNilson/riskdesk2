@@ -110,8 +110,7 @@ public class WtxRsiStrategyService {
         WtxRsiBarEvaluator.IndicatorSeries series =
                 WtxRsiBarEvaluator.computeIndicators(candles, config);
 
-        WtxRsiStrategyState state = statePort.load(instrumentName, event.timeframe())
-                .orElseGet(() -> WtxRsiStrategyState.initial(instrumentName, event.timeframe()));
+        WtxRsiStrategyState state = loadOrInit(instrumentName, event.timeframe());
 
         int lastBar = candles.size() - 1;
         Candle lastCandle = candles.get(lastBar);
@@ -301,12 +300,13 @@ public class WtxRsiStrategyService {
             }
         }
 
-        // Entry-only Chaikin gate. When chaikin-required is on, an unconfirmed
-        // signal may NOT open a position. Any exit triggered above (reversal
-        // close, or SL/TP earlier in the candle) has already executed — only the
-        // fresh entry is blocked here, so the exit mechanism is unchanged.
+        // Entry-only Chaikin gate. When chaikin-required is on for this panel, an
+        // unconfirmed signal may NOT open a position. Any exit triggered above
+        // (reversal close, or SL/TP earlier in the candle) has already executed —
+        // only the fresh entry is blocked here, so the exit mechanism is unchanged.
+        // Per-panel runtime toggle (state), inheriting the global config default.
         // No-op when Chaikin confirmation isn't computed (chaikinEnabled=false).
-        if (config.chaikinRequired() && config.chaikinEnabled() && !signal.confirmed()) {
+        if (state.chaikinRequired() && config.chaikinEnabled() && !signal.confirmed()) {
             WtxRsiSignalRecord blocked = new WtxRsiSignalRecord(
                     state.instrument(), state.timeframe(),
                     signal.timestamp(), signal.side(),
@@ -426,9 +426,24 @@ public class WtxRsiStrategyService {
         return statePort.load(instrument, timeframe);
     }
 
+    /**
+     * Current state, or a fresh one seeded with the global Chaikin-gate default
+     * when none persisted yet — so the panel reflects the configured default
+     * before any candle has created a row.
+     */
+    public WtxRsiStrategyState getStateOrInitial(String instrument, String timeframe) {
+        return loadOrInit(instrument, timeframe);
+    }
+
+    /** Load persisted state, or seed a fresh one inheriting the global Chaikin-gate default. */
+    private WtxRsiStrategyState loadOrInit(String instrument, String timeframe) {
+        return statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxRsiStrategyState.initial(
+                        instrument, timeframe, properties.isChaikinRequired()));
+    }
+
     public WtxRsiStrategyState toggleAutoExecution(String instrument, String timeframe, boolean enabled) {
-        WtxRsiStrategyState state = statePort.load(instrument, timeframe)
-                .orElseGet(() -> WtxRsiStrategyState.initial(instrument, timeframe));
+        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
         WtxRsiStrategyState updated = state.withAutoExecution(enabled);
         statePort.save(updated);
         log.warn("WTX-RSI [{} {}] auto-execution {} — IBKR routing is now {}",
@@ -439,8 +454,7 @@ public class WtxRsiStrategyService {
     }
 
     public WtxRsiStrategyState setOrderQty(String instrument, String timeframe, int qty) {
-        WtxRsiStrategyState state = statePort.load(instrument, timeframe)
-                .orElseGet(() -> WtxRsiStrategyState.initial(instrument, timeframe));
+        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
         WtxRsiStrategyState updated = state.withConfiguredOrderQty(qty);
         statePort.save(updated);
         publishState(updated);
@@ -448,11 +462,20 @@ public class WtxRsiStrategyService {
     }
 
     public WtxRsiStrategyState toggleSwingBiasFilter(String instrument, String timeframe, boolean enabled) {
-        WtxRsiStrategyState state = statePort.load(instrument, timeframe)
-                .orElseGet(() -> WtxRsiStrategyState.initial(instrument, timeframe));
+        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
         WtxRsiStrategyState updated = state.withSwingBiasFilter(enabled);
         statePort.save(updated);
         log.info("WTX-RSI [{} {}] swing-bias filter {}",
+                instrument, timeframe, enabled ? "ENABLED" : "DISABLED");
+        publishState(updated);
+        return updated;
+    }
+
+    public WtxRsiStrategyState toggleChaikinRequired(String instrument, String timeframe, boolean enabled) {
+        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
+        WtxRsiStrategyState updated = state.withChaikinRequired(enabled);
+        statePort.save(updated);
+        log.info("WTX-RSI [{} {}] chaikin-required entry gate {}",
                 instrument, timeframe, enabled ? "ENABLED" : "DISABLED");
         publishState(updated);
         return updated;
@@ -522,6 +545,7 @@ public class WtxRsiStrategyService {
         p.put("autoExecutionEnabled", s.autoExecutionEnabled());
         p.put("configuredOrderQty", s.configuredOrderQty());
         p.put("swingBiasFilterEnabled", s.swingBiasFilterEnabled());
+        p.put("chaikinRequired", s.chaikinRequired());
         p.put("lastSwingBias", s.lastSwingBias() != null ? s.lastSwingBias().name() : null);
         p.put("biasSource", properties.getBiasSource() != null ? properties.getBiasSource().name() : null);
         return p;

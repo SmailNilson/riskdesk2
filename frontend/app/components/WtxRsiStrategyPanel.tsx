@@ -6,6 +6,7 @@ import {
   getWtxRsiRecentSignals,
   updateWtxRsiAutoExecution,
   updateWtxRsiSwingBiasFilter,
+  updateWtxRsiChaikinRequired,
   updateWtxRsiOrderQty,
 } from '@/app/lib/api';
 import type {
@@ -165,6 +166,7 @@ export default function WtxRsiStrategyPanel({
   const [collapsed, setCollapsed] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
   const [swingBiasBusy, setSwingBiasBusy] = useState(false);
+  const [chaikinBusy, setChaikinBusy] = useState(false);
   const [qtyBusy, setQtyBusy] = useState(false);
   const [qtyDraft, setQtyDraft] = useState<string>('');
   const draftPanelRef = useRef<string>('');
@@ -238,6 +240,19 @@ export default function WtxRsiStrategyPanel({
       if (updated) setState(updated);
     } finally {
       setSwingBiasBusy(false);
+    }
+  }, [instrument, timeframe, state]);
+
+  const onToggleChaikinRequired = useCallback(async () => {
+    if (!state) return;
+    setChaikinBusy(true);
+    try {
+      const updated = await updateWtxRsiChaikinRequired(
+        instrument, timeframe, !state.chaikinRequired,
+      );
+      if (updated) setState(updated);
+    } finally {
+      setChaikinBusy(false);
     }
   }, [instrument, timeframe, state]);
 
@@ -367,6 +382,24 @@ export default function WtxRsiStrategyPanel({
                 }`}
               >
                 <span>Swing-bias : {state.swingBiasFilterEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={onToggleChaikinRequired}
+                disabled={chaikinBusy}
+                aria-pressed={state.chaikinRequired}
+                title={
+                  state.chaikinRequired
+                    ? 'Gate Chaikin actif — seuls les signaux confirmés par le Chaikin oscillator peuvent OUVRIR. Les sorties (reversal / SL / TP) ne sont pas affectées.'
+                    : 'Gate Chaikin inactif — tous les signaux qualifiés peuvent ouvrir (le Chaikin ne fait que doubler la taille quand il confirme).'
+                }
+                className={`flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                  state.chaikinRequired
+                    ? 'border-fuchsia-600/70 bg-fuchsia-950/40 text-fuchsia-200 hover:bg-fuchsia-950/60'
+                    : 'border-zinc-700 text-zinc-400 hover:border-fuchsia-700 hover:text-fuchsia-300'
+                }`}
+              >
+                <span>Chaikin-req : {state.chaikinRequired ? 'ON' : 'OFF'}</span>
               </button>
             </div>
           )}

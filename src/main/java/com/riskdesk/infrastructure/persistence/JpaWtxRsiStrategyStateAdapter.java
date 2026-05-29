@@ -4,6 +4,7 @@ import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiPosition;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiStrategyState;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSwingBias;
 import com.riskdesk.domain.engine.strategy.wtxrsi.port.WtxRsiStrategyStatePort;
+import com.riskdesk.infrastructure.config.WtxRsiStrategyProperties;
 import com.riskdesk.infrastructure.persistence.entity.WtxRsiStrategyStateEntity;
 import org.springframework.stereotype.Component;
 
@@ -16,9 +17,13 @@ import java.util.Optional;
 public class JpaWtxRsiStrategyStateAdapter implements WtxRsiStrategyStatePort {
 
     private final JpaWtxRsiStrategyStateRepository repository;
+    private final WtxRsiStrategyProperties properties;
 
-    public JpaWtxRsiStrategyStateAdapter(JpaWtxRsiStrategyStateRepository repository) {
+    public JpaWtxRsiStrategyStateAdapter(
+            JpaWtxRsiStrategyStateRepository repository,
+            WtxRsiStrategyProperties properties) {
         this.repository = repository;
+        this.properties = properties;
     }
 
     @Override
@@ -63,7 +68,11 @@ public class JpaWtxRsiStrategyStateAdapter implements WtxRsiStrategyStatePort {
                         ? e.getConfiguredOrderQty()
                         : WtxRsiStrategyState.DEFAULT_ORDER_QTY,
                 Boolean.TRUE.equals(e.getSwingBiasFilterEnabled()),
-                bias
+                bias,
+                // Null (pre-migration rows / never set) inherits the global default.
+                e.getChaikinRequired() != null
+                        ? e.getChaikinRequired()
+                        : properties.isChaikinRequired()
         );
     }
 
@@ -82,5 +91,6 @@ public class JpaWtxRsiStrategyStateAdapter implements WtxRsiStrategyStatePort {
         e.setConfiguredOrderQty(s.configuredOrderQty());
         e.setSwingBiasFilterEnabled(s.swingBiasFilterEnabled());
         e.setLastSwingBias(s.lastSwingBias() != null ? s.lastSwingBias().name() : null);
+        e.setChaikinRequired(s.chaikinRequired());
     }
 }

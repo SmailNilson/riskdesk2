@@ -42,12 +42,26 @@ public record WtxRsiStrategyState(
          */
         boolean swingBiasFilterEnabled,
         /** Snapshot of the most recently resolved bias (UI display + reasoning hint). */
-        WtxRsiSwingBias lastSwingBias
+        WtxRsiSwingBias lastSwingBias,
+        /**
+         * Entry-only Chaikin gate for this (instrument, timeframe). When true, an
+         * OPEN is allowed only if the signal is Chaikin-confirmed; unconfirmed
+         * signals are suppressed. Exits (reversal / SL / TP) are unaffected.
+         * Per-panel runtime toggle; the initial value is inherited from the global
+         * {@code riskdesk.wtxrsi.chaikin-required} config default.
+         */
+        boolean chaikinRequired
 ) {
 
     public static final int DEFAULT_ORDER_QTY = 1;
 
+    /** Fresh state with the Chaikin gate ON (matches the shipped global default). */
     public static WtxRsiStrategyState initial(String instrument, String timeframe) {
+        return initial(instrument, timeframe, true);
+    }
+
+    /** Fresh state seeding the Chaikin entry gate from the caller (global config default). */
+    public static WtxRsiStrategyState initial(String instrument, String timeframe, boolean chaikinRequired) {
         return new WtxRsiStrategyState(
                 instrument, timeframe, WtxRsiPosition.FLAT,
                 null, BigDecimal.ZERO, null, null,
@@ -56,7 +70,8 @@ public record WtxRsiStrategyState(
                 false,
                 DEFAULT_ORDER_QTY,
                 false,
-                WtxRsiSwingBias.NEUTRAL
+                WtxRsiSwingBias.NEUTRAL,
+                chaikinRequired
         );
     }
 
@@ -67,7 +82,7 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, pos, entryPrice, qty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
-                swingBiasFilterEnabled, lastSwingBias
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -78,7 +93,7 @@ public record WtxRsiStrategyState(
                 null, BigDecimal.ZERO, null, null,
                 updated, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
-                swingBiasFilterEnabled, lastSwingBias
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -87,7 +102,7 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, ts, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
-                swingBiasFilterEnabled, lastSwingBias
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -96,7 +111,7 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, lastCandleTs, Instant.now(),
                 enabled, configuredOrderQty,
-                swingBiasFilterEnabled, lastSwingBias
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -106,7 +121,7 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, sanitized,
-                swingBiasFilterEnabled, lastSwingBias
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -115,7 +130,7 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
-                enabled, lastSwingBias
+                enabled, lastSwingBias, chaikinRequired
         );
     }
 
@@ -124,7 +139,16 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
                 cumulativeRealizedPnl, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
-                swingBiasFilterEnabled, bias
+                swingBiasFilterEnabled, bias, chaikinRequired
+        );
+    }
+
+    public WtxRsiStrategyState withChaikinRequired(boolean required) {
+        return new WtxRsiStrategyState(
+                instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
+                cumulativeRealizedPnl, lastCandleTs, Instant.now(),
+                autoExecutionEnabled, configuredOrderQty,
+                swingBiasFilterEnabled, lastSwingBias, required
         );
     }
 }
