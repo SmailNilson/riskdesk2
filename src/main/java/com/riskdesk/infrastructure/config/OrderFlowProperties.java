@@ -22,6 +22,9 @@ public class OrderFlowProperties {
     private Momentum momentum = new Momentum();
     private Cycle cycle = new Cycle();
     private Freshness freshness = new Freshness();
+    private Iceberg iceberg = new Iceberg();
+    private Spoofing spoofing = new Spoofing();
+    private FlashCrash flashCrash = new FlashCrash();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -41,6 +44,12 @@ public class OrderFlowProperties {
     public void setCycle(Cycle cycle) { this.cycle = cycle; }
     public Freshness getFreshness() { return freshness; }
     public void setFreshness(Freshness freshness) { this.freshness = freshness; }
+    public Iceberg getIceberg() { return iceberg; }
+    public void setIceberg(Iceberg iceberg) { this.iceberg = iceberg; }
+    public Spoofing getSpoofing() { return spoofing; }
+    public void setSpoofing(Spoofing spoofing) { this.spoofing = spoofing; }
+    public FlashCrash getFlashCrash() { return flashCrash; }
+    public void setFlashCrash(FlashCrash flashCrash) { this.flashCrash = flashCrash; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -226,5 +235,76 @@ public class OrderFlowProperties {
         public void setGraceSeconds(int v) { this.graceSeconds = v; }
         public int getMaxStrikes() { return maxStrikes; }
         public void setMaxStrikes(int v) { this.maxStrikes = v; }
+    }
+
+    /**
+     * Iceberg detector (UC-OF-014). Scans recent wall events for repeated
+     * APPEARED → DISAPPEARED → APPEARED recharge cycles at the same price level.
+     * Re-scans a rolling window each cycle; de-duplicated by {@code RecentSignalGate}.
+     */
+    public static class Iceberg {
+        private boolean enabled = true;
+        /** Cadence of the live scan loop (shared with spoofing). */
+        private long evalIntervalMs = 2_000;
+        /** Wall-event lookback window fed to the detector. Matches its 60s recharge window. */
+        private int lookbackSeconds = 60;
+        /** Suppress re-emitting the same (side, price level) within this many seconds. */
+        private int dedupSeconds = 60;
+        /** Only emit icebergs scoring at least this (0-100); filters weak single-recharge noise. */
+        private double minScore = 50.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public long getEvalIntervalMs() { return evalIntervalMs; }
+        public void setEvalIntervalMs(long v) { this.evalIntervalMs = v; }
+        public int getLookbackSeconds() { return lookbackSeconds; }
+        public void setLookbackSeconds(int v) { this.lookbackSeconds = v; }
+        public int getDedupSeconds() { return dedupSeconds; }
+        public void setDedupSeconds(int v) { this.dedupSeconds = v; }
+        public double getMinScore() { return minScore; }
+        public void setMinScore(double v) { this.minScore = v; }
+    }
+
+    /**
+     * Spoofing detector (UC-OF-005). Pairs APPEARED/DISAPPEARED wall events and flags
+     * large walls (≥ 3× avg level size) pulled within 10s. Shares the scan loop with iceberg.
+     */
+    public static class Spoofing {
+        private boolean enabled = true;
+        /** Wall-event lookback window fed to the detector. */
+        private int lookbackSeconds = 30;
+        /** Suppress re-emitting the same (side, price level) within this many seconds. */
+        private int dedupSeconds = 30;
+        /** Only emit spoofs above this composite score (detector's own floor is 1.0). */
+        private double minScore = 1.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getLookbackSeconds() { return lookbackSeconds; }
+        public void setLookbackSeconds(int v) { this.lookbackSeconds = v; }
+        public int getDedupSeconds() { return dedupSeconds; }
+        public void setDedupSeconds(int v) { this.dedupSeconds = v; }
+        public double getMinScore() { return minScore; }
+        public void setMinScore(double v) { this.minScore = v; }
+    }
+
+    /**
+     * Flash-crash FSM (UC-OF-006), evaluated live on the 5s order-flow loop with a
+     * stateful FSM per instrument. Thresholds come from {@code FlashCrashConfigPort}
+     * (persisted, per-instrument) with {@code FlashCrashThresholds.defaults()} as fallback.
+     */
+    public static class FlashCrash {
+        private boolean enabled = true;
+        /** Tick window used to derive velocity / delta5s / volume-spike each evaluation. */
+        private int windowSeconds = 5;
+        /** Rolling windows kept to compute the volume-spike baseline. */
+        private int volumeHistorySize = 12;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getWindowSeconds() { return windowSeconds; }
+        public void setWindowSeconds(int v) { this.windowSeconds = v; }
+        public int getVolumeHistorySize() { return volumeHistorySize; }
+        public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
     }
 }
