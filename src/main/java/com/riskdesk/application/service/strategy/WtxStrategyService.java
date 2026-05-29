@@ -207,10 +207,21 @@ public class WtxStrategyService {
                             currentCandle.getClose(), null);
                 } else {
                     BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
+                    WtxStrategyState preActionState = state;
                     state = applyAction(signal.suggestedAction(), state, instrument, config,
                             currentCandle.getClose(), entryAtr);
-                    signal = signal.withRouting(
-                            routeToExecution(signal, state, currentCandle.getClose()));
+                    WtxRoutingResult routing = routeToExecution(signal, state, currentCandle.getClose());
+                    signal = signal.withRouting(routing);
+                    // Flatten-only reverse: the bridge flattened the prior position but skipped the
+                    // open leg (unaffordable margin), so the broker is FLAT. applyAction already moved
+                    // the virtual state to the new side — re-derive it as a plain close of the prior
+                    // position so position/PnL bookkeeping matches the broker instead of tracking a
+                    // phantom position that was never opened.
+                    if (routing.outcome() == WtxRoutingOutcome.ROUTED_FLATTEN_ONLY) {
+                        state = closePosition(preActionState, instrument, currentCandle.getClose());
+                        log.warn("WTX [{} {}] reverse flattened only — virtual state corrected to FLAT "
+                                + "(open leg skipped for margin)", instrumentName, event.timeframe());
+                    }
                 }
             }
 
