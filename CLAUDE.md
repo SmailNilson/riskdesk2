@@ -71,7 +71,7 @@ Domain layer is completely isolated. Infrastructure implements `domain/port/` in
 ### Data Flow
 
 ```
-IBKR IB Gateway (riskdesk-prod:4003 via Tailscale)
+IBKR IB Gateway (prod: ibkr-gateway:4003 container on riskdesk-prod-v2)
   → IbGatewayNativeClient (infrastructure/marketdata/ibkr)
   → MarketDataService / HistoricalDataService (application)
   → PostgreSQL
@@ -262,14 +262,16 @@ The `local` Spring profile is **required** when running locally. Override in `sr
 ```properties
 server.port=8090
 riskdesk.ibkr.native-client-id=8
-riskdesk.ibkr.native-host=100.113.139.64
+riskdesk.ibkr.native-host=<reachable IB Gateway host>   # see note below
 riskdesk.ibkr.native-port=4003
 riskdesk.mentor.api-key=${GEMINI_API_KEY}
 riskdesk.mentor.model=gemini-3.1-pro-preview
 riskdesk.mentor.embeddings-model=gemini-embedding-001
 ```
 
-**IBKR Gateway runs on `riskdesk-prod` (`100.113.139.64:4003`) via Tailscale** — NOT on localhost. Always verify Tailscale is active: `tailscale status | grep riskdesk-prod`.
+**Prod host is now `riskdesk-prod-v2` (Tailscale `100.69.177.128`)** — API/nginx at `100.69.177.128:3000`. The old `riskdesk-prod` (`100.113.139.64`) is **deprecated** (Tailscale idle).
+
+**IBKR Gateway on prod runs as a Docker container reached internally as `ibkr-gateway:4003`** (confirm via `GET /api/ibkr/auth/status` → `"endpoint":"socket://ibkr-gateway:4003"`). It is **NOT** exposed on the host's Tailscale IP — `nc -z 100.69.177.128 4003` will fail. For local dev, point `riskdesk.ibkr.native-host` at an IB Gateway you can actually reach (your own local/Tailscale gateway) and verify with `nc -z <host> 4003`.
 
 **Gemini API Key** must be in `application-local.properties` as `riskdesk.mentor.api-key=<key>`. The `.env.local` at repo root has the key but Spring does NOT auto-load it. Without this, Mentor IA calls will fail silently.
 
