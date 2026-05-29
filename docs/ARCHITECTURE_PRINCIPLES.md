@@ -196,6 +196,26 @@ Do not:
 - create separate mentor reviews for alerts that fire simultaneously for the same trading signal
 - move transition detection logic out of the domain layer
 
+### Perfect Setup Confluence Rule
+
+The Perfect Setup detector fuses individual order-flow signals into one ARMED
+signal. Keep the boundaries intact:
+
+- the scoring + state machine live in `domain/orderflow/perfectsetup/PerfectSetupDetector`
+  as a **pure function** (no Spring/JPA/IBKR); the application service only gathers
+  inputs and maps DTOs → `PerfectSetupInputs`
+- emission is **transition-based** (same rule as alerts): `PerfectSetupDetected` and
+  the auto-arm bridge fire on a state *change*, never on every scan while a state
+  persists. The `/topic/perfect-setup` live snapshot may publish every scan for the UI
+- arming requires `passing axes ≥ arm-threshold` **and** `R:R ≥ min-rr` (hard gate) —
+  do not arm a setup with sub-threshold reward-to-risk
+- the auto-arm bridge is **opt-in** (`riskdesk.perfect-setup.auto-arm.enabled`, default
+  off) and reuses `QuantAutoArmService` (trigger source `PERFECT_SETUP`); it must never
+  place a live broker order on its own — submission still requires the existing
+  `riskdesk.quant.auto-submit.enabled` flag and the shared no-double-arm / cooldown gates
+- do not persist Perfect Setup signals to a new table without a deliberate schema slice;
+  v1 is in-memory latest + WebSocket + the existing `trade_executions` row when bridged
+
 ### IBKR Order Acknowledgement Rule
 
 When routing live orders through IBKR:

@@ -23,6 +23,7 @@ import { LiveAnalysisPanel } from './LiveAnalysisPanel';
 import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
+import PerfectSetupPanel from './PerfectSetupPanel';
 import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
 import WtxStrategyPanel from './WtxStrategyPanel';
@@ -274,6 +275,9 @@ export default function Dashboard() {
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <PerfectSetupPanel />
+          </div>
         </section>
 
         {/* Right zone — AI Trade Desk */}

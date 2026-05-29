@@ -1008,6 +1008,32 @@ export interface ReplayReport {
   }>;
 }
 
+export interface PerfectSetupAxisResultView {
+  axis: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface PerfectSetupSignalView {
+  instrument: string;
+  direction: 'LONG' | 'SHORT' | 'NONE';
+  state: 'IDLE' | 'LONG_ARMED' | 'SHORT_ARMED' | 'TRIGGERED' | 'INVALIDATED' | 'EXPIRED';
+  score: number;
+  maxScore: number;
+  axes: PerfectSetupAxisResultView[];
+  entryLow: number | null;
+  entryHigh: number | null;
+  stop: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  riskReward: number | null;
+  triggerLevel: number | null;
+  invalidationLevel: number | null;
+  reasoning: string;
+  timestamp: string;
+}
+
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
@@ -1070,6 +1096,11 @@ export const api = {
     get<{ instruments: Record<string, FlashCrashStatusView> }>('/api/order-flow/flash-crash/status'),
   getFlashCrashStatusForInstrument: (instrument: string) =>
     get<FlashCrashStatusView>(`/api/order-flow/flash-crash/status/${encodeURIComponent(instrument)}`),
+  // Perfect Setup order-flow confluence signals. The WebSocket at
+  // /topic/perfect-setup pushes live updates; this REST seed populates the
+  // panel on a fresh page load before the first push arrives.
+  getPerfectSetups: () =>
+    get<PerfectSetupSignalView[]>('/api/perfect-setup'),
   // Rollover open-interest comparison per instrument — complements the
   // time-to-expiry data exposed by useRollover with a liquidity-based signal.
   getRolloverOiStatus: () =>

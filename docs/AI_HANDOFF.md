@@ -2,6 +2,38 @@
 
 Last updated: 2026-05-29
 
+## Perfect Setup — order-flow confluence detector (2026-05-29)
+
+**New feature.** Fuses the individual order-flow signals (which previously had to
+be combined by eye) into a single transition-based ARMED signal.
+
+- **Domain (pure):** `domain/orderflow/perfectsetup/` — `PerfectSetupDetector`
+  scores 6 axes per direction (REGIME / ICEBERG / ABSORPTION / VALUE /
+  LIQUIDITY_GRAB / RISK_REWARD), resolves the dominant direction, and runs the
+  state machine `IDLE → LONG_ARMED/SHORT_ARMED → TRIGGERED | INVALIDATED | EXPIRED`
+  with a post-terminal cooldown. Arms when passing axes ≥ `arm-threshold` (default
+  **4/6**) **and** R:R ≥ `min-rr` (hard gate). Stateless — caller feeds back the
+  prior signal. `PerfectSetupDetected` domain event added.
+- **Application:** `application/service/perfectsetup/PerfectSetupService` — a
+  `@Scheduled` (5s) evaluator that gathers inputs from **existing beans only**
+  (`AbsorptionPort` / `DistributionPort` / `CyclePort`, `IndicatorsPort`,
+  `LivePricePort`, `OrderFlowHistoryService.recentIcebergs`,
+  `FlashCrashStatusService`, `CandleRepositoryPort` for ATR), runs the detector,
+  keeps the latest signal per instrument in memory, publishes `/topic/perfect-setup`
+  every scan, emits `PerfectSetupDetected` on each state **transition**, and
+  optionally bridges an ARM to the auto-arm pipeline.
+- **Auto-arm bridge (opt-in, default OFF):** `QuantAutoArmService.armFromPerfectSetup`
+  reuses the existing `trade_executions` persist+event path with new
+  `ExecutionTriggerSource.PERFECT_SETUP`. Gated by `riskdesk.perfect-setup.auto-arm.enabled`;
+  a live broker order still additionally requires `riskdesk.quant.auto-submit.enabled`.
+  Shared active-execution + cooldown gates prevent double-arming with the 7-gate path.
+- **REST:** `GET /api/perfect-setup`, `GET /api/perfect-setup/{instrument}`.
+- **Frontend:** `useOrderFlow` subscribes to `/topic/perfect-setup`; new
+  `PerfectSetupPanel.tsx` (composed in `Dashboard.tsx`) renders the 6-axis
+  checklist + ARMED verdict + entry/SL/TP/R:R. `api.getPerfectSetups()` seeds it.
+- **Config:** `riskdesk.perfect-setup.*` in `application.properties` (detector ON
+  by default; bridge OFF). **No DB schema change** — signal is in-memory + on the wire.
+
 ## Live wiring: Iceberg / Spoofing / Flash-Crash detectors (2026-05-29)
 
 **Root cause found.** `IcebergDetector`, `SpoofingDetector` and `FlashCrashFSM`
