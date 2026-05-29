@@ -8,20 +8,33 @@ import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
 import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
+import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
+import com.riskdesk.domain.orderflow.event.IcebergDetected;
 import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
 import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
+import com.riskdesk.domain.orderflow.event.SpoofingDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.DistributionSignal;
+import com.riskdesk.domain.orderflow.model.FlashCrashEvaluation;
+import com.riskdesk.domain.orderflow.model.FlashCrashInput;
+import com.riskdesk.domain.orderflow.model.FlashCrashThresholds;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
+import com.riskdesk.domain.orderflow.model.IcebergSignal;
 import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
+import com.riskdesk.domain.orderflow.model.SpoofingSignal;
+import com.riskdesk.domain.orderflow.model.WallEvent;
+import com.riskdesk.domain.orderflow.port.FlashCrashConfigPort;
 import com.riskdesk.domain.orderflow.port.FootprintPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.orderflow.service.AbsorptionDetector;
 import com.riskdesk.domain.orderflow.service.AggressiveMomentumDetector;
 import com.riskdesk.domain.orderflow.service.DistributionCycleDetector;
+import com.riskdesk.domain.orderflow.service.FlashCrashFSM;
+import com.riskdesk.domain.orderflow.service.IcebergDetector;
 import com.riskdesk.domain.orderflow.service.InstitutionalDistributionDetector;
+import com.riskdesk.domain.orderflow.service.SpoofingDetector;
 import org.springframework.context.ApplicationEventPublisher;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
@@ -76,7 +89,25 @@ public class OrderFlowOrchestrator {
     private final ObjectProvider<FootprintPort> footprintPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final CandleRepositoryPort candleRepository;
+    private final FlashCrashConfigPort flashCrashConfig;
     private final AbsorptionDetector absorptionDetector = new AbsorptionDetector();
+
+    /** Stateless wall-event detectors — safe to share a single instance across instruments. */
+    private final IcebergDetector icebergDetector = new IcebergDetector();
+    private final SpoofingDetector spoofingDetector = new SpoofingDetector();
+
+    /** Transition-style de-dup gates so a re-scanned window doesn't re-emit the same signal. */
+    private final RecentSignalGate icebergGate = new RecentSignalGate();
+    private final RecentSignalGate spoofingGate = new RecentSignalGate();
+
+    /** Per-instrument stateful flash-crash FSMs (NORMAL→INITIATING→…→REVERSING→NORMAL). */
+    private final ConcurrentHashMap<Instrument, FlashCrashFSM> flashCrashFSMs = new ConcurrentHashMap<>();
+    /** Previous-cycle velocity per instrument — needed for the FSM acceleration ratio. */
+    private final ConcurrentHashMap<Instrument, Double> flashPrevVelocity = new ConcurrentHashMap<>();
+    /** Rolling flash-crash window volumes per instrument for the volume-spike baseline. */
+    private final ConcurrentHashMap<Instrument, Deque<Long>> flashVolumeHistory = new ConcurrentHashMap<>();
+    /** Cached per-instrument thresholds (refreshed every 60s) to avoid a DB hit every 5s. */
+    private final ConcurrentHashMap<Instrument, FlashCrashThresholds> flashThresholdsCache = new ConcurrentHashMap<>();
 
     /** Per-instrument stateful momentum detectors (one per instrument for correct ATR-debounce). */
     private final ConcurrentHashMap<Instrument, AggressiveMomentumDetector> momentumDetectors
@@ -131,7 +162,8 @@ public class OrderFlowOrchestrator {
                                   ObjectProvider<MarketDepthPort> depthPortProvider,
                                   ObjectProvider<FootprintPort> footprintPortProvider,
                                   ApplicationEventPublisher eventPublisher,
-                                  CandleRepositoryPort candleRepository) {
+                                  CandleRepositoryPort candleRepository,
+                                  FlashCrashConfigPort flashCrashConfig) {
         this.nativeClient = nativeClient;
         this.contractResolver = contractResolver;
         this.properties = properties;
@@ -144,7 +176,12 @@ public class OrderFlowOrchestrator {
         this.footprintPortProvider = footprintPortProvider;
         this.eventPublisher = eventPublisher;
         this.candleRepository = candleRepository;
+        this.flashCrashConfig = flashCrashConfig;
         // momentumDetectors are created per-instrument in momentumDetectorFor()
+    }
+
+    private FlashCrashFSM flashCrashFsmFor(Instrument instrument) {
+        return flashCrashFSMs.computeIfAbsent(instrument, i -> new FlashCrashFSM());
     }
 
     private InstitutionalDistributionDetector distributionDetectorFor(Instrument instrument) {
@@ -443,6 +480,103 @@ public class OrderFlowOrchestrator {
                     log.debug("cycle.tick() failed for {}: {}", instrument, e.toString());
                 }
             }
+
+            // Flash-crash FSM: evaluate every cycle (even on quiet windows) so the FSM
+            // decays back to NORMAL. Reads its own short tick window + live depth imbalance.
+            if (properties.getFlashCrash().isEnabled()) {
+                try {
+                    evaluateFlashCrash(instrument, tickDataPort, java.time.Instant.now());
+                } catch (Exception e) {
+                    log.debug("evaluateFlashCrash failed for {}: {}", instrument, e.toString());
+                }
+            }
+        }
+    }
+
+    /**
+     * Builds a live {@link FlashCrashInput} from the short tick window and current depth,
+     * advances the per-instrument {@link FlashCrashFSM}, and publishes a
+     * {@link FlashCrashPhaseChanged} event <b>only on a phase transition</b> (transition-based,
+     * consistent with the alert system). Downstream listeners persist the row and push
+     * {@code /topic/flash-crash}.
+     */
+    void evaluateFlashCrash(Instrument instrument, TickDataPort tickDataPort, Instant now) {
+        int windowSec = Math.max(1, properties.getFlashCrash().getWindowSeconds());
+        double tickSize = instrument.getTickSize().doubleValue();
+
+        double velocity = 0.0;
+        double delta5s = 0.0;
+        double volumeSpikeRatio = 1.0;
+
+        Optional<TickAggregation> aggOpt = tickDataPort.recentAggregation(instrument, windowSec);
+        if (aggOpt.isPresent()) {
+            TickAggregation a = aggOpt.get();
+            // Velocity = signed first→last move magnitude in ticks per second (mirrors the
+            // |close-open| convention used by the offline FlashCrashSimulationService).
+            if (!Double.isNaN(a.firstPrice()) && !Double.isNaN(a.lastPrice()) && tickSize > 0) {
+                velocity = Math.abs(a.lastPrice() - a.firstPrice()) / windowSec / tickSize;
+            }
+            delta5s = a.delta();
+            long windowVolume = a.buyVolume() + a.sellVolume();
+            double avgVolume = flashAvgVolume(instrument, windowVolume);
+            volumeSpikeRatio = avgVolume > 0 ? windowVolume / avgVolume : 1.0;
+        } else {
+            // No tick data this window — record a 0 so old spikes age out of the baseline.
+            flashAvgVolume(instrument, 0L);
+        }
+
+        // Live depth imbalance from the order book; neutral 0.5 when no book (won't meet the
+        // "bids fleeing" condition, matching the simulation's neutral default).
+        MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
+        double depthImbalance = 0.5;
+        if (depthPort != null) {
+            Optional<DepthMetrics> depth = depthPort.currentDepth(instrument);
+            if (depth.isPresent()) {
+                depthImbalance = depth.get().depthImbalance();
+            }
+        }
+
+        double prevVelocity = flashPrevVelocity.getOrDefault(instrument, 0.0);
+        double accelerationRatio = prevVelocity > 0 ? velocity / prevVelocity : 1.0;
+        flashPrevVelocity.put(instrument, velocity);
+
+        FlashCrashInput input = new FlashCrashInput(
+            velocity, delta5s, accelerationRatio, depthImbalance, volumeSpikeRatio, now);
+
+        FlashCrashThresholds thresholds = flashThresholdsCache
+            .computeIfAbsent(instrument, this::loadFlashThresholds);
+
+        FlashCrashEvaluation eval = flashCrashFsmFor(instrument).evaluate(input, thresholds);
+        if (eval.phaseChanged()) {
+            eventPublisher.publishEvent(new FlashCrashPhaseChanged(
+                instrument,
+                eval.previousPhase(),
+                eval.currentPhase(),
+                eval.conditionsMet(),
+                eval.conditions(),
+                eval.reversalScore(),
+                now));
+        }
+    }
+
+    private FlashCrashThresholds loadFlashThresholds(Instrument instrument) {
+        try {
+            return flashCrashConfig.loadThresholds(instrument).orElseGet(FlashCrashThresholds::defaults);
+        } catch (Exception e) {
+            return FlashCrashThresholds.defaults();
+        }
+    }
+
+    /** Append the current flash-crash window volume and return the rolling mean baseline. */
+    private double flashAvgVolume(Instrument instrument, long currentWindowVolume) {
+        int maxSize = Math.max(1, properties.getFlashCrash().getVolumeHistorySize());
+        Deque<Long> hist = flashVolumeHistory.computeIfAbsent(instrument, k -> new ArrayDeque<>());
+        synchronized (hist) {
+            hist.addLast(currentWindowVolume);
+            while (hist.size() > maxSize) hist.pollFirst();
+            long sum = 0;
+            for (Long v : hist) sum += v;
+            return hist.isEmpty() ? currentWindowVolume : (double) sum / hist.size();
         }
     }
 
@@ -466,7 +600,112 @@ public class OrderFlowOrchestrator {
             } catch (Exception e) {
                 // best-effort — keep stale value in cache
             }
+            // Refresh persisted flash-crash thresholds so config edits take effect without restart.
+            if (properties.getFlashCrash().isEnabled()) {
+                flashThresholdsCache.put(instrument, loadFlashThresholds(instrument));
+            }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Book-manipulation detection — Iceberg (UC-OF-014) + Spoofing (UC-OF-005)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Scans recent wall events for iceberg and spoofing patterns and publishes the
+     * corresponding domain events. Runs on a short cadence (default 2s); each pattern
+     * is gated by {@link RecentSignalGate} so a still-in-window pattern is emitted once,
+     * not on every scan. Downstream listeners persist the row and push the WebSocket topic.
+     * <p>
+     * This is the live counterpart to {@code evaluateAbsorption} for the L2 book: the
+     * {@link IcebergDetector}/{@link SpoofingDetector} were previously never invoked outside
+     * tests, so {@code /topic/iceberg} and {@code /topic/spoofing} never emitted.
+     */
+    @Scheduled(fixedDelayString = "${riskdesk.order-flow.iceberg.eval-interval-ms:2000}", initialDelay = 95_000)
+    public void evaluateBookManipulation() {
+        boolean icebergEnabled = properties.getIceberg().isEnabled();
+        boolean spoofingEnabled = properties.getSpoofing().isEnabled();
+        if (!icebergEnabled && !spoofingEnabled) return;
+
+        MarketDepthPort depthPort = depthPortProvider.getIfAvailable();
+        if (depthPort == null) return;
+
+        Instant now = Instant.now();
+        int lookbackSec = Math.max(
+            properties.getIceberg().getLookbackSeconds(),
+            properties.getSpoofing().getLookbackSeconds());
+
+        for (String instrumentName : properties.getDepth().getInstruments()) {
+            Instrument instrument;
+            try {
+                instrument = Instrument.valueOf(instrumentName);
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
+            try {
+                List<WallEvent> walls = depthPort.recentWallEvents(instrument, Duration.ofSeconds(lookbackSec));
+                if (walls == null || walls.isEmpty()) continue;
+
+                double tickSize = instrument.getTickSize().doubleValue();
+                if (tickSize <= 0) continue;
+
+                if (icebergEnabled) {
+                    detectIcebergs(instrument, walls, tickSize, now);
+                }
+                if (spoofingEnabled) {
+                    detectSpoofs(instrument, walls, tickSize, depthPort.currentDepth(instrument).orElse(null), now);
+                }
+            } catch (Exception e) {
+                log.debug("evaluateBookManipulation failed for {}: {}", instrument, e.toString());
+            }
+        }
+    }
+
+    private void detectIcebergs(Instrument instrument, List<WallEvent> walls, double tickSize, Instant now) {
+        List<IcebergSignal> signals = icebergDetector.evaluate(instrument, walls, tickSize, now);
+        double minScore = properties.getIceberg().getMinScore();
+        int dedupSec = properties.getIceberg().getDedupSeconds();
+        for (IcebergSignal s : signals) {
+            if (s.icebergScore() < minScore) continue;
+            String key = "ICE|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            if (icebergGate.shouldEmit(instrument, key, now, dedupSec)) {
+                eventPublisher.publishEvent(new IcebergDetected(instrument, s, now));
+            }
+        }
+    }
+
+    private void detectSpoofs(Instrument instrument, List<WallEvent> walls, double tickSize,
+                              DepthMetrics depth, Instant now) {
+        if (depth == null) return;
+        double currentPrice = midPrice(depth);
+        double avgLevelSize = avgLevelSize(depth);
+        if (currentPrice <= 0 || avgLevelSize <= 0) return;
+
+        List<SpoofingSignal> signals = spoofingDetector.evaluate(instrument, walls, currentPrice, avgLevelSize, now);
+        double minScore = properties.getSpoofing().getMinScore();
+        int dedupSec = properties.getSpoofing().getDedupSeconds();
+        for (SpoofingSignal s : signals) {
+            if (s.spoofScore() < minScore) continue;
+            String key = "SPF|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            if (spoofingGate.shouldEmit(instrument, key, now, dedupSec)) {
+                eventPublisher.publishEvent(new SpoofingDetected(instrument, s, now));
+            }
+        }
+    }
+
+    /** Mid price from the book, falling back to whichever side is available. */
+    private static double midPrice(DepthMetrics depth) {
+        double bid = depth.bestBid();
+        double ask = depth.bestAsk();
+        if (bid > 0 && ask > 0) return (bid + ask) / 2.0;
+        return bid > 0 ? bid : ask;
+    }
+
+    /** Average resting size per book level: total depth / number of populated sides×levels. */
+    private double avgLevelSize(DepthMetrics depth) {
+        int rows = Math.max(1, properties.getDepth().getNumRows());
+        long total = depth.totalBidSize() + depth.totalAskSize();
+        return total / (2.0 * rows);
     }
 
     private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {

@@ -1,6 +1,51 @@
 # AI Handoff
 
-Last updated: 2026-05-28
+Last updated: 2026-05-29
+
+## Live wiring: Iceberg / Spoofing / Flash-Crash detectors (2026-05-29)
+
+**Root cause found.** `IcebergDetector`, `SpoofingDetector` and `FlashCrashFSM`
+had a complete downstream pipeline — domain events → `OrderFlowCorrelationService`
+(`/topic/{iceberg,spoofing,flash-crash}`) + `OrderFlowEventPersistenceService`
+(DB) → frontend `useOrderFlow.ts` subscriptions — but the detectors were **never
+invoked on the live feed**. `IcebergDetector`/`SpoofingDetector` had zero
+production callers; `FlashCrashFSM` was only used by the offline
+`FlashCrashSimulationService` (replay). So the three events were never published
+→ topics never emitted → panels permanently empty and tables never written, for
+**every** instrument (not just MNQ). The wall-event data (`MutableOrderBook` →
+`MarketDepthPort.recentWallEvents`) and depth/tick inputs already existed; only
+the orchestration was missing.
+
+**Fix — wired into `OrderFlowOrchestrator` (the existing live driver):**
+
+- **Iceberg + Spoofing**: new `@Scheduled evaluateBookManipulation()` (2s) reads
+  `recentWallEvents()` per depth instrument, derives `tickSize` / mid price /
+  `avgLevelSize` from `DepthMetrics`, calls the (stateless, shared) detectors, and
+  publishes `IcebergDetected` / `SpoofingDetected`.
+- **Flash Crash**: `evaluateFlashCrash()` runs inside the existing 5s order-flow
+  loop with a **stateful FSM per instrument**. Builds a live `FlashCrashInput`
+  (velocity from the short tick window, `delta5s`, acceleration vs previous
+  velocity, live `depthImbalance`, volume-spike ratio). Thresholds load from
+  `FlashCrashConfigPort` (cached, refreshed every 60s) with
+  `FlashCrashThresholds.defaults()` fallback. Publishes `FlashCrashPhaseChanged`
+  **only on a phase transition** (transition-based, like the alert system).
+- **`RecentSignalGate`** (new application helper) de-dups re-scanned wall-event
+  windows so a pattern still inside the lookback is emitted once, not every 2s.
+- New config block `riskdesk.order-flow.{iceberg,spoofing,flash-crash}.*` in
+  `OrderFlowProperties` + `application.properties` (all enabled by default).
+- Constructor of `OrderFlowOrchestrator` gained `FlashCrashConfigPort`.
+
+**Calibration note:** `depth.wall-threshold-multiplier=5.0` governs whether wall
+events are emitted at all; on very liquid MNQ this may need tuning if icebergs
+stay quiet. The flash-crash `depthImbalanceThreshold=0.3` is met for most
+balanced/sell-skewed books — it is one of 5 conditions (3 required), so a genuine
+event still needs 2 of the stringent velocity/delta/accel/volume conditions.
+Tune thresholds via `FlashCrashConfigPort` once real wall events are observed.
+
+Tests: `RecentSignalGateTest`, `OrderFlowManipulationWiringTest` (regression guard
+against the wiring being removed again). Detectors keep their existing unit tests.
+
+## Client-side trim: MentorDesk removed, Engine v2 deleted, Exec/Sim gated (2026-05-28)
 
 ## Client-side trim: MentorDesk removed, Engine v2 deleted, Exec/Sim gated (2026-05-28)
 
