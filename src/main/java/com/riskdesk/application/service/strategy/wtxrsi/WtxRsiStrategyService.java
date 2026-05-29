@@ -301,6 +301,28 @@ public class WtxRsiStrategyService {
             }
         }
 
+        // Entry-only Chaikin gate. When chaikin-required is on, an unconfirmed
+        // signal may NOT open a position. Any exit triggered above (reversal
+        // close, or SL/TP earlier in the candle) has already executed — only the
+        // fresh entry is blocked here, so the exit mechanism is unchanged.
+        // No-op when Chaikin confirmation isn't computed (chaikinEnabled=false).
+        if (config.chaikinRequired() && config.chaikinEnabled() && !signal.confirmed()) {
+            WtxRsiSignalRecord blocked = new WtxRsiSignalRecord(
+                    state.instrument(), state.timeframe(),
+                    signal.timestamp(), signal.side(),
+                    WtxRsiSignalRecord.Action.NONE,
+                    signal.wt1(), signal.wt2(), signal.rsi(), signal.rsiSma(),
+                    signal.chaikin(), signal.confirmed(),
+                    null, null, null, 0, null,
+                    "chaikin-required: entry blocked (Chaikin not confirmed)"
+            );
+            historyPort.save(blocked);
+            publishSignal(blocked);
+            log.info("WTX-RSI [{} {}] entry blocked by chaikin-required — side={} (unconfirmed)",
+                    state.instrument(), state.timeframe(), signal.side());
+            return state;
+        }
+
         // Open new position
         BigDecimal entryPrice = signal.close();
         Optional<WtxRsiRiskPlan> maybePlan = WtxRsiRiskCalculator.build(signal, candles, entryPrice, config);

@@ -84,7 +84,8 @@ public class WtxRsiBacktestService {
                 req.tpRMultiple() != null ? req.tpRMultiple() : base.tpRMultiple(),
                 base.chaikinFast(), base.chaikinSlow(),
                 req.chaikinEnabled() != null ? req.chaikinEnabled() : base.chaikinEnabled(),
-                req.biasSource() != null ? req.biasSource() : base.biasSource()
+                req.biasSource() != null ? req.biasSource() : base.biasSource(),
+                req.chaikinRequired() != null ? req.chaikinRequired() : base.chaikinRequired()
         );
     }
 }

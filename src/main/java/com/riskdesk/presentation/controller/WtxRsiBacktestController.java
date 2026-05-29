@@ -24,7 +24,8 @@ import org.springframework.web.bind.annotation.RestController;
  *   "syncLookbackBars": 3,                   // optional
  *   "zoneMode": "STRICT_ZONE",               // STRICT_ZONE | VISITED_RECENTLY | CROSS_FROM_ZONE
  *   "tpMode": "R_MULTIPLE",                  // REVERSAL | R_MULTIPLE
- *   "tpRMultiple": 2.0                       // ignored unless tpMode = R_MULTIPLE
+ *   "tpRMultiple": 2.0,                      // ignored unless tpMode = R_MULTIPLE
+ *   "chaikinRequired": true                  // entry-only gate: only open Chaikin-confirmed signals
  * }
  * </pre>
  */

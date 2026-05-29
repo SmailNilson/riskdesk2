@@ -34,6 +34,13 @@ import java.math.BigDecimal;
  * @param chaikinEnabled   Whether confirmation should be applied at all.
  * @param biasSource       Which engine resolves the swing bias used by the
  *                         optional {@code swingBiasFilterEnabled} toggle.
+ * @param chaikinRequired  When {@code true}, an <i>entry</i> may only open if the
+ *                         Chaikin oscillator confirms the signal direction;
+ *                         unconfirmed signals are suppressed (no OPEN). Exits
+ *                         (reversal-on-opposite-signal and SL/TP) are unaffected.
+ *                         Only effective when {@link #chaikinEnabled} is also
+ *                         {@code true} — confirmation that is never computed
+ *                         would otherwise block every entry. Default {@code false}.
  */
 public record WtxRsiConfig(
         int wtN1,
@@ -58,8 +65,37 @@ public record WtxRsiConfig(
         int chaikinFast,
         int chaikinSlow,
         boolean chaikinEnabled,
-        WtxRsiBiasSource biasSource
+        WtxRsiBiasSource biasSource,
+        boolean chaikinRequired
 ) {
+
+    /**
+     * Backward-compatible constructor — keeps the {@code chaikinRequired} entry
+     * gate <b>off</b> for existing call sites (tests, {@code defaults*}) that
+     * predate the field. New code that needs the gate uses the canonical
+     * constructor with the trailing {@code chaikinRequired} flag.
+     */
+    public WtxRsiConfig(
+            int wtN1, int wtN2, int wtSignalPeriod,
+            BigDecimal wtOverbought, BigDecimal wtOversold,
+            int rsiLength, int rsiSmaLength,
+            int syncLookbackBars,
+            WtxRsiZoneMode zoneMode, int zoneLookbackBars,
+            int fractalLeftRight, int fractalMaxLookback,
+            int swingBufferTicks,
+            BigDecimal tickSize, BigDecimal tickValueUsd,
+            int baseContracts, int confirmedMultiplier,
+            WtxRsiTpMode tpMode, BigDecimal tpRMultiple,
+            int chaikinFast, int chaikinSlow, boolean chaikinEnabled,
+            WtxRsiBiasSource biasSource) {
+        this(wtN1, wtN2, wtSignalPeriod, wtOverbought, wtOversold,
+                rsiLength, rsiSmaLength, syncLookbackBars,
+                zoneMode, zoneLookbackBars, fractalLeftRight, fractalMaxLookback,
+                swingBufferTicks, tickSize, tickValueUsd,
+                baseContracts, confirmedMultiplier, tpMode, tpRMultiple,
+                chaikinFast, chaikinSlow, chaikinEnabled, biasSource,
+                false);
+    }
 
     public static WtxRsiConfig defaults5m() {
         return new WtxRsiConfig(
