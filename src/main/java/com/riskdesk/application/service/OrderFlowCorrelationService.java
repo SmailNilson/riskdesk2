@@ -13,7 +13,6 @@ import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -103,9 +102,13 @@ public class OrderFlowCorrelationService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instrument", event.instrument().name());
         payload.put("previousPhase", event.previousPhase().name());
-        payload.put("currentPhase", event.currentPhase().name());
+        // Frontend FlashCrashState reads `phase` (not `currentPhase`) and `conditions` as a
+        // boolean[] — matching the REST seed in FlashCrashStatusService.toMap(). Sending
+        // `currentPhase` / a stringified array made the live card fall back to NORMAL and
+        // index a String for the condition dots.
+        payload.put("phase", event.currentPhase().name());
         payload.put("conditionsMet", event.conditionsMet());
-        payload.put("conditions", Arrays.toString(event.conditions()));
+        payload.put("conditions", event.conditions());
         payload.put("reversalScore", event.reversalScore());
         payload.put("timestamp", event.timestamp().toString());
 
