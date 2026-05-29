@@ -27,13 +27,16 @@ A signal fires on the close of bar `i` when:
 
 Sizing: `baseContracts × (confirmedMultiplier if Chaikin agrees else 1)`.
 
-**Chaikin as an entry gate (`chaikin-required`, opt-in):** by default Chaikin
-only scales size. Set `riskdesk.wtxrsi.chaikin-required=true` to also *require*
-confirmation to open — unconfirmed signals are suppressed (recorded as a `NONE`
-signal with reason `chaikin-required:`). This is **entry-only**: exits keep their
-existing mechanism (reversal-on-opposite-signal and SL/TP fire regardless). The
-gate is a no-op unless `chaikin-enabled=true` (confirmation that is never
-computed would otherwise block every entry). Honoured by both the live executor
+**Chaikin as an entry gate (`chaikin-required`, ENABLED by default):** the
+shipped baseline sets `riskdesk.wtxrsi.chaikin-required=true`, so Chaikin
+confirmation is *required* to open — unconfirmed signals are suppressed
+(recorded as a `NONE` signal with reason `chaikin-required:`). Set it to `false`
+(per env / profile) to fall back to confirmation-as-size-only, where every
+qualified signal opens and Chaikin merely scales the contract count. This is
+**entry-only**: exits keep their existing mechanism (reversal-on-opposite-signal
+and SL/TP fire regardless). The gate is a no-op unless `chaikin-enabled=true`
+(confirmation that is never computed would otherwise block every entry).
+Honoured by both the live executor
 and the backtest (`chaikinRequired` request override).
 
 Risk: SL = most recent **confirmed** Williams fractal of opposite polarity
@@ -61,7 +64,7 @@ riskdesk.wtxrsi.swing-buffer-ticks=2
 riskdesk.wtxrsi.tp-mode=REVERSAL
 riskdesk.wtxrsi.tp-r-multiple=0
 riskdesk.wtxrsi.chaikin-enabled=true
-riskdesk.wtxrsi.chaikin-required=false           # entry-only gate: only open Chaikin-confirmed signals
+riskdesk.wtxrsi.chaikin-required=true            # entry-only gate (default ON): only open Chaikin-confirmed signals; set false to disable
 ```
 
 See `WtxRsiStrategyProperties` for the full list.

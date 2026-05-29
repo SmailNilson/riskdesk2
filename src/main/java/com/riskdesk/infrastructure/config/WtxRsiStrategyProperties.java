@@ -57,9 +57,11 @@ public class WtxRsiStrategyProperties {
     private int chaikinSlow = 10;
     private boolean chaikinEnabled = true;
     // Entry gate: when true, only Chaikin-confirmed signals may OPEN a position.
-    // Exits (reversal / SL / TP) keep their current mechanism. Off by default —
-    // a reversible opt-in for A/B testing in simulation. Only effective when
+    // Exits (reversal / SL / TP) keep their current mechanism. Only effective when
     // chaikinEnabled=true (confirmation must actually be computed).
+    // NOTE: this field initialiser is the programmatic fallback (false); the
+    // shipped application.properties baseline ENABLES it (chaikin-required=true).
+    // Reversible — override to false per env / profile to disable the gate.
     private boolean chaikinRequired = false;
 
     // Bias source for the optional swingBiasFilter toggle.
