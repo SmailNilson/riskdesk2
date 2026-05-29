@@ -342,7 +342,10 @@ public class WtxExecutionBridge {
                         + truncate(marginDenyReason, 150);
                 log.warn("WTX [{} {}] reverse flattened, open leg skipped — insufficient margin for new "
                         + "position (delta qty={})", state.instrument(), tf, preflightQty);
-                return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED, msg);
+                // ROUTED_FLATTEN_ONLY (not ROUTED): the caller optimistically moved the virtual
+                // state to the new side before routing — it must correct it back to FLAT so the
+                // virtual position/PnL matches the broker, which is now flat.
+                return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY, msg);
             }
             // Nothing flattened this call (prior already EXIT_SUBMITTED / no opposite position)
             // and the open can't be afforded → decline. Any in-flight close still brings the
@@ -401,8 +404,10 @@ public class WtxExecutionBridge {
                     state.instrument(), tf, action, positionQty, orderAction, submission.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (IbkrOrderRejectionException e) {
-            // Typed broker exception: map kind → outcome and persist a clean reason.
-            return handleEntryRejection(persisted, action, e);
+            // Typed broker exception: map kind → outcome and persist a clean reason. closeLegFired
+            // tells the rejection handler whether a REVERSE already flattened the prior position —
+            // in that case an open-leg reject means the broker is FLAT, not "no order happened".
+            return handleEntryRejection(persisted, action, e, closeLegFired);
         } catch (RuntimeException e) {
             // Unknown error path — preserve legacy FAILED outcome.
             String msg = truncate(e.getMessage(), 200);
@@ -429,37 +434,71 @@ public class WtxExecutionBridge {
      *       "manual reconcile required" status reason.</li>
      *   <li>{@code BROKER_REJECT} / {@code CANCELLED} / {@code UNKNOWN} — mark {@code FAILED}.</li>
      * </ul>
+     *
+     * <p>{@code reverseFlattened} is {@code true} when this open leg belongs to a REVERSE whose
+     * close leg already flattened the prior position at the broker. In that case a definitive
+     * open-leg rejection (margin / broker reject) leaves the account <b>FLAT</b>, not unchanged —
+     * so it must return {@link WtxRoutingOutcome#ROUTED_FLATTEN_ONLY} (never {@code NO MARGIN} /
+     * {@code REJECT}). That tells the caller the user is protected-flat and the virtual strategy
+     * state must be corrected to FLAT instead of tracking the never-opened new side.</p>
      */
     private WtxRoutingResult handleEntryRejection(TradeExecutionRecord row, WtxAction action,
-                                                  IbkrOrderRejectionException e) {
+                                                  IbkrOrderRejectionException e, boolean reverseFlattened) {
         String brokerText = e.brokerMessage() != null ? e.brokerMessage() : e.getMessage();
         String shortMsg = truncate(brokerText, 200);
+
+        // TIMEOUT first: broker state is UNKNOWN — the open leg may or may not have executed —
+        // so we must NOT force the caller back to FLAT, even on a flattened reverse. Same handling
+        // for pure OPEN and REVERSE.
+        if (e.kind() == IbkrOrderRejectionException.Kind.TIMEOUT) {
+            WtxRoutingOutcome outcome;
+            Long brokerOrderId = e.brokerOrderId();
+            if (brokerOrderId != null) {
+                outcome = WtxRoutingOutcome.ACK_PENDING;
+                persistAckPending(row, brokerOrderId, ExecutionStatus.ENTRY_SUBMITTED);
+                row.setStatusReason("WTX " + action.name()
+                        + " sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")");
+                log.warn("WTX [{} {}] open leg ack pending — brokerOrderId={} saved for reconciliation",
+                        row.getInstrument(), row.getTimeframe(), brokerOrderId);
+            } else {
+                outcome = WtxRoutingOutcome.FAILED_TIMEOUT;
+                // Keep non-terminal — broker state is unknown, do not terminal-fail.
+                row.setStatusReason("WTX " + action.name()
+                        + " timeout — ack lost, manual reconcile required");
+                log.error("WTX [{} {}] open leg timeout — broker state unknown, row left non-terminal",
+                        row.getInstrument(), row.getTimeframe());
+            }
+            row.setUpdatedAt(Instant.now());
+            executionRepository.save(row);
+            return WtxRoutingResult.of(outcome, shortMsg);
+        }
+
+        // Every non-timeout rejection means the open leg definitely did NOT open at the broker.
+        // For a REVERSE whose close leg already flattened, the account is now FLAT — surface
+        // ROUTED_FLATTEN_ONLY so the user sees "protected flat" instead of NO MARGIN / REJECT, and
+        // the caller re-derives the virtual state to FLAT. We deliberately do NOT retry the open
+        // (flatten au minimum) — terminal-fail this never-opened leg.
+        if (reverseFlattened) {
+            row.setStatus(ExecutionStatus.FAILED);
+            row.setStatusReason("WTX " + action.name() + " flattened to flat — open leg not opened ("
+                    + e.kind() + "): " + shortMsg);
+            row.setUpdatedAt(Instant.now());
+            executionRepository.save(row);
+            log.warn("WTX [{} {}] reverse flattened, open leg rejected by IBKR ({}) — broker FLAT, "
+                    + "virtual state corrected; {}", row.getInstrument(), row.getTimeframe(), e.kind(), shortMsg);
+            return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY,
+                    "reversed to flat — open leg not opened (" + e.kind() + "): " + truncate(shortMsg, 150));
+        }
+
+        // Pure OPEN (or a reverse where no close leg fired): keep per-kind handling.
         WtxRoutingOutcome outcome;
         switch (e.kind()) {
             case INSUFFICIENT_MARGIN -> {
                 outcome = WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN;
-                // Leave row ACTIVE (still pending) — no position change at the broker.
+                // Leave row non-terminal (still pending) — no position change at the broker.
                 row.setStatusReason("WTX " + action.name() + " skipped — insufficient margin: " + shortMsg);
                 log.warn("WTX [{} {}] open leg skipped — INSUFFICIENT_MARGIN ({})",
                         row.getInstrument(), row.getTimeframe(), shortMsg);
-            }
-            case TIMEOUT -> {
-                Long brokerOrderId = e.brokerOrderId();
-                if (brokerOrderId != null) {
-                    outcome = WtxRoutingOutcome.ACK_PENDING;
-                    persistAckPending(row, brokerOrderId, ExecutionStatus.ENTRY_SUBMITTED);
-                    row.setStatusReason("WTX " + action.name()
-                            + " sent to IBKR; acknowledgement pending (broker order " + brokerOrderId + ")");
-                    log.warn("WTX [{} {}] open leg ack pending — brokerOrderId={} saved for reconciliation",
-                            row.getInstrument(), row.getTimeframe(), brokerOrderId);
-                } else {
-                    outcome = WtxRoutingOutcome.FAILED_TIMEOUT;
-                    // Keep non-terminal — broker state is unknown, do not terminal-fail.
-                    row.setStatusReason("WTX " + action.name()
-                            + " timeout — ack lost, manual reconcile required");
-                    log.error("WTX [{} {}] open leg timeout — broker state unknown, row left non-terminal",
-                            row.getInstrument(), row.getTimeframe());
-                }
             }
             case BROKER_REJECT, CANCELLED, UNKNOWN -> {
                 outcome = WtxRoutingOutcome.FAILED_BROKER_REJECT;
@@ -871,8 +910,17 @@ public class WtxExecutionBridge {
         Optional<TradeExecutionRecord> prior = findOpenWtxExecution(state.instrument(), timeframe);
         if (prior.isPresent()) {
             TradeExecutionRecord row = prior.get();
-            // EXIT_SUBMITTED → no fresh close leg this call → no margin released → can't subtract.
+            // EXIT_SUBMITTED → a close leg from a previous bar is already in flight (ack-pending).
+            // If IBKR STILL holds the position, the flatten has not completed, so the contracts
+            // are really there — size against the live broker position so the reverse's delta is
+            // correct (a same-size reverse then nets to ~0 and skips the heuristic preflight),
+            // instead of treating them as already gone (the old return 0 under-counted and made a
+            // 1→1 reverse gate the full qty). Only when IBKR confirms flat (or the snapshot is
+            // unavailable) do we fall back to 0.
             if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                if (liveIbkrPosition != null && liveIbkrPosition.signum() != 0) {
+                    return liveIbkrPosition.abs().intValue();
+                }
                 return 0;
             }
             if (row.getQuantity() != null && row.getQuantity() > 0) {

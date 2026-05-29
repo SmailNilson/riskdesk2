@@ -89,16 +89,19 @@ function RoutingChip({
   errorMessage?: string | null;
 }) {
   if (!outcome) return null;
+  const isFlattenOnly = outcome === 'ROUTED_FLATTEN_ONLY';
   const isMargin = outcome === 'SKIPPED_INSUFFICIENT_MARGIN';
   const isFail = outcome === 'FAILED' || outcome === 'FAILED_BROKER_REJECT' || outcome === 'FAILED_TIMEOUT';
   const style =
     outcome === 'ROUTED'       ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' :
+    isFlattenOnly              ? 'bg-teal-950/70 text-teal-300 border-teal-800/60' :
     outcome === 'ACK_PENDING'  ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60' :
     isMargin                   ? 'bg-orange-950/70 text-orange-300 border-orange-800/60' :
     isFail                     ? 'bg-red-950/70 text-red-300 border-red-800/60' :
                                  'bg-amber-950/70 text-amber-300 border-amber-800/60';
   const label =
     outcome === 'ROUTED'              ? 'IBKR ✓' :
+    isFlattenOnly                     ? 'FLAT ✓' :
     outcome === 'ACK_PENDING'         ? 'ACK ?' :
     outcome === 'SKIPPED_AUTO_OFF'    ? 'AUTO OFF' :
     outcome === 'SKIPPED_BRIDGE_UNAVAILABLE' ? 'NO BRIDGE' :

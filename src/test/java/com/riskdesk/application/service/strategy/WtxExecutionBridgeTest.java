@@ -439,6 +439,45 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reverseToShort_closeLegFlattens_openLegIbkrMarginReject_isFlattenOnly_notNoMargin() {
+        // Exact prod repro (screenshot): a same-size 1→1 REVERSE skips the heuristic preflight
+        // (delta 0), so IBKR itself rejects the OPEN leg with code 201 — but only AFTER the close
+        // leg already flattened the prior position. The user is FLAT at the broker; the UI must NOT
+        // show NO MARGIN, and the caller must correct virtual state to FLAT (not the never-opened
+        // SHORT). Close leg succeeds (call #1), open leg margin-rejected (call #2).
+        TradeExecutionRecord priorLong = wtxRow("LONG", 1, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(priorLong);
+
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(777L, "Submitted", "ref", Instant.now()))
+                .thenThrow(new IbkrOrderRejectionException(
+                        IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201,
+                        "Equity 9757 < InitMargin 11729",
+                        "IBKR margin insufficient (code=201)"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridge.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // Broker is FLAT — flatten-only, never NO MARGIN.
+        assertEquals(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY, result.outcome());
+        assertNotNull(result.errorMessage());
+        assertTrue(result.errorMessage().toLowerCase().contains("reversed to flat"),
+                "errorMessage must explain the user was flattened, open leg not opened");
+        // Prior LONG row was flattened (close leg sent).
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.byId(priorLong.getId()).getStatus());
+        // The never-opened SHORT leg is terminal-failed (we do NOT retry the open — flatten au minimum).
+        TradeExecutionRecord openLeg = repo.all().stream()
+                .filter(r -> !r.getId().equals(priorLong.getId()))
+                .findFirst().orElseThrow();
+        assertEquals(ExecutionStatus.FAILED, openLeg.getStatus(),
+                "open leg that IBKR margin-rejected must be terminal — not left pending for retry");
+        // Two broker calls: close (flatten) + open (rejected) attempt.
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+    }
+
+    @Test
     void reverseToShort_closeLegTimeout_returnsFailedTimeout_priorRowNonTerminal() {
         TradeExecutionRecord priorLong = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
         repo.createIfAbsent(priorLong);
@@ -568,7 +607,9 @@ class WtxExecutionBridgeTest {
         // Preflight ran on delta=4 (5 − 1) and denied → open leg skipped, but the close leg fires.
         verify(spy, times(1)).canAffordOrder(any(), any(),
                 org.mockito.ArgumentMatchers.eq(4), any());
-        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // ROUTED_FLATTEN_ONLY (not ROUTED): broker is FLAT and the caller must correct the
+        // virtual strategy state back to FLAT rather than tracking the never-opened new side.
+        assertEquals(WtxRoutingOutcome.ROUTED_FLATTEN_ONLY, result.outcome());
         assertNotNull(result.errorMessage());
         assertTrue(result.errorMessage().toLowerCase().contains("reversed to flat"),
                 "errorMessage must explain the user was flattened, open leg skipped for margin");
@@ -605,6 +646,38 @@ class WtxExecutionBridgeTest {
         // releases no margin in this call.
         verify(spy, times(1)).canAffordOrder(any(), any(),
                 org.mockito.ArgumentMatchers.eq(5), any());
+    }
+
+    @Test
+    void exitSubmittedPriorButIbkrStillHolds_sizesReverseAgainstLivePosition_skipsPreflight() {
+        // Prod cascade fix: a previous reverse's close leg ack-pended (prior row EXIT_SUBMITTED)
+        // but IBKR STILL holds the position. A new same-size REVERSE_TO_SHORT must size its margin
+        // delta against the LIVE broker position (1 − 1 = 0) and SKIP the preflight. The old code
+        // returned 0 for any EXIT_SUBMITTED prior → priorQty=0 → preflightQty=1 → the heuristic
+        // ran and produced a false NO MARGIN (the exact 10:00 prod denial).
+        com.riskdesk.application.service.IbkrMarginPreflightService spy =
+                org.mockito.Mockito.mock(com.riskdesk.application.service.IbkrMarginPreflightService.class);
+        when(spy.canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(com.riskdesk.application.service.IbkrMarginPreflightService.PreflightDecision
+                        .deny("would have denied if consulted"));
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(1))); // IBKR still long 1
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, spy, portfolio);
+
+        // Prior LONG whose close is already in flight (ack-pending from a previous bar).
+        TradeExecutionRecord priorExiting = wtxRow("LONG", 1, ExecutionStatus.EXIT_SUBMITTED);
+        repo.createIfAbsent(priorExiting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // delta = positionQty(1) − liveIbkrPos(1) = 0 → the preflight is NEVER consulted.
+        verify(spy, never()).canAffordOrder(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        // Open leg proceeds (the prior close is already in flight, so no new close leg fires).
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
     }
 
     @Test

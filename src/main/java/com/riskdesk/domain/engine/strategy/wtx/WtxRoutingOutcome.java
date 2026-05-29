@@ -14,6 +14,16 @@ public enum WtxRoutingOutcome {
     /** Broker order was submitted (entry, close or both legs of a reverse). */
     ROUTED,
     /**
+     * A REVERSE flattened the prior position (close leg sent) but the open leg was
+     * skipped because its NET margin delta was unaffordable. The broker ends up
+     * <b>FLAT</b> — the user is protected, never stuck in the position the strategy
+     * told them to exit. Distinct from {@link #ROUTED} because the caller must NOT
+     * leave the virtual strategy state on the new side: it has to be corrected to
+     * FLAT to match the broker. Distinct from {@link #SKIPPED_INSUFFICIENT_MARGIN}
+     * (a pure OPEN denied with no position to flatten — nothing was sent).
+     */
+    ROUTED_FLATTEN_ONLY,
+    /**
      * The order was sent to IBKR and has a broker order id, but the initial
      * acknowledgement did not arrive before the timeout. Later orderStatus /
      * execDetails callbacks can still reconcile the execution row.

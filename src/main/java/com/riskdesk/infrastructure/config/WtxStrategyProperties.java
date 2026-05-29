@@ -57,7 +57,13 @@ public class WtxStrategyProperties {
      * 200-500ms of latency per signal — opt-in only.
      */
     public enum PreflightMode { OFF, PORTFOLIO_HEURISTIC, WHATIF }
-    private PreflightMode preflightMode = PreflightMode.PORTFOLIO_HEURISTIC;
+    // OFF by default: the PORTFOLIO_HEURISTIC (15% of notional) over-estimated futures
+    // margin by ~3.5x for micro index futures (e.g. MNQ: est. 9099 vs IBKR real ~2600),
+    // producing false NO MARGIN denials on reverses that IBKR would have accepted. IBKR's
+    // own margin check is authoritative and exact, so we let it decide and surface a real
+    // code-201 reject if it ever happens. Re-enable (PORTFOLIO_HEURISTIC / WHATIF) only with
+    // a calibrated, per-instrument estimate.
+    private PreflightMode preflightMode = PreflightMode.OFF;
 
     /**
      * Conservative margin buffer applied by the PORTFOLIO_HEURISTIC pre-flight: the
