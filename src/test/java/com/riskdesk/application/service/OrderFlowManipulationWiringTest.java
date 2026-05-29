@@ -181,6 +181,41 @@ class OrderFlowManipulationWiringTest {
         verify(eventPublisher, never()).publishEvent(any(FlashCrashPhaseChanged.class));
     }
 
+    @Test
+    void volumeSpikeAfterCalmHistory_triggersTransition() {
+        // Prime the baseline with calm, low-volume windows (no move → no transition), then send a
+        // window whose only "extra" condition is a 20× volume spike vs the prior baseline.
+        // depthImbalance 0.5 keeps the "bids fleeing" condition OFF so volume is the deciding 3rd.
+        TickAggregation calm = new TickAggregation(
+            Instrument.MNQ, 25, 25, 0, 0, 50.0,
+            TickAggregation.TREND_FLAT, false, null,
+            now.minusSeconds(5), now, TickAggregation.SOURCE_REAL_TICKS,
+            20000.0, 20000.0, 20000.0, 20000.0);   // velocity 0, volume 50
+        TickAggregation spike = new TickAggregation(
+            Instrument.MNQ, 750, 250, 500, 500, 75.0,
+            TickAggregation.TREND_FALLING, false, null,
+            now.minusSeconds(5), now, TickAggregation.SOURCE_REAL_TICKS,
+            20100.0, 20000.0, 20000.0, 20100.0);    // velocity 80, delta 500, volume 1000
+
+        when(tickDataPort.recentAggregation(eq(Instrument.MNQ), eq(5L)))
+            .thenReturn(Optional.of(calm), Optional.of(calm), Optional.of(calm), Optional.of(spike));
+
+        DepthMetrics depth = new DepthMetrics(
+            Instrument.MNQ, 1500, 500, 0.5,   // imbalance 0.5 → NOT < 0.3, so condition[3] is off
+            20000.0, 20000.25, 0.25, 1, null, null, now);
+        when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
+        when(flashCrashConfig.loadThresholds(Instrument.MNQ)).thenReturn(Optional.empty());
+
+        orchestrator.evaluateFlashCrash(Instrument.MNQ, tickDataPort, now); // baseline empty
+        orchestrator.evaluateFlashCrash(Instrument.MNQ, tickDataPort, now); // hist [50]
+        orchestrator.evaluateFlashCrash(Instrument.MNQ, tickDataPort, now); // hist [50,50]
+        orchestrator.evaluateFlashCrash(Instrument.MNQ, tickDataPort, now); // spike vs prior mean 50 → 20×
+
+        // velocity + delta + volume-spike = 3/5 → NORMAL → INITIATING. Under the old logic the
+        // spike was averaged into its own baseline (1000/287≈3.5 < 4) and this never fired.
+        verify(eventPublisher, atLeastOnce()).publishEvent(any(FlashCrashPhaseChanged.class));
+    }
+
     private WallEvent wall(WallSide side, double price, long size, WallEventType type, int secondsOffset) {
         return new WallEvent(Instrument.MNQ, side, price, size, now.plusSeconds(secondsOffset), type);
     }

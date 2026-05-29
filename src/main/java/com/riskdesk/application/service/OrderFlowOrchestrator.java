@@ -518,11 +518,11 @@ public class OrderFlowOrchestrator {
             }
             delta5s = a.delta();
             long windowVolume = a.buyVolume() + a.sellVolume();
-            double avgVolume = flashAvgVolume(instrument, windowVolume);
-            volumeSpikeRatio = avgVolume > 0 ? windowVolume / avgVolume : 1.0;
+            double baseline = flashVolumeBaseline(instrument, windowVolume);
+            volumeSpikeRatio = baseline > 0 ? windowVolume / baseline : 1.0;
         } else {
             // No tick data this window — record a 0 so old spikes age out of the baseline.
-            flashAvgVolume(instrument, 0L);
+            flashVolumeBaseline(instrument, 0L);
         }
 
         // Live depth imbalance from the order book; neutral 0.5 when no book (won't meet the
@@ -567,16 +567,30 @@ public class OrderFlowOrchestrator {
         }
     }
 
-    /** Append the current flash-crash window volume and return the rolling mean baseline. */
-    private double flashAvgVolume(Instrument instrument, long currentWindowVolume) {
+    /**
+     * Returns the volume-spike baseline = mean of the <b>prior</b> windows (excluding the
+     * current one), then appends {@code currentWindowVolume} to the rolling history.
+     * <p>
+     * The current window is excluded from its own baseline so a genuine spike isn't diluted
+     * into the average (which would make the {@code > 4×} condition mathematically unreachable
+     * with a short history). With no prior history the baseline is the current volume itself,
+     * yielding a neutral ratio of 1.0 (a spike can't be judged without a baseline).
+     */
+    private double flashVolumeBaseline(Instrument instrument, long currentWindowVolume) {
         int maxSize = Math.max(1, properties.getFlashCrash().getVolumeHistorySize());
         Deque<Long> hist = flashVolumeHistory.computeIfAbsent(instrument, k -> new ArrayDeque<>());
         synchronized (hist) {
+            double baseline;
+            if (hist.isEmpty()) {
+                baseline = currentWindowVolume;
+            } else {
+                long sum = 0;
+                for (Long v : hist) sum += v;
+                baseline = (double) sum / hist.size();
+            }
             hist.addLast(currentWindowVolume);
             while (hist.size() > maxSize) hist.pollFirst();
-            long sum = 0;
-            for (Long v : hist) sum += v;
-            return hist.isEmpty() ? currentWindowVolume : (double) sum / hist.size();
+            return baseline;
         }
     }
 
@@ -649,11 +663,19 @@ public class OrderFlowOrchestrator {
                 double tickSize = instrument.getTickSize().doubleValue();
                 if (tickSize <= 0) continue;
 
+                // One wide fetch (the larger lookback), then narrow per detector so each only
+                // sees events within ITS configured window. Otherwise a spoof 30-60s old stays
+                // in the list and re-fires once its (shorter) dedup gate expires.
                 if (icebergEnabled) {
-                    detectIcebergs(instrument, walls, tickSize, now);
+                    List<WallEvent> icebergWindow =
+                        withinLookback(walls, properties.getIceberg().getLookbackSeconds(), now);
+                    detectIcebergs(instrument, icebergWindow, tickSize, now);
                 }
                 if (spoofingEnabled) {
-                    detectSpoofs(instrument, walls, tickSize, depthPort.currentDepth(instrument).orElse(null), now);
+                    List<WallEvent> spoofingWindow =
+                        withinLookback(walls, properties.getSpoofing().getLookbackSeconds(), now);
+                    detectSpoofs(instrument, spoofingWindow, tickSize,
+                                 depthPort.currentDepth(instrument).orElse(null), now);
                 }
             } catch (Exception e) {
                 log.debug("evaluateBookManipulation failed for {}: {}", instrument, e.toString());
@@ -691,6 +713,16 @@ public class OrderFlowOrchestrator {
                 eventPublisher.publishEvent(new SpoofingDetected(instrument, s, now));
             }
         }
+    }
+
+    /** Sub-window of wall events no older than {@code lookbackSeconds} (the fetched window may be wider). */
+    private static List<WallEvent> withinLookback(List<WallEvent> walls, int lookbackSeconds, Instant now) {
+        Instant cutoff = now.minusSeconds(lookbackSeconds);
+        List<WallEvent> out = new ArrayList<>(walls.size());
+        for (WallEvent w : walls) {
+            if (!w.timestamp().isBefore(cutoff)) out.add(w);
+        }
+        return out;
     }
 
     /** Mid price from the book, falling back to whichever side is available. */
