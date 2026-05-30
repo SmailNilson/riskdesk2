@@ -15,13 +15,19 @@ import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Polls every second for {@link ExecutionTriggerSource#QUANT_AUTO_ARM}
- * executions whose cancel window has elapsed and forwards them to
- * {@link ExecutionManagerService#submitEntryOrder} so the IBKR limit order
- * goes out.
+ * Polls every second for auto-armed executions whose cancel window has elapsed
+ * and forwards them to {@link ExecutionManagerService#submitEntryOrder} so the
+ * IBKR limit order goes out. Both the 7-gate
+ * ({@link ExecutionTriggerSource#QUANT_AUTO_ARM}) and the Perfect Setup
+ * ({@link ExecutionTriggerSource#PERFECT_SETUP}) arming paths are polled — each
+ * is independently opted in upstream, and once a row reaches
+ * {@code PENDING_ENTRY_SUBMISSION} the auto-submit behaviour is identical.
  *
  * <p>Loop body is wrapped in a try/catch so a single bad row never stops
  * future ticks. The feature flag {@code riskdesk.quant.auto-submit.enabled}
@@ -38,6 +44,10 @@ import java.util.List;
 public class QuantAutoSubmitScheduler {
 
     private static final Logger log = LoggerFactory.getLogger(QuantAutoSubmitScheduler.class);
+
+    /** Trigger sources whose PENDING arms this scheduler auto-submits once their cancel window elapses. */
+    private static final Set<ExecutionTriggerSource> AUTO_SUBMIT_SOURCES =
+        EnumSet.of(ExecutionTriggerSource.QUANT_AUTO_ARM, ExecutionTriggerSource.PERFECT_SETUP);
 
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final ExecutionManagerService executionManager;
@@ -70,8 +80,10 @@ public class QuantAutoSubmitScheduler {
     void tickInternal() {
         if (!props.isEnabled()) return;
 
-        List<TradeExecutionRecord> pending =
-            tradeExecutionRepository.findPendingByTriggerSource(ExecutionTriggerSource.QUANT_AUTO_ARM);
+        List<TradeExecutionRecord> pending = new ArrayList<>();
+        for (ExecutionTriggerSource source : AUTO_SUBMIT_SOURCES) {
+            pending.addAll(tradeExecutionRepository.findPendingByTriggerSource(source));
+        }
         if (pending.isEmpty()) return;
 
         Instant now = clock.instant();
