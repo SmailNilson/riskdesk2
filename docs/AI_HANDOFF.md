@@ -27,6 +27,10 @@ be combined by eye) into a single transition-based ARMED signal.
   `ExecutionTriggerSource.PERFECT_SETUP`. Gated by `riskdesk.perfect-setup.auto-arm.enabled`;
   a live broker order still additionally requires `riskdesk.quant.auto-submit.enabled`.
   Shared active-execution + cooldown gates prevent double-arming with the 7-gate path.
+  `PERFECT_SETUP` is also in `QuantAutoSubmitScheduler`'s auto-submit source set and in
+  `PlaybookAutomationService.CROSS_STRATEGY_BLOCKING_SOURCES`, so a live Perfect Setup
+  execution both auto-submits (when the auto-submit flag is on) and blocks a duplicate
+  Playbook order on the same instrument/account.
 - **REST:** `GET /api/perfect-setup`, `GET /api/perfect-setup/{instrument}`.
 - **Frontend:** `useOrderFlow` subscribes to `/topic/perfect-setup`; new
   `PerfectSetupPanel.tsx` (composed in `Dashboard.tsx`) renders the 6-axis
