@@ -72,8 +72,14 @@ public final class WtxRsiBacktestEngine {
             });
         }
 
-        WtxRsiStrategyState state = WtxRsiStrategyState.initial(
-                BACKTEST_INSTRUMENT, BACKTEST_TIMEFRAME, config.chaikinRequired());
+        // The backtest has no UI panel quantity, so its "configured qty" is the
+        // config's base-contracts. Seeding it here keeps the shared reducer's qty
+        // formula (configuredOrderQty × confirmation-multiplier) identical to the
+        // legacy plan.contracts() sizing — i.e. riskdesk.wtxrsi.base-contracts is
+        // honoured in backtests, while live (driven by the panel qty) is unchanged.
+        WtxRsiStrategyState state = WtxRsiStrategyState
+                .initial(BACKTEST_INSTRUMENT, BACKTEST_TIMEFRAME, config.chaikinRequired())
+                .withConfiguredOrderQty(config.baseContracts());
         if (swingBiasFilterEnabled) {
             state = state.withSwingBiasFilter(true);
         }

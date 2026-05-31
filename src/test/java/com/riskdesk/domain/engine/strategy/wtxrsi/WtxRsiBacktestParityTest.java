@@ -44,7 +44,8 @@ class WtxRsiBacktestParityTest {
                     .ifPresent(s -> signalsByBar.put(s.barIndex(), s));
         }
 
-        WtxRsiStrategyState state = WtxRsiStrategyState.initial("BACKTEST", "", config.chaikinRequired());
+        WtxRsiStrategyState state = WtxRsiStrategyState.initial("BACKTEST", "", config.chaikinRequired())
+                .withConfiguredOrderQty(config.baseContracts());
         List<TradeKey> reference = new ArrayList<>();
         WtxRsiSignal openSignal = null;
         WtxRsiRiskPlan openPlan = null;
@@ -83,6 +84,38 @@ class WtxRsiBacktestParityTest {
                 .toList();
         assertEquals(reference, engineKeys,
                 "backtest engine must reproduce the reference reduce loop trade-for-trade");
+    }
+
+    @Test
+    void backtest_honours_base_contracts() {
+        // base-contracts=2: every entry sizes at 2 (unconfirmed) or 2×multiplier
+        // (confirmed). The pre-fix bug seeded configuredOrderQty=1 and produced
+        // 1/2 contracts regardless of base-contracts.
+        WtxRsiConfig base2 = configWithBaseContracts(2);
+        List<Candle> candles = SyntheticCandles.mnq(800, 42);
+        List<WtxRsiTrade> trades = new WtxRsiBacktestEngine(base2).run(candles).trades();
+
+        assertFalse(trades.isEmpty(), "fixture must produce trades");
+        int mult = base2.confirmedMultiplier();
+        assertTrue(trades.stream().allMatch(t ->
+                        t.contracts() == base2.baseContracts()
+                                || t.contracts() == base2.baseContracts() * mult),
+                "every backtest trade must size at base-contracts (× multiplier when confirmed)");
+    }
+
+    private WtxRsiConfig configWithBaseContracts(int baseContracts) {
+        return new WtxRsiConfig(
+                config.wtN1(), config.wtN2(), config.wtSignalPeriod(),
+                config.wtOverbought(), config.wtOversold(),
+                config.rsiLength(), config.rsiSmaLength(),
+                config.syncLookbackBars(),
+                config.zoneMode(), config.zoneLookbackBars(),
+                config.fractalLeftRight(), config.fractalMaxLookback(),
+                config.swingBufferTicks(), config.tickSize(), config.tickValueUsd(),
+                baseContracts, config.confirmedMultiplier(),
+                config.tpMode(), config.tpRMultiple(),
+                config.chaikinFast(), config.chaikinSlow(), config.chaikinEnabled(),
+                config.biasSource());
     }
 
     /** Equality key for a trade — side + entry + exit fully identify it for parity. */
