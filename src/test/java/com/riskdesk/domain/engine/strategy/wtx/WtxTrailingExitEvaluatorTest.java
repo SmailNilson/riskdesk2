@@ -110,6 +110,17 @@ class WtxTrailingExitEvaluatorTest {
     }
 
     @Test
+    void currentStop_baselineProfile_returnsNull() {
+        // BASELINE enforces no ATR/trailing exit, so no protective stop should be surfaced
+        // even though entryAtr is snapshotted on open.
+        WtxStrategyState state = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
+                .withProfile(WtxProfile.BASELINE)
+                .withPosition(WtxPosition.LONG, BigDecimal.valueOf(100), BigDecimal.valueOf(1),
+                        BigDecimal.valueOf(1.0));
+        assertNull(WtxTrailingExitEvaluator.currentStop(state, CONFIG));
+    }
+
+    @Test
     void currentStop_armedTrailing_returnsRatchetedLevel() {
         WtxStrategyState state = openLong(100.0, 1.0)
                 .withTrailing(BigDecimal.valueOf(101.5), BigDecimal.valueOf(99.5));
@@ -117,14 +128,17 @@ class WtxTrailingExitEvaluatorTest {
                 WtxTrailingExitEvaluator.currentStop(state, CONFIG)));
     }
 
+    // SESSION_ATR — an ATR-exit profile, so currentStop surfaces a real protective stop.
     private static WtxStrategyState openLong(double entry, double atr) {
         return WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
+                .withProfile(WtxProfile.SESSION_ATR)
                 .withPosition(WtxPosition.LONG, BigDecimal.valueOf(entry), BigDecimal.valueOf(1),
                         BigDecimal.valueOf(atr));
     }
 
     private static WtxStrategyState openShort(double entry, double atr) {
         return WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
+                .withProfile(WtxProfile.SESSION_ATR)
                 .withPosition(WtxPosition.SHORT, BigDecimal.valueOf(entry), BigDecimal.valueOf(1),
                         BigDecimal.valueOf(atr));
     }

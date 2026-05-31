@@ -47,9 +47,17 @@ public final class WtxTrailingExitEvaluator {
      * otherwise derives the fixed initial ATR stop (entry ∓ slAtrMult * entryAtr) so the
      * active risk level is visible immediately on the bar a fresh position is opened —
      * before {@link #evaluate} runs on the next candle. Null when FLAT or ATR unavailable.
+     *
+     * <p>Only profiles that {@link WtxProfile#requiresAtrExits() enforce ATR exits} have a real
+     * protective stop. Under BASELINE the engine takes no ATR/trailing exit (it merely snapshots
+     * {@code entryAtr} on open), so a derived stop would misrepresent risk coverage — returns null.
      */
     public static BigDecimal currentStop(WtxStrategyState state, WtxConfig config) {
         if (state == null || state.currentPosition() == WtxPosition.FLAT || state.entryPrice() == null) {
+            return null;
+        }
+        WtxProfile profile = state.activeProfile();
+        if (profile == null || !profile.requiresAtrExits()) {
             return null;
         }
         if (state.trailingStopPrice() != null) {
