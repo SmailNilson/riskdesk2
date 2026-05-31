@@ -3,30 +3,41 @@ package com.riskdesk.domain.engine.strategy.wtxrsi;
 import com.riskdesk.domain.model.Candle;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Pure-domain backtest. No Spring, no JPA, no IBKR.
  *
- * <p>Execution model:
+ * <p><b>Single source of truth.</b> This engine no longer re-implements the
+ * open / reverse / suppress / SL-TP logic — it drives the very same
+ * {@link WtxRsiTransition#reduce} finite-state machine the live orchestrator
+ * ({@code WtxRsiStrategyService}) uses. Feeding identical candles to both
+ * therefore yields an identical trade sequence by construction; the two can no
+ * longer silently diverge.
+ *
+ * <p>Execution model (aligned with the live engine):
  * <ul>
  *   <li>Indicators are computed once over the full series.</li>
- *   <li>Signals fire on the close of bar i; entries fill at the OPEN of bar i+1.</li>
- *   <li>SL/TP are evaluated intra-bar with the pessimistic rule:
- *       if both SL and TP are touched in the same bar, SL wins.
- *       (Matches the production {@code TradeSimulationService} convention.)</li>
- *   <li>{@link WtxRsiTpMode#REVERSAL}: the position is closed when the opposite
- *       WT signal fires on its <i>own</i> emit bar (next bar's open is used as
- *       the exit fill price).</li>
- *   <li>One trade max per side concurrently. New signals on the same side are
- *       dropped while a position is open.</li>
+ *   <li>Entries fill at the <b>close of the signal bar</b> ({@code signal.close()})
+ *       — the canonical fill model shared with the live path.</li>
+ *   <li>SL/TP are evaluated intra-bar with the pessimistic rule (SL wins on a
+ *       same-bar double touch), starting on the bar <i>after</i> the entry.</li>
+ *   <li>{@link WtxRsiTpMode#REVERSAL}: an opposite signal closes at its own close
+ *       and immediately attempts the reverse entry.</li>
+ *   <li>One position at a time; the chaikin-required gate and (optionally) the
+ *       swing-bias filter apply exactly as live.</li>
+ *   <li>A position still open at the end is force-closed at the last close
+ *       ({@link WtxRsiTradeOutcome#END_OF_SERIES}).</li>
  * </ul>
  */
 public final class WtxRsiBacktestEngine {
+
+    private static final String BACKTEST_INSTRUMENT = "BACKTEST";
+    private static final String BACKTEST_TIMEFRAME = "";
 
     private final WtxRsiConfig config;
 
@@ -34,7 +45,17 @@ public final class WtxRsiBacktestEngine {
         this.config = config;
     }
 
+    /** Run with the swing-bias filter off (the live default). */
     public Result run(List<Candle> candles) {
+        return run(candles, false);
+    }
+
+    /**
+     * Run with an explicit swing-bias filter toggle. Bias is resolved per bar
+     * with the pure {@code FRACTAL_HH_HL} detector — the {@code SMC_ENGINE}
+     * source is an application-layer dependency and is not replayable here.
+     */
+    public Result run(List<Candle> candles, boolean swingBiasFilterEnabled) {
         if (candles == null || candles.isEmpty()) {
             return new Result(List.of(), List.of(), List.of());
         }
@@ -51,110 +72,65 @@ public final class WtxRsiBacktestEngine {
             });
         }
 
+        // The backtest has no UI panel quantity, so its "configured qty" is the
+        // config's base-contracts. Seeding it here keeps the shared reducer's qty
+        // formula (configuredOrderQty × confirmation-multiplier) identical to the
+        // legacy plan.contracts() sizing — i.e. riskdesk.wtxrsi.base-contracts is
+        // honoured in backtests, while live (driven by the panel qty) is unchanged.
+        WtxRsiStrategyState state = WtxRsiStrategyState
+                .initial(BACKTEST_INSTRUMENT, BACKTEST_TIMEFRAME, config.chaikinRequired())
+                .withConfiguredOrderQty(config.baseContracts());
+        if (swingBiasFilterEnabled) {
+            state = state.withSwingBiasFilter(true);
+        }
+
         List<WtxRsiTrade> trades = new ArrayList<>();
         List<EquityPoint> equityCurve = new ArrayList<>();
-        OpenPosition longPos = null;
-        OpenPosition shortPos = null;
         BigDecimal equity = BigDecimal.ZERO;
-
-        // Pending entries — signal at bar i, filled at open of bar i+1
-        WtxRsiSignal pendingLong = null;
-        WtxRsiSignal pendingShort = null;
+        OpenContext open = null; // remembers the entry signal + plan for trade building
 
         for (int i = 0; i < candles.size(); i++) {
             Candle bar = candles.get(i);
+            Optional<WtxRsiSignal> signal = Optional.ofNullable(signalsByBar.get(i));
+            WtxRsiSwingBias bias = swingBiasFilterEnabled
+                    ? WtxRsiSwingBiasDetector.detect(
+                            candles.subList(0, i + 1), config.fractalLeftRight(), config.fractalMaxLookback())
+                    : WtxRsiSwingBias.NEUTRAL;
 
-            // ── 1) Fill pending entries at the open of this bar ──────────────
-            if (pendingLong != null) {
-                OpenPosition opened = openPosition(pendingLong, candles, bar.getOpen());
-                if (opened != null && longPos == null) longPos = opened;
-                pendingLong = null;
-            }
-            if (pendingShort != null) {
-                OpenPosition opened = openPosition(pendingShort, candles, bar.getOpen());
-                if (opened != null && shortPos == null) shortPos = opened;
-                pendingShort = null;
-            }
+            WtxRsiTransition.Result r =
+                    WtxRsiTransition.reduce(state, bar, candles, signal, bias, config);
 
-            // ── 2) Check exits intra-bar (SL / TP) ───────────────────────────
-            if (longPos != null) {
-                ExitResult exit = checkExit(longPos, bar);
-                if (exit != null) {
-                    closeTrade(trades, longPos, bar.getTimestamp(), exit.exitPrice(), exit.outcome());
-                    equity = equity.add(pnl(longPos, exit.exitPrice()));
-                    longPos = null;
-                }
-            }
-            if (shortPos != null) {
-                ExitResult exit = checkExit(shortPos, bar);
-                if (exit != null) {
-                    closeTrade(trades, shortPos, bar.getTimestamp(), exit.exitPrice(), exit.outcome());
-                    equity = equity.add(pnl(shortPos, exit.exitPrice()));
-                    shortPos = null;
-                }
-            }
-
-            // ── 3) Reversal exits (TP mode REVERSAL only) ────────────────────
-            if (config.tpMode() == WtxRsiTpMode.REVERSAL) {
-                WtxRsiSignal sig = signalsByBar.get(i);
-                if (sig != null) {
-                    // Opposite signal closes the open trade at next bar's open.
-                    if (sig.side() == WtxRsiSignal.Side.SHORT && longPos != null) {
-                        BigDecimal exitPx = nextOpen(candles, i);
-                        if (exitPx != null) {
-                            closeTrade(trades, longPos, candles.get(Math.min(i + 1, candles.size() - 1)).getTimestamp(),
-                                    exitPx, WtxRsiTradeOutcome.REVERSAL_EXIT);
-                            equity = equity.add(pnl(longPos, exitPx));
-                            longPos = null;
-                        }
-                    } else if (sig.side() == WtxRsiSignal.Side.LONG && shortPos != null) {
-                        BigDecimal exitPx = nextOpen(candles, i);
-                        if (exitPx != null) {
-                            closeTrade(trades, shortPos, candles.get(Math.min(i + 1, candles.size() - 1)).getTimestamp(),
-                                    exitPx, WtxRsiTradeOutcome.REVERSAL_EXIT);
-                            equity = equity.add(pnl(shortPos, exitPx));
-                            shortPos = null;
-                        }
+            for (WtxRsiDecision decision : r.decisions()) {
+                if (decision instanceof WtxRsiDecision.Open o) {
+                    open = new OpenContext(o.signal(), o.plan());
+                } else if (decision instanceof WtxRsiDecision.Close c) {
+                    if (open != null) {
+                        WtxRsiTrade trade = buildTrade(open, c.exitPrice(), c.timestamp(),
+                                c.realizedPnl(), mapOutcome(c.cause()), open.plan().contracts());
+                        trades.add(trade);
+                        equity = equity.add(trade.pnlUsd());
+                        open = null;
                     }
                 }
+                // Suppress / Block / Reject produce no trade.
             }
 
+            state = r.newState();
             equityCurve.add(new EquityPoint(bar.getTimestamp(), equity));
+        }
 
-            // ── 4) Queue new entries.
-            //
-            // Mirror the live orchestrator: only one position at a time, regardless
-            // of side. A SHORT signal while a LONG is open (and vice versa) must be
-            // suppressed in non-REVERSAL TP modes — otherwise the backtest hedges
-            // opposite sides simultaneously while the live engine would not, and
-            // backtest PnL drifts from the production behaviour we're trying to
-            // measure. REVERSAL mode handles opposite signals in section 3 by
-            // closing the open leg on the next bar's open before evaluating the
-            // entry, so by the time we get here the slot is already free.
-            boolean flat = longPos == null && shortPos == null
-                    && pendingLong == null && pendingShort == null;
-            WtxRsiSignal sig = signalsByBar.get(i);
-            if (sig != null && flat && !entryBlockedByChaikin(sig)) {
-                if (sig.side() == WtxRsiSignal.Side.LONG) {
-                    pendingLong = sig;
-                } else {
-                    pendingShort = sig;
-                }
+        // Force-close a position still open at the last bar's close.
+        if (state.currentPosition() != WtxRsiPosition.FLAT && open != null) {
+            Candle last = candles.get(candles.size() - 1);
+            BigDecimal exitPrice = last.getClose();
+            BigDecimal realized = WtxRsiTransition.realizedPnl(state, exitPrice, config);
+            WtxRsiTrade trade = buildTrade(open, exitPrice, last.getTimestamp(),
+                    realized, WtxRsiTradeOutcome.END_OF_SERIES, open.plan().contracts());
+            trades.add(trade);
+            equity = equity.add(trade.pnlUsd());
+            if (!equityCurve.isEmpty()) {
+                equityCurve.set(equityCurve.size() - 1, new EquityPoint(last.getTimestamp(), equity));
             }
-        }
-
-        // Force-close still-open positions at the last bar's close.
-        Candle last = candles.get(candles.size() - 1);
-        if (longPos != null) {
-            closeTrade(trades, longPos, last.getTimestamp(), last.getClose(), WtxRsiTradeOutcome.END_OF_SERIES);
-            equity = equity.add(pnl(longPos, last.getClose()));
-        }
-        if (shortPos != null) {
-            closeTrade(trades, shortPos, last.getTimestamp(), last.getClose(), WtxRsiTradeOutcome.END_OF_SERIES);
-            equity = equity.add(pnl(shortPos, last.getClose()));
-        }
-        if (!equityCurve.isEmpty()) {
-            equityCurve.set(equityCurve.size() - 1, new EquityPoint(last.getTimestamp(), equity));
         }
 
         return new Result(allSignals, trades, equityCurve);
@@ -162,71 +138,40 @@ public final class WtxRsiBacktestEngine {
 
     // ── helpers ────────────────────────────────────────────────────────────
 
-    /**
-     * Entry-only Chaikin gate. When {@code chaikinRequired} is on, a fresh
-     * position may open only if the signal is Chaikin-confirmed. Exits
-     * (reversal / SL / TP) are handled elsewhere and stay unaffected. No-op
-     * when Chaikin confirmation isn't computed ({@code chaikinEnabled=false}).
-     */
-    private boolean entryBlockedByChaikin(WtxRsiSignal sig) {
-        return config.chaikinRequired() && config.chaikinEnabled() && !sig.confirmed();
-    }
-
-    private OpenPosition openPosition(WtxRsiSignal sig, List<Candle> candles, BigDecimal entryPrice) {
-        return WtxRsiRiskCalculator.build(sig, candles, entryPrice, config)
-                .map(plan -> new OpenPosition(sig, plan, plan.entryPrice()))
-                .orElse(null);
-    }
-
-    private ExitResult checkExit(OpenPosition pos, Candle bar) {
-        boolean isLong = pos.signal.side() == WtxRsiSignal.Side.LONG;
-        BigDecimal sl = pos.plan.stopLoss();
-        BigDecimal tp = pos.plan.takeProfit();
-        BigDecimal high = bar.getHigh();
-        BigDecimal low = bar.getLow();
-
-        boolean slHit = isLong ? low.compareTo(sl) <= 0 : high.compareTo(sl) >= 0;
-        boolean tpHit = tp != null && (isLong ? high.compareTo(tp) >= 0 : low.compareTo(tp) <= 0);
-
-        if (slHit) return new ExitResult(sl, WtxRsiTradeOutcome.SL_HIT);
-        if (tpHit) return new ExitResult(tp, WtxRsiTradeOutcome.TP_HIT);
-        return null;
-    }
-
-    private void closeTrade(
-            List<WtxRsiTrade> trades, OpenPosition pos, java.time.Instant exitTime,
-            BigDecimal exitPrice, WtxRsiTradeOutcome outcome) {
-        BigDecimal direction = pos.signal.side() == WtxRsiSignal.Side.LONG
+    private WtxRsiTrade buildTrade(
+            OpenContext open, BigDecimal exitPrice, java.time.Instant exitTime,
+            BigDecimal pnlUsd, WtxRsiTradeOutcome outcome, int contracts) {
+        WtxRsiSignal entrySignal = open.signal();
+        WtxRsiRiskPlan plan = open.plan();
+        BigDecimal direction = entrySignal.side() == WtxRsiSignal.Side.LONG
                 ? BigDecimal.ONE : BigDecimal.ONE.negate();
-        BigDecimal pnlPoints = exitPrice.subtract(pos.plan.entryPrice()).multiply(direction);
-        BigDecimal pnlUsd = pnl(pos, exitPrice);
-        trades.add(new WtxRsiTrade(
-                pos.signal.side(),
-                pos.signal.timestamp(),
-                pos.plan.entryPrice(),
+        BigDecimal pnlPoints = exitPrice.subtract(plan.entryPrice()).multiply(direction);
+        return new WtxRsiTrade(
+                entrySignal.side(),
+                entrySignal.timestamp(),
+                plan.entryPrice(),
                 exitTime,
                 exitPrice,
-                pos.plan.contracts(),
-                pos.plan.stopLoss(),
-                pos.plan.takeProfit(),
+                contracts,
+                plan.stopLoss(),
+                plan.takeProfit(),
                 outcome,
                 pnlPoints,
-                pnlUsd
-        ));
+                pnlUsd);
     }
 
-    private BigDecimal pnl(OpenPosition pos, BigDecimal exitPrice) {
-        BigDecimal direction = pos.signal.side() == WtxRsiSignal.Side.LONG
-                ? BigDecimal.ONE : BigDecimal.ONE.negate();
-        BigDecimal pointsPerContract = exitPrice.subtract(pos.plan.entryPrice()).multiply(direction);
-        BigDecimal ticks = pointsPerContract.divide(config.tickSize(), 4, RoundingMode.HALF_UP);
-        return ticks.multiply(config.tickValueUsd())
-                .multiply(BigDecimal.valueOf(pos.plan.contracts()));
-    }
-
-    private BigDecimal nextOpen(List<Candle> candles, int i) {
-        if (i + 1 >= candles.size()) return null;
-        return candles.get(i + 1).getOpen();
+    /**
+     * Maps the reducer's {@link WtxRsiDecision.CloseCause} onto the trade-ledger
+     * outcome. {@code BIAS_FLIP} has no dedicated ledger outcome and can only
+     * occur when the swing-bias filter is enabled; it is reported as a
+     * reversal-style exit.
+     */
+    private static WtxRsiTradeOutcome mapOutcome(WtxRsiDecision.CloseCause cause) {
+        return switch (cause) {
+            case STOP_LOSS -> WtxRsiTradeOutcome.SL_HIT;
+            case TAKE_PROFIT -> WtxRsiTradeOutcome.TP_HIT;
+            case REVERSAL, BIAS_FLIP -> WtxRsiTradeOutcome.REVERSAL_EXIT;
+        };
     }
 
     // ── value types ────────────────────────────────────────────────────────
@@ -239,14 +184,5 @@ public final class WtxRsiBacktestEngine {
             List<EquityPoint> equityCurve
     ) {}
 
-    private record ExitResult(BigDecimal exitPrice, WtxRsiTradeOutcome outcome) {}
-
-    private static final class OpenPosition {
-        final WtxRsiSignal signal;
-        final WtxRsiRiskPlan plan;
-        final BigDecimal entryPrice;
-        OpenPosition(WtxRsiSignal signal, WtxRsiRiskPlan plan, BigDecimal entryPrice) {
-            this.signal = signal; this.plan = plan; this.entryPrice = entryPrice;
-        }
-    }
+    private record OpenContext(WtxRsiSignal signal, WtxRsiRiskPlan plan) {}
 }
