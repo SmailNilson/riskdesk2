@@ -19,7 +19,6 @@ import AlertsFeed from './AlertsFeed';
 import BacktestPanel from './BacktestPanel';
 import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
-import { LiveAnalysisPanel } from './LiveAnalysisPanel';
 import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import FlashCrashPanel from './FlashCrashPanel';
@@ -271,7 +270,6 @@ export default function Dashboard() {
               livePrice={prices[instrument]?.price ?? null}
             />
           </div>
-          <LiveAnalysisPanel instrument={instrument} timeframe={timeframe} />
           <OrderFlowPanel selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
