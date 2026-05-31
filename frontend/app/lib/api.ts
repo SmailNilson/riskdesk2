@@ -1838,6 +1838,12 @@ export interface WtxStrategyStateView {
    * the Telegram button on the panel.
    */
   telegramNotificationsEnabled: boolean;
+  /** Entry price of the open position; null when FLAT. */
+  entryPrice: number | null;
+  /** Contracts held on the open position; 0 when FLAT. */
+  entryQty: number;
+  /** Live trailing-exit stop (initial ATR stop until trailing arms); null when FLAT. */
+  stopLoss: number | null;
 }
 
 export type WtxRoutingOutcome =

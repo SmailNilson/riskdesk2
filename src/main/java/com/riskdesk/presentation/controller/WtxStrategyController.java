@@ -223,6 +223,12 @@ public class WtxStrategyController {
         view.put("currentSwingBias", wtxStrategyService.currentSwingBias(state.instrument(), state.timeframe()));
         view.put("configuredOrderQty", state.configuredOrderQty());
         view.put("telegramNotificationsEnabled", state.telegramNotificationsEnabled());
+        // Open-position summary (null/zero when FLAT). entryPrice / entryQty come straight from
+        // state; "stopLoss" surfaces the live trailing-exit stop (initial ATR stop until the
+        // trailing phase arms, then the ratcheted trailing level).
+        view.put("entryPrice", state.entryPrice());
+        view.put("entryQty", state.entryQty());
+        view.put("stopLoss", state.trailingStopPrice());
         view.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return view;
     }
@@ -243,6 +249,9 @@ public class WtxStrategyController {
         view.put("currentSwingBias", null);
         view.put("configuredOrderQty", com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState.DEFAULT_ORDER_QTY);
         view.put("telegramNotificationsEnabled", WtxStrategyState.defaultTelegramEnabledFor(instrument));
+        view.put("entryPrice", null);
+        view.put("entryQty", 0);
+        view.put("stopLoss", null);
         view.put("canTrade", true);
         return view;
     }
