@@ -90,17 +90,60 @@ public class QuantAutoArmService {
         if (decisionOpt.isEmpty()) return Optional.empty();
 
         AutoArmDecision decision = decisionOpt.get();
-        TradeExecutionRecord persisted;
-        try {
-            persisted = createExecution(instrument, decision);
-        } catch (RuntimeException e) {
-            log.warn("auto-arm persistence failed instrument={} direction={}: {}",
-                instrument, decision.direction(), e.toString());
+        return persistAndPublish(instrument, decision, now,
+            "exec:quant-auto:", ExecutionTriggerSource.QUANT_AUTO_ARM, "quant-auto",
+            "Auto-armed by quant pipeline. ");
+    }
+
+    /**
+     * Bridge entry point for the Perfect Setup order-flow confluence detector.
+     * Arms an execution directly from a pre-built {@link AutoArmDecision}
+     * (direction + entry/SL/TP supplied by the detector), bypassing the 7-gate
+     * {@link AutoArmEvaluator}. Idempotence + no-double-arm are enforced by the
+     * shared active-execution + cooldown gates. No IBKR side effect — submission
+     * still happens later via {@link QuantAutoSubmitScheduler} or a manual fire.
+     *
+     * <p>Callers gate this behind {@code riskdesk.perfect-setup.auto-arm.enabled};
+     * this method does not consult the quant auto-arm enabled flag.</p>
+     */
+    public Optional<TradeExecutionRecord> armFromPerfectSetup(Instrument instrument, AutoArmDecision decision) {
+        if (instrument == null || decision == null) return Optional.empty();
+        Instant now = clock.instant();
+
+        // No double-arm: skip if an execution is already live on this instrument.
+        if (tradeExecutionRepository.findActiveByInstrument(instrument.name()).isPresent()) {
+            return Optional.empty();
+        }
+        // Cooldown shared with the 7-gate path so the two can't spam the instrument.
+        Instant lastArm = lastArmAt.get(instrument);
+        long cooldownSeconds = autoArmProps.toConfig(autoSubmitProps.getDelaySeconds()).cooldownSeconds();
+        if (lastArm != null && now.isBefore(lastArm.plusSeconds(cooldownSeconds))) {
             return Optional.empty();
         }
 
-        // Mark cooldown only after successful persistence so a transient DB
-        // failure doesn't lock us out of arming for cooldownSeconds.
+        return persistAndPublish(instrument, decision, now,
+            "exec:perfect-setup:", ExecutionTriggerSource.PERFECT_SETUP, "perfect-setup",
+            "Auto-armed by Perfect Setup. ");
+    }
+
+    /**
+     * Shared persist-then-publish path used by both the 7-gate auto-arm and the
+     * Perfect Setup bridge. Records cooldown only after a successful persist so a
+     * transient DB failure doesn't lock out arming for the cooldown window.
+     */
+    private Optional<TradeExecutionRecord> persistAndPublish(Instrument instrument, AutoArmDecision decision,
+                                                             Instant now, String execKeyPrefix,
+                                                             ExecutionTriggerSource triggerSource,
+                                                             String requestedBy, String reasonPrefix) {
+        TradeExecutionRecord persisted;
+        try {
+            persisted = createExecution(instrument, decision, execKeyPrefix, triggerSource, requestedBy, reasonPrefix);
+        } catch (RuntimeException e) {
+            log.warn("auto-arm persistence failed instrument={} direction={} source={}: {}",
+                instrument, decision.direction(), triggerSource, e.toString());
+            return Optional.empty();
+        }
+
         lastArmAt.put(instrument, now);
 
         Instant autoSubmitAt = autoSubmitProps.isEnabled()
@@ -127,8 +170,8 @@ public class QuantAutoArmService {
             AutoArmStateChangedEvent.State.ARMED,
             decision.reasoning(), now));
 
-        log.info("auto-arm fired instrument={} direction={} executionId={} entry={} sl={} tp1={} expiresAt={} autoSubmitAt={}",
-            instrument, decision.direction(), persisted.getId(),
+        log.info("auto-arm fired source={} instrument={} direction={} executionId={} entry={} sl={} tp1={} expiresAt={} autoSubmitAt={}",
+            triggerSource, instrument, decision.direction(), persisted.getId(),
             persisted.getNormalizedEntryPrice(), persisted.getVirtualStopLoss(),
             persisted.getVirtualTakeProfit(), decision.expiresAt(), autoSubmitAt);
         return Optional.of(persisted);
@@ -177,11 +220,13 @@ public class QuantAutoArmService {
         return exec.getCreatedAt().plusSeconds(autoSubmitProps.getDelaySeconds());
     }
 
-    private TradeExecutionRecord createExecution(Instrument instrument, AutoArmDecision decision) {
+    private TradeExecutionRecord createExecution(Instrument instrument, AutoArmDecision decision,
+                                                 String execKeyPrefix, ExecutionTriggerSource triggerSource,
+                                                 String requestedBy, String reasonPrefix) {
         TradeExecutionRecord rec = new TradeExecutionRecord();
         // Synthetic, unique key per arm — the Postgres unique index on
         // executionKey de-duplicates, while mentorSignalReviewId stays null.
-        String execKey = "exec:quant-auto:" + instrument.name() + ":" + decision.direction().name() + ":" + decision.decisionAt().toEpochMilli();
+        String execKey = execKeyPrefix + instrument.name() + ":" + decision.direction().name() + ":" + decision.decisionAt().toEpochMilli();
         rec.setExecutionKey(execKey);
         rec.setMentorSignalReviewId(null);
         rec.setReviewAlertKey(null);
@@ -195,10 +240,10 @@ public class QuantAutoArmService {
         rec.setTimeframe("5m");
         rec.setAction(decision.direction().action());
         rec.setQuantity(autoArmProps.getDefaultQuantity());
-        rec.setTriggerSource(ExecutionTriggerSource.QUANT_AUTO_ARM);
-        rec.setRequestedBy("quant-auto");
+        rec.setTriggerSource(triggerSource);
+        rec.setRequestedBy(requestedBy);
         rec.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
-        rec.setStatusReason("Auto-armed by quant pipeline. " + decision.reasoning());
+        rec.setStatusReason(reasonPrefix + decision.reasoning());
         rec.setNormalizedEntryPrice(normalize(decision.entryPrice(), instrument));
         rec.setVirtualStopLoss(normalize(decision.stopLoss(), instrument));
         rec.setVirtualTakeProfit(normalize(decision.takeProfit1(), instrument));

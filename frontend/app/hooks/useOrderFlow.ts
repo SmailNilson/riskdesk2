@@ -132,6 +132,32 @@ export interface CycleEvent {
   timestamp: string;
 }
 
+export interface PerfectSetupAxisResult {
+  axis: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface PerfectSetupSignal {
+  instrument: string;
+  direction: 'LONG' | 'SHORT' | 'NONE';
+  state: 'IDLE' | 'LONG_ARMED' | 'SHORT_ARMED' | 'TRIGGERED' | 'INVALIDATED' | 'EXPIRED';
+  score: number;
+  maxScore: number;
+  axes: PerfectSetupAxisResult[];
+  entryLow: number | null;
+  entryHigh: number | null;
+  stop: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  riskReward: number | null;
+  triggerLevel: number | null;
+  invalidationLevel: number | null;
+  reasoning: string;
+  timestamp: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -163,6 +189,7 @@ export function useOrderFlow() {
   const [distributionEvents, setDistributionEvents] = useState<DistributionEvent[]>([]);
   const [momentumEvents, setMomentumEvents] = useState<MomentumEvent[]>([]);
   const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
+  const [perfectSetups, setPerfectSetups] = useState<Map<string, PerfectSetupSignal>>(new Map());
   const [connected, setConnected] = useState(false);
 
   const connect = useCallback(() => {
@@ -237,6 +264,15 @@ export function useOrderFlow() {
           const event: CycleEvent = JSON.parse(msg.body);
           setCycleEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
         });
+
+        client.subscribe('/topic/perfect-setup', (msg: IMessage) => {
+          const signal: PerfectSetupSignal = JSON.parse(msg.body);
+          setPerfectSetups(prev => {
+            const next = new Map(prev);
+            next.set(signal.instrument, signal);
+            return next;
+          });
+        });
       },
       onDisconnect: () => setConnected(false),
       onStompError: () => setConnected(false),
@@ -264,6 +300,7 @@ export function useOrderFlow() {
     distributionEvents,
     momentumEvents,
     cycleEvents,
+    perfectSetups,
     connected,
   };
 }

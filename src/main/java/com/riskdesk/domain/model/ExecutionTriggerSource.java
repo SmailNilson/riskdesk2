@@ -33,5 +33,13 @@ public enum ExecutionTriggerSource {
      * Opt-in per (instrument, timeframe) via the WTX+RSI panel "Auto-IBKR" toggle.
      * No mentor review is involved.
      */
-    WTXRSI_AUTO
+    WTXRSI_AUTO,
+    /**
+     * Auto-armed execution bridged from the Perfect Setup order-flow confluence
+     * detector ({@code PerfectSetupService}). Fires only when the dedicated
+     * {@code riskdesk.perfect-setup.auto-arm.enabled} flag is on; a live broker
+     * order still additionally requires {@code riskdesk.quant.auto-submit.enabled}.
+     * No mentor review is involved.
+     */
+    PERFECT_SETUP
 }

@@ -56,7 +56,8 @@ public class PlaybookAutomationService {
         ExecutionTriggerSource.PLAYBOOK_AUTO,
         ExecutionTriggerSource.WTX_AUTO,
         ExecutionTriggerSource.WTXRSI_AUTO,
-        ExecutionTriggerSource.QUANT_AUTO_ARM
+        ExecutionTriggerSource.QUANT_AUTO_ARM,
+        ExecutionTriggerSource.PERFECT_SETUP
     );
 
     private final PlaybookService playbookService;

@@ -93,6 +93,17 @@ class QuantAutoSubmitSchedulerTest {
     }
 
     @Test
+    void aged_perfect_setup_arm_is_also_submitted() {
+        TradeExecutionRecord aged = pending(NOW.minusSeconds(45));
+        aged.setTriggerSource(ExecutionTriggerSource.PERFECT_SETUP);
+        when(repo.findPendingByTriggerSource(ExecutionTriggerSource.PERFECT_SETUP)).thenReturn(List.of(aged));
+        when(manager.submitEntryOrder(any())).thenReturn(aged);
+        scheduler.tickInternal();
+        verify(manager, times(1)).submitEntryOrder(any(SubmitEntryOrderCommand.class));
+        assertThat(publisher.events).hasSize(1);
+    }
+
+    @Test
     void manager_failure_does_not_break_loop() {
         TradeExecutionRecord aged1 = pending(NOW.minusSeconds(45));
         aged1.setId(1L);
