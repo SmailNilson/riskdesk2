@@ -228,7 +228,7 @@ public class WtxStrategyController {
         // trailing phase arms, then the ratcheted trailing level).
         view.put("entryPrice", state.entryPrice());
         view.put("entryQty", state.entryQty());
-        view.put("stopLoss", state.trailingStopPrice());
+        view.put("stopLoss", wtxStrategyService.effectiveStop(state));
         view.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return view;
     }
