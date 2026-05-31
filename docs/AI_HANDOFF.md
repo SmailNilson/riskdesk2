@@ -1,6 +1,42 @@
 # AI Handoff
 
-Last updated: 2026-05-29
+Last updated: 2026-05-31
+
+## WTX+RSI: unified FSM via Reducer + Command (2026-05-31)
+
+**Problem.** The live orchestrator (`WtxRsiStrategyService`) and the backtest
+engine (`WtxRsiBacktestEngine`) each re-implemented the position transition logic
+(open / reverse / suppress / chaikin-block / SL-TP), and they had **silently
+diverged**: live filled entries at `signal.close()`, backtest at the *next bar's
+open*; backtest had no swing-bias filter and used a different quantity rule. The
+simulated P&L was therefore not comparable to live — the measured edge was wrong.
+
+**Fix — single pure transition function shared by both:**
+
+- New `domain/.../wtxrsi/WtxRsiTransition.reduce(state, bar, candles, signal?, bias, config)
+  → (newState, List<WtxRsiDecision>)`. Pure FSM, no Spring/JPA/IBKR (ArchUnit-guarded).
+- New `WtxRsiDecision` (`sealed`: `Open`, `Close(cause)`, `Suppress`, `Block`, `Reject`)
+  — the Command half: decisions are data; nothing is executed inside the reducer.
+- `WtxRsiStrategyService` is now a thin interpreter: it resolves the bias upstream
+  (SMC engine stays out of the pure reducer), calls `reduce`, then `execute(decision)`
+  is the ONLY place that routes to IBKR / persists / publishes WS. **Live behaviour
+  is unchanged** — `WtxRsiStrategyServiceTest` (13) stays green untouched.
+- `WtxRsiBacktestEngine` now drives the same `reduce`. **Behaviour change (intended):**
+  entries fill at the signal-bar close (not next-bar open); the chaikin gate and
+  (optional) swing-bias filter apply as live; qty uses `configuredOrderQty`. Equity
+  curves shift vs the old engine. `run(candles, swingBiasFilterEnabled)` overload
+  added; default keeps the filter off (live default). `SMC_ENGINE` bias is not
+  replayable in a pure backtest → it uses `FRACTAL_HH_HL`.
+- Parity guard: `WtxRsiBacktestParityTest` proves the engine reproduces a reference
+  `reduce` loop trade-for-trade, and that entries fill at the rounded signal close.
+- Concurrency: `onCandleClosed` + the REST toggles now serialise the
+  load→reduce→save read-modify-write under a per-(instrument, timeframe) monitor
+  (single-node guard) — kills the lost-update race and duplicate IBKR routing.
+
+Tests: `WtxRsiTransitionTest` (8), `WtxRsiBacktestParityTest` (1); full `WtxRsi*`
+suite 54 green; `HexagonalArchitectureTest` green (reducer purity).
+
+## Live wiring: Iceberg / Spoofing / Flash-Crash detectors (2026-05-29)
 
 ## Live wiring: Iceberg / Spoofing / Flash-Crash detectors (2026-05-29)
 

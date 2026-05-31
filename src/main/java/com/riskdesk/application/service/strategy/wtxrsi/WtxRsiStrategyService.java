@@ -5,15 +5,14 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiBarEvaluator;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiConfig;
+import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiDecision;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiPosition;
-import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiRiskCalculator;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiRiskPlan;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSignal;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSignalRecord;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiStrategyState;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSwingBias;
-import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSwingBiasFilter;
-import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiTpMode;
+import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiTransition;
 import com.riskdesk.domain.engine.strategy.wtxrsi.port.WtxRsiSignalHistoryPort;
 import com.riskdesk.domain.engine.strategy.wtxrsi.port.WtxRsiStrategyStatePort;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
@@ -29,7 +28,6 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -71,6 +69,20 @@ public class WtxRsiStrategyService {
     private final SimpMessagingTemplate ws;
     private final WtxRsiBiasResolver biasResolver;
 
+    /**
+     * Per-(instrument, timeframe) monitors serialising the load → reduce → save
+     * read-modify-write. A candle close and a concurrent REST toggle would
+     * otherwise race on the same row and lose an update; this also prevents two
+     * overlapping cycles from routing duplicate IBKR orders for the same key.
+     * Single-node guard (this app is not clustered).
+     */
+    private final java.util.concurrent.ConcurrentMap<String, Object> stateLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Object lockFor(String instrument, String timeframe) {
+        return stateLocks.computeIfAbsent(instrument + ":" + timeframe, k -> new Object());
+    }
+
     public WtxRsiStrategyService(
             WtxRsiStrategyStatePort statePort,
             WtxRsiSignalHistoryPort historyPort,
@@ -110,268 +122,123 @@ public class WtxRsiStrategyService {
         WtxRsiBarEvaluator.IndicatorSeries series =
                 WtxRsiBarEvaluator.computeIndicators(candles, config);
 
-        WtxRsiStrategyState state = loadOrInit(instrumentName, event.timeframe());
-
         int lastBar = candles.size() - 1;
         Candle lastCandle = candles.get(lastBar);
 
-        // ── 1) If a position is open, check SL / TP exits on the closed candle ───
-        if (state.currentPosition() != WtxRsiPosition.FLAT) {
-            state = checkProtectiveExit(state, lastCandle, instrument, config);
-        }
-
-        // ── 2) Resolve the current swing bias (always — used for UI + optional filter).
-        //       Source (fractal HH/HL vs SMC engine) is picked by config.biasSource(). ──
+        // Resolve the swing bias upstream (it may consult the application-layer SMC
+        // engine, so it cannot live inside the pure reducer) and evaluate the signal.
+        // Both are read-only w.r.t. strategy state, so they run outside the lock.
         WtxRsiSwingBias bias = biasResolver.resolve(instrument, event.timeframe(), candles, config);
-        state = state.withLastSwingBias(bias);
-
-        // ── 3) If the filter is on and the open position is on the wrong side,
-        //       force-close before evaluating new signals. ─────────────────────────
-        if (state.swingBiasFilterEnabled() && state.currentPosition() != WtxRsiPosition.FLAT) {
-            WtxRsiSwingBiasFilter.Decision openSideDecision =
-                    WtxRsiSwingBiasFilter.evaluate(null, state.currentPosition(), bias);
-            if (openSideDecision == WtxRsiSwingBiasFilter.Decision.FORCE_CLOSE_LONG
-                    || openSideDecision == WtxRsiSwingBiasFilter.Decision.FORCE_CLOSE_SHORT) {
-                state = forceCloseFromBias(state, lastCandle, bias, config);
-            }
-        }
-
-        // ── 4) Evaluate signal on this bar ───────────────────────────────────────
-        Optional<WtxRsiSignal> maybeSignal =
+        Optional<WtxRsiSignal> signal =
                 WtxRsiBarEvaluator.evaluate(candles, series, lastBar, config);
-        if (maybeSignal.isPresent()) {
-            WtxRsiSignal sig = maybeSignal.get();
-            // Bias filter on fresh signals — suppress when toggled on and contradictory.
-            if (state.swingBiasFilterEnabled()) {
-                WtxRsiSwingBiasFilter.Decision decision =
-                        WtxRsiSwingBiasFilter.evaluate(sig.side(), state.currentPosition(), bias);
-                if (decision == WtxRsiSwingBiasFilter.Decision.SUPPRESS) {
-                    WtxRsiSignalRecord suppressed = new WtxRsiSignalRecord(
-                            state.instrument(), state.timeframe(),
-                            sig.timestamp(), sig.side(),
-                            WtxRsiSignalRecord.Action.NONE,
-                            sig.wt1(), sig.wt2(), sig.rsi(), sig.rsiSma(),
-                            sig.chaikin(), sig.confirmed(),
-                            null, null, null, 0, null,
-                            "swing-bias filter: " + bias.name()
-                    );
-                    historyPort.save(suppressed);
-                    publishSignal(suppressed);
-                    log.info("WTX-RSI [{} {}] signal suppressed by swing-bias filter — side={} bias={}",
-                            state.instrument(), state.timeframe(), sig.side(), bias);
-                } else {
-                    state = handleSignal(sig, candles, state, config, instrument);
-                }
-            } else {
-                state = handleSignal(sig, candles, state, config, instrument);
+
+        // Serialise the load → reduce → execute → save cycle per (instrument, timeframe)
+        // so a concurrent toggle / overlapping candle can't lose an update or route a
+        // duplicate order. The pure FSM (reduce) is the single source of truth shared
+        // with the backtest engine; execute() is the ONLY place that performs I/O.
+        WtxRsiStrategyState saved;
+        synchronized (lockFor(instrumentName, event.timeframe())) {
+            WtxRsiStrategyState state = loadOrInit(instrumentName, event.timeframe());
+            WtxRsiTransition.Result result =
+                    WtxRsiTransition.reduce(state, lastCandle, candles, signal, bias, config);
+            for (WtxRsiDecision decision : result.decisions()) {
+                execute(decision, instrumentName, event.timeframe());
             }
+            saved = result.newState().withLastCandleTs(event.timestamp());
+            statePort.save(saved);
         }
-
-        // ── 5) Persist state + WS publish ────────────────────────────────────────
-        state = state.withLastCandleTs(event.timestamp());
-        statePort.save(state);
-        publishState(state);
+        publishState(saved);
     }
 
+    // ── Decision interpreter — the ONLY place that performs I/O ────────────────
+
     /**
-     * Closes an open position when the swing-bias filter flips against it and
-     * no opposite signal has fired yet. The exit price is the bar's close — the
-     * filter is evaluated on the closed bar, so this matches the moment the
-     * operator's panel would have flipped.
+     * Interprets a single {@link WtxRsiDecision} emitted by {@link WtxRsiTransition}:
+     * routes to IBKR, persists the append-only history row, and publishes the WS
+     * payload. The {@code switch} is exhaustive over the sealed decision type, so
+     * a new decision kind forces a compile error here until it is handled.
      */
-    private WtxRsiStrategyState forceCloseFromBias(
-            WtxRsiStrategyState state, Candle bar, WtxRsiSwingBias bias, WtxRsiConfig config) {
-        BigDecimal exitPrice = bar.getClose();
-        BigDecimal realized = realizedPnl(state, exitPrice, config);
-        WtxRsiSignalRecord.Action action = state.currentPosition() == WtxRsiPosition.LONG
-                ? WtxRsiSignalRecord.Action.CLOSE_LONG
-                : WtxRsiSignalRecord.Action.CLOSE_SHORT;
-        WtxRoutingResult routing = routeClose(state, action, exitPrice);
-        WtxRsiSignalRecord rec = new WtxRsiSignalRecord(
-                state.instrument(), state.timeframe(),
-                bar.getTimestamp(),
-                state.currentPosition() == WtxRsiPosition.LONG
-                        ? WtxRsiSignal.Side.LONG : WtxRsiSignal.Side.SHORT,
-                action,
-                null, null, null, null, null, false,
-                exitPrice, state.stopLoss(), state.takeProfit(),
-                state.entryQty().intValue(),
-                routing.outcome(),
-                "swing-bias flip → " + bias.name()
-        );
-        historyPort.save(rec);
-        publishSignal(rec);
-        log.info("WTX-RSI [{} {}] force-close by swing-bias filter — newBias={} exit={} routing={}",
-                state.instrument(), state.timeframe(), bias, exitPrice, routing.outcome());
-        return state.withFlat(realized);
+    private void execute(WtxRsiDecision decision, String instrument, String timeframe) {
+        switch (decision) {
+            case WtxRsiDecision.Open o -> executeOpen(o, instrument, timeframe);
+            case WtxRsiDecision.Close c -> executeClose(c, instrument, timeframe);
+            case WtxRsiDecision.Suppress s -> executeSuppress(s, instrument, timeframe);
+            case WtxRsiDecision.Block b -> executeBlock(b, instrument, timeframe);
+            case WtxRsiDecision.Reject r -> log.info(
+                    "WTX-RSI [{} {}] signal rejected — {}", instrument, timeframe, r.reason());
+        }
     }
 
-    /**
-     * Closes the open position when the bar's intra-bar high/low touches SL or TP.
-     * Pessimistic rule: if both touched in the same bar, SL wins. Matches
-     * {@code TradeSimulationService} and the backtest engine.
-     */
-    private WtxRsiStrategyState checkProtectiveExit(
-            WtxRsiStrategyState state, Candle bar, Instrument instrument, WtxRsiConfig config) {
-        boolean isLong = state.currentPosition() == WtxRsiPosition.LONG;
-        BigDecimal sl = state.stopLoss();
-        BigDecimal tp = state.takeProfit();
-        BigDecimal high = bar.getHigh();
-        BigDecimal low = bar.getLow();
+    private void executeOpen(WtxRsiDecision.Open o, String instrument, String timeframe) {
+        WtxRsiSignal sig = o.signal();
+        WtxRsiRiskPlan plan = o.plan();
+        WtxRoutingResult routing = routeOpen(sig, plan, o.stateForRouting(), sig.close());
+        WtxRsiSignalRecord record = new WtxRsiSignalRecord(
+                instrument, timeframe, sig.timestamp(), sig.side(),
+                sig.side() == WtxRsiSignal.Side.LONG
+                        ? WtxRsiSignalRecord.Action.OPEN_LONG
+                        : WtxRsiSignalRecord.Action.OPEN_SHORT,
+                sig.wt1(), sig.wt2(), sig.rsi(), sig.rsiSma(), sig.chaikin(), sig.confirmed(),
+                plan.entryPrice(), plan.stopLoss(), plan.takeProfit(), plan.contracts(),
+                routing.outcome(), routing.errorMessage());
+        historyPort.save(record);
+        publishSignal(record);
+        log.info("WTX-RSI [{} {}] OPEN {} qty={} entry={} SL={} TP={} routing={}",
+                instrument, timeframe, sig.side(), plan.contracts(),
+                plan.entryPrice(), plan.stopLoss(), plan.takeProfit(), routing.outcome());
+    }
 
-        boolean slHit = sl != null
-                && (isLong ? low.compareTo(sl) <= 0 : high.compareTo(sl) >= 0);
-        boolean tpHit = tp != null
-                && (isLong ? high.compareTo(tp) >= 0 : low.compareTo(tp) <= 0);
-        if (!slHit && !tpHit) return state;
-
-        BigDecimal exitPrice = slHit ? sl : tp;
-        BigDecimal realized = realizedPnl(state, exitPrice, config);
+    private void executeClose(WtxRsiDecision.Close c, String instrument, String timeframe) {
+        // Route with the pre-close snapshot — it still carries the open qty/SL/TP
+        // the broker bridge needs (the running state is already FLAT by now).
+        WtxRsiStrategyState st = c.stateBeforeClose();
+        boolean isLong = st.currentPosition() == WtxRsiPosition.LONG;
         WtxRsiSignalRecord.Action action = isLong
                 ? WtxRsiSignalRecord.Action.CLOSE_LONG
                 : WtxRsiSignalRecord.Action.CLOSE_SHORT;
-        WtxRoutingResult routing = routeClose(state, action, exitPrice);
+        WtxRoutingResult routing = routeClose(st, action, c.exitPrice());
 
+        WtxRsiSignal sig = c.signal(); // non-null only for REVERSAL
+        boolean hasSig = sig != null;
+        String message = c.reasonOverride() != null ? c.reasonOverride() : routing.errorMessage();
         WtxRsiSignalRecord record = new WtxRsiSignalRecord(
-                state.instrument(), state.timeframe(),
-                bar.getTimestamp(),
+                instrument, timeframe, c.timestamp(),
                 isLong ? WtxRsiSignal.Side.LONG : WtxRsiSignal.Side.SHORT,
                 action,
-                null, null, null, null, null, false,
-                exitPrice, state.stopLoss(), state.takeProfit(),
-                state.entryQty().intValue(),
-                routing.outcome(), routing.errorMessage()
-        );
+                hasSig ? sig.wt1() : null, hasSig ? sig.wt2() : null,
+                hasSig ? sig.rsi() : null, hasSig ? sig.rsiSma() : null,
+                hasSig ? sig.chaikin() : null, hasSig && sig.confirmed(),
+                c.exitPrice(), st.stopLoss(), st.takeProfit(),
+                st.entryQty() != null ? st.entryQty().intValue() : 0,
+                routing.outcome(), message);
         historyPort.save(record);
         publishSignal(record);
-
-        log.info("WTX-RSI [{} {}] protective exit — {} at {} (slHit={}, tpHit={}) routing={}",
-                state.instrument(), state.timeframe(),
-                slHit ? "SL_HIT" : "TP_HIT", exitPrice, slHit, tpHit, routing.outcome());
-        return state.withFlat(realized);
+        log.info("WTX-RSI [{} {}] CLOSE {} ({}) at {} routing={}",
+                instrument, timeframe, action, c.cause(), c.exitPrice(), routing.outcome());
     }
 
-    /**
-     * Handles a newly-emitted signal: opens if flat, reverses if opposite to current.
-     */
-    private WtxRsiStrategyState handleSignal(
-            WtxRsiSignal signal, List<Candle> candles,
-            WtxRsiStrategyState state, WtxRsiConfig config, Instrument instrument) {
-
-        // Reversal-on-opposite-signal (TP mode REVERSAL) — close current side first.
-        if (state.currentPosition() != WtxRsiPosition.FLAT) {
-            boolean opposite = (signal.side() == WtxRsiSignal.Side.SHORT && state.currentPosition() == WtxRsiPosition.LONG)
-                    || (signal.side() == WtxRsiSignal.Side.LONG && state.currentPosition() == WtxRsiPosition.SHORT);
-            if (opposite && config.tpMode() == WtxRsiTpMode.REVERSAL) {
-                BigDecimal exitPrice = signal.close();
-                BigDecimal realized = realizedPnl(state, exitPrice, config);
-                WtxRsiSignalRecord.Action closeAction = state.currentPosition() == WtxRsiPosition.LONG
-                        ? WtxRsiSignalRecord.Action.CLOSE_LONG
-                        : WtxRsiSignalRecord.Action.CLOSE_SHORT;
-                WtxRoutingResult closeRouting = routeClose(state, closeAction, exitPrice);
-                WtxRsiSignalRecord closeRecord = new WtxRsiSignalRecord(
-                        state.instrument(), state.timeframe(),
-                        signal.timestamp(),
-                        state.currentPosition() == WtxRsiPosition.LONG
-                                ? WtxRsiSignal.Side.LONG : WtxRsiSignal.Side.SHORT,
-                        closeAction,
-                        signal.wt1(), signal.wt2(), signal.rsi(), signal.rsiSma(),
-                        signal.chaikin(), signal.confirmed(),
-                        exitPrice, state.stopLoss(), state.takeProfit(),
-                        state.entryQty().intValue(),
-                        closeRouting.outcome(), closeRouting.errorMessage()
-                );
-                historyPort.save(closeRecord);
-                publishSignal(closeRecord);
-                state = state.withFlat(realized);
-            } else {
-                // Same-side signal while open — suppress
-                WtxRsiSignalRecord suppressed = new WtxRsiSignalRecord(
-                        state.instrument(), state.timeframe(),
-                        signal.timestamp(), signal.side(),
-                        WtxRsiSignalRecord.Action.NONE,
-                        signal.wt1(), signal.wt2(), signal.rsi(), signal.rsiSma(),
-                        signal.chaikin(), signal.confirmed(),
-                        null, null, null, 0, null, null
-                );
-                historyPort.save(suppressed);
-                publishSignal(suppressed);
-                return state;
-            }
-        }
-
-        // Entry-only Chaikin gate. When chaikin-required is on for this panel, an
-        // unconfirmed signal may NOT open a position. Any exit triggered above
-        // (reversal close, or SL/TP earlier in the candle) has already executed —
-        // only the fresh entry is blocked here, so the exit mechanism is unchanged.
-        // Per-panel runtime toggle (state), inheriting the global config default.
-        // No-op when Chaikin confirmation isn't computed (chaikinEnabled=false).
-        if (state.chaikinRequired() && config.chaikinEnabled() && !signal.confirmed()) {
-            WtxRsiSignalRecord blocked = new WtxRsiSignalRecord(
-                    state.instrument(), state.timeframe(),
-                    signal.timestamp(), signal.side(),
-                    WtxRsiSignalRecord.Action.NONE,
-                    signal.wt1(), signal.wt2(), signal.rsi(), signal.rsiSma(),
-                    signal.chaikin(), signal.confirmed(),
-                    null, null, null, 0, null,
-                    "chaikin-required: entry blocked (Chaikin not confirmed)"
-            );
-            historyPort.save(blocked);
-            publishSignal(blocked);
-            log.info("WTX-RSI [{} {}] entry blocked by chaikin-required — side={} (unconfirmed)",
-                    state.instrument(), state.timeframe(), signal.side());
-            return state;
-        }
-
-        // Open new position
-        BigDecimal entryPrice = signal.close();
-        Optional<WtxRsiRiskPlan> maybePlan = WtxRsiRiskCalculator.build(signal, candles, entryPrice, config);
-        if (maybePlan.isEmpty()) {
-            log.info("WTX-RSI [{} {}] signal rejected — no confirmed fractal in range",
-                    state.instrument(), state.timeframe());
-            return state;
-        }
-        WtxRsiRiskPlan plan = maybePlan.get();
-
-        // Honour the user's configured order qty (override the auto base/confirmed sizing
-        // when the user has set a panel quantity). configuredOrderQty=DEFAULT_ORDER_QTY (1)
-        // by default — same intent as the WTX panel quantity input.
-        int contracts = state.configuredOrderQty() > 0
-                ? state.configuredOrderQty() * (signal.confirmed() ? config.confirmedMultiplier() : 1)
-                : plan.contracts();
-        WtxRsiRiskPlan finalPlan = new WtxRsiRiskPlan(
-                plan.side(), contracts, plan.entryPrice(), plan.stopLoss(),
-                plan.takeProfit(), plan.initialRiskPerContract(), plan.swingReference());
-
-        WtxRoutingResult routing = routeOpen(signal, finalPlan, state, entryPrice);
-
-        WtxRsiPosition newPos = signal.side() == WtxRsiSignal.Side.LONG
-                ? WtxRsiPosition.LONG : WtxRsiPosition.SHORT;
-        state = state.withPosition(newPos, finalPlan.entryPrice(),
-                BigDecimal.valueOf(finalPlan.contracts()), finalPlan.stopLoss(), finalPlan.takeProfit());
-
+    private void executeSuppress(WtxRsiDecision.Suppress s, String instrument, String timeframe) {
+        WtxRsiSignal sig = s.signal();
         WtxRsiSignalRecord record = new WtxRsiSignalRecord(
-                state.instrument(), state.timeframe(),
-                signal.timestamp(), signal.side(),
-                signal.side() == WtxRsiSignal.Side.LONG
-                        ? WtxRsiSignalRecord.Action.OPEN_LONG
-                        : WtxRsiSignalRecord.Action.OPEN_SHORT,
-                signal.wt1(), signal.wt2(), signal.rsi(), signal.rsiSma(),
-                signal.chaikin(), signal.confirmed(),
-                finalPlan.entryPrice(), finalPlan.stopLoss(), finalPlan.takeProfit(),
-                finalPlan.contracts(),
-                routing.outcome(), routing.errorMessage()
-        );
+                instrument, timeframe, sig.timestamp(), sig.side(),
+                WtxRsiSignalRecord.Action.NONE,
+                sig.wt1(), sig.wt2(), sig.rsi(), sig.rsiSma(), sig.chaikin(), sig.confirmed(),
+                null, null, null, 0, null, s.reason());
         historyPort.save(record);
         publishSignal(record);
+    }
 
-        log.info("WTX-RSI [{} {}] OPEN {} qty={} entry={} SL={} TP={} routing={}",
-                state.instrument(), state.timeframe(),
-                signal.side(), finalPlan.contracts(),
-                finalPlan.entryPrice(), finalPlan.stopLoss(), finalPlan.takeProfit(),
-                routing.outcome());
-
-        return state;
+    private void executeBlock(WtxRsiDecision.Block b, String instrument, String timeframe) {
+        WtxRsiSignal sig = b.signal();
+        WtxRsiSignalRecord record = new WtxRsiSignalRecord(
+                instrument, timeframe, sig.timestamp(), sig.side(),
+                WtxRsiSignalRecord.Action.NONE,
+                sig.wt1(), sig.wt2(), sig.rsi(), sig.rsiSma(), sig.chaikin(), sig.confirmed(),
+                null, null, null, 0, null, b.reason());
+        historyPort.save(record);
+        publishSignal(record);
+        log.info("WTX-RSI [{} {}] entry blocked by chaikin-required — side={} (unconfirmed)",
+                instrument, timeframe, sig.side());
     }
 
     private WtxRoutingResult routeOpen(
@@ -411,15 +278,6 @@ public class WtxRsiStrategyService {
         }
     }
 
-    private BigDecimal realizedPnl(WtxRsiStrategyState state, BigDecimal exitPrice, WtxRsiConfig config) {
-        if (state.entryPrice() == null || state.entryQty() == null) return BigDecimal.ZERO;
-        BigDecimal direction = state.currentPosition() == WtxRsiPosition.LONG
-                ? BigDecimal.ONE : BigDecimal.ONE.negate();
-        BigDecimal points = exitPrice.subtract(state.entryPrice()).multiply(direction);
-        BigDecimal ticks = points.divide(config.tickSize(), 4, RoundingMode.HALF_UP);
-        return ticks.multiply(config.tickValueUsd()).multiply(state.entryQty());
-    }
-
     // ── Public API used by the REST controller ─────────────────────────────
 
     public Optional<WtxRsiStrategyState> getState(String instrument, String timeframe) {
@@ -443,9 +301,11 @@ public class WtxRsiStrategyService {
     }
 
     public WtxRsiStrategyState toggleAutoExecution(String instrument, String timeframe, boolean enabled) {
-        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
-        WtxRsiStrategyState updated = state.withAutoExecution(enabled);
-        statePort.save(updated);
+        WtxRsiStrategyState updated;
+        synchronized (lockFor(instrument, timeframe)) {
+            updated = loadOrInit(instrument, timeframe).withAutoExecution(enabled);
+            statePort.save(updated);
+        }
         log.warn("WTX-RSI [{} {}] auto-execution {} — IBKR routing is now {}",
                 instrument, timeframe, enabled ? "ENABLED" : "DISABLED",
                 enabled ? "LIVE" : "off");
@@ -454,17 +314,21 @@ public class WtxRsiStrategyService {
     }
 
     public WtxRsiStrategyState setOrderQty(String instrument, String timeframe, int qty) {
-        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
-        WtxRsiStrategyState updated = state.withConfiguredOrderQty(qty);
-        statePort.save(updated);
+        WtxRsiStrategyState updated;
+        synchronized (lockFor(instrument, timeframe)) {
+            updated = loadOrInit(instrument, timeframe).withConfiguredOrderQty(qty);
+            statePort.save(updated);
+        }
         publishState(updated);
         return updated;
     }
 
     public WtxRsiStrategyState toggleSwingBiasFilter(String instrument, String timeframe, boolean enabled) {
-        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
-        WtxRsiStrategyState updated = state.withSwingBiasFilter(enabled);
-        statePort.save(updated);
+        WtxRsiStrategyState updated;
+        synchronized (lockFor(instrument, timeframe)) {
+            updated = loadOrInit(instrument, timeframe).withSwingBiasFilter(enabled);
+            statePort.save(updated);
+        }
         log.info("WTX-RSI [{} {}] swing-bias filter {}",
                 instrument, timeframe, enabled ? "ENABLED" : "DISABLED");
         publishState(updated);
@@ -472,9 +336,11 @@ public class WtxRsiStrategyService {
     }
 
     public WtxRsiStrategyState toggleChaikinRequired(String instrument, String timeframe, boolean enabled) {
-        WtxRsiStrategyState state = loadOrInit(instrument, timeframe);
-        WtxRsiStrategyState updated = state.withChaikinRequired(enabled);
-        statePort.save(updated);
+        WtxRsiStrategyState updated;
+        synchronized (lockFor(instrument, timeframe)) {
+            updated = loadOrInit(instrument, timeframe).withChaikinRequired(enabled);
+            statePort.save(updated);
+        }
         log.info("WTX-RSI [{} {}] chaikin-required entry gate {}",
                 instrument, timeframe, enabled ? "ENABLED" : "DISABLED");
         publishState(updated);
