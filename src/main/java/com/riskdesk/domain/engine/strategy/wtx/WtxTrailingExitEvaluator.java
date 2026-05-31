@@ -41,6 +41,31 @@ public final class WtxTrailingExitEvaluator {
     }
 
     /**
+     * Effective protective stop for an open position, for display/risk surfaces.
+     *
+     * Returns the ratcheted {@code trailingStopPrice} once the trailing phase has armed,
+     * otherwise derives the fixed initial ATR stop (entry ∓ slAtrMult * entryAtr) so the
+     * active risk level is visible immediately on the bar a fresh position is opened —
+     * before {@link #evaluate} runs on the next candle. Null when FLAT or ATR unavailable.
+     */
+    public static BigDecimal currentStop(WtxStrategyState state, WtxConfig config) {
+        if (state == null || state.currentPosition() == WtxPosition.FLAT || state.entryPrice() == null) {
+            return null;
+        }
+        if (state.trailingStopPrice() != null) {
+            return state.trailingStopPrice();
+        }
+        BigDecimal atr = state.entryAtr();
+        if (atr == null || atr.signum() <= 0) {
+            return null;
+        }
+        BigDecimal slDistance = atr.multiply(config.slAtrMult());
+        return state.currentPosition() == WtxPosition.LONG
+                ? state.entryPrice().subtract(slDistance)
+                : state.entryPrice().add(slDistance);
+    }
+
+    /**
      * Evaluate exit conditions for an open position.
      *
      * @param state    current strategy state — must have position != FLAT and entryPrice / entryAtr set

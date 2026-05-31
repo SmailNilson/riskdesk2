@@ -10,6 +10,7 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WtxTrailingExitEvaluatorTest {
@@ -82,6 +83,38 @@ class WtxTrailingExitEvaluatorTest {
         Candle c = candle(100, 100.5, 99.0, 100);
         WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(state, c, CONFIG);
         assertFalse(d.shouldExit());
+    }
+
+    @Test
+    void currentStop_flat_returnsNull() {
+        WtxStrategyState flat = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000));
+        assertNull(WtxTrailingExitEvaluator.currentStop(flat, CONFIG));
+    }
+
+    @Test
+    void currentStop_freshLong_derivesInitialAtrStop() {
+        // No trailing eval has run yet → trailingStopPrice is null.
+        // Initial stop = entry - slMult*ATR = 100 - 1.4*1 = 98.6 must still be exposed.
+        WtxStrategyState state = openLong(100.0, 1.0);
+        assertNull(state.trailingStopPrice());
+        assertEquals(0, BigDecimal.valueOf(98.6).compareTo(
+                WtxTrailingExitEvaluator.currentStop(state, CONFIG)));
+    }
+
+    @Test
+    void currentStop_freshShort_derivesInitialAtrStop() {
+        // Initial stop = entry + slMult*ATR = 100 + 1.4*1 = 101.4
+        WtxStrategyState state = openShort(100.0, 1.0);
+        assertEquals(0, BigDecimal.valueOf(101.4).compareTo(
+                WtxTrailingExitEvaluator.currentStop(state, CONFIG)));
+    }
+
+    @Test
+    void currentStop_armedTrailing_returnsRatchetedLevel() {
+        WtxStrategyState state = openLong(100.0, 1.0)
+                .withTrailing(BigDecimal.valueOf(101.5), BigDecimal.valueOf(99.5));
+        assertEquals(0, BigDecimal.valueOf(99.5).compareTo(
+                WtxTrailingExitEvaluator.currentStop(state, CONFIG)));
     }
 
     private static WtxStrategyState openLong(double entry, double atr) {

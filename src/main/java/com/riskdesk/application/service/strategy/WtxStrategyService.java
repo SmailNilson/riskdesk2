@@ -314,6 +314,16 @@ public class WtxStrategyService {
         return properties.getInitialEquity();
     }
 
+    /**
+     * Effective protective stop for the open position (trailing level once armed,
+     * else the derived initial ATR stop). Null when FLAT or ATR unavailable.
+     * Surfaced on the state view so the panel shows the active risk level
+     * immediately after a fresh fill.
+     */
+    public BigDecimal effectiveStop(WtxStrategyState state) {
+        return WtxTrailingExitEvaluator.currentStop(state, properties.toConfig());
+    }
+
     public WtxStrategyState updateProfile(String instrument, String timeframe, WtxProfile profile) {
         WtxStrategyState state = statePort.load(instrument, timeframe)
                 .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
@@ -533,6 +543,9 @@ public class WtxStrategyService {
         payload.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
         payload.put("configuredOrderQty", state.configuredOrderQty());
+        payload.put("entryPrice", state.entryPrice());
+        payload.put("entryQty", state.entryQty());
+        payload.put("stopLoss", WtxTrailingExitEvaluator.currentStop(state, config));
         payload.put("canTrade", !state.maxLossHit() || !profile.blocksOnMaxLoss());
         return payload;
     }

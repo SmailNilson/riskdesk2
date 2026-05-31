@@ -9,6 +9,7 @@ import {
   updateWtxRsiChaikinRequired,
   updateWtxRsiOrderQty,
 } from '@/app/lib/api';
+import DayGroupedSignals from '@/app/components/strategy/DayGroupedSignals';
 import type {
   WtxRsiAction,
   WtxRsiBiasSource,
@@ -430,16 +431,16 @@ export default function WtxRsiStrategyPanel({
             </div>
           )}
 
-          {/* Recent signals */}
+          {/* Recent signals — grouped by trading day, newest day expanded */}
           <div className="space-y-1.5">
             <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Signaux récents</span>
-            {mergedSignals.length === 0 ? (
-              <p className="text-[10px] text-zinc-600 italic">Aucun signal</p>
-            ) : (
-              mergedSignals.map(sig => (
-                <SignalCard key={sig.signalTs + sig.action} sig={sig} />
-              ))
-            )}
+            <DayGroupedSignals
+              signals={mergedSignals}
+              getTs={sig => sig.signalTs}
+              getKey={sig => sig.signalTs + sig.action}
+              renderSignal={sig => <SignalCard sig={sig} />}
+              accent="fuchsia"
+            />
           </div>
         </>
       )}

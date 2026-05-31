@@ -17,6 +17,7 @@ import type {
   WtxProfile,
   WtxRoutingOutcome,
 } from '@/app/lib/api';
+import DayGroupedSignals from '@/app/components/strategy/DayGroupedSignals';
 
 const POLL_MS = 5000;
 const PROFILE_OPTIONS: WtxProfile[] = ['BASELINE', 'SESSION_ATR', 'HTF', 'STRICT'];
@@ -116,6 +117,15 @@ function SwingBiasControl({
       <span>Swing : {enabled ? 'ON' : 'OFF'}</span>
       <span className={`font-mono ${enabled ? dirStyle : 'text-zinc-600'}`}>{dirLabel}</span>
     </button>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string | undefined }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-zinc-600 text-[9px]">{label}</span>
+      <span className="font-mono text-zinc-200">{value ?? '—'}</span>
+    </div>
   );
 }
 
@@ -508,14 +518,25 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
             </div>
           )}
 
-          {/* Signals list */}
+          {/* Open-position summary (mirrors WTX+RSI). SL = live trailing-exit stop. */}
+          {state && state.currentDirection !== 'FLAT' && (
+            <div className="grid grid-cols-3 gap-2 text-[10px] border border-zinc-800/60 rounded p-2 bg-zinc-950/30">
+              <Stat label="Entry" value={state.entryPrice != null ? state.entryPrice.toFixed(2) : undefined} />
+              <Stat label="Qty" value={state.entryQty ? String(state.entryQty) : undefined} />
+              <Stat label="SL" value={state.stopLoss != null ? state.stopLoss.toFixed(2) : undefined} />
+            </div>
+          )}
+
+          {/* Signals list — grouped by trading day, newest day expanded */}
           <div className="space-y-1.5">
             <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Signaux récents</span>
-            {merged.length === 0 ? (
-              <p className="text-[10px] text-zinc-600 italic">Aucun signal</p>
-            ) : (
-              merged.map(sig => <SignalCard key={sig.signalTs + sig.instrument} sig={sig} />)
-            )}
+            <DayGroupedSignals
+              signals={merged}
+              getTs={sig => sig.signalTs}
+              getKey={sig => sig.signalTs + sig.instrument}
+              renderSignal={sig => <SignalCard sig={sig} />}
+              accent="cyan"
+            />
           </div>
         </>
       )}
