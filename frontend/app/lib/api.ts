@@ -925,89 +925,6 @@ export interface CorrelationStatus {
   blackoutDurationMins: number;
 }
 
-// ── Live Tri-Layer Analysis ──────────────────────────────────────────
-export interface LiveScoreComponent {
-  name: string;
-  contribution: number;
-  rationale: string;
-}
-
-export interface LiveFactor {
-  polarity: 'BULLISH' | 'BEARISH';
-  layer: string;
-  description: string;
-  strength: number;
-}
-
-export interface LiveContradiction {
-  layerA: string;
-  layerB: string;
-  description: string;
-}
-
-export interface LiveTradeScenario {
-  name: string;
-  probability: number;
-  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
-  entry: number | null;
-  stopLoss: number | null;
-  takeProfit1: number | null;
-  takeProfit2: number | null;
-  rewardRiskRatio: number;
-  triggerCondition: string;
-  invalidation: string;
-}
-
-export interface LiveBiasView {
-  primary: 'LONG' | 'SHORT' | 'NEUTRAL';
-  confidence: number;
-  structureScore: number;
-  orderFlowScore: number;
-  momentumScore: number;
-  bullishFactors: LiveFactor[];
-  bearishFactors: LiveFactor[];
-  contradictions: LiveContradiction[];
-  standAsideReason: string | null;
-}
-
-export interface LiveVerdictView {
-  instrument: string;
-  timeframe: string;
-  decisionTimestamp: string;
-  scoringEngineVersion: number;
-  currentPrice: number;
-  bias: LiveBiasView;
-  scenarios: LiveTradeScenario[];
-  validUntil: string;
-  /** True when validUntil < server now() — surfaced as a banner in the panel. */
-  expired: boolean;
-  /** Seconds since validUntil; 0 when not expired. */
-  expiredForSeconds: number;
-}
-
-export interface ReplayReport {
-  instrument: string;
-  timeframe: string;
-  from: string;
-  to: string;
-  weights: { structure: number; orderFlow: number; momentum: number };
-  totalSnapshots: number;
-  agreementCount: number;
-  agreementRatio: number;
-  actionableCount: number;
-  directionDistribution: Record<string, number>;
-  samples: Array<{
-    decisionTimestamp: string;
-    originalDirection: string;
-    originalConfidence: number;
-    replayedDirection: string;
-    replayedConfidence: number;
-    structureScore: number;
-    orderFlowScore: number;
-    momentumScore: number;
-  }>;
-}
-
 export interface PerfectSetupAxisResultView {
   axis: string;
   label: string;
@@ -1037,30 +954,6 @@ export interface PerfectSetupSignalView {
 export const api = {
   getPortfolioSummary: (accountId?: string) =>
     get<PortfolioSummary>(`/api/positions/summary${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
-  // Read-only — returns the latest persisted verdict (no compute, no DB write).
-  // Use this for dashboard polling so verdict_records grows at scheduler cadence
-  // only, regardless of how many viewers are open.
-  getLatestAnalysis: (instrument: string, timeframe: string) =>
-    get<LiveVerdictView>(`/api/analysis/latest/${instrument}/${timeframe}`),
-  // What the scheduler actually scans — used to flag tabs that will never
-  // produce a verdict instead of polling /latest forever (PR #270 review).
-  getAnalysisScanConfig: () =>
-    get<{ schedulerEnabled: boolean; instruments: string[]; timeframes: string[]; pollIntervalMs: number }>(
-      '/api/analysis/scan-config'),
-  // On-demand fresh compute — call sparingly, this writes a verdict row.
-  getLiveAnalysis: (instrument: string, timeframe: string) =>
-    get<LiveVerdictView>(`/api/analysis/live/${instrument}/${timeframe}`),
-  getRecentVerdicts: (instrument: string, timeframe: string, limit = 20) =>
-    get<LiveVerdictView[]>(`/api/analysis/recent/${instrument}/${timeframe}?limit=${limit}`),
-  replayAnalysis: (req: {
-    instrument: string;
-    timeframe: string;
-    from: string;
-    to: string;
-    structure: number;
-    orderFlow: number;
-    momentum: number;
-  }) => post<ReplayReport>('/api/analysis/replay', req),
   getOpenPositions: (accountId?: string) =>
     get<PositionView[]>(`/api/positions${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`),
   getClosedPositions: () => get<PositionView[]>('/api/positions/closed'),

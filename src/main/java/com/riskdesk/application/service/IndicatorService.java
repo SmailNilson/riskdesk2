@@ -117,10 +117,10 @@ public class IndicatorService {
     /**
      * Atomic version of {@link #computeSnapshot} that also returns the
      * {@code computedAt} of the cache entry the snapshot came from. Solves the
-     * non-atomic race flagged in PR #269 review: when {@code AnalysisSnapshotAggregator}
-     * calls indicator and SMC adapters in parallel, separate {@code computeSnapshot}
+     * non-atomic race flagged in PR #269 review: when snapshot consumers
+     * call indicator and SMC adapters in parallel, separate {@code computeSnapshot}
      * + {@code snapshotComputedAt} calls could return values from different
-     * cache generations, mixing inconsistent data into a single verdict.
+     * cache generations, mixing inconsistent data into a single snapshot.
      * <p>
      * Single cache lookup → if hit, return both fields directly. If miss, run
      * the full compute (which atomically populates the cache) and read both
