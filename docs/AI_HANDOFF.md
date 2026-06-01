@@ -1,6 +1,43 @@
 # AI Handoff
 
-Last updated: 2026-05-31
+Last updated: 2026-06-01
+
+## WTX: no naked orders when IBKR is confirmed flat (2026-06-01)
+
+**Problem (prod, reported from the panel).** The WTX auto-IBKR bridge fired a REVERSE
+as TWO orders (close leg to flatten the prior side + open leg for the new side). When
+the broker position had been flattened **outside WTX** — a manual close, or a side that
+was opened while `Auto-IBKR` was OFF so no order ever reached IBKR — IBKR was actually
+**flat**, but the stale `trade_executions` row was still `ACTIVE`. `WtxExecutionBridge`'s
+IBKR-truth reconcile treated `livePos == 0` (confirmed flat) the same as `livePos == null`
+(snapshot unavailable) and passed the REVERSE through unchanged → the close leg became a
+**naked order** (a BUY that *opens* instead of flattening) on top of the open leg. Result:
+two orders, ~double exposure, one resting unfilled in limit. The pure CLOSE path
+(`handleClose`: MAX_LOSS / NY-force / trailing) never consulted IBKR at all, so it had the
+same naked-flatten risk.
+
+**Fix — trust a *confirmed-flat* IBKR snapshot, only in `WtxExecutionBridge`:**
+
+- `reconcileWithIbkr`: split `livePos == null` (snapshot unavailable → legacy passthrough)
+  from `livePos == 0` (IBKR confirmed flat). On confirmed flat, **downgrade**
+  `REVERSE_TO_LONG/SHORT → OPEN_LONG/SHORT` so no close leg runs — exactly one order at the
+  panel qty.
+- `handleEntry`: on confirmed flat, void (`→ CANCELLED`) any stale `ACTIVE` WTX row for the
+  (instrument, timeframe) before opening, keeping the one-active-row invariant so a later
+  CLOSE can't target a phantom. DB-only, no broker side effect.
+- `handleClose`: on confirmed flat, skip the flatten and void the stale row instead of
+  sending a naked order. An `EXIT_SUBMITTED` row (flatten already in flight) is left for the
+  fill tracker.
+- Unchanged when the snapshot is unavailable (`null`) or when IBKR holds a real position —
+  the existing OPEN→REVERSE upgrade / duplicate-skip / synthesize paths are untouched.
+
+Tests: `WtxExecutionBridgeTest` +4 (reverse-on-flat downgrade with/without stale row,
+close-on-flat skip, snapshot-unavailable legacy two-leg) — 49 green; strategy package 109 green.
+
+**Known gap (follow-up, not in this change):** `IbkrWtxRsiExecutionBridge` (the separate
+WTX+RSI strategy) has no IBKR-truth reconcile at all — its `submitClose`/`submitOpen` trust
+the DB row, so the same naked-order class is latent there. It would need an
+`IbkrPortfolioService` wired in.
 
 ## WTX+RSI: unified FSM via Reducer + Command (2026-05-31)
 

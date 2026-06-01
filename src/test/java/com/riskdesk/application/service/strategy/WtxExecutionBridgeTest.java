@@ -884,6 +884,110 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reconcile_ibkrFlat_reverseWithStaleRow_downgradesToSingleOpen_noNakedCloseLeg() {
+        // PROD REPRO (screenshot): WTX still thinks it holds a SHORT (stale ACTIVE row) and fires
+        // REVERSE_TO_LONG, but the user already flattened the position manually at the broker so
+        // IBKR is FLAT. The old code passed the REVERSE through → a NAKED close leg (BUY to flatten
+        // a short that's gone) PLUS the open leg = TWO orders, one resting unfilled in limit.
+        // Now: IBKR-flat downgrades REVERSE → OPEN, so exactly ONE order (the new long) is sent and
+        // the stale row is reconciled to CANCELLED.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        // Stale prior SHORT row — never closed in the app because the user flattened at the broker.
+        TradeExecutionRecord stale = wtxRow("SHORT", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(stale);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1)) // virtual state already flipped to the new side
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // EXACTLY ONE order — the open leg. No naked close leg.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+
+        // Stale row reconciled to terminal so a later CLOSE can't target the phantom.
+        TradeExecutionRecord staleAfter = repo.all().stream()
+                .filter(r -> r.getId().equals(stale.getId())).findFirst().orElseThrow();
+        assertEquals(ExecutionStatus.CANCELLED, staleAfter.getStatus(),
+                "stale row must be voided when IBKR is confirmed flat");
+        // Exactly one non-terminal row remains — the new open leg.
+        long active = repo.all().stream()
+                .filter(r -> r.getStatus() != ExecutionStatus.CANCELLED
+                        && r.getStatus() != ExecutionStatus.CLOSED).count();
+        assertEquals(1, active, "only the new OPEN row stays active after the downgrade");
+    }
+
+    @Test
+    void reconcile_ibkrFlat_reverseWithNoRow_opensSingleLong() {
+        // REVERSE_TO_LONG with IBKR flat and no local row (prior side opened while auto-exec was
+        // OFF, so nothing ever reached the broker). Must open a single long — no close leg.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+        assertEquals(1, repo.all().size(), "single OPEN row, no synthesized/naked close leg");
+    }
+
+    @Test
+    void close_ibkrFlat_skipsNakedFlatten_andVoidsStaleRow() {
+        // CLOSE path (MAX_LOSS / NY-force / trailing): WTX has an ACTIVE long row but IBKR is flat
+        // (manual close). A flatten now would be a NAKED SELL that opens an unintended short.
+        // Must skip the order entirely and void the stale row.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true); // service already flattened virtual state
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(ExecutionStatus.CANCELLED, repo.all().get(0).getStatus(),
+                "stale row must be voided — never flattened naked");
+    }
+
+    @Test
+    void reconcile_snapshotUnavailable_reverseUnchanged_legacyTwoLegs() {
+        // Snapshot unavailable (portfolio read returns null) → can't reconcile, so the REVERSE keeps
+        // its legacy behaviour: flatten the WTX-tracked prior side, then open the new one (two legs).
+        // Guards that ONLY the confirmed-flat path changed, not the unknown-snapshot path.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(null); // snapshot unavailable → livePos null
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("SHORT", 1, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // Two legs: close the tracked short (BUY) + open the new long (BUY).
+        verify(ibkrOrderService, times(2)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+    }
+
+    @Test
     void reconcile_scopesPortfolioReadToConfiguredBrokerAccount() {
         // wtx.broker-account-id is configured to "DU777"; the bridge must request that account
         // from the portfolio service AND filter out positions belonging to other accounts so a

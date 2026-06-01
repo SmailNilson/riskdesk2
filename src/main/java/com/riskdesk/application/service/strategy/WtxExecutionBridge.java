@@ -242,6 +242,17 @@ public class WtxExecutionBridge {
         isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
+        // IBKR confirmed flat — void any stale ACTIVE WTX row for this (instrument, tf) BEFORE we
+        // open fresh. The position was flattened outside WTX (manual broker close, or a side opened
+        // while auto-exec was OFF), so the row tracks a phantom: left ACTIVE it would break the
+        // one-active-row invariant once the new OPEN row is created, and let a later CLOSE fire a
+        // naked flatten against it. A REVERSE has already been downgraded to OPEN above, so no close
+        // leg runs here. DB-only reconcile — no broker side effect.
+        if (liveIbkrPosition != null && liveIbkrPosition.signum() == 0) {
+            voidStaleActiveWtxRow(state.instrument(), tf,
+                    "WTX reconcile: IBKR flat — stale row voided before " + action.name());
+        }
+
         // Pre-flight margin — sized by the NET margin delta the order will create.
         //   • Pure OPEN              → delta = positionQty (full new position).
         //   • Same-size REVERSE      → delta ≈ 0; close leg releases exactly what the open leg
@@ -541,6 +552,17 @@ public class WtxExecutionBridge {
                     + "skipping duplicate flatten", state.instrument(), tf, action, row.getId());
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
         }
+        // IBKR truth: if the broker is already flat, this row is stale (manual close, or a position
+        // opened while auto-exec was OFF). Flattening now would be a NAKED order that OPENS an
+        // unintended position. Void the row and skip — never send a naked flatten. DB-only reconcile.
+        BigDecimal livePos = readLiveIbkrPosition(instrument);
+        if (livePos != null && livePos.signum() == 0) {
+            voidRow(row, "WTX " + action.name()
+                    + " — IBKR already flat; flatten skipped (stale row voided, no naked order)");
+            log.warn("WTX [{} {}] close requested ({}) but IBKR is flat — row {} voided, no naked order",
+                    state.instrument(), tf, action, row.getId());
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, "IBKR already flat — flatten skipped");
+        }
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : positionQuantity(state);
         if (qty <= 0) {
             log.info("WTX [{} {}] routing skipped — non-positive close quantity {}",
@@ -776,14 +798,38 @@ public class WtxExecutionBridge {
      *   <li>IBKR holds the same side already → return a {@code SKIPPED_DUPLICATE} result;
      *       the bridge stops without touching either store.</li>
      *   <li>IBKR holds the opposite side and the WTX action is {@code OPEN_*} → upgrade to
-     *       the matching {@code REVERSE_*} so the bridge flattens IBKR before opening fresh.
-     *       A WTX action of {@code REVERSE_*} stays as-is.</li>
-     *   <li>IBKR flat OR snapshot unavailable → return the original action unchanged.</li>
+     *       the matching {@code REVERSE_*} so the bridge flattens IBKR before opening fresh.</li>
+     *   <li>IBKR <b>confirmed flat</b> ({@code livePos == 0}) and the WTX action is a
+     *       {@code REVERSE_*} → <b>downgrade to the matching {@code OPEN_*}</b>. A reverse has no
+     *       broker-side position to flatten, so its close leg would be a NAKED order — it would
+     *       OPEN an unintended position instead of flattening. Downgrading opens only the new
+     *       side (one order at the panel qty). This is the manual-close / auto-exec-was-OFF
+     *       drift case: WTX still thinks it holds a position the broker no longer has.</li>
+     *   <li>Snapshot unavailable ({@code livePos == null}) → return the original action
+     *       unchanged (can't reconcile, trust the WTX state view — legacy behaviour).</li>
      * </ul>
      */
     private ReconcileOutcome reconcileWithIbkr(WtxAction action, BigDecimal livePos,
                                                String instrument, String timeframe) {
-        if (livePos == null || livePos.signum() == 0) {
+        if (livePos == null) {
+            // Snapshot unavailable / portfolio service not wired — can't reconcile.
+            return ReconcileOutcome.passthrough(action);
+        }
+        if (livePos.signum() == 0) {
+            // IBKR CONFIRMED FLAT. Downgrade a REVERSE to a plain OPEN so the close leg never
+            // fires a naked order; an OPEN stays an OPEN.
+            if (action == WtxAction.REVERSE_TO_LONG) {
+                log.warn("WTX [{} {}] reconcile: IBKR flat — downgrading REVERSE_TO_LONG to OPEN_LONG "
+                        + "(nothing to flatten; close leg suppressed to avoid a naked order)",
+                        instrument, timeframe);
+                return ReconcileOutcome.passthrough(WtxAction.OPEN_LONG);
+            }
+            if (action == WtxAction.REVERSE_TO_SHORT) {
+                log.warn("WTX [{} {}] reconcile: IBKR flat — downgrading REVERSE_TO_SHORT to OPEN_SHORT "
+                        + "(nothing to flatten; close leg suppressed to avoid a naked order)",
+                        instrument, timeframe);
+                return ReconcileOutcome.passthrough(WtxAction.OPEN_SHORT);
+            }
             return ReconcileOutcome.passthrough(action);
         }
         boolean longAction = action == WtxAction.OPEN_LONG || action == WtxAction.REVERSE_TO_LONG;
@@ -952,6 +998,31 @@ public class WtxExecutionBridge {
     private Optional<TradeExecutionRecord> findOpenWtxExecution(String instrument, String timeframe) {
         return executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
                 instrument, timeframe, ExecutionTriggerSource.WTX_AUTO);
+    }
+
+    /**
+     * Voids (→ {@code CANCELLED}) the bridge's own most-recent non-terminal WTX row for an
+     * (instrument, timeframe) when IBKR is confirmed flat — the row tracks a phantom position
+     * (flattened outside WTX). DB-only reconcile, no broker side effect; idempotent (a no-op
+     * when no active row exists). A row already in {@code EXIT_SUBMITTED} is left alone so the
+     * fill tracker can reconcile its in-flight flatten to {@code CLOSED}.
+     */
+    private void voidStaleActiveWtxRow(String instrument, String timeframe, String reason) {
+        Optional<TradeExecutionRecord> stale = findOpenWtxExecution(instrument, timeframe);
+        if (stale.isEmpty()) return;
+        TradeExecutionRecord row = stale.get();
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) return;
+        voidRow(row, reason);
+        log.warn("WTX [{} {}] reconcile: voided stale ACTIVE row {} — IBKR flat, position closed outside WTX",
+                instrument, timeframe, row.getId());
+    }
+
+    /** Marks a row {@code CANCELLED} with a reason and persists it. No broker side effect. */
+    private void voidRow(TradeExecutionRecord row, String reason) {
+        row.setStatus(ExecutionStatus.CANCELLED);
+        row.setStatusReason(reason);
+        row.setUpdatedAt(Instant.now());
+        executionRepository.save(row);
     }
 
     /**
