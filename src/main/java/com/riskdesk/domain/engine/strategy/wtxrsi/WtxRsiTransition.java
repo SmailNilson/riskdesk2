@@ -1,6 +1,7 @@
 package com.riskdesk.domain.engine.strategy.wtxrsi;
 
 import com.riskdesk.domain.model.Candle;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -21,8 +22,11 @@ import java.util.Optional;
  * <i>upstream</i> (it may consult the application-layer SMC engine) and passed
  * in as a value, preserving the purity of this class.
  *
- * <p>The transition order mirrors the legacy {@code onCandleClosed} exactly:
+ * <p>The transition order mirrors the legacy {@code onCandleClosed} (with a
+ * daily P&L reset prepended):
  * <ol>
+ *   <li>daily reset: zero the realized-P&L accumulator when this bar opens a
+ *       new CME trading day relative to the last processed bar;</li>
  *   <li>protective exit (SL/TP) on the just-closed bar — pessimistic: SL wins;</li>
  *   <li>snapshot the resolved bias onto the state;</li>
  *   <li>swing-bias force-close of an open position pointing against the bias;</li>
@@ -49,6 +53,18 @@ public final class WtxRsiTransition {
             WtxRsiConfig config) {
 
         List<WtxRsiDecision> decisions = new ArrayList<>();
+
+        // ── 0) Daily P&L reset ──
+        // cumulativeRealizedPnl is scoped to the current CME trading day
+        // (17:00 ET → 17:00 ET). When this bar opens a new trading day relative
+        // to the last processed bar, zero the accumulator *before* this bar's own
+        // close (if any) is added — so each session starts at 0, not yesterday's
+        // total. lastCandleTs is null only on the very first bar (nothing to reset).
+        if (state.lastCandleTs() != null
+                && !TradingSessionResolver.tradingDate(bar.getTimestamp())
+                        .equals(TradingSessionResolver.tradingDate(state.lastCandleTs()))) {
+            state = state.withDailyPnlReset();
+        }
 
         // ── 1) Protective exit on the just-closed bar (SL/TP, pessimistic) ──
         if (state.currentPosition() != WtxRsiPosition.FLAT) {

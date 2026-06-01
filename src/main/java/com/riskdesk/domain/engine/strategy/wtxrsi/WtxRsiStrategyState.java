@@ -26,7 +26,12 @@ public record WtxRsiStrategyState(
         BigDecimal stopLoss,
         /** Active take-profit on the open position, null when FLAT or REVERSAL mode. */
         BigDecimal takeProfit,
-        /** Realized P&L since this state was first created (informational; never blocks). */
+        /**
+         * Realized P&L for the <b>current CME trading day</b> (17:00 ET → 17:00 ET).
+         * The reducer zeroes this at each session boundary via {@link #withDailyPnlReset()},
+         * so it is a per-day figure, not an all-time running total. Informational;
+         * never blocks.
+         */
         BigDecimal cumulativeRealizedPnl,
         /** Timestamp of the most recently processed candle. */
         Instant lastCandleTs,
@@ -92,6 +97,20 @@ public record WtxRsiStrategyState(
                 instrument, timeframe, WtxRsiPosition.FLAT,
                 null, BigDecimal.ZERO, null, null,
                 updated, lastCandleTs, Instant.now(),
+                autoExecutionEnabled, configuredOrderQty,
+                swingBiasFilterEnabled, lastSwingBias, chaikinRequired
+        );
+    }
+
+    /**
+     * Zero the realized-P&L accumulator. Called by the reducer at the CME
+     * trading-day boundary so {@link #cumulativeRealizedPnl} reflects only the
+     * current session's realized P&L rather than an all-time running total.
+     */
+    public WtxRsiStrategyState withDailyPnlReset() {
+        return new WtxRsiStrategyState(
+                instrument, timeframe, currentPosition, entryPrice, entryQty, stopLoss, takeProfit,
+                BigDecimal.ZERO, lastCandleTs, Instant.now(),
                 autoExecutionEnabled, configuredOrderQty,
                 swingBiasFilterEnabled, lastSwingBias, chaikinRequired
         );

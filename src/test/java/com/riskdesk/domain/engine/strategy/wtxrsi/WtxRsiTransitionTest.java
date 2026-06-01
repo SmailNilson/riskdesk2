@@ -169,10 +169,74 @@ class WtxRsiTransitionTest {
         assertEquals(0, r.newState().stopLoss().compareTo(open.plan().stopLoss()));
     }
 
+    // ── daily P&L reset (CME trading-day boundary, 17:00 ET) ────────────────────
+
+    // 2025-01-06 is a Monday; EST = UTC-5.
+    private static final Instant MON_10ET = Instant.parse("2025-01-06T15:00:00Z"); // trading date Mon
+    private static final Instant MON_14ET = Instant.parse("2025-01-06T19:00:00Z"); // trading date Mon
+    private static final Instant MON_16ET = Instant.parse("2025-01-06T21:00:00Z"); // trading date Mon
+    private static final Instant MON_18ET = Instant.parse("2025-01-06T23:00:00Z"); // trading date Tue (>=17:00 ET)
+
+    @Test
+    void daily_pnl_resets_to_zero_on_new_trading_day() {
+        WtxRsiStrategyState flatWithPnl = flat(false)
+                .withFlat(bd(100))           // +100 realized on the prior session
+                .withLastCandleTs(MON_16ET); // last bar belonged to Monday's session
+        Candle nextSession = candleAt(MON_18ET, 17000, 17005, 16995, 17001); // Tuesday session
+
+        WtxRsiTransition.Result r = WtxRsiTransition.reduce(
+                flatWithPnl, nextSession, List.of(nextSession), Optional.empty(),
+                WtxRsiSwingBias.NEUTRAL, config);
+
+        assertTrue(r.decisions().isEmpty(), "FLAT + no signal emits no decision");
+        assertEquals(0, r.newState().cumulativeRealizedPnl().compareTo(BigDecimal.ZERO),
+                "a new CME trading day must zero the realized-P&L accumulator");
+    }
+
+    @Test
+    void daily_pnl_unchanged_within_the_same_trading_day() {
+        WtxRsiStrategyState flatWithPnl = flat(false)
+                .withFlat(bd(100))
+                .withLastCandleTs(MON_10ET);
+        Candle sameSession = candleAt(MON_14ET, 17000, 17005, 16995, 17001); // still Monday
+
+        WtxRsiTransition.Result r = WtxRsiTransition.reduce(
+                flatWithPnl, sameSession, List.of(sameSession), Optional.empty(),
+                WtxRsiSwingBias.NEUTRAL, config);
+
+        assertEquals(0, r.newState().cumulativeRealizedPnl().compareTo(bd(100)),
+                "P&L must keep accumulating within a single trading day");
+    }
+
+    @Test
+    void daily_reset_precedes_this_bars_close_pnl() {
+        // A new-session bar that also realizes a loss must start the day at 0 and
+        // then apply only this close — never yesterday's total plus the new close.
+        WtxRsiStrategyState longPos = flat(false)
+                .withFlat(bd(100))                                   // prior-session total
+                .withPosition(WtxRsiPosition.LONG, bd(17000), BigDecimal.ONE, bd(16990), null)
+                .withLastCandleTs(MON_16ET);
+        Candle nextSessionSl = candleAt(MON_18ET, 16995, 16998, 16985, 16992); // Tuesday, hits SL
+
+        WtxRsiTransition.Result r = WtxRsiTransition.reduce(
+                longPos, nextSessionSl, List.of(nextSessionSl), Optional.empty(),
+                WtxRsiSwingBias.NEUTRAL, config);
+
+        WtxRsiDecision.Close close = assertClose(r.decisions().get(0));
+        assertEquals(WtxRsiDecision.CloseCause.STOP_LOSS, close.cause());
+        assertEquals(0, close.realizedPnl().compareTo(bd(-20)), "SL close realizes -20 USD");
+        assertEquals(0, r.newState().cumulativeRealizedPnl().compareTo(bd(-20)),
+                "the +100 from the prior session must be dropped before this close is added");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static WtxRsiStrategyState flat(boolean chaikinRequired) {
         return WtxRsiStrategyState.initial("MNQ", "5m", chaikinRequired);
+    }
+
+    private static Candle candleAt(Instant ts, double open, double high, double low, double close) {
+        return new Candle(Instrument.MNQ, "5m", ts, bd(open), bd(high), bd(low), bd(close), 1000L);
     }
 
     private static WtxRsiDecision.Close assertClose(WtxRsiDecision d) {
