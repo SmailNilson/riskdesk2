@@ -1041,6 +1041,53 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reconcile_offsettingLegsNetZero_notTreatedAsFlat_reverseKeepsTwoLegs() {
+        // Codex P1: rollover/calendar overlap holds +1 MCLM6 and -1 MCLU6 — these net to zero but are
+        // LIVE legs. Must NOT be read as confirmed-flat: a REVERSE keeps its normal two-leg behaviour
+        // (close the tracked leg + open the new side), not the flat downgrade to a single open, and the
+        // local row is never voided as a phantom.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWithLegs(
+                new String[]{"MCLM6", "MCLU6"}, new BigDecimal[]{bd(1), bd(-1)})); // net 0, both live
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ACTIVE)); // WTX tracks the front-month long leg
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // Two legs (close tracked long + open new short) — NOT downgraded to one open.
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+        long voided = repo.all().stream().filter(r -> r.getStatus() == ExecutionStatus.CANCELLED).count();
+        assertEquals(0, voided, "offsetting live legs must not be voided as confirmed-flat drift");
+    }
+
+    @Test
+    void close_offsettingLegsNetZero_notTreatedAsFlat_flattensTrackedLeg() {
+        // CLOSE counterpart: offsetting live legs (net 0) must not hit the confirmed-flat void/skip —
+        // run the normal close path and flatten the WTX-tracked leg.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWithLegs(
+                new String[]{"MCLM6", "MCLU6"}, new BigDecimal[]{bd(1), bd(-1)}));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // the flatten of the tracked leg
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.all().get(0).getStatus(),
+                "tracked leg is flattened normally, not voided as confirmed-flat");
+    }
+
+    @Test
     void reconcile_scopesPortfolioReadToConfiguredBrokerAccount() {
         // wtx.broker-account-id is configured to "DU777"; the bridge must request that account
         // from the portfolio service AND filter out positions belonging to other accounts so a
@@ -1188,6 +1235,20 @@ class WtxExecutionBridgeTest {
         return new IbkrPortfolioSnapshot(
                 true, "DU123", List.of(), bd(10000), bd(2000), bd(8000),
                 bd(8000), bd(0), bd(0), bd(0), "USD", List.of(pos), null);
+    }
+
+    /** Multi-leg IBKR portfolio snapshot — for offsetting rollover/calendar reconcile tests. */
+    private static IbkrPortfolioSnapshot snapshotWithLegs(String[] contractDescs, BigDecimal[] positions) {
+        List<IbkrPositionView> legs = new ArrayList<>();
+        for (int i = 0; i < contractDescs.length; i++) {
+            legs.add(new IbkrPositionView(
+                    "DU123", 10000L + i, contractDescs[i], "FUT",
+                    positions[i], BigDecimal.ZERO, BigDecimal.ZERO,
+                    BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "USD"));
+        }
+        return new IbkrPortfolioSnapshot(
+                true, "DU123", List.of(), bd(10000), bd(2000), bd(8000),
+                bd(8000), bd(0), bd(0), bd(0), "USD", legs, null);
     }
 
     /** Minimal in-memory TradeExecutionRepositoryPort for bridge unit tests. */

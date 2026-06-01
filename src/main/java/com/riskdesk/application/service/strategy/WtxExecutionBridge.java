@@ -224,8 +224,13 @@ public class WtxExecutionBridge {
         // failed reconcile). Trust IBKR: a same-side existing position skips the duplicate;
         // an opposite-side position upgrades the OPEN into a REVERSE so we never stack a fresh
         // contract on top of an unknown one. Returns the (possibly rewritten) action.
-        BigDecimal liveIbkrPosition = readLiveIbkrPosition(instrument);
-        ReconcileOutcome reconcile = reconcileWithIbkr(action, liveIbkrPosition, state.instrument(), tf);
+        // ONE snapshot read → net (for same/opposite reconcile) + confirmedFlat (stricter than
+        // net == 0: requires no matching nonzero leg, so offsetting rollover/calendar legs are
+        // never mistaken for flat). Single getPortfolio call keeps account scoping unambiguous.
+        IbkrPositionState ibkrState = readIbkrPositionState(instrument);
+        BigDecimal liveIbkrPosition = ibkrState.net();
+        boolean ibkrConfirmedFlat = ibkrState.confirmedFlat();
+        ReconcileOutcome reconcile = reconcileWithIbkr(action, liveIbkrPosition, ibkrConfirmedFlat, state.instrument(), tf);
         if (reconcile.skipResult() != null) {
             // Same-side IBKR position with no WTX tracking row: synthesize an ACTIVE row so the
             // next CLOSE / MAX_LOSS / trailing-exit signal can locate the broker-side position and
@@ -243,7 +248,7 @@ public class WtxExecutionBridge {
         String orderAction = mapToOrderAction(action);
 
         // IBKR confirmed flat — resolve our own non-terminal WTX row before opening fresh.
-        if (liveIbkrPosition != null && liveIbkrPosition.signum() == 0) {
+        if (ibkrConfirmedFlat) {
             Optional<TradeExecutionRecord> existingRow = findOpenWtxExecution(state.instrument(), tf);
             if (existingRow.isPresent()) {
                 TradeExecutionRecord existing = existingRow.get();
@@ -573,9 +578,10 @@ public class WtxExecutionBridge {
         //   • in-flight (ENTRY_SUBMITTED / ENTRY_PARTIALLY_FILLED / …) — the entry is resting UNFILLED,
         //     which is exactly why IBKR reads flat. Skip WITHOUT voiding (the order is still live and
         //     tracked) and return SKIPPED_ENTRY_IN_FLIGHT so the caller keeps the position side.
-        // Either way: never send a naked flatten. DB-only reconcile.
-        BigDecimal livePos = readLiveIbkrPosition(instrument);
-        if (livePos != null && livePos.signum() == 0) {
+        // Either way: never send a naked flatten. DB-only reconcile. "Confirmed flat" is stricter
+        // than net == 0 — offsetting rollover/calendar legs (net 0 but live) are NOT flat, so the
+        // normal close path runs and flattens the WTX-tracked leg.
+        if (readIbkrPositionState(instrument).confirmedFlat()) {
             if (row.getStatus() == ExecutionStatus.ACTIVE) {
                 voidRow(row, "WTX " + action.name()
                         + " — IBKR already flat; flatten skipped (stale row voided, no naked order)");
@@ -734,14 +740,23 @@ public class WtxExecutionBridge {
     }
 
     /**
-     * Reads IBKR's live net position for {@code instrument}. Sums signed positions across
-     * every contract description that matches the instrument's symbol — necessary because
-     * IBKR returns positions keyed by conid (front/back month each get their own row when a
-     * rollover overlaps). Returns {@code null} when the portfolio service is not wired or
-     * the snapshot is unavailable; treat null as "unknown, fall back to legacy behaviour".
+     * IBKR live position for an instrument, read from a SINGLE portfolio snapshot:
+     * <ul>
+     *   <li>{@code net} — signed position summed across every matching contract description (front/
+     *       back month each get their own row during a rollover overlap). {@code null} when the
+     *       portfolio service is not wired or the snapshot is unavailable ("unknown, fall back to
+     *       legacy behaviour").</li>
+     *   <li>{@code confirmedFlat} — true only when the snapshot is connected AND there is no matching
+     *       nonzero leg at all. Stricter than {@code net == 0}: offsetting live legs across expiries
+     *       (a calendar/rollover overlap holding {@code +1 MCLM6} and {@code -1 MCLU6}) net to zero
+     *       but are LIVE positions and must NOT be treated as flat.</li>
+     * </ul>
+     * One read keeps the account-scoped {@code getPortfolio} call to a single invocation per route.
      */
-    private BigDecimal readLiveIbkrPosition(Instrument instrument) {
-        if (ibkrPortfolioService == null) return null;
+    private record IbkrPositionState(BigDecimal net, boolean confirmedFlat) {}
+
+    private IbkrPositionState readIbkrPositionState(Instrument instrument) {
+        if (ibkrPortfolioService == null) return new IbkrPositionState(null, false);
         // Scope reconcile to the same account the bridge will submit the order on. In a
         // multi-account gateway, querying the default selection could read account A's positions
         // while orders go to account B, producing spurious duplicate-skips or unwanted REVERSE
@@ -754,13 +769,14 @@ public class WtxExecutionBridge {
         } catch (RuntimeException e) {
             log.debug("WTX reconcile: portfolio snapshot unavailable for {} (account={}) — {}",
                     instrument, accountId, e.getMessage());
-            return null;
+            return new IbkrPositionState(null, false);
         }
         if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
-            return null;
+            return new IbkrPositionState(null, false);
         }
         String symbol = ibkrSymbol(instrument);
         BigDecimal total = BigDecimal.ZERO;
+        boolean anyNonzeroLeg = false;
         for (IbkrPositionView pos : snapshot.positions()) {
             if (pos == null || pos.position() == null) continue;
             // Second-line account filter: some gateways return positions across every account
@@ -771,9 +787,12 @@ public class WtxExecutionBridge {
             }
             if (matchesSymbol(pos.contractDesc(), symbol)) {
                 total = total.add(pos.position());
+                if (pos.position().signum() != 0) anyNonzeroLeg = true;
             }
         }
-        return total;
+        // Confirmed flat = connected snapshot with NO nonzero matching leg. Offsetting legs that net
+        // to zero (anyNonzeroLeg && total == 0) are LIVE positions, hence not flat.
+        return new IbkrPositionState(total, !anyNonzeroLeg);
     }
 
     /**
@@ -834,22 +853,25 @@ public class WtxExecutionBridge {
      *       unchanged (can't reconcile, trust the WTX state view — legacy behaviour).</li>
      * </ul>
      */
-    private ReconcileOutcome reconcileWithIbkr(WtxAction action, BigDecimal livePos,
+    private ReconcileOutcome reconcileWithIbkr(WtxAction action, BigDecimal livePos, boolean confirmedFlat,
                                                String instrument, String timeframe) {
         if (livePos == null) {
             // Snapshot unavailable / portfolio service not wired — can't reconcile.
             return ReconcileOutcome.passthrough(action);
         }
         if (livePos.signum() == 0) {
-            // IBKR CONFIRMED FLAT. Downgrade a REVERSE to a plain OPEN so the close leg never
-            // fires a naked order; an OPEN stays an OPEN.
-            if (action == WtxAction.REVERSE_TO_LONG) {
+            // Net zero. Only downgrade a REVERSE to a plain OPEN when IBKR is CONFIRMED FLAT (no
+            // matching nonzero leg). A net of zero from offsetting legs across expiries (rollover/
+            // calendar overlap) is NOT flat — keep the normal two-leg reverse so the live legs stay
+            // managed. When confirmed flat, the reverse has nothing to flatten, so dropping the close
+            // leg avoids a naked order; an OPEN stays an OPEN.
+            if (confirmedFlat && action == WtxAction.REVERSE_TO_LONG) {
                 log.warn("WTX [{} {}] reconcile: IBKR flat — downgrading REVERSE_TO_LONG to OPEN_LONG "
                         + "(nothing to flatten; close leg suppressed to avoid a naked order)",
                         instrument, timeframe);
                 return ReconcileOutcome.passthrough(WtxAction.OPEN_LONG);
             }
-            if (action == WtxAction.REVERSE_TO_SHORT) {
+            if (confirmedFlat && action == WtxAction.REVERSE_TO_SHORT) {
                 log.warn("WTX [{} {}] reconcile: IBKR flat — downgrading REVERSE_TO_SHORT to OPEN_SHORT "
                         + "(nothing to flatten; close leg suppressed to avoid a naked order)",
                         instrument, timeframe);

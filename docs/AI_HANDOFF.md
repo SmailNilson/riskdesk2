@@ -50,12 +50,19 @@ same naked-flatten risk.
 - **A filled `ACTIVE` row the broker no longer holds is genuine drift** (voided); an unfilled
   resting entry legitimately reads flat and must never be voided (would corrupt the live order),
   stacked on (would double fill), or flattened against (would be naked).
+- **"Confirmed flat" ≠ net == 0.** `readIbkrPositionState` does ONE account-scoped snapshot read
+  and returns both the signed `net` (for the same/opposite reconcile) and `confirmedFlat` — true
+  only when there is **no matching nonzero leg at all**. Offsetting legs across expiries (a rollover/
+  calendar overlap holding `+1 MCLM6` and `-1 MCLU6`) net to zero but are LIVE: `confirmedFlat` is
+  false, so the reverse keeps its two-leg behaviour and the close flattens the tracked leg instead of
+  voiding it. Only `confirmedFlat` gates the void / REVERSE→OPEN downgrade / in-flight skip.
 - Unchanged when the snapshot is unavailable (`null`) or when IBKR holds a real position —
   the existing OPEN→REVERSE upgrade / duplicate-skip / synthesize paths are untouched.
 
-Tests: `WtxExecutionBridgeTest` +6 (reverse-on-flat downgrade with/without stale row,
+Tests: `WtxExecutionBridgeTest` +8 (reverse-on-flat downgrade with/without stale row,
 close-on-flat void+skip, snapshot-unavailable legacy two-leg, in-flight entry open-skip,
-in-flight entry close-skip) — 51 green; strategy package 111 green.
+in-flight entry close-skip, offsetting-legs reverse keeps two legs, offsetting-legs close
+flattens tracked leg) — 53 green; full suite 1830 green.
 
 **Known gap (follow-up, not in this change):** `IbkrWtxRsiExecutionBridge` (the separate
 WTX+RSI strategy) has no IBKR-truth reconcile at all — its `submitClose`/`submitOpen` trust
