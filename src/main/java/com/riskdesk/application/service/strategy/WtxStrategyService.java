@@ -252,6 +252,7 @@ public class WtxStrategyService {
                 && !state.maxLossHit()
                 && WtxRiskGuard.isMaxLossHit(state, config.maxDailyLossUsd())) {
             log.warn("WTX [{}] daily max-loss hit (dailyPnl={}), flattening + halting", instrumentName, state.dailyPnl());
+            boolean haltDeferred = false;
             if (state.currentPosition() != WtxPosition.FLAT) {
                 WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                         ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
@@ -261,15 +262,27 @@ public class WtxStrategyService {
                 WtxRoutingResult haltRouting =
                         routeToExecution(haltSignal, state, currentCandle.getClose());
                 haltSignal = haltSignal.withRouting(haltRouting);
-                // Prior entry still resting unfilled → no broker flatten sent; keep the position.
-                if (!skippedEntryInFlight(haltRouting)) {
+                if (skippedEntryInFlight(haltRouting)) {
+                    // Prior entry still resting UNFILLED and IBKR flat → no broker flatten was sent.
+                    // Do NOT mark max-loss-hit: withMaxLossHit() forces the state FLAT and the retry
+                    // gate (!state.maxLossHit()) would then lock out the flatten forever, leaving the
+                    // entry to fill later as an unmanaged position. Defer — keep the position so the
+                    // halt re-fires on a later bar once the entry fills (or the snapshot updates).
+                    haltDeferred = true;
+                    log.warn("WTX [{}] max-loss halt deferred — prior entry still in flight; "
+                            + "position kept, will retry on a later bar", instrumentName);
+                } else {
                     state = closePosition(state, instrument, currentCandle.getClose());
                 }
                 historyPort.save(haltSignal);
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
                 publishWtxEvent(haltSignal, currentCandle.getClose());
             }
-            state = state.withMaxLossHit();
+            // Only latch the halt (which also flattens the virtual state) when the flatten was not
+            // deferred — otherwise the next bar must be free to retry the max-loss flatten.
+            if (!haltDeferred) {
+                state = state.withMaxLossHit();
+            }
         }
 
         statePort.save(state.withLastCandleTs(event.timestamp()));

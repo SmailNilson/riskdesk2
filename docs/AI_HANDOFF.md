@@ -42,7 +42,11 @@ same naked-flatten risk.
 - **Caller keeps the position side on `SKIPPED_ENTRY_IN_FLIGHT`.** All four `WtxStrategyService`
   flatten sites (signal close, swing-bias rewrite-to-close, MAX_LOSS halt, NY force-close, plus
   the main open/reverse branch) skip their virtual-state flatten on that outcome — no broker
-  order was sent, so the panel keeps pointing at the resting entry's side.
+  order was sent, so the panel keeps pointing at the resting entry's side. The **MAX_LOSS halt**
+  additionally **defers the latch**: it skips `state.withMaxLossHit()` (which forces FLAT) when the
+  flatten was deferred, so the retry gate (`!state.maxLossHit()`) stays open and the halt re-fires
+  on a later bar once the entry fills — otherwise the resting entry would fill into an unmanaged,
+  un-haltable position.
 - **A filled `ACTIVE` row the broker no longer holds is genuine drift** (voided); an unfilled
   resting entry legitimately reads flat and must never be voided (would corrupt the live order),
   stacked on (would double fill), or flattened against (would be naked).
