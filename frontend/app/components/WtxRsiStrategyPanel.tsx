@@ -418,7 +418,7 @@ export default function WtxRsiStrategyPanel({
           {/* Cumulative realized P&L */}
           {state && (
             <div className="flex justify-between text-[10px]">
-              <span className="text-zinc-500">P&L cumulé (réalisé)</span>
+              <span className="text-zinc-500" title="P&L réalisé de la séance CME en cours (17:00 ET → 17:00 ET). Remis à zéro à chaque nouvelle journée de trading.">P&L du jour (réalisé)</span>
               <span
                 className={`font-mono ${
                   state.cumulativeRealizedPnl > 0 ? 'text-emerald-300' :
