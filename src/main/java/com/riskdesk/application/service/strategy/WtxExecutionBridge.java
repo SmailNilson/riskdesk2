@@ -242,15 +242,29 @@ public class WtxExecutionBridge {
         isReverse = action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
         String orderAction = mapToOrderAction(action);
 
-        // IBKR confirmed flat — void any stale ACTIVE WTX row for this (instrument, tf) BEFORE we
-        // open fresh. The position was flattened outside WTX (manual broker close, or a side opened
-        // while auto-exec was OFF), so the row tracks a phantom: left ACTIVE it would break the
-        // one-active-row invariant once the new OPEN row is created, and let a later CLOSE fire a
-        // naked flatten against it. A REVERSE has already been downgraded to OPEN above, so no close
-        // leg runs here. DB-only reconcile — no broker side effect.
+        // IBKR confirmed flat — resolve our own non-terminal WTX row before opening fresh.
         if (liveIbkrPosition != null && liveIbkrPosition.signum() == 0) {
-            voidStaleActiveWtxRow(state.instrument(), tf,
-                    "WTX reconcile: IBKR flat — stale row voided before " + action.name());
+            Optional<TradeExecutionRecord> existingRow = findOpenWtxExecution(state.instrument(), tf);
+            if (existingRow.isPresent()) {
+                TradeExecutionRecord existing = existingRow.get();
+                if (existing.getStatus() == ExecutionStatus.ACTIVE) {
+                    // Genuine drift: a FILLED position the broker no longer holds (manual close, or a
+                    // side opened while auto-exec was OFF). Void the phantom so the new OPEN is the
+                    // sole active row and a later CLOSE can't flatten it naked. DB-only, no broker call.
+                    voidRow(existing, "WTX reconcile: IBKR flat — stale row voided before " + action.name());
+                    log.warn("WTX [{} {}] reconcile: voided stale ACTIVE row {} — IBKR flat, position closed outside WTX",
+                            state.instrument(), tf, existing.getId());
+                } else {
+                    // An entry order is resting UNFILLED at the broker — IBKR reads flat only because it
+                    // hasn't filled yet. Opening another now risks a DOUBLE FILL once both rest, leaving
+                    // two non-terminal rows on one panel. Skip and let the in-flight order resolve
+                    // (fill → ACTIVE, or terminal) before any new entry on a later bar.
+                    log.info("WTX [{} {}] open/reverse skipped — entry row {} still in flight ({}) while IBKR flat; "
+                            + "not stacking a second order", state.instrument(), tf, existing.getId(), existing.getStatus());
+                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE,
+                            "entry still in flight (" + existing.getStatus() + ") — open skipped to avoid double fill");
+                }
+            }
         }
 
         // Pre-flight margin — sized by the NET margin delta the order will create.
@@ -1001,29 +1015,6 @@ public class WtxExecutionBridge {
     private Optional<TradeExecutionRecord> findOpenWtxExecution(String instrument, String timeframe) {
         return executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
                 instrument, timeframe, ExecutionTriggerSource.WTX_AUTO);
-    }
-
-    /**
-     * Voids (→ {@code CANCELLED}) the bridge's own stale {@code ACTIVE} WTX row for an
-     * (instrument, timeframe) when IBKR is confirmed flat — a <i>filled</i> position the broker
-     * no longer holds (flattened outside WTX). DB-only reconcile, no broker side effect; idempotent
-     * (a no-op when no active row exists).
-     *
-     * <p><b>Only {@code ACTIVE} rows are voided.</b> {@code findOpenWtxExecution} also returns
-     * non-terminal in-flight rows ({@code ENTRY_SUBMITTED}, {@code ENTRY_PARTIALLY_FILLED},
-     * {@code VIRTUAL_EXIT_TRIGGERED}, {@code EXIT_SUBMITTED}) — an entry order resting unfilled at
-     * the broker legitimately reads as a zero IBKR position, so voiding it would corrupt the live
-     * order's tracking and let the new open duplicate exposure. Those are left to the fill tracker.
-     * Only a confirmed-filled {@code ACTIVE} position that IBKR now reports flat is genuine drift.
-     */
-    private void voidStaleActiveWtxRow(String instrument, String timeframe, String reason) {
-        Optional<TradeExecutionRecord> stale = findOpenWtxExecution(instrument, timeframe);
-        if (stale.isEmpty()) return;
-        TradeExecutionRecord row = stale.get();
-        if (row.getStatus() != ExecutionStatus.ACTIVE) return;
-        voidRow(row, reason);
-        log.warn("WTX [{} {}] reconcile: voided stale ACTIVE row {} — IBKR flat, position closed outside WTX",
-                instrument, timeframe, row.getId());
     }
 
     /** Marks a row {@code CANCELLED} with a reason and persists it. No broker side effect. */

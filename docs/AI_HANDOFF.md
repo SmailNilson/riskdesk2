@@ -22,17 +22,24 @@ same naked-flatten risk.
   from `livePos == 0` (IBKR confirmed flat). On confirmed flat, **downgrade**
   `REVERSE_TO_LONG/SHORT → OPEN_LONG/SHORT` so no close leg runs — exactly one order at the
   panel qty.
-- `handleEntry`: on confirmed flat, void (`→ CANCELLED`) any stale `ACTIVE` WTX row for the
-  (instrument, timeframe) before opening, keeping the one-active-row invariant so a later
-  CLOSE can't target a phantom. DB-only, no broker side effect.
-- `handleClose`: on confirmed flat, skip the flatten and void the stale row instead of
-  sending a naked order. An `EXIT_SUBMITTED` row (flatten already in flight) is left for the
-  fill tracker.
+- `handleEntry`: on confirmed flat, resolve our own non-terminal WTX row before opening.
+  An `ACTIVE` row (a filled position the broker no longer holds) is voided (`→ CANCELLED`)
+  so the new OPEN is the sole active row. An **in-flight** row (`ENTRY_SUBMITTED` /
+  `ENTRY_PARTIALLY_FILLED` …) means an entry is resting **unfilled** — IBKR reads flat only
+  because it hasn't filled yet, so the open is **skipped** (`SKIPPED_DUPLICATE`) to avoid a
+  double fill once both rest. DB-only, no broker side effect.
+- `handleClose`: on confirmed flat **and** an `ACTIVE` row, skip the flatten and void the
+  stale row instead of sending a naked order. In-flight rows (`ENTRY_SUBMITTED`, …) fall
+  through to normal handling; an `EXIT_SUBMITTED` flatten is left for the fill tracker.
+- **Confirmed-flat acts only on `ACTIVE` rows** — a filled position the broker no longer
+  holds is genuine drift; an unfilled resting entry legitimately reads flat and must never be
+  voided (would corrupt the live order) or stacked on (would double fill).
 - Unchanged when the snapshot is unavailable (`null`) or when IBKR holds a real position —
   the existing OPEN→REVERSE upgrade / duplicate-skip / synthesize paths are untouched.
 
-Tests: `WtxExecutionBridgeTest` +4 (reverse-on-flat downgrade with/without stale row,
-close-on-flat skip, snapshot-unavailable legacy two-leg) — 49 green; strategy package 109 green.
+Tests: `WtxExecutionBridgeTest` +6 (reverse-on-flat downgrade with/without stale row,
+close-on-flat skip, snapshot-unavailable legacy two-leg, in-flight entry skip on flat,
+in-flight close fall-through) — 51 green; strategy package 111 green.
 
 **Known gap (follow-up, not in this change):** `IbkrWtxRsiExecutionBridge` (the separate
 WTX+RSI strategy) has no IBKR-truth reconcile at all — its `submitClose`/`submitOpen` trust

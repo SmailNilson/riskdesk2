@@ -988,11 +988,11 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void reconcile_ibkrFlat_preservesInFlightEntryRow_noVoidNoDuplicate() {
-        // Codex P1: an ENTRY_SUBMITTED row is an entry order resting UNFILLED at the broker, so IBKR
-        // legitimately reports flat. The confirmed-flat reconcile must NOT void it — voiding would
-        // corrupt the live order and let the new open duplicate exposure. Only a filled ACTIVE
-        // position counts as drift. The new open still proceeds (one order), the in-flight row stays.
+    void reconcile_ibkrFlat_inFlightEntryRow_skipsOpen_noVoidNoSecondOrder() {
+        // Codex P1 (follow-up): when IBKR reads flat ONLY because a prior entry is still resting
+        // UNFILLED (ENTRY_SUBMITTED), the bridge must NOT void that row AND must NOT open another —
+        // otherwise the first resting entry and the new one can both fill → double exposure, two
+        // non-terminal rows on one panel. Skip and let the in-flight order resolve first.
         IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
         when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // entry unfilled → IBKR flat
         WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
@@ -1006,14 +1006,15 @@ class WtxExecutionBridgeTest {
                 .withConfiguredOrderQty(1);
         WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
 
-        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
-        // In-flight entry row preserved — NOT voided.
-        TradeExecutionRecord after = repo.all().stream()
-                .filter(r -> r.getId().equals(inFlight.getId())).findFirst().orElseThrow();
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        // No second order — the open is skipped while the entry is in flight.
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        // In-flight entry row preserved (NOT voided) and no new row created.
+        assertEquals(1, repo.all().size(), "no new open row while an entry is in flight");
+        TradeExecutionRecord after = repo.all().get(0);
+        assertEquals(inFlight.getId(), after.getId());
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, after.getStatus(),
-                "in-flight ENTRY_SUBMITTED row must be preserved on confirmed-flat reconcile");
-        // Exactly ONE new order (the downgraded open) — no naked close leg, no duplicate.
-        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+                "in-flight ENTRY_SUBMITTED row must be preserved, not voided");
     }
 
     @Test
