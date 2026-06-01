@@ -566,19 +566,27 @@ public class WtxExecutionBridge {
                     + "skipping duplicate flatten", state.instrument(), tf, action, row.getId());
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
         }
-        // IBKR truth: if the broker is already flat AND this is a FILLED (ACTIVE) position, the row
-        // is stale (manual close, or a position opened while auto-exec was OFF). Flattening now would
-        // be a NAKED order that OPENS an unintended position. Void the row and skip — never send a
-        // naked flatten. DB-only reconcile. Restricted to ACTIVE: an ENTRY_SUBMITTED row is an entry
-        // resting unfilled at the broker (IBKR legitimately reads flat) — falling through keeps the
-        // pre-existing handling and never corrupts the in-flight order.
+        // IBKR truth: a confirmed-flat broker means flattening now would be a NAKED order that
+        // OPENS an unintended position. How we resolve depends on our own row's status:
+        //   • ACTIVE — a filled position the broker no longer holds (manual close, or a side opened
+        //     while auto-exec was OFF). Void the phantom and skip; the position is genuinely gone.
+        //   • in-flight (ENTRY_SUBMITTED / ENTRY_PARTIALLY_FILLED / …) — the entry is resting UNFILLED,
+        //     which is exactly why IBKR reads flat. Skip WITHOUT voiding (the order is still live and
+        //     tracked) and return SKIPPED_ENTRY_IN_FLIGHT so the caller keeps the position side.
+        // Either way: never send a naked flatten. DB-only reconcile.
         BigDecimal livePos = readLiveIbkrPosition(instrument);
-        if (livePos != null && livePos.signum() == 0 && row.getStatus() == ExecutionStatus.ACTIVE) {
-            voidRow(row, "WTX " + action.name()
-                    + " — IBKR already flat; flatten skipped (stale row voided, no naked order)");
-            log.warn("WTX [{} {}] close requested ({}) but IBKR is flat — row {} voided, no naked order",
-                    state.instrument(), tf, action, row.getId());
-            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, "IBKR already flat — flatten skipped");
+        if (livePos != null && livePos.signum() == 0) {
+            if (row.getStatus() == ExecutionStatus.ACTIVE) {
+                voidRow(row, "WTX " + action.name()
+                        + " — IBKR already flat; flatten skipped (stale row voided, no naked order)");
+                log.warn("WTX [{} {}] close requested ({}) but IBKR is flat — row {} voided, no naked order",
+                        state.instrument(), tf, action, row.getId());
+                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, "IBKR already flat — flatten skipped");
+            }
+            log.warn("WTX [{} {}] close requested ({}) but entry row {} is still in flight ({}) and IBKR flat — "
+                    + "flatten skipped to avoid a naked order", state.instrument(), tf, action, row.getId(), row.getStatus());
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                    "entry still in flight (" + row.getStatus() + ") — flatten skipped to avoid a naked order");
         }
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : positionQuantity(state);
         if (qty <= 0) {

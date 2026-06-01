@@ -33,18 +33,25 @@ same naked-flatten risk.
   (the only live order is the resting one — keep pointing at that side, not the never-opened
   new side). A new `WtxRoutingOutcome` value distinct from `SKIPPED_DUPLICATE`, whose
   reconcile-same-side case must *keep* the applied state.
-- `handleClose`: on confirmed flat **and** an `ACTIVE` row, skip the flatten and void the
-  stale row instead of sending a naked order. In-flight rows (`ENTRY_SUBMITTED`, …) fall
-  through to normal handling; an `EXIT_SUBMITTED` flatten is left for the fill tracker.
-- **Confirmed-flat acts only on `ACTIVE` rows** — a filled position the broker no longer
-  holds is genuine drift; an unfilled resting entry legitimately reads flat and must never be
-  voided (would corrupt the live order) or stacked on (would double fill).
+- `handleClose`: on confirmed flat, never send a naked flatten. An `ACTIVE` row (filled
+  position the broker no longer holds) is voided → `SKIPPED_NO_OPEN_ROW`. An **in-flight** row
+  (`ENTRY_SUBMITTED` / `ENTRY_PARTIALLY_FILLED`) is the resting unfilled entry that *makes*
+  IBKR read flat — the flatten would be a naked opposite-side order, so it is skipped **without
+  voiding** (the order is still live & tracked) → `SKIPPED_ENTRY_IN_FLIGHT`. An `EXIT_SUBMITTED`
+  flatten already in flight is left for the fill tracker.
+- **Caller keeps the position side on `SKIPPED_ENTRY_IN_FLIGHT`.** All four `WtxStrategyService`
+  flatten sites (signal close, swing-bias rewrite-to-close, MAX_LOSS halt, NY force-close, plus
+  the main open/reverse branch) skip their virtual-state flatten on that outcome — no broker
+  order was sent, so the panel keeps pointing at the resting entry's side.
+- **A filled `ACTIVE` row the broker no longer holds is genuine drift** (voided); an unfilled
+  resting entry legitimately reads flat and must never be voided (would corrupt the live order),
+  stacked on (would double fill), or flattened against (would be naked).
 - Unchanged when the snapshot is unavailable (`null`) or when IBKR holds a real position —
   the existing OPEN→REVERSE upgrade / duplicate-skip / synthesize paths are untouched.
 
 Tests: `WtxExecutionBridgeTest` +6 (reverse-on-flat downgrade with/without stale row,
-close-on-flat skip, snapshot-unavailable legacy two-leg, in-flight entry skip on flat,
-in-flight close fall-through) — 51 green; strategy package 111 green.
+close-on-flat void+skip, snapshot-unavailable legacy two-leg, in-flight entry open-skip,
+in-flight entry close-skip) — 51 green; strategy package 111 green.
 
 **Known gap (follow-up, not in this change):** `IbkrWtxRsiExecutionBridge` (the separate
 WTX+RSI strategy) has no IBKR-truth reconcile at all — its `submitClose`/`submitOpen` trust

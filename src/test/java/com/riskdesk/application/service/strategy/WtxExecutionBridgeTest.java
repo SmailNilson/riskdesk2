@@ -1018,10 +1018,12 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void close_ibkrFlat_inFlightEntryRow_notVoidedByFlatGuard() {
-        // Symmetric guard for handleClose: a CLOSE against an ENTRY_SUBMITTED (unfilled) row must NOT
-        // hit the confirmed-flat void path — that path is reserved for filled ACTIVE positions. The
-        // row falls through to the normal close handling (→ EXIT_SUBMITTED), never CANCELLED here.
+    void close_ibkrFlat_inFlightEntryRow_skipsFlatten_noNakedOrder_rowPreserved() {
+        // Codex P1 (CLOSE symmetry): a CLOSE / MAX_LOSS / force-close against an ENTRY_SUBMITTED
+        // (unfilled) row must NOT send a flatten — IBKR reads flat only because the entry hasn't
+        // filled, so the opposite-side order would be NAKED and could open an unintended position.
+        // Skip WITHOUT voiding (the resting order is still live & tracked), returning
+        // SKIPPED_ENTRY_IN_FLIGHT so the caller keeps the position side.
         IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
         when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
         WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
@@ -1030,10 +1032,12 @@ class WtxExecutionBridgeTest {
         repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED));
 
         WtxStrategyState state = flatState().withAutoExecution(true);
-        bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
 
-        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.all().get(0).getStatus(),
-                "in-flight entry row falls through to normal close handling, not the flat-void guard");
+        assertEquals(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, repo.all().get(0).getStatus(),
+                "in-flight entry row must be preserved — not voided, not flattened");
     }
 
     @Test
