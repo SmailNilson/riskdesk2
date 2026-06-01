@@ -261,7 +261,7 @@ public class WtxExecutionBridge {
                     // (fill → ACTIVE, or terminal) before any new entry on a later bar.
                     log.info("WTX [{} {}] open/reverse skipped — entry row {} still in flight ({}) while IBKR flat; "
                             + "not stacking a second order", state.instrument(), tf, existing.getId(), existing.getStatus());
-                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE,
+                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
                             "entry still in flight (" + existing.getStatus() + ") — open skipped to avoid double fill");
                 }
             }

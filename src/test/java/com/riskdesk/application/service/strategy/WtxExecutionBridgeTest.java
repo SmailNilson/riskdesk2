@@ -1006,7 +1006,7 @@ class WtxExecutionBridgeTest {
                 .withConfiguredOrderQty(1);
         WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
 
-        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        assertEquals(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT, result.outcome());
         // No second order — the open is skipped while the entry is in flight.
         verify(ibkrOrderService, never()).submitEntryOrder(any());
         // In-flight entry row preserved (NOT voided) and no new row created.

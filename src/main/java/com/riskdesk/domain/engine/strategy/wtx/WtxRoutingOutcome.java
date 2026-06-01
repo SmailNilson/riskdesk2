@@ -44,6 +44,15 @@ public enum WtxRoutingOutcome {
     /** A close/reverse was requested but no open WTX execution row exists for this timeframe. */
     SKIPPED_NO_OPEN_ROW,
     /**
+     * An OPEN / REVERSE was skipped because the bridge's own prior entry order is still
+     * <b>in flight</b> (a non-terminal {@code ENTRY_SUBMITTED} / {@code ENTRY_PARTIALLY_FILLED}
+     * row) while IBKR reads flat — the resting order simply hasn't filled yet. Submitting a second
+     * entry would risk a double fill. No broker order was sent. The caller must <b>revert</b> the
+     * optimistically-applied virtual state to its pre-action value: the only live order is the
+     * resting one, so the panel must keep pointing at that side, not the never-opened new side.
+     */
+    SKIPPED_ENTRY_IN_FLIGHT,
+    /**
      * Pre-flight margin check denied the order: estimated initial margin exceeded
      * available funds. No broker order was submitted — opposite of {@link #FAILED_BROKER_REJECT}
      * where IBKR rejects after submission.

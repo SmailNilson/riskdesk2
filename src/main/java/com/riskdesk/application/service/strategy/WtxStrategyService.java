@@ -221,6 +221,14 @@ public class WtxStrategyService {
                         state = closePosition(preActionState, instrument, currentCandle.getClose());
                         log.warn("WTX [{} {}] reverse flattened only — virtual state corrected to FLAT "
                                 + "(open leg skipped for margin)", instrumentName, event.timeframe());
+                    } else if (routing.outcome() == WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT) {
+                        // The bridge skipped the open: a prior entry order is still resting unfilled at
+                        // the broker. No order was sent, so revert the optimistically-applied action —
+                        // the only live order is the resting one, so the virtual state must keep pointing
+                        // at its (pre-action) side, not the never-opened new side.
+                        state = preActionState;
+                        log.warn("WTX [{} {}] open/reverse skipped — prior entry still in flight; virtual "
+                                + "state kept at pre-action side", instrumentName, event.timeframe());
                     }
                 }
             }

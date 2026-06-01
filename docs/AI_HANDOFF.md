@@ -26,8 +26,13 @@ same naked-flatten risk.
   An `ACTIVE` row (a filled position the broker no longer holds) is voided (`→ CANCELLED`)
   so the new OPEN is the sole active row. An **in-flight** row (`ENTRY_SUBMITTED` /
   `ENTRY_PARTIALLY_FILLED` …) means an entry is resting **unfilled** — IBKR reads flat only
-  because it hasn't filled yet, so the open is **skipped** (`SKIPPED_DUPLICATE`) to avoid a
-  double fill once both rest. DB-only, no broker side effect.
+  because it hasn't filled yet, so the open is **skipped** with the dedicated
+  `SKIPPED_ENTRY_IN_FLIGHT` outcome to avoid a double fill once both rest. DB-only, no broker
+  side effect. The caller (`WtxStrategyService`) applies the action optimistically before
+  routing, so on `SKIPPED_ENTRY_IN_FLIGHT` it **reverts** the virtual state to `preActionState`
+  (the only live order is the resting one — keep pointing at that side, not the never-opened
+  new side). A new `WtxRoutingOutcome` value distinct from `SKIPPED_DUPLICATE`, whose
+  reconcile-same-side case must *keep* the applied state.
 - `handleClose`: on confirmed flat **and** an `ACTIVE` row, skip the flatten and void the
   stale row instead of sending a naked order. In-flight rows (`ENTRY_SUBMITTED`, …) fall
   through to normal handling; an `EXIT_SUBMITTED` flatten is left for the fill tracker.
