@@ -14,7 +14,8 @@ import java.util.Optional;
  *   - rejects the trade (returns empty) when no fractal is in range or the
  *     resulting SL would sit on the wrong side of the entry price
  *   - computes the TP if {@link WtxRsiTpMode#R_MULTIPLE} is configured
- *   - doubles the contract count on Chaikin confirmation
+ *   - sizes the position at {@link WtxRsiConfig#baseContracts()} (Chaikin
+ *     confirmation no longer scales the contract count)
  */
 public final class WtxRsiRiskCalculator {
 
@@ -61,13 +62,9 @@ public final class WtxRsiRiskCalculator {
             tp = roundToTick(raw, config.tickSize());
         }
 
-        int contracts = signal.confirmed()
-                ? config.baseContracts() * config.confirmedMultiplier()
-                : config.baseContracts();
-
         return Optional.of(new WtxRsiRiskPlan(
                 signal.side(),
-                contracts,
+                config.baseContracts(),
                 roundToTick(entryPrice, config.tickSize()),
                 stop,
                 tp,

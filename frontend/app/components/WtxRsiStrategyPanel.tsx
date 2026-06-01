@@ -129,7 +129,7 @@ function SignalCard({ sig }: { sig: WtxRsiSignalView }) {
       <div className="flex items-center gap-1.5 flex-wrap">
         <ActionChip action={sig.action} />
         {sig.chaikinConfirmed && (
-          <span title="Chaikin oscillator a confirmé la direction → qty × multiplier" className="text-[9px] px-1.5 py-0.5 rounded border border-cyan-700/60 text-cyan-300">×2</span>
+          <span title="Chaikin oscillator a confirmé la direction du signal (gate d'entrée)" className="text-[9px] px-1.5 py-0.5 rounded border border-cyan-700/60 text-cyan-300">CHK ✓</span>
         )}
         <span className="text-[10px] text-zinc-400">{sig.instrument} {sig.timeframe}</span>
         <span className="text-[10px] text-zinc-600 ml-auto">{timeStr}</span>
@@ -331,7 +331,7 @@ export default function WtxRsiStrategyPanel({
           {/* Toggles */}
           {state && (
             <div className="flex items-center gap-2 flex-wrap">
-              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="Nombre de contrats par défaut envoyés à IBKR sur chaque OPEN. Doublé si Chaikin confirme.">
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="Nombre de contrats envoyés à IBKR sur chaque OPEN. Taille fixe — Chaikin ne la modifie pas.">
                 <span className="text-zinc-500">Qty</span>
                 <input
                   type="number"
@@ -392,7 +392,7 @@ export default function WtxRsiStrategyPanel({
                 title={
                   state.chaikinRequired
                     ? 'Gate Chaikin actif — seuls les signaux confirmés par le Chaikin oscillator peuvent OUVRIR. Les sorties (reversal / SL / TP) ne sont pas affectées.'
-                    : 'Gate Chaikin inactif — tous les signaux qualifiés peuvent ouvrir (le Chaikin ne fait que doubler la taille quand il confirme).'
+                    : 'Gate Chaikin inactif — tous les signaux qualifiés peuvent ouvrir. La taille reste celle du champ Qty (le Chaikin ne modifie pas la quantité).'
                 }
                 className={`flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
                   state.chaikinRequired

@@ -25,8 +25,10 @@ import java.math.BigDecimal;
  * @param swingBufferTicks Ticks to add beyond the fractal price for the actual SL.
  * @param tickSize         Instrument tick size (MNQ = 0.25)
  * @param tickValueUsd     USD value per tick per contract (MNQ = 0.50)
- * @param baseContracts    Default position size (1)
- * @param confirmedMultiplier Multiplier on Chaikin confirmation (2)
+ * @param baseContracts    Default position size (1). The Chaikin oscillator no
+ *                         longer scales this — order quantity is driven solely
+ *                         by this value (backtest) or the per-panel configured
+ *                         qty (live). Chaikin only acts as an optional entry gate.
  * @param tpMode           REVERSAL (close on opposite signal) or R_MULTIPLE
  * @param tpRMultiple      If tpMode = R_MULTIPLE, target = R × initial risk.
  * @param chaikinFast      Chaikin oscillator EMA-fast (3)
@@ -59,7 +61,6 @@ public record WtxRsiConfig(
         BigDecimal tickSize,
         BigDecimal tickValueUsd,
         int baseContracts,
-        int confirmedMultiplier,
         WtxRsiTpMode tpMode,
         BigDecimal tpRMultiple,
         int chaikinFast,
@@ -84,7 +85,7 @@ public record WtxRsiConfig(
             int fractalLeftRight, int fractalMaxLookback,
             int swingBufferTicks,
             BigDecimal tickSize, BigDecimal tickValueUsd,
-            int baseContracts, int confirmedMultiplier,
+            int baseContracts,
             WtxRsiTpMode tpMode, BigDecimal tpRMultiple,
             int chaikinFast, int chaikinSlow, boolean chaikinEnabled,
             WtxRsiBiasSource biasSource) {
@@ -92,7 +93,7 @@ public record WtxRsiConfig(
                 rsiLength, rsiSmaLength, syncLookbackBars,
                 zoneMode, zoneLookbackBars, fractalLeftRight, fractalMaxLookback,
                 swingBufferTicks, tickSize, tickValueUsd,
-                baseContracts, confirmedMultiplier, tpMode, tpRMultiple,
+                baseContracts, tpMode, tpRMultiple,
                 chaikinFast, chaikinSlow, chaikinEnabled, biasSource,
                 false);
     }
@@ -107,7 +108,7 @@ public record WtxRsiConfig(
                 2, 20,  // Y=2 fractal, search up to 20 bars back
                 2,                                  // 2 ticks buffer beyond fractal
                 new BigDecimal("0.25"), new BigDecimal("0.50"),
-                1, 2,
+                1,
                 WtxRsiTpMode.REVERSAL, BigDecimal.ZERO,
                 3, 10, true,
                 WtxRsiBiasSource.FRACTAL_HH_HL
@@ -124,7 +125,7 @@ public record WtxRsiConfig(
                 2, 16,
                 2,
                 new BigDecimal("0.25"), new BigDecimal("0.50"),
-                1, 2,
+                1,
                 WtxRsiTpMode.REVERSAL, BigDecimal.ZERO,
                 3, 10, true,
                 WtxRsiBiasSource.FRACTAL_HH_HL

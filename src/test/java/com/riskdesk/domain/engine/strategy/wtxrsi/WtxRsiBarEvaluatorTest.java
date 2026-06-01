@@ -64,7 +64,7 @@ class WtxRsiBarEvaluatorTest {
                 WtxRsiZoneMode.VISITED_RECENTLY, 8,
                 strict.fractalLeftRight(), strict.fractalMaxLookback(),
                 strict.swingBufferTicks(), strict.tickSize(), strict.tickValueUsd(),
-                strict.baseContracts(), strict.confirmedMultiplier(),
+                strict.baseContracts(),
                 strict.tpMode(), strict.tpRMultiple(),
                 strict.chaikinFast(), strict.chaikinSlow(), strict.chaikinEnabled(),
                 strict.biasSource()
@@ -102,7 +102,7 @@ class WtxRsiBarEvaluatorTest {
                 defaults.zoneMode(), defaults.zoneLookbackBars(),
                 defaults.fractalLeftRight(), defaults.fractalMaxLookback(),
                 defaults.swingBufferTicks(), defaults.tickSize(), defaults.tickValueUsd(),
-                defaults.baseContracts(), defaults.confirmedMultiplier(),
+                defaults.baseContracts(),
                 defaults.tpMode(), defaults.tpRMultiple(),
                 defaults.chaikinFast(), defaults.chaikinSlow(), defaults.chaikinEnabled(),
                 defaults.biasSource()

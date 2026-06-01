@@ -73,10 +73,9 @@ public final class WtxRsiBacktestEngine {
         }
 
         // The backtest has no UI panel quantity, so its "configured qty" is the
-        // config's base-contracts. Seeding it here keeps the shared reducer's qty
-        // formula (configuredOrderQty × confirmation-multiplier) identical to the
-        // legacy plan.contracts() sizing — i.e. riskdesk.wtxrsi.base-contracts is
-        // honoured in backtests, while live (driven by the panel qty) is unchanged.
+        // config's base-contracts. Seeding it here makes the shared reducer size
+        // every entry at riskdesk.wtxrsi.base-contracts in backtests, while live
+        // sizing is driven by the panel qty. Chaikin no longer scales either.
         WtxRsiStrategyState state = WtxRsiStrategyState
                 .initial(BACKTEST_INSTRUMENT, BACKTEST_TIMEFRAME, config.chaikinRequired())
                 .withConfiguredOrderQty(config.baseContracts());

@@ -1,8 +1,8 @@
 # WTX+RSI Strategy
 
 MNQ-focused strategy combining **WaveTrend (LazyBear)** crossovers with an
-**RSI/SMA(RSI)** confirmation gate, Chaikin oscillator size multiplier, and a
-**Williams fractal** stop-loss. Lives in `domain/engine/strategy/wtxrsi/`.
+**RSI/SMA(RSI)** confirmation gate, an optional **Chaikin oscillator entry gate**,
+and a **Williams fractal** stop-loss. Lives in `domain/engine/strategy/wtxrsi/`.
 
 The Python prototype under `auto_trader/` documents the same rules as an
 executable specification — useful for sanity-checking parameter changes
@@ -20,19 +20,21 @@ A signal fires on the close of bar `i` when:
    - `STRICT_ZONE`: WT1 at bar `j` is within OB/OS band
    - `VISITED_RECENTLY`: OB/OS was visited in the last `zoneLookbackBars`
    - `CROSS_FROM_ZONE`: WT1 at bar `j` or `j-1` is within OB/OS
-4. **Chaikin confirmation (optional)** — if Chaikin oscillator agrees with
-   the signal direction at bar `i`, the contract count is doubled. When
-   `chaikin-required=true`, confirmation becomes a hard **entry gate**:
-   unconfirmed signals do not open at all (see below).
+4. **Chaikin confirmation (optional)** — when `chaikin-required=true`, Chaikin
+   agreement with the signal direction at bar `i` is a hard **entry gate**:
+   unconfirmed signals do not open at all (see below). Confirmation no longer
+   affects position size.
 
-Sizing: `baseContracts × (confirmedMultiplier if Chaikin agrees else 1)`.
+Sizing: every entry opens at the configured order quantity — the per-panel
+`Qty` field (live) or `riskdesk.wtxrsi.base-contracts` (backtest). Chaikin
+confirmation does **not** scale the contract count.
 
 **Chaikin as an entry gate (`chaikin-required`, ENABLED by default):** the
 shipped baseline sets `riskdesk.wtxrsi.chaikin-required=true`, so Chaikin
 confirmation is *required* to open — unconfirmed signals are suppressed
 (recorded as a `NONE` signal with reason `chaikin-required:`). Set it to `false`
-(per env / profile) to fall back to confirmation-as-size-only, where every
-qualified signal opens and Chaikin merely scales the contract count. This is
+(per env / profile) to let every qualified signal open regardless of Chaikin
+(confirmation then has no effect on entries — it never changed sizing). This is
 **entry-only**: exits keep their existing mechanism (reversal-on-opposite-signal
 and SL/TP fire regardless). The gate is a no-op unless `chaikin-enabled=true`
 (confirmation that is never computed would otherwise block every entry).

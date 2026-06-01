@@ -88,19 +88,16 @@ class WtxRsiBacktestParityTest {
 
     @Test
     void backtest_honours_base_contracts() {
-        // base-contracts=2: every entry sizes at 2 (unconfirmed) or 2×multiplier
-        // (confirmed). The pre-fix bug seeded configuredOrderQty=1 and produced
-        // 1/2 contracts regardless of base-contracts.
+        // base-contracts=2: every entry sizes at exactly 2. Chaikin confirmation
+        // no longer scales the size, and the pre-fix bug that seeded
+        // configuredOrderQty=1 (ignoring base-contracts) stays fixed.
         WtxRsiConfig base2 = configWithBaseContracts(2);
         List<Candle> candles = SyntheticCandles.mnq(800, 42);
         List<WtxRsiTrade> trades = new WtxRsiBacktestEngine(base2).run(candles).trades();
 
         assertFalse(trades.isEmpty(), "fixture must produce trades");
-        int mult = base2.confirmedMultiplier();
-        assertTrue(trades.stream().allMatch(t ->
-                        t.contracts() == base2.baseContracts()
-                                || t.contracts() == base2.baseContracts() * mult),
-                "every backtest trade must size at base-contracts (× multiplier when confirmed)");
+        assertTrue(trades.stream().allMatch(t -> t.contracts() == base2.baseContracts()),
+                "every backtest trade must size at base-contracts (Chaikin no longer doubles)");
     }
 
     private WtxRsiConfig configWithBaseContracts(int baseContracts) {
@@ -112,7 +109,7 @@ class WtxRsiBacktestParityTest {
                 config.zoneMode(), config.zoneLookbackBars(),
                 config.fractalLeftRight(), config.fractalMaxLookback(),
                 config.swingBufferTicks(), config.tickSize(), config.tickValueUsd(),
-                baseContracts, config.confirmedMultiplier(),
+                baseContracts,
                 config.tpMode(), config.tpRMultiple(),
                 config.chaikinFast(), config.chaikinSlow(), config.chaikinEnabled(),
                 config.biasSource());
