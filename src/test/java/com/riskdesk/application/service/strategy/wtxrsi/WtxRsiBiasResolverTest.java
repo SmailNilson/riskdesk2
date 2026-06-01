@@ -97,7 +97,7 @@ class WtxRsiBiasResolverTest {
                 base.zoneMode(), base.zoneLookbackBars(),
                 base.fractalLeftRight(), base.fractalMaxLookback(),
                 base.swingBufferTicks(), base.tickSize(), base.tickValueUsd(),
-                base.baseContracts(), base.confirmedMultiplier(),
+                base.baseContracts(),
                 base.tpMode(), base.tpRMultiple(),
                 base.chaikinFast(), base.chaikinSlow(), base.chaikinEnabled(),
                 src

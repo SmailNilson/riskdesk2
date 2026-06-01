@@ -146,9 +146,11 @@ public final class WtxRsiTransition {
         }
         WtxRsiRiskPlan plan = maybePlan.get();
 
-        // Honour the user's configured order qty (override auto base/confirmed sizing).
+        // Honour the user's configured order qty. Chaikin confirmation no longer
+        // scales the size — the panel qty (or backtest base-contracts) is the
+        // single source of position sizing.
         int contracts = state.configuredOrderQty() > 0
-                ? state.configuredOrderQty() * (signal.confirmed() ? config.confirmedMultiplier() : 1)
+                ? state.configuredOrderQty()
                 : plan.contracts();
         WtxRsiRiskPlan finalPlan = new WtxRsiRiskPlan(
                 plan.side(), contracts, plan.entryPrice(), plan.stopLoss(),

@@ -79,7 +79,7 @@ public class WtxRsiBacktestService {
                 req.fractalMaxLookback() != null ? req.fractalMaxLookback() : base.fractalMaxLookback(),
                 req.swingBufferTicks() != null ? req.swingBufferTicks() : base.swingBufferTicks(),
                 base.tickSize(), base.tickValueUsd(),
-                base.baseContracts(), base.confirmedMultiplier(),
+                base.baseContracts(),
                 req.tpMode() != null ? req.tpMode() : base.tpMode(),
                 req.tpRMultiple() != null ? req.tpRMultiple() : base.tpRMultiple(),
                 base.chaikinFast(), base.chaikinSlow(),

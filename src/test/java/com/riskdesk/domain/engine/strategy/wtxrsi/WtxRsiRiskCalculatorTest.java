@@ -44,13 +44,15 @@ class WtxRsiRiskCalculatorTest {
     }
 
     @Test
-    void confirmation_doubles_contract_count() {
+    void chaikin_confirmation_does_not_change_contract_count() {
         List<Candle> bars = SyntheticCandles.mnq(500, 42);
         List<WtxRsiSignal> signals = WtxRsiBarEvaluator.detectAll(bars, defaults);
         WtxRsiRiskPlan confirmed = findFirstPlanWithConfirmation(signals, bars, true);
         WtxRsiRiskPlan unconfirmed = findFirstPlanWithConfirmation(signals, bars, false);
         if (confirmed == null || unconfirmed == null) return; // fixture-dependent
-        assertEquals(defaults.baseContracts() * defaults.confirmedMultiplier(), confirmed.contracts());
+        // Chaikin no longer scales the position — confirmed and unconfirmed
+        // entries both size at base-contracts. Confirmation is an entry gate only.
+        assertEquals(defaults.baseContracts(), confirmed.contracts());
         assertEquals(defaults.baseContracts(), unconfirmed.contracts());
     }
 
@@ -75,7 +77,7 @@ class WtxRsiRiskCalculatorTest {
                 defaults.zoneMode(), defaults.zoneLookbackBars(),
                 defaults.fractalLeftRight(), defaults.fractalMaxLookback(),
                 defaults.swingBufferTicks(), defaults.tickSize(), defaults.tickValueUsd(),
-                defaults.baseContracts(), defaults.confirmedMultiplier(),
+                defaults.baseContracts(),
                 WtxRsiTpMode.R_MULTIPLE, new BigDecimal("2.0"),
                 defaults.chaikinFast(), defaults.chaikinSlow(), defaults.chaikinEnabled(),
                 defaults.biasSource()

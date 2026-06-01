@@ -44,9 +44,8 @@ public class WtxRsiStrategyProperties {
     private BigDecimal tickSize = new BigDecimal("0.25");
     private BigDecimal tickValueUsd = new BigDecimal("0.50");
 
-    // Sizing
+    // Sizing — Chaikin confirmation no longer scales this (entry gate only).
     private int baseContracts = 1;
-    private int confirmedMultiplier = 2;
 
     // TP
     private WtxRsiTpMode tpMode = WtxRsiTpMode.REVERSAL;
@@ -79,7 +78,7 @@ public class WtxRsiStrategyProperties {
                 fractalLeftRight, fractalMaxLookback,
                 swingBufferTicks,
                 tickSize, tickValueUsd,
-                baseContracts, confirmedMultiplier,
+                baseContracts,
                 tpMode, tpRMultiple,
                 chaikinFast, chaikinSlow, chaikinEnabled,
                 biasSource,
@@ -126,8 +125,6 @@ public class WtxRsiStrategyProperties {
     public void setTickValueUsd(BigDecimal tickValueUsd) { this.tickValueUsd = tickValueUsd; }
     public int getBaseContracts() { return baseContracts; }
     public void setBaseContracts(int baseContracts) { this.baseContracts = baseContracts; }
-    public int getConfirmedMultiplier() { return confirmedMultiplier; }
-    public void setConfirmedMultiplier(int confirmedMultiplier) { this.confirmedMultiplier = confirmedMultiplier; }
     public WtxRsiTpMode getTpMode() { return tpMode; }
     public void setTpMode(WtxRsiTpMode tpMode) { this.tpMode = tpMode; }
     public BigDecimal getTpRMultiple() { return tpRMultiple; }

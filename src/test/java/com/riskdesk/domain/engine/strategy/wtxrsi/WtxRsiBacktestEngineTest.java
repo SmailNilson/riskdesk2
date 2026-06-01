@@ -5,7 +5,10 @@ import com.riskdesk.domain.model.Candle;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -87,7 +90,7 @@ class WtxRsiBacktestEngineTest {
                 base.zoneMode(), base.zoneLookbackBars(),
                 base.fractalLeftRight(), base.fractalMaxLookback(),
                 base.swingBufferTicks(), base.tickSize(), base.tickValueUsd(),
-                base.baseContracts(), base.confirmedMultiplier(),
+                base.baseContracts(),
                 WtxRsiTpMode.R_MULTIPLE, new BigDecimal("1.5"),
                 base.chaikinFast(), base.chaikinSlow(), base.chaikinEnabled(),
                 base.biasSource()
@@ -112,19 +115,28 @@ class WtxRsiBacktestEngineTest {
         Result ungated = new WtxRsiBacktestEngine(base).run(bars);
         Result gated = new WtxRsiBacktestEngine(withChaikin(base, true, true)).run(bars);
 
-        // Confirmed trades carry the ×2 size (RiskCalculator), unconfirmed carry ×1.
-        int confirmedSize = base.baseContracts() * base.confirmedMultiplier();
-        long ungatedUnconfirmed = ungated.trades().stream()
-                .filter(t -> t.contracts() != confirmedSize).count();
+        // Chaikin no longer scales size, so confirmed vs unconfirmed entries are
+        // identified via the originating signal's confirmation flag, matched on
+        // the entry timestamp (an entry fills at its signal bar's time).
+        Set<Instant> confirmedTs = ungated.signals().stream()
+                .filter(WtxRsiSignal::confirmed)
+                .map(WtxRsiSignal::timestamp)
+                .collect(Collectors.toSet());
+        Set<Instant> unconfirmedTs = ungated.signals().stream()
+                .filter(s -> !s.confirmed())
+                .map(WtxRsiSignal::timestamp)
+                .collect(Collectors.toSet());
 
-        // Fixture sanity: the ungated run must contain unconfirmed entries, otherwise
-        // the gate would have nothing to prove.
+        // Fixture sanity: the ungated run must open at least one unconfirmed entry,
+        // otherwise the gate would have nothing to prove.
+        long ungatedUnconfirmed = ungated.trades().stream()
+                .filter(t -> unconfirmedTs.contains(t.entryTime())).count();
         assertTrue(ungatedUnconfirmed > 0, "fixture should produce unconfirmed trades to filter");
 
         // Core guarantee: with the gate on, every OPENED trade is Chaikin-confirmed.
         for (WtxRsiTrade t : gated.trades()) {
-            assertEquals(confirmedSize, t.contracts(),
-                    "chaikin-required must only open confirmed (×2) entries");
+            assertTrue(confirmedTs.contains(t.entryTime()),
+                    "chaikin-required must only open Chaikin-confirmed entries");
         }
         // The gate removes entries — it never adds them.
         assertTrue(gated.trades().size() <= ungated.trades().size());
@@ -154,7 +166,7 @@ class WtxRsiBacktestEngineTest {
                 base.zoneMode(), base.zoneLookbackBars(),
                 base.fractalLeftRight(), base.fractalMaxLookback(),
                 base.swingBufferTicks(), base.tickSize(), base.tickValueUsd(),
-                base.baseContracts(), base.confirmedMultiplier(),
+                base.baseContracts(),
                 base.tpMode(), base.tpRMultiple(),
                 base.chaikinFast(), base.chaikinSlow(), enabled,
                 base.biasSource(),
