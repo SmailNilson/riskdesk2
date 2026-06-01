@@ -988,6 +988,54 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reconcile_ibkrFlat_preservesInFlightEntryRow_noVoidNoDuplicate() {
+        // Codex P1: an ENTRY_SUBMITTED row is an entry order resting UNFILLED at the broker, so IBKR
+        // legitimately reports flat. The confirmed-flat reconcile must NOT void it — voiding would
+        // corrupt the live order and let the new open duplicate exposure. Only a filled ACTIVE
+        // position counts as drift. The new open still proceeds (one order), the in-flight row stays.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // entry unfilled → IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord inFlight = wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED);
+        repo.createIfAbsent(inFlight);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // In-flight entry row preserved — NOT voided.
+        TradeExecutionRecord after = repo.all().stream()
+                .filter(r -> r.getId().equals(inFlight.getId())).findFirst().orElseThrow();
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, after.getStatus(),
+                "in-flight ENTRY_SUBMITTED row must be preserved on confirmed-flat reconcile");
+        // Exactly ONE new order (the downgraded open) — no naked close leg, no duplicate.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_ibkrFlat_inFlightEntryRow_notVoidedByFlatGuard() {
+        // Symmetric guard for handleClose: a CLOSE against an ENTRY_SUBMITTED (unfilled) row must NOT
+        // hit the confirmed-flat void path — that path is reserved for filled ACTIVE positions. The
+        // row falls through to the normal close handling (→ EXIT_SUBMITTED), never CANCELLED here.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED));
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.all().get(0).getStatus(),
+                "in-flight entry row falls through to normal close handling, not the flat-void guard");
+    }
+
+    @Test
     void reconcile_scopesPortfolioReadToConfiguredBrokerAccount() {
         // wtx.broker-account-id is configured to "DU777"; the bridge must request that account
         // from the portfolio service AND filter out positions belonging to other accounts so a
