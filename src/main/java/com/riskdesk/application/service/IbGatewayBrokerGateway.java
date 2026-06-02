@@ -114,6 +114,15 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
             ? "IB Gateway native API connected"
             : "IB Gateway socket is not reachable. Start TWS or IB Gateway and enable the API socket.";
 
+        // Surface the #1 silent cause of "entries not sent": a Read-Only API session rejects every
+        // order. Detected on the last order reject (IbGatewayNativeClient#recordBrokerMessageForReadOnly).
+        String readOnly = nativeClient.brokerReadOnlyReason();
+        if (readOnly != null) {
+            message = "⚠ " + readOnly
+                + " — orders are BLOCKED by IBKR. Uncheck 'Read-Only API' in TWS / IB Gateway, then reconnect. "
+                + message;
+        }
+
         return new IbkrAuthStatusView(connected, connected, connected, false, endpoint, message);
     }
 

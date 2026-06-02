@@ -131,6 +131,15 @@ public class IbGatewayNativeClient {
     /** Snapshot of an IBKR async error tied to a specific order id. */
     private record OrderErrorContext(int errorCode, String message, Instant at) {}
 
+    /**
+     * Set to a human-readable reason when IBKR rejects an order because the API session is in
+     * Read-Only mode (error 321 / message containing "read-only"). This is the #1 silent cause of
+     * "entries not sent": the 'Read-Only API' box is checked in TWS / IB Gateway, so every order is
+     * rejected. Surfaced in {@code /api/ibkr/auth/status} and logged at ERROR (once per detection)
+     * so it never fails silently. Cleared on a fresh connect and on the first accepted order.
+     */
+    private final AtomicReference<String> brokerReadOnlyReason = new AtomicReference<>();
+
     public IbGatewayNativeClient(IbkrProperties properties) {
         this.properties = properties;
     }
@@ -172,6 +181,58 @@ public class IbGatewayNativeClient {
     private void purgeStaleOrderErrors() {
         Instant cutoff = Instant.now().minus(ORDER_ERROR_CONTEXT_TTL);
         pendingOrderErrors.entrySet().removeIf(e -> e.getValue().at().isBefore(cutoff));
+    }
+
+    /**
+     * Detect the IBKR "Read-Only mode" rejection from the broker message text. IBKR sends error
+     * code 321 with a message like "The API interface is currently in Read-Only mode." The text is
+     * the reliable signal across API versions, matched case-insensitively (mirrors
+     * {@link #looksLikeMarginReject(String)} style).
+     *
+     * <p>Package-private static so it can be unit-tested directly.</p>
+     */
+    static boolean looksLikeReadOnly(String text) {
+        if (text == null) return false;
+        String lower = text.toLowerCase();
+        return lower.contains("read-only") || lower.contains("read only");
+    }
+
+    /**
+     * Detect and record the IBKR "Read-Only mode" order rejection. We flag it (surfaced in
+     * {@code /api/ibkr/auth/status}), log it loudly ONCE per detection, and capture it as an order
+     * error so {@link #placeLimitOrder} reports a clear reason instead of a misleading
+     * timeout / "PendingSubmit". This is the single most common silent cause of "entries not sent".
+     *
+     * <p>Package-private so it can be unit-tested without a live controller.</p>
+     *
+     * @return {@code true} if a read-only rejection was detected.
+     */
+    boolean recordBrokerMessageForReadOnly(int id, int errorCode, String errorMsg) {
+        if (!looksLikeReadOnly(errorMsg)) {
+            return false;
+        }
+        String reason = "IBKR API session is in READ-ONLY mode (code " + errorCode + "): " + errorMsg;
+        if (brokerReadOnlyReason.getAndSet(reason) == null) {
+            log.error("IB Gateway REJECTED an order — the API session is in READ-ONLY mode. No orders "
+                + "will be sent until 'Read-Only API' is UNCHECKED in TWS / IB Gateway "
+                + "(Global Configuration -> API -> Settings), then reconnect. code={} msg={}",
+                errorCode, errorMsg);
+        }
+        if (id > 0) {
+            pendingOrderErrors.put(id, new OrderErrorContext(errorCode, errorMsg, Instant.now()));
+            purgeStaleOrderErrors();
+        }
+        return true;
+    }
+
+    /** Reason string when the broker API is in Read-Only mode, else {@code null}. */
+    public String brokerReadOnlyReason() {
+        return brokerReadOnlyReason.get();
+    }
+
+    /** True once IBKR has rejected an order due to Read-Only API mode (see {@link #brokerReadOnlyReason()}). */
+    public boolean isBrokerReadOnly() {
+        return brokerReadOnlyReason.get() != null;
     }
 
     /**
@@ -734,6 +795,20 @@ public class IbGatewayNativeClient {
         if (orderRef == null || orderRef.isBlank()) {
             throw new IllegalArgumentException("orderRef is required");
         }
+        // Phase 0.2 — software kill-switch. When riskdesk.ibkr.native-read-only=true, refuse EVERY
+        // order submission here at the single broker choke point, so the halt is uniform across all
+        // strategies (WTX, WTX+RSI, Quant, Perfect Setup, Playbook). Default is false (trading
+        // allowed). Reuses BROKER_REJECT (not a new Kind) to avoid touching the exhaustive Kind
+        // switches in the strategy bridges; the message makes the cause unambiguous.
+        if (properties.isNativeReadOnly()) {
+            log.warn("Order NOT sent (ref={}): riskdesk.ibkr.native-read-only kill-switch is ON. "
+                + "Set it to false to allow order submission.", orderRef);
+            throw new IbkrOrderRejectionException(
+                IbkrOrderRejectionException.Kind.BROKER_REJECT, null,
+                "native-read-only kill-switch is ON",
+                "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch). "
+                    + "Set it to false to allow order submission.");
+        }
         if (!ensureConnected()) {
             throw new IllegalStateException("IB Gateway native API is not connected.");
         }
@@ -835,6 +910,8 @@ public class IbGatewayNativeClient {
         OrderErrorContext asyncErr = pendingOrderErrors.remove(order.orderId());
 
         if (acceptedStatus.get() != null) {
+            // An accepted order proves the session is NOT read-only — clear any prior flag.
+            brokerReadOnlyReason.set(null);
             return new NativeOrderSubmission((long) order.orderId(), acceptedStatus.get(), orderRef, Instant.now());
         }
 
@@ -854,7 +931,14 @@ public class IbGatewayNativeClient {
         String detail;
 
         IbkrOrderRejectionException.Kind kind;
-        if (brokerCode != null && brokerCode == 201) {
+        if (asyncErr != null && looksLikeReadOnly(asyncErr.message())) {
+            // Read-Only API mode — the order was rejected, NOT working. Surface it clearly instead of
+            // letting the no-ack path below mislabel it as "PendingSubmit" (a working order).
+            kind = IbkrOrderRejectionException.Kind.BROKER_REJECT;
+            detail = "IBKR rejected the order — the API session is in READ-ONLY mode. Uncheck "
+                + "'Read-Only API' in TWS / IB Gateway (Global Configuration -> API -> Settings). "
+                + brokerMsg;
+        } else if (brokerCode != null && brokerCode == 201) {
             kind = IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN;
             detail = "IBKR margin insufficient (code=201): " + brokerMsg;
         } else if (looksLikeMarginReject(brokerMsg) || looksLikeMarginReject(error.get())) {
@@ -1584,6 +1668,9 @@ public class IbGatewayNativeClient {
             connectedFuture.complete(null);
             reconnectBlockedUntil = Instant.EPOCH;
             lastConnectionFailure = "connected";
+            // Fresh session: optimistically clear any prior Read-Only flag. It re-arms on the next
+            // order reject if the TWS / IB Gateway 'Read-Only API' box is still checked.
+            brokerReadOnlyReason.set(null);
             try {
                 controller.reqMktDataType(1);
             } catch (Exception e) {
@@ -1591,6 +1678,15 @@ public class IbGatewayNativeClient {
             }
             log.info("IB Gateway native API connected on {}:{} with clientId={}",
                 properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId());
+            // Visibility: surface the effective kill-switch state at connect. Enforced as of Phase 0.2
+            // in placeLimitOrder. Broker-side Read-Only (a different thing — set in TWS/IB Gateway) is
+            // auto-detected separately on the first order reject above.
+            if (properties.isNativeReadOnly()) {
+                log.warn("IB Gateway native-read-only kill-switch is ON — order submission is BLOCKED "
+                    + "for ALL strategies. Set riskdesk.ibkr.native-read-only=false to allow trading.");
+            } else {
+                log.info("IB Gateway native-read-only kill-switch is OFF — order submission allowed.");
+            }
             // Slice 3a — if a fill listener was registered before connect,
             // attach the persistent handlers now that the controller is live.
             try {
@@ -1672,6 +1768,10 @@ public class IbGatewayNativeClient {
                 pendingOrderErrors.put(id, new OrderErrorContext(errorCode, errorMsg, Instant.now()));
                 purgeStaleOrderErrors();
             }
+            // The #1 silent cause of "entries not sent": the TWS / IB Gateway 'Read-Only API' box is
+            // checked, so every order is rejected (error 321). Detect it, flag it for /auth/status,
+            // and surface it as a typed order reject instead of a misleading timeout.
+            recordBrokerMessageForReadOnly(id, errorCode, errorMsg);
             log.warn("IB Gateway message id={} code={} msg={}", id, errorCode, errorMsg);
         }
 
