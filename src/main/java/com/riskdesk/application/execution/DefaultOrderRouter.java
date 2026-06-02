@@ -6,6 +6,7 @@ import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.domain.execution.port.InstrumentTickProvider;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -52,17 +53,20 @@ public class DefaultOrderRouter implements OrderRouter {
     private final IbkrProperties ibkrProperties;
     private final ExecutionReadinessGate readinessGate;
     private final ExecutionReconciler reconciler;
+    private final InstrumentTickProvider tickProvider;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               ExecutionReadinessGate readinessGate,
-                              ExecutionReconciler reconciler) {
+                              ExecutionReconciler reconciler,
+                              InstrumentTickProvider tickProvider) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.readinessGate = readinessGate;
         this.reconciler = reconciler;
+        this.tickProvider = tickProvider;
     }
 
     @Override
@@ -628,8 +632,10 @@ public class DefaultOrderRouter implements OrderRouter {
         return brokerOrderId == null ? null : brokerOrderId.intValue();
     }
 
-    private static BigDecimal normalizeToTick(BigDecimal price, Instrument instrument) {
-        BigDecimal tick = instrument.getTickSize();
+    /** Round an order price to the instrument's tick. Prefers the broker's runtime minTick
+     *  (ContractDetails.minTick via the provider) over the hardcoded Instrument tick. */
+    private BigDecimal normalizeToTick(BigDecimal price, Instrument instrument) {
+        BigDecimal tick = tickProvider.minTick(instrument);
         return price.divide(tick, 0, RoundingMode.HALF_UP)
             .multiply(tick)
             .setScale(tick.scale(), RoundingMode.HALF_UP);

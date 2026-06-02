@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,24 @@ public class IbGatewayContractResolver {
         }
         // No registry value — fall back to legacy min-expiry behavior (should be rare in prod).
         return refresh(instrument);
+    }
+
+    /**
+     * The broker's {@code ContractDetails.minTick} for an already-resolved instrument — CACHE-ONLY, never
+     * triggers a contract fetch (safe to call on the order-submission path). Empty when the contract is not
+     * yet cached or the broker minTick is not a positive finite value; callers fall back to the
+     * instrument's hardcoded tick.
+     */
+    public Optional<BigDecimal> cachedMinTick(Instrument instrument) {
+        IbGatewayResolvedContract resolved = cache.get(instrument);
+        if (resolved == null || resolved.details() == null) {
+            return Optional.empty();
+        }
+        double minTick = resolved.details().minTick();
+        if (Double.isNaN(minTick) || Double.isInfinite(minTick) || minTick <= 0.0) {
+            return Optional.empty();
+        }
+        return Optional.of(BigDecimal.valueOf(minTick));
     }
 
     /**
