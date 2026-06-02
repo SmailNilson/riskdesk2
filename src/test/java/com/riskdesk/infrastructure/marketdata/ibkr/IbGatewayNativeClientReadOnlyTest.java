@@ -1,13 +1,8 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
-import com.ib.client.Contract;
-import com.ib.client.Types.Action;
 import org.junit.jupiter.api.Test;
 
-import java.math.BigDecimal;
-
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Phase 0.1 — IBKR Read-Only detection. The TWS / IB Gateway "Read-Only API" box being checked is
@@ -93,17 +88,10 @@ class IbGatewayNativeClientReadOnlyTest {
         assertThat(new IbkrProperties().isNativeReadOnly()).isFalse();
     }
 
-    @Test
-    void killSwitchOnBlocksSubmissionBeforeConnecting() {
-        IbkrProperties props = new IbkrProperties();
-        props.setNativeReadOnly(true);
-        IbGatewayNativeClient client = new IbGatewayNativeClient(props);
-
-        // With the kill-switch ON the order is refused at the choke point BEFORE any connection
-        // attempt — so this test needs no live gateway.
-        assertThatThrownBy(() -> client.placeLimitOrder(
-                new Contract(), "DU123", Action.BUY, 1, new BigDecimal("100.25"), "test-ref"))
-            .isInstanceOf(IbkrOrderRejectionException.class)
-            .hasMessageContaining("kill-switch");
-    }
+    // NOTE: the kill-switch gate (properties.isNativeReadOnly() -> reject) lives in placeLimitOrder
+    // AFTER ensureConnected() and the existing-order idempotency lookup, so a retry/recovery for an
+    // already-live orderRef still reuses the broker order id instead of being rejected (Codex review,
+    // PR #374). Reaching that gate needs a live gateway connection, so it is exercised at integration
+    // level rather than unit-tested here (a unit test would have to open a real socket). The
+    // default-off invariant above is the unit-level guard.
 }
