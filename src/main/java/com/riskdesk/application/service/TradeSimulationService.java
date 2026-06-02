@@ -20,6 +20,7 @@ import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.MentorProperties;
+import com.riskdesk.infrastructure.config.PlaybookAutomationProperties;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +82,7 @@ public class TradeSimulationService {
     private final TradeSimulationRepositoryPort simulationRepository;
     private final PlaybookDecisionRepositoryPort playbookDecisionRepository;
     private final MentorProperties mentorProperties;
+    private final PlaybookAutomationProperties playbookAutomationProperties;
 
     public TradeSimulationService(MentorSignalReviewRepositoryPort reviewRepository,
                                   MentorAuditRepositoryPort auditRepository,
@@ -91,7 +93,7 @@ public class TradeSimulationService {
                                   TradeSimulationRepositoryPort simulationRepository) {
         this(reviewRepository, auditRepository, candleRepositoryPort, objectMapper,
             messagingProvider, trailingStopProperties, simulationRepository, null,
-            new MentorProperties());
+            new MentorProperties(), new PlaybookAutomationProperties());
     }
 
     @Autowired
@@ -103,7 +105,8 @@ public class TradeSimulationService {
                                   TrailingStopProperties trailingStopProperties,
                                   TradeSimulationRepositoryPort simulationRepository,
                                   ObjectProvider<PlaybookDecisionRepositoryPort> playbookDecisionRepositoryProvider,
-                                  MentorProperties mentorProperties) {
+                                  MentorProperties mentorProperties,
+                                  PlaybookAutomationProperties playbookAutomationProperties) {
         this.reviewRepository = reviewRepository;
         this.auditRepository = auditRepository;
         this.candleRepositoryPort = candleRepositoryPort;
@@ -115,6 +118,9 @@ public class TradeSimulationService {
             ? null
             : playbookDecisionRepositoryProvider.getIfAvailable();
         this.mentorProperties = mentorProperties;
+        this.playbookAutomationProperties = playbookAutomationProperties == null
+            ? new PlaybookAutomationProperties()
+            : playbookAutomationProperties;
     }
 
     /**
@@ -502,10 +508,18 @@ public class TradeSimulationService {
      * plan, never by constructing a fake mentor review. This keeps forward
      * profitability tied to the deterministic candle-close decision that created
      * the simulation.
+     *
+     * <p>Gated by {@code riskdesk.playbook.automation.enabled} — the SAME flag
+     * that governs PLAYBOOK decision/simulation <em>creation</em> in
+     * {@link PlaybookAutomationService} — NOT by {@code riskdesk.mentor.enabled}.
+     * PLAYBOOK paper-trading is independent of the Mentor/Gemini system; gating
+     * resolution on the Mentor flag (the pre-#355 state) left every simulation
+     * stuck at {@code PENDING_ENTRY} forever whenever Mentor was off. Creation
+     * and resolution now share one switch so the lifecycle can't half-run.
      */
     @Scheduled(fixedDelayString = "${riskdesk.trade-simulation.poll-ms:60000}")
     public void refreshPendingPlaybookSimulations() {
-        if (!mentorProperties.isEnabled()) return;
+        if (!playbookAutomationProperties.isEnabled()) return;
         if (playbookDecisionRepository == null) {
             return;
         }

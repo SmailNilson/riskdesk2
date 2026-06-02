@@ -262,6 +262,13 @@ export default function Dashboard() {
             snapshot={snapshot}
             livePrice={prices[instrument]}
           />
+          <OrderFlowPanel selectedInstrument={instrument} />
+          <FootprintChart selectedInstrument={instrument} />
+          <FlashCrashPanel />
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+            <PerfectSetupPanel />
+          </div>
+          {/* PLAYBOOK anchored at the bottom of the center column */}
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
             <PlaybookPanel
               instrument={instrument}
@@ -269,12 +276,6 @@ export default function Dashboard() {
               selectedBrokerAccountId={selectedIbkrAccountId}
               livePrice={prices[instrument]?.price ?? null}
             />
-          </div>
-          <OrderFlowPanel selectedInstrument={instrument} />
-          <FootprintChart selectedInstrument={instrument} />
-          <FlashCrashPanel />
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-            <PerfectSetupPanel />
           </div>
         </section>
 
