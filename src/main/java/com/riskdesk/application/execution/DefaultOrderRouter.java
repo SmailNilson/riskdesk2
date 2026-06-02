@@ -224,6 +224,11 @@ public class DefaultOrderRouter implements OrderRouter {
         r.setBrokerAccountId(accountId(intent));
         r.setRequestedBy(intent.source().name());
         r.setStatus(ExecutionStatus.ACTIVE);
+        // normalizedEntryPrice is NOT NULL in the entity. We don't know the live position's real fill
+        // price (it drifted in / pre-dates restart), so use the intent's limit price as a proxy — this
+        // row exists only to let a later CLOSE/FLATTEN manage the position; its close order prices off
+        // the exit intent, not this stored value.
+        r.setNormalizedEntryPrice(normalizeToTick(intent.limitPrice(), intent.instrument()));
         r.setCreatedAt(now);
         r.setUpdatedAt(now);
         return executionRepository.createIfAbsent(r);

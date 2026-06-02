@@ -562,7 +562,10 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
         assertThat(r.executionId()).isEqualTo(9L);         // the synthesised tracking row
-        verify(repo).createIfAbsent(any());                 // tracking row created
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).createIfAbsent(cap.capture());         // tracking row created
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(cap.getValue().getNormalizedEntryPrice()).isNotNull(); // NOT NULL column — must be set or flush fails
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
