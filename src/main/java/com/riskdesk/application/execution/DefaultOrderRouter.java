@@ -202,6 +202,16 @@ public class DefaultOrderRouter implements OrderRouter {
             }
         }
 
+        // KNOWN LIMITATION — fill-ordering race (tracked follow-up): this fires the open leg once the close
+        // leg is ACCEPTED, not once it is FILLED, matching the locked close-then-open design ported from
+        // WtxExecutionBridge. For futures both legs are the same BUY/SELL, so an out-of-order fill (open
+        // before close) can mark the new row ACTIVE while the broker is only flat. The resulting NAKED-exit
+        // outcome is fully prevented downstream — a later CLOSE/FLATTEN voids the phantom when truth is
+        // readable, and skips (SKIPPED_BRIDGE_UNAVAILABLE) when it is not — so no blind reducing order is
+        // ever sent. Eliminating the transient ENTIRELY requires serialising the open behind the close FILL
+        // (fill-driven deferred open). That is the dedicated fill-orchestration slice and an explicit
+        // prerequisite before enabling riskdesk.execution.unified-router for any live strategy — see
+        // docs/PLAN_ORDER_ROUTER_IMPL.md.
         return submitEntry(intent, closeLegFired);
     }
 
@@ -347,6 +357,16 @@ public class DefaultOrderRouter implements OrderRouter {
                 "close already in flight (EXIT_SUBMITTED) — duplicate exit skipped", row.getId(), row.getEntryOrderId());
         }
         BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
+        if (!pos.available()) {
+            // Broker position truth is unreadable. We cannot confirm a live position exists, so firing a
+            // reducing order blind risks a NAKED order. This is the only path by which the REVERSE close/
+            // open fill-ordering race could surface a naked exit: when truth IS readable an ACTIVE row over
+            // a flat broker is voided below (no order); only an unreadable snapshot would fire blind. Skip
+            // and let the next signal retry once truth is back.
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE,
+                "broker position truth unavailable — " + (flatten ? "flatten" : "close")
+                    + " skipped to avoid a blind/naked reducing order", row.getId(), row.getEntryOrderId());
+        }
         if (pos.confirmedFlat()) {
             if (row.getStatus() == ExecutionStatus.ACTIVE) {
                 // Phantom: a filled position the broker no longer holds (manual close / drift). Void it

@@ -320,6 +320,20 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
+    @Test
+    void close_brokerTruthUnavailable_skipsNoBlindOrder() {
+        // Broker position truth unreadable — can't confirm a live position. This is the only path by which
+        // the REVERSE fill-ordering race could surface a naked exit (row ACTIVE while broker is flat). A
+        // reducing order must NOT fire blind; skip until truth is back.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
     // ---- FLATTEN ---------------------------------------------------------------------------
 
     private TradeIntent flatten() {
