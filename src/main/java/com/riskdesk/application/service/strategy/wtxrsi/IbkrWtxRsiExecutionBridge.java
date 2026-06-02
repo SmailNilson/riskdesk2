@@ -2,6 +2,7 @@ package com.riskdesk.application.service.strategy.wtxrsi;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
@@ -183,6 +184,10 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
         }
         String closeAction = state.currentPosition() == WtxRsiPosition.LONG ? "SHORT" : "LONG";
+        // Per-bar discriminator for the retry-safe exit orderRef (see WtxExecutionBridge#submitCloseLeg):
+        // stable within a bar (idempotent in-flight), fresh next bar (a retry after a terminal-non-filled
+        // close gets a new ref instead of matching the dead order).
+        long exitAttempt = (state.lastCandleTs() != null ? state.lastCandleTs() : Instant.now()).toEpochMilli();
 
         // CRITICAL: transition the EXISTING open row to EXIT_SUBMITTED. Do NOT
         // create a new row — ExecutionFillTrackingService only marks EXIT_SUBMITTED
@@ -192,7 +197,10 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                     row.getId(),
-                    row.getExecutionKey(),
+                    // Distinct, retry-safe exit orderRef — see WtxExecutionBridge#submitCloseLeg: ":exit"
+                    // stops placeLimitOrder's idempotency returning the completed entry order; the per-bar
+                    // discriminator stops a close retry matching the previous terminal-non-filled close.
+                    row.getExecutionKey() + DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX + ":" + exitAttempt,
                     row.getBrokerAccountId(),
                     row.getInstrument(),
                     closeAction,

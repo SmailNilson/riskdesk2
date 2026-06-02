@@ -178,6 +178,32 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void execDetailsMapsDiscriminatedExitRefBackToBaseExecutionKey() {
+        // Retry-safe exit refs carry a per-attempt discriminator: "<executionKey>:exit:<bar ts>". The fill
+        // tracker must still map it back to the row by the base key (everything before ":exit").
+        TradeExecutionRecord stored = baseExecution();
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.empty());
+        when(repository.findByExecutionKey(ORDER_REF + ":exit:1717350000000")).thenReturn(Optional.empty());
+        when(repository.findByExecutionKey(ORDER_REF)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onExecDetails(
+            ORDER_ID,
+            EXEC_ID_1,
+            ORDER_REF + ":exit:1717350000000",
+            new BigDecimal("1"),
+            new BigDecimal("72.50"),
+            new BigDecimal("72.50"),
+            "SLD",
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        assertEquals(Integer.valueOf(ORDER_ID), captor.getValue().getIbkrOrderId());
+    }
+
+    @Test
     void orderStatusSubmittedTransitionsPendingEntryToEntrySubmitted() {
         TradeExecutionRecord stored = baseExecution();
         stored.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);

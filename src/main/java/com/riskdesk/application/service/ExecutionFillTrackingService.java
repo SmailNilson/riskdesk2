@@ -223,13 +223,14 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         if (byKey.isPresent()) {
             return byKey;
         }
-        // Exit legs from the unified OrderRouter submit under "<executionKey>:exit" (a distinct orderRef so
-        // placeLimitOrder's idempotency can't return the completed ENTRY order). Map it back to the row by
-        // its base executionKey so a close callback that arrives before the close orderId is persisted is
-        // not silently dropped.
-        if (orderRef.endsWith(DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX)) {
-            String baseKey = orderRef.substring(0, orderRef.length() - DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX.length());
-            return tradeExecutionRepository.findByExecutionKey(baseKey);
+        // Exit legs submit under "<executionKey>:exit[:<discriminator>]" — a distinct orderRef (so
+        // placeLimitOrder's idempotency can't return the completed ENTRY order) plus an optional
+        // per-attempt discriminator (so a retried close after a terminal-non-filled one gets a fresh ref).
+        // Map any such ref back to the row by the base executionKey (everything before ":exit") so a close
+        // callback arriving before the close orderId is persisted is not silently dropped.
+        int exitAt = orderRef.indexOf(DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX);
+        if (exitAt > 0) {
+            return tradeExecutionRepository.findByExecutionKey(orderRef.substring(0, exitAt));
         }
         return Optional.empty();
     }
