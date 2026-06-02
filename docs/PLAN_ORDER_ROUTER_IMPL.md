@@ -59,10 +59,16 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
      outcome = "PendingSubmit".equals(sub.brokerOrderStatus) ? ACK_PENDING : ROUTED
      → tracked(outcome, persisted.id, sub.brokerOrderId)
    catch IbkrOrderRejectionException e:
-     persisted.status = terminalStatusFor(e.kind())          // FAILED, sauf ACK_PENDING
+     outcome = mapKind(e)
+     // Ligne NON-TERMINALE dès que l'ordre est — ou peut être — vivant au broker :
+     //   ACK_PENDING (id présent, ack tardif) ET FAILED_TIMEOUT (pas d'id, état broker INCONNU).
+     // Un FAILED terminal ici autoriserait un retry sur un ordre que le broker tient peut-être ;
+     // les callbacks tardifs / le reconciler doivent encore résoudre la ligne.
+     persisted.status = outcome.mustTrackExecutionRow() ? ENTRY_SUBMITTED : FAILED
      repo.save(persisted)
-     → tracked(mapKind(e), persisted.id, e.brokerOrderId())
+     → tracked(outcome, persisted.id, e.brokerOrderId())
 ```
+> ⚠️ `FAILED_TIMEOUT` reste **non-terminal** — cohérent avec `RoutingOutcome.mustTrackExecutionRow()` et `WtxExecutionBridge.handleEntryRejection`.
 
 **`mapKind(IbkrOrderRejectionException.Kind)` :**
 - `INSUFFICIENT_MARGIN` → `FAILED_INSUFFICIENT_MARGIN`
