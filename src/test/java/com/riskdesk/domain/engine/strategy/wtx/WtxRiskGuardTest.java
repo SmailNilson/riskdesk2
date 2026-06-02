@@ -65,10 +65,20 @@ class WtxRiskGuardTest {
     }
 
     @Test
-    void newTradingDay_detectsNyMidnightChange() {
+    void newTradingDay_detectsCme17EtSessionBoundary() {
+        // Crossing the 17:00 ET session close opens a new CME trading day.
+        Instant pre = ZonedDateTime.of(2026, 5, 13, 16, 55, 0, 0, NY).toInstant();
+        Instant post = ZonedDateTime.of(2026, 5, 13, 17, 5, 0, 0, NY).toInstant();
+        assertTrue(WtxRiskGuard.isNewTradingDay(pre, post));
+    }
+
+    @Test
+    void newTradingDay_falseAcrossMidnightWithinSameSession() {
+        // Both bars are after 17:00 ET on May 13, so they belong to the SAME
+        // CME trading day (the May 14 session) — midnight ET is NOT a boundary.
         Instant pre = ZonedDateTime.of(2026, 5, 13, 23, 30, 0, 0, NY).toInstant();
         Instant post = ZonedDateTime.of(2026, 5, 14, 0, 5, 0, 0, NY).toInstant();
-        assertTrue(WtxRiskGuard.isNewTradingDay(pre, post));
+        assertFalse(WtxRiskGuard.isNewTradingDay(pre, post));
     }
 
     @Test
