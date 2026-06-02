@@ -16,6 +16,7 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -52,6 +53,7 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     @Override
+    @Transactional
     public RoutingResult route(TradeIntent intent) {
         if (intent == null) {
             throw new IllegalArgumentException("intent is required");
@@ -77,8 +79,15 @@ public class DefaultOrderRouter implements OrderRouter {
                 "execution already exists for " + intent.idempotencyKey());
         }
 
-        // createIfAbsent de-dups on a unique constraint, so a concurrent caller cannot double-submit.
-        TradeExecutionRecord persisted = executionRepository.createIfAbsent(toPendingRecord(intent));
+        // createIfAbsent de-dups on the unique executionKey constraint, but two racing callers can BOTH
+        // receive a PENDING row (the loser gets the winner's freshly-created, not-yet-submitted row), so
+        // a plain status check would let both proceed and double-submit. Re-fetch under a pessimistic row
+        // lock and decide there: only one caller holds the lock and sees PENDING; the other blocks, then
+        // sees ENTRY_SUBMITTED and is rejected as a duplicate. route() is @Transactional so the lock spans
+        // the submit. (Matches ExecutionManagerService.submitEntryOrder.)
+        Long executionId = executionRepository.createIfAbsent(toPendingRecord(intent)).getId();
+        TradeExecutionRecord persisted = executionRepository.findByIdForUpdate(executionId)
+            .orElseThrow(() -> new IllegalStateException("execution row vanished after createIfAbsent: " + executionId));
         if (persisted.getStatus() != ExecutionStatus.PENDING_ENTRY_SUBMISSION) {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already in flight",
                 persisted.getId(), persisted.getEntryOrderId());

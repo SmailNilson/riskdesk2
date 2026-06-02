@@ -41,18 +41,22 @@ class DefaultOrderRouterTest {
 
     private IbkrProperties props;
     private DefaultOrderRouter router;
+    private TradeExecutionRecord lastCreated;
 
     @BeforeEach
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true);
-        // createIfAbsent simulates persistence assigning the PK; save echoes the row.
+        // createIfAbsent simulates persistence assigning the PK; findByIdForUpdate returns the same
+        // (still-PENDING) row under the pessimistic lock; save echoes the row.
         lenient().when(repo.createIfAbsent(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
             r.setId(1L);
+            lastCreated = r;
             return r;
         });
+        lenient().when(repo.findByIdForUpdate(1L)).thenAnswer(inv -> Optional.ofNullable(lastCreated));
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
     }
 
@@ -104,6 +108,26 @@ class DefaultOrderRouterTest {
         RoutingResult r = router.route(openLong());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void racingTickSeesLockedRowAlreadyClaimed_noDoubleSubmit() {
+        // Two ticks race the same key: both pass findByExecutionKey, both createIfAbsent. By the time
+        // this (loser) caller acquires the row lock (findByIdForUpdate), the winner has already moved
+        // the row to ENTRY_SUBMITTED. The loser must NOT submit a second order.
+        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
+        TradeExecutionRecord claimedByWinner = new TradeExecutionRecord();
+        claimedByWinner.setId(1L);
+        claimedByWinner.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        claimedByWinner.setEntryOrderId(555L);
+        when(repo.findByIdForUpdate(1L)).thenReturn(Optional.of(claimedByWinner));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        assertThat(r.executionId()).isEqualTo(1L);
+        assertThat(r.brokerOrderId()).isEqualTo(555L); // the winner's broker order id
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
