@@ -18,6 +18,9 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Side;
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.ExecutionReconciler;
 import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.application.service.IbkrMarginPreflightService;
 import com.riskdesk.domain.execution.IntentKind;
@@ -182,6 +185,64 @@ class WtxExecutionBridgeTest {
         // (else a CLOSE after cutover would SKIPPED_NO_OPEN_ROW and leave the live position open).
         unifiedBridge(mock(OrderRouter.class), null, true).normalizeLegacyDefaultAccountRowsForCutover();
         assertEquals("__default__", repo.all().get(0).getBrokerAccountId());
+    }
+
+    // ---- Slice C: legacy ↔ unified parity ------------------------------------------------------
+
+    /**
+     * Runs the same signal through the LEGACY path (flag OFF) and the UNIFIED path (flag ON, with a REAL
+     * OrderRouter), each with its own broker mock + repo, and returns the broker order each path submitted —
+     * [0] legacy, [1] unified. The router's reconciler sees no broker truth (unavailable → pass-through),
+     * matching the legacy path with no portfolio service, so both open from a clean slate.
+     */
+    private BrokerEntryOrderRequest[] runBothPaths(WtxAction action, WtxStrategyState state, BigDecimal refPrice) {
+        IbkrOrderService legacyBroker = mock(IbkrOrderService.class);
+        when(legacyBroker.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(1L, "Submitted", "ref", Instant.now()));
+        new WtxExecutionBridge(legacyBroker, new FakeRepo(), ibkrProperties, wtxProperties)
+                .submit(signal(action), state, refPrice);
+
+        IbkrOrderService unifiedBroker = mock(IbkrOrderService.class);
+        when(unifiedBroker.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(2L, "Submitted", "ref", Instant.now()));
+        FakeRepo unifiedRepo = new FakeRepo();
+        DefaultOrderRouter router = new DefaultOrderRouter(unifiedBroker, unifiedRepo, ibkrProperties,
+                () -> true, new ExecutionReconciler(null), Instrument::getTickSize);
+        new WtxExecutionBridge(unifiedBroker, unifiedRepo, ibkrProperties, wtxProperties,
+                null, null, router, unifiedRouter(true)).submit(signal(action), state, refPrice);
+
+        ArgumentCaptor<BrokerEntryOrderRequest> legacyCap = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(legacyBroker).submitEntryOrder(legacyCap.capture());
+        ArgumentCaptor<BrokerEntryOrderRequest> unifiedCap = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(unifiedBroker).submitEntryOrder(unifiedCap.capture());
+        return new BrokerEntryOrderRequest[]{legacyCap.getValue(), unifiedCap.getValue()};
+    }
+
+    private static void assertSameTrade(BrokerEntryOrderRequest legacy, BrokerEntryOrderRequest unified) {
+        assertEquals(legacy.action(), unified.action(), "broker action must match");
+        assertEquals(legacy.quantity(), unified.quantity(), "quantity must match");
+        assertEquals(legacy.instrument(), unified.instrument(), "instrument must match");
+        assertEquals(0, legacy.limitPrice().compareTo(unified.limitPrice()), "rounded limit price must match");
+        // Account differs only by placeholder ("wtx-default" vs "__default__") — both resolve to the same
+        // default managed account at the gateway, so it is intentionally not asserted here.
+    }
+
+    @Test
+    void parity_openLong_bothPathsSubmitSameBrokerOrder() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        BrokerEntryOrderRequest[] r = runBothPaths(WtxAction.OPEN_LONG, state, bd(70));
+        assertSameTrade(r[0], r[1]);
+        assertEquals("LONG", r[1].action()); // unified path BUYs a long, same as legacy
+    }
+
+    @Test
+    void parity_openShort_bothPathsSubmitSameBrokerOrder() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        BrokerEntryOrderRequest[] r = runBothPaths(WtxAction.OPEN_SHORT, state, bd(70));
+        assertSameTrade(r[0], r[1]);
+        assertEquals("SHORT", r[1].action());
     }
 
     @Test
