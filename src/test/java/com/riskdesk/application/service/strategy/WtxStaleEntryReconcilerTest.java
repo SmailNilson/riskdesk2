@@ -4,6 +4,7 @@ import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.dto.BrokerOrderStatusView;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
+import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -25,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,6 +36,7 @@ class WtxStaleEntryReconcilerTest {
     private TradeExecutionRepositoryPort repo;
     private IbkrProperties props;
     private IbkrPortfolioService portfolio;
+    private boolean gateReady = true; // execution readiness gate state for the boot-replay tests
 
     @BeforeEach
     void setUp() {
@@ -42,10 +45,11 @@ class WtxStaleEntryReconcilerTest {
         portfolio = mock(IbkrPortfolioService.class);
         props = new IbkrProperties();
         props.setEnabled(true);
+        gateReady = true;
     }
 
     private WtxStaleEntryReconciler reconciler(long graceSeconds) {
-        return new WtxStaleEntryReconciler(orderService, repo, props, portfolio, graceSeconds);
+        return new WtxStaleEntryReconciler(orderService, repo, props, portfolio, () -> gateReady, graceSeconds);
     }
 
     private TradeExecutionRecord stuckRow(String key, long ageMinutes) {
@@ -231,6 +235,68 @@ class WtxStaleEntryReconcilerTest {
 
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus());
         verify(repo, never()).save(any());
+    }
+
+    // ── Slice D — D3: unified-router rows ("__default__" account) + boot replay ─────────────
+
+    @Test
+    void routerDefaultAccount_notFound_ibkrHoldsPosition_leavesRow() {
+        // The unified router persists rows under DEFAULT_BROKER_ACCOUNT ("__default__"). A NOT_FOUND order
+        // with a real live position (under the resolved real account) must NOT be cancelled — treating the
+        // placeholder as a real account would filter the position out, read it flat, and orphan it.
+        TradeExecutionRecord row = stuckRow("wtx:MNQ:5m:1:OPEN_LONG", 10);
+        row.setBrokerAccountId(DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+        seed(row);
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
+        when(portfolio.getPortfolio(any())).thenReturn(snapshot(true, List.of(leg("MNQM6", bd(1)))));
+
+        reconciler(120).reconcileStaleEntries();
+
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus(),
+                "a router '__default__' row backed by a live position must not be cancelled");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void routerDefaultAccount_notFound_ibkrFlat_reconcilesToCancelled() {
+        // Counterpart: genuinely flat → the phantom router row is still reconciled to CANCELLED.
+        TradeExecutionRecord row = stuckRow("wtx:MNQ:5m:1:OPEN_LONG", 10);
+        row.setBrokerAccountId(DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+        seed(row);
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
+        when(portfolio.getPortfolio(any())).thenReturn(snapshot(true, List.of())); // flat
+
+        reconciler(120).reconcileStaleEntries();
+
+        assertEquals(ExecutionStatus.CANCELLED, row.getStatus());
+        verify(repo).save(row);
+    }
+
+    @Test
+    void bootReplay_runsOnceWhenGateReady_thenLatches() {
+        gateReady = true;
+        TradeExecutionRecord row = stuckRow("k", 10);
+        seed(row);
+        when(orderService.findOrder(any(), any()))
+                .thenReturn(BrokerOrderLookup.found(new BrokerOrderStatusView(99L, "k", "acct", "Filled")));
+
+        WtxStaleEntryReconciler r = reconciler(120);
+        r.bootReplayWhenReady(); // first ready tick → replays the stranded row
+        r.bootReplayWhenReady(); // latched → must not replay again
+
+        assertEquals(ExecutionStatus.ACTIVE, row.getStatus());
+        verify(orderService, times(1)).findOrder(any(), any());
+    }
+
+    @Test
+    void bootReplay_skipsWhileGateClosed() {
+        gateReady = false; // broker truth not readable yet → boot replay must not run
+        WtxStaleEntryReconciler r = reconciler(120);
+
+        r.bootReplayWhenReady();
+
+        verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
+        verify(orderService, never()).findOrder(any(), any());
     }
 
     // ── Uncertainty is never reconciled ────────────────────────────────────
