@@ -3,6 +3,8 @@ package com.riskdesk.application.service.strategy;
 import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
+import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.ExecutionReadinessGate;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -51,6 +53,18 @@ import java.util.Locale;
  *
  * <p>The bridge routing path is unchanged and stays fast (it reads the cached position snapshot);
  * this runs out-of-band and unblocks the strategy within one interval.
+ *
+ * <p><b>Unified-router rows (Slice D — D3).</b> When {@code riskdesk.execution.unified-router} is on,
+ * WTX entries are persisted by {@link DefaultOrderRouter} under the {@code WTX_AUTO} trigger source —
+ * the exact set this reconciler scans — so this IS the per-row {@code ENTRY_SUBMITTED} boot/stale replay
+ * the live flip requires. Router rows carry {@link DefaultOrderRouter#DEFAULT_BROKER_ACCOUNT} as their
+ * account placeholder; {@link #effectiveAccount} treats it (like {@code "wtx-default"} / blank) as "no
+ * specific account", so the NOT_FOUND flat-check is account-unscoped for them — WITHOUT this, the
+ * placeholder would match no live account, every position would be filtered out, a phantom-looking
+ * NOT_FOUND would be read as flat, and a row actually backed by a live position would be wrongly
+ * CANCELLED (orphaning the position). A one-shot {@link #bootReplayWhenReady() boot replay} runs as soon
+ * as broker truth is readable (the {@link ExecutionReadinessGate}) so a restart unblocks the strategy in
+ * seconds, not after the first steady-state interval.
  */
 @Component
 @ConditionalOnProperty(name = "riskdesk.wtx.enabled", havingValue = "true")
@@ -62,20 +76,26 @@ public class WtxStaleEntryReconciler {
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
     private final IbkrPortfolioService ibkrPortfolioService;
+    private final ExecutionReadinessGate readinessGate;
 
     /** Don't touch a row younger than this — give the normal ack/fill flow time to land. */
     private final Duration grace;
+
+    /** The one-shot boot replay (D3) fires exactly once, as soon as broker truth is readable. */
+    private volatile boolean bootReplayDone = false;
 
     public WtxStaleEntryReconciler(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties,
             IbkrPortfolioService ibkrPortfolioService,
+            ExecutionReadinessGate readinessGate,
             @Value("${riskdesk.wtx.stale-entry.grace-seconds:120}") long graceSeconds) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.ibkrPortfolioService = ibkrPortfolioService;
+        this.readinessGate = readinessGate;
         this.grace = Duration.ofSeconds(Math.max(0, graceSeconds));
     }
 
@@ -98,6 +118,26 @@ public class WtxStaleEntryReconciler {
                 log.debug("WTX stale-entry reconcile: row {} skipped — {}", row.getId(), e.getMessage());
             }
         }
+    }
+
+    /**
+     * One-shot boot replay (Slice D — D3). Fires once, as soon as the execution readiness gate reports
+     * broker position truth is readable, then never again — so a restart that stranded an
+     * {@code ENTRY_SUBMITTED} row reconciles it against broker truth within seconds rather than waiting
+     * for the first steady-state interval (up to a minute of a frozen strategy). The steady-state
+     * {@link #reconcileStaleEntries()} schedule continues independently afterwards.
+     */
+    @Scheduled(fixedDelayString = "${riskdesk.wtx.stale-entry.boot-replay-retry-ms:5000}")
+    void bootReplayWhenReady() {
+        if (bootReplayDone || !readinessGate.isReady()) {
+            return; // gate still closed → broker truth not readable yet; retry next tick
+        }
+        bootReplayDone = true; // latch on the first ready tick so this never runs twice
+        if (!ibkrProperties.isEnabled()) {
+            return; // the gate opened only because IBKR is disabled — nothing to replay
+        }
+        log.info("WTX boot replay — reconciling stranded ENTRY_SUBMITTED rows against broker truth");
+        reconcileStaleEntries();
     }
 
     private void reconcileOne(TradeExecutionRecord row, Instant now) {
@@ -188,7 +228,13 @@ public class WtxStaleEntryReconciler {
     }
 
     private static String effectiveAccount(String brokerAccountId) {
-        if (brokerAccountId == null || brokerAccountId.isBlank() || "wtx-default".equals(brokerAccountId)) {
+        // null / blank / the legacy "wtx-default" / the unified router's "__default__" placeholder all mean
+        // "no specific account configured" → no account filter on the flat-check (any account's matching leg
+        // counts as a live position). Treating the router placeholder as a real account here would filter
+        // out the genuine position and wrongly CANCEL a row backed by a live position (Slice D — D3).
+        if (brokerAccountId == null || brokerAccountId.isBlank()
+                || "wtx-default".equals(brokerAccountId)
+                || DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT.equals(brokerAccountId)) {
             return null;
         }
         return brokerAccountId;

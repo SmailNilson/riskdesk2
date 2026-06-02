@@ -29,8 +29,11 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -51,7 +54,8 @@ class DefaultOrderRouterTest {
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
-        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler, Instrument::getTickSize);
+        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.empty());
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -107,7 +111,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50")); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty()); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -809,11 +813,80 @@ class DefaultOrderRouterTest {
 
     @Test
     void skipsWhenNotReady() {
-        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler, Instrument::getTickSize);
+        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
+            Instrument::getTickSize, Optional.empty());
 
         RoutingResult r = gated.route(openLong());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_RECONCILING);
         verifyNoInteractions(ibkrOrderService);
+    }
+
+    // ---- D4 — margin pre-flight after reconcile ------------------------------------------------
+
+    private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
+        return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.of(aff));
+    }
+
+    @Test
+    void open_marginDenied_skipsInsufficientMargin_noBrokerOrder() {
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any()))
+            .thenReturn(OrderAffordabilityPort.Affordability.deny("AvailFunds 5 < InitMargin 9"));
+
+        RoutingResult r = routerWith(aff).route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN);
+        assertThat(r.message()).contains("AvailFunds 5 < InitMargin 9");
+        verify(ibkrOrderService, never()).submitEntryOrder(any());      // declined before any broker side effect
+        verify(aff).check(eq(Instrument.MNQ), eq("LONG"), eq(2), any(), eq("DU1")); // full qty, routed account
+    }
+
+    @Test
+    void open_marginAllowed_routes() {
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+
+        RoutingResult r = routerWith(aff).route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(ibkrOrderService).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_sizeIncrease_openLegUnaffordable_closeStillFires_routedFlattenOnly() {
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any()))
+            .thenReturn(OrderAffordabilityPort.Affordability.deny("no funds for the extra contract"));
+        TradeExecutionRecord prior = priorLong();
+        prior.setQuantity(1);                                            // held LONG 1
+        stubActive(prior);
+        stubBroker("1");                                                 // broker LONG 1
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // close ok
+
+        RoutingResult r = routerWith(aff).route(reverseToShort());       // reverse to SHORT 2 → delta 1
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED_FLATTEN_ONLY); // flatten protects the user
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());      // ONLY the close leg; open skipped
+        verify(aff).check(eq(Instrument.MNQ), eq("SHORT"), eq(1), any(), eq("DU1")); // delta 2−1, routed account
+    }
+
+    @Test
+    void reverse_sameSize_marginPreflightSkipped_bothLegsRoute() {
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        // A hard-deny stub that must NEVER be consulted: a same-size reverse frees exactly what it consumes.
+        lenient().when(aff.check(any(), any(), anyInt(), any(), any()))
+            .thenReturn(OrderAffordabilityPort.Affordability.deny("should never be called"));
+        stubActive(priorLong());                                        // LONG 2
+        stubBroker("2");                                                 // broker LONG 2 → reverse SHORT 2, delta 0
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = routerWith(aff).route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());     // close + open both fired
+        verify(aff, never()).check(any(), any(), anyInt(), any(), any());      // delta 0 → never pre-checked
     }
 }

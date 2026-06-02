@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.execution.OrderAffordabilityPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties.PreflightMode;
@@ -46,7 +47,7 @@ import java.math.RoundingMode;
  */
 @Service
 @ConditionalOnProperty(name = "riskdesk.wtx.enabled", havingValue = "true")
-public class IbkrMarginPreflightService {
+public class IbkrMarginPreflightService implements OrderAffordabilityPort {
 
     private static final Logger log = LoggerFactory.getLogger(IbkrMarginPreflightService.class);
 
@@ -71,6 +72,18 @@ public class IbkrMarginPreflightService {
      * @return a {@link PreflightDecision} carrying allow/deny + an explanatory message
      */
     public PreflightDecision canAffordOrder(Instrument instrument, String orderAction, int qty, BigDecimal refPrice) {
+        // Legacy 4-arg entry point (single-account WTX) — assess against the default account.
+        return canAffordOrder(instrument, orderAction, qty, refPrice, null);
+    }
+
+    /**
+     * Account-scoped variant: assess affordability against {@code brokerAccountId}'s funds (the account the
+     * order routes to), not the gateway default. The unified router passes the intent's account so a
+     * multi-account gateway denies/allows against the correct account — matching the per-account reconcile.
+     * {@code null} resolves to the default account.
+     */
+    public PreflightDecision canAffordOrder(Instrument instrument, String orderAction, int qty, BigDecimal refPrice,
+                                            String brokerAccountId) {
         if (instrument == null || refPrice == null || qty <= 0) {
             return PreflightDecision.allow();
         }
@@ -87,7 +100,7 @@ public class IbkrMarginPreflightService {
 
         IbkrPortfolioSnapshot snapshot;
         try {
-            snapshot = portfolioService.getPortfolio(null);
+            snapshot = portfolioService.getPortfolio(brokerAccountId);
         } catch (RuntimeException e) {
             log.warn("WTX preflight: portfolio snapshot unavailable, failing open: {}", e.getMessage());
             return PreflightDecision.allow();
@@ -111,6 +124,17 @@ public class IbkrMarginPreflightService {
             return PreflightDecision.deny(msg);
         }
         return PreflightDecision.allow();
+    }
+
+    /**
+     * {@link OrderAffordabilityPort} adapter — the unified {@link com.riskdesk.application.execution.DefaultOrderRouter}
+     * consults the SAME pre-flight the legacy WTX bridge used, so the unified path's deny decision is
+     * identical. Delegates straight to {@link #canAffordOrder}.
+     */
+    @Override
+    public Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice, String brokerAccountId) {
+        PreflightDecision decision = canAffordOrder(instrument, action, qty, refPrice, brokerAccountId);
+        return decision.allowed() ? Affordability.allow() : Affordability.deny(decision.denyReason());
     }
 
     /**

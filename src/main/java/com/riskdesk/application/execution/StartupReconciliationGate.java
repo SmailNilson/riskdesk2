@@ -30,11 +30,15 @@ import org.springframework.stereotype.Component;
  * The gate is one-way (CLOSED&rarr;OPEN): a mid-session disconnect is handled at submission time, not
  * here, so we never re-close and silently halt a live strategy.</p>
  *
- * <p><b>Deliberately NOT done here (tracked follow-up — the fill-orchestration slice):</b> replaying
- * pre-existing non-terminal router rows (e.g. {@code ENTRY_SUBMITTED}) against broker truth to resolve
- * fills/phantoms left by the restart. That per-row re-sync is an explicit prerequisite before enabling
- * {@code riskdesk.execution.unified-router} for any live strategy (see docs/PLAN_ORDER_ROUTER_IMPL.md).
- * Until the router is wired, there are no such rows, so connection-readiness is a correct gate today.</p>
+ * <p><b>Per-row boot replay is NOT done by this gate</b> — it lives in the stale-entry reconciler. The
+ * gate only decides <i>whether the core may route</i>; replaying pre-existing non-terminal router rows
+ * (e.g. {@code ENTRY_SUBMITTED}) against broker truth to resolve fills/phantoms left by a restart is the
+ * {@code ENTRY_SUBMITTED}-row re-sync prerequisite for {@code riskdesk.execution.unified-router}, now
+ * shipped for the WTX pilot by {@code WtxStaleEntryReconciler} (Slice D — D3): it scans the {@code
+ * WTX_AUTO} rows the router persists and runs a one-shot boot replay keyed off THIS gate's readiness, so
+ * a stranded row reconciles within seconds of broker truth becoming readable. A strategy-neutral core
+ * replay covering every trigger source is the generalisation step as the other strategies migrate (see
+ * docs/PLAN_ORDER_ROUTER_IMPL.md).</p>
  */
 @Component
 public class StartupReconciliationGate implements ExecutionReadinessGate {
