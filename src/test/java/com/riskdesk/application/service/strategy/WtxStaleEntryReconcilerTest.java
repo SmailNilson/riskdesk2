@@ -77,7 +77,11 @@ class WtxStaleEntryReconcilerTest {
     }
 
     private static IbkrPositionView leg(String contractDesc, BigDecimal qty) {
-        return new IbkrPositionView("DU123", 1L, contractDesc, "FUT", qty,
+        return legAcct("DU123", contractDesc, qty);
+    }
+
+    private static IbkrPositionView legAcct(String account, String contractDesc, BigDecimal qty) {
+        return new IbkrPositionView(account, 1L, contractDesc, "FUT", qty,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "USD");
     }
 
@@ -188,6 +192,40 @@ class WtxStaleEntryReconcilerTest {
         when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
         when(portfolio.getPortfolio(any()))
                 .thenReturn(snapshot(true, List.of(leg("MNQM6", bd(1)), leg("MNQU6", bd(-1)))));
+
+        reconciler(120).reconcileStaleEntries();
+
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus());
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void notFound_positionInOtherAccount_isStillFlatForThisAccount() {
+        // Codex P2: a multi-account gateway returns positions across accounts. The row's account is
+        // DU777; a same-instrument position on DU111 must be filtered out, or the phantom row would
+        // stay stuck forever whenever another account holds the same future.
+        TradeExecutionRecord row = stuckRow("k", 10);
+        row.setBrokerAccountId("DU777");
+        seed(row);
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
+        when(portfolio.getPortfolio(any()))
+                .thenReturn(snapshot(true, List.of(legAcct("DU111", "MNQM6", bd(-1))))); // other account
+
+        reconciler(120).reconcileStaleEntries();
+
+        assertEquals(ExecutionStatus.CANCELLED, row.getStatus(),
+                "another account's position must not block this account's phantom-row reconcile");
+    }
+
+    @Test
+    void notFound_positionInSameConfiguredAccount_leavesRow() {
+        // Counterpart: a position on the row's OWN configured account is a real position → not flat.
+        TradeExecutionRecord row = stuckRow("k", 10);
+        row.setBrokerAccountId("DU777");
+        seed(row);
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
+        when(portfolio.getPortfolio(any()))
+                .thenReturn(snapshot(true, List.of(legAcct("DU777", "MNQM6", bd(-1)))));
 
         reconciler(120).reconcileStaleEntries();
 

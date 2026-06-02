@@ -169,14 +169,29 @@ public class WtxStaleEntryReconciler {
         if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
             return false;
         }
+        // Scope to the row's account: a multi-account gateway can return positions across every
+        // attached account, so an unrelated account holding the same instrument must not make this
+        // row's account look non-flat (which would leave the phantom row stuck forever). The
+        // placeholder "wtx-default" / blank means no specific account is configured — no filter.
+        String account = effectiveAccount(brokerAccountId);
         String symbol = ibkrSymbol(instrument);
         for (IbkrPositionView pos : snapshot.positions()) {
             if (pos == null || pos.position() == null) continue;
+            if (account != null && pos.accountId() != null && !account.equals(pos.accountId())) {
+                continue;
+            }
             if (matchesSymbol(pos.contractDesc(), symbol) && pos.position().signum() != 0) {
-                return false; // a live leg exists → not flat
+                return false; // a live leg in this account → not flat
             }
         }
         return true;
+    }
+
+    private static String effectiveAccount(String brokerAccountId) {
+        if (brokerAccountId == null || brokerAccountId.isBlank() || "wtx-default".equals(brokerAccountId)) {
+            return null;
+        }
+        return brokerAccountId;
     }
 
     /** IBKR ticker for a WTX instrument name. Differs only for E6 (IBKR symbol "6E"). */

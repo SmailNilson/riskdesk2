@@ -49,6 +49,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
@@ -705,10 +706,14 @@ public class IbGatewayNativeClient {
         if (accountId == null) {
             return OrderLookupResult.unavailable();
         }
-        Optional<NativeOrderSnapshot> openOrder = findOpenOrderByOrderRef(accountId, orderRef);
-        Optional<NativeOrderSnapshot> snapshot =
-            openOrder.isPresent() ? openOrder : findCompletedOrderByOrderRef(accountId, orderRef);
-        return snapshot.map(OrderLookupResult::found).orElseGet(OrderLookupResult::notFound);
+        // Live book first. FOUND or UNAVAILABLE (timeout/error querying it) is conclusive — return it.
+        // Only when the live book was fully delivered AND the order wasn't in it (NOT_FOUND) do we fall
+        // through to the completed book. A timeout on EITHER book yields UNAVAILABLE — never NOT_FOUND.
+        OrderLookupResult open = findOpenOrderByOrderRef(accountId, orderRef);
+        if (open.outcome() != OrderLookupOutcome.NOT_FOUND) {
+            return open;
+        }
+        return findCompletedOrderByOrderRef(accountId, orderRef);
     }
 
     public NativeOrderSubmission placeLimitOrder(Contract contract,
@@ -1434,9 +1439,13 @@ public class IbGatewayNativeClient {
         return value == null ? "" : value;
     }
 
-    private Optional<NativeOrderSnapshot> findOpenOrderByOrderRef(String accountId, String orderRef) {
+    private OrderLookupResult findOpenOrderByOrderRef(String accountId, String orderRef) {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+        // endReached is the truth signal: only openOrderEnd() means the live book was fully delivered.
+        // A timeout or an async error wakes the latch WITHOUT setting it → we must report UNAVAILABLE,
+        // never NOT_FOUND, so the reconciler doesn't read an unqueried book as proof the order is gone.
+        AtomicBoolean endReached = new AtomicBoolean(false);
 
         ApiController.ILiveOrderHandler handler = new ApiController.ILiveOrderHandler() {
             @Override
@@ -1455,6 +1464,7 @@ public class IbGatewayNativeClient {
 
             @Override
             public void openOrderEnd() {
+                endReached.set(true);
                 latch.countDown();
             }
 
@@ -1475,6 +1485,8 @@ public class IbGatewayNativeClient {
 
             @Override
             public void handle(int orderId, int errorCode, String errorMsg) {
+                // An async error means the query did NOT complete — wake the waiter but leave
+                // endReached false so the outcome is UNAVAILABLE, not a false NOT_FOUND.
                 log.debug("IB Gateway live order lookup error code={} msg={}", errorCode, errorMsg);
                 latch.countDown();
             }
@@ -1486,12 +1498,17 @@ public class IbGatewayNativeClient {
             controller.removeLiveOrderHandler(handler);
         } catch (Exception ignored) {
         }
-        return Optional.ofNullable(found.get());
+        if (!endReached.get()) {
+            return OrderLookupResult.unavailable();
+        }
+        NativeOrderSnapshot snapshot = found.get();
+        return snapshot != null ? OrderLookupResult.found(snapshot) : OrderLookupResult.notFound();
     }
 
-    private Optional<NativeOrderSnapshot> findCompletedOrderByOrderRef(String accountId, String orderRef) {
+    private OrderLookupResult findCompletedOrderByOrderRef(String accountId, String orderRef) {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+        AtomicBoolean endReached = new AtomicBoolean(false);
 
         ApiController.ICompletedOrdersHandler handler = new ApiController.ICompletedOrdersHandler() {
             @Override
@@ -1512,13 +1529,18 @@ public class IbGatewayNativeClient {
 
             @Override
             public void completedOrdersEnd() {
+                endReached.set(true);
                 latch.countDown();
             }
         };
 
         controller.reqCompletedOrders(handler);
         awaitLatch(latch, "completed orders", orderTimeout());
-        return Optional.ofNullable(found.get());
+        if (!endReached.get()) {
+            return OrderLookupResult.unavailable();
+        }
+        NativeOrderSnapshot snapshot = found.get();
+        return snapshot != null ? OrderLookupResult.found(snapshot) : OrderLookupResult.notFound();
     }
 
 
