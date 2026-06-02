@@ -150,6 +150,34 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void execDetailsMapsSuffixedExitRefBackToBaseExecutionKey() {
+        // Exit legs submit under "<executionKey>:exit" (distinct from the entry ref). The row's key is
+        // unsuffixed, so a close callback arriving before the close orderId is persisted must still locate
+        // the row by stripping the ":exit" suffix — otherwise the fill is dropped and the row stays
+        // EXIT_SUBMITTED after the broker is flat.
+        TradeExecutionRecord stored = baseExecution();
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.empty());
+        when(repository.findByExecutionKey(ORDER_REF + ":exit")).thenReturn(Optional.empty());
+        when(repository.findByExecutionKey(ORDER_REF)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onExecDetails(
+            ORDER_ID,
+            EXEC_ID_1,
+            ORDER_REF + ":exit",
+            new BigDecimal("1"),
+            new BigDecimal("72.50"),
+            new BigDecimal("72.50"),
+            "SLD",
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        assertEquals(Integer.valueOf(ORDER_ID), captor.getValue().getIbkrOrderId());
+    }
+
+    @Test
     void orderStatusSubmittedTransitionsPendingEntryToEntrySubmitted() {
         TradeExecutionRecord stored = baseExecution();
         stored.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);

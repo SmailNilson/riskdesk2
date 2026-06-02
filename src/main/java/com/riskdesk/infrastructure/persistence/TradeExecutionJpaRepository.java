@@ -73,6 +73,26 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
             @Param("terminal") Collection<ExecutionStatus> terminalStatuses);
 
     /**
+     * Account-scoped variant of {@link #findActiveByInstrumentAndTimeframeAndTriggerSourceRaw} — the
+     * unified OrderRouter must never locate another IBKR account's row (it would close it on the wrong
+     * account). Pushes the account filter into the query so the right account's row is returned even
+     * when several accounts each hold one for the same (instrument, timeframe, source).
+     */
+    @Query("select e from TradeExecutionEntity e " +
+           "where e.instrument = :instrument " +
+           "  and e.timeframe = :timeframe " +
+           "  and e.triggerSource = :triggerSource " +
+           "  and e.brokerAccountId = :brokerAccountId " +
+           "  and e.status not in (:terminal) " +
+           "order by e.createdAt desc")
+    List<TradeExecutionEntity> findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccountRaw(
+            @Param("instrument") String instrument,
+            @Param("timeframe") String timeframe,
+            @Param("triggerSource") ExecutionTriggerSource triggerSource,
+            @Param("brokerAccountId") String brokerAccountId,
+            @Param("terminal") Collection<ExecutionStatus> terminalStatuses);
+
+    /**
      * PR #303 — return all currently-pending executions for the given trigger
      * source (e.g. {@link ExecutionTriggerSource#QUANT_AUTO_ARM}). Used by the
      * auto-submit scheduler to find decisions whose cancel window has elapsed.

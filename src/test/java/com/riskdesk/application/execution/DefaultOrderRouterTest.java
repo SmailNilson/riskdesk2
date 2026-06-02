@@ -1,0 +1,803 @@
+package com.riskdesk.application.execution;
+
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.domain.execution.IntentKind;
+import com.riskdesk.domain.execution.RoutingOutcome;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
+import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
+import com.riskdesk.domain.model.ExecutionStatus;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
+import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
+import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class DefaultOrderRouterTest {
+
+    @Mock private IbkrOrderService ibkrOrderService;
+    @Mock private TradeExecutionRepositoryPort repo;
+    @Mock private ExecutionReconciler reconciler;
+
+    private IbkrProperties props;
+    private DefaultOrderRouter router;
+
+    @BeforeEach
+    void setUp() {
+        props = new IbkrProperties();
+        props.setEnabled(true);
+        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler);
+        // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
+        lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
+            TradeExecutionRecord r = inv.getArgument(0);
+            if (r != null) r.setId(1L); // null-safe: re-stubbing in a test re-invokes this with a null arg
+            return new CreateOutcome(r, true);
+        });
+        lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        // createIfAbsent (used to synthesise a phantom close row in a reverse against drift).
+        lenient().when(repo.createIfAbsent(any())).thenAnswer(inv -> {
+            TradeExecutionRecord r = inv.getArgument(0);
+            if (r != null) r.setId(9L);
+            return r;
+        });
+        // Default reconcile: position unavailable, plan = pass-through (Open for OPEN, Reverse for REVERSE).
+        lenient().when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+        lenient().when(reconciler.reconcile(any(), any())).thenAnswer(inv -> {
+            TradeIntent i = inv.getArgument(0);
+            if (i == null) return null; // null-safe: re-stubbing in a test re-invokes this with a null arg
+            return i.kind() == IntentKind.REVERSE ? new ReconcilePlan.Reverse(i.side()) : new ReconcilePlan.Open(i.side());
+        });
+    }
+
+    private TradeIntent openLong() {
+        return TradeIntent.open("wtx:MNQ:5m:1:OPEN_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 2, new BigDecimal("18000.30"), "DU1");
+    }
+
+    private BrokerEntryOrderSubmission submission(Long brokerOrderId, String status) {
+        return new BrokerEntryOrderSubmission(brokerOrderId, status, "wtx:MNQ:5m:1:OPEN_LONG", Instant.now());
+    }
+
+    @Test
+    void routesOpen_persistsBothIds_roundsTick() {
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        assertThat(r.executionId()).isEqualTo(1L);
+        assertThat(r.brokerOrderId()).isEqualTo(12345L);
+
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+        assertThat(saved.getEntryOrderId()).isEqualTo(12345L);
+        assertThat(saved.getIbkrOrderId()).isEqualTo(12345);                 // Integer cast for fill tracker
+        assertThat(saved.getAction()).isEqualTo("LONG");
+        assertThat(saved.getNormalizedEntryPrice()).isEqualByComparingTo("18000.25"); // rounded to 0.25 tick
+    }
+
+    @Test
+    void pendingSubmitMapsToAckPending() {
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(777L, "PendingSubmit"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        assertThat(r.brokerOrderId()).isEqualTo(777L);
+    }
+
+    @Test
+    void open_immediatelyFilled_marksActive() {
+        // A marketable entry IBKR fills immediately (first accepted status "Filled") must be ACTIVE, not
+        // ENTRY_SUBMITTED — else a later CLOSE/FLATTEN skips the LIVE position as entry-in-flight.
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Filled"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(cap.getValue().getEntryFilledAt()).isNotNull();
+    }
+
+    @Test
+    void skipsDuplicateWhenRowAlreadyExisted_noDoubleSubmit() {
+        // Race resolved by the DB unique constraint: createIfAbsentTracked reports created=false, so this
+        // (loser) caller must NOT submit a second order.
+        TradeExecutionRecord existing = new TradeExecutionRecord();
+        existing.setId(1L);
+        existing.setEntryOrderId(555L);
+        when(repo.createIfAbsentTracked(any())).thenReturn(new CreateOutcome(existing, false));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        assertThat(r.executionId()).isEqualTo(1L);
+        assertThat(r.brokerOrderId()).isEqualTo(555L); // the winner's broker order id
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void mapsInsufficientMargin_terminalFailed() {
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED); // terminal: broker rejected
+    }
+
+    @Test
+    void readOnlyRejectMapsToFailedReadOnly() {
+        // The kill-switch / TWS Read-Only surface as BROKER_REJECT carrying a read-only message.
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "native-read-only kill-switch is ON",
+            "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch).", null));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_READ_ONLY);
+    }
+
+    @Test
+    void timeoutWithBrokerIdIsAckPending() {
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", 999L));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        assertThat(r.brokerOrderId()).isEqualTo(999L);
+    }
+
+    @Test
+    void timeoutWithoutBrokerIdIsFailedTimeout_nonTerminal() {
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", null));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_TIMEOUT);
+        assertThat(r.brokerOrderId()).isNull();
+        // Broker state UNKNOWN on a no-id timeout — row MUST stay non-terminal for the reconciler.
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void entry_flatBroker_staleExitRow_voidsItAndOpens() {
+        // Broker confirmed flat but a stale EXIT_SUBMITTED row lingers (its close filled while we missed the
+        // callback / restarted). It must be VOIDED — not treated as entry-in-flight — so the open proceeds
+        // instead of being blocked forever.
+        stubActive(activeRow(ExecutionStatus.EXIT_SUBMITTED, 1, 100L));
+        stubFlat(true);
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo, atLeastOnce()).save(cap.capture());
+        assertThat(cap.getAllValues()).anyMatch(rec -> rec.getStatus() == ExecutionStatus.CANCELLED); // stale exit voided
+        verify(ibkrOrderService).submitEntryOrder(any());
+    }
+
+    @Test
+    void entry_flatBroker_inFlightEntryRow_skipsToAvoidDoubleFill() {
+        // Broker flat but our entry order is genuinely resting unfilled (ENTRY_SUBMITTED) — opening another
+        // risks a double fill once both rest. This is the ONLY status that should skip on this path.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ---- CLOSE -----------------------------------------------------------------------------
+
+    private TradeIntent closeLong() {
+        return TradeIntent.close("wtx:MNQ:5m:2:CLOSE_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 1, new BigDecimal("18010.00"), "DU1");
+    }
+
+    private TradeExecutionRecord activeRow(ExecutionStatus status, int qty, Long entryOrderId) {
+        TradeExecutionRecord r = new TradeExecutionRecord();
+        r.setId(7L);
+        r.setExecutionKey("wtx:MNQ:5m:1:OPEN_LONG");
+        r.setInstrument("MNQ");
+        r.setTimeframe("5m");
+        r.setBrokerAccountId("DU1");
+        r.setAction("LONG"); // held side (NOT NULL in the entity); flatten/reverse tests override as needed
+        r.setQuantity(qty);
+        r.setStatus(status);
+        r.setEntryOrderId(entryOrderId);
+        return r;
+    }
+
+    private void stubActive(TradeExecutionRecord row) {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.of(row));
+    }
+
+    private void stubFlat(boolean flat) {
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(flat ? BigDecimal.ZERO : new BigDecimal("1"), flat));
+    }
+
+    /** Stub broker truth to a signed net (available, not flat) — e.g. "2" = long 2, "-2" = short 2. */
+    private void stubBroker(String net) {
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal(net), false));
+    }
+
+    @Test
+    void close_noActiveRow_skipsNoOpenRow() {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_flatAndActiveRow_voidsPhantom() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CANCELLED); // phantom voided, DB-only
+    }
+
+    @Test
+    void close_flatAndInFlight_skipsEntryInFlight() {
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_submits_exitSubmitted_oppositeActionAndRowQty() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
+        when(reconciler.readPositionState(any(), any())) // broker holds long 2 (matches the row)
+            .thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        assertThat(r.brokerOrderId()).isEqualTo(888L);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // closing a long = SELL
+        assertThat(req.getValue().quantity()).isEqualTo(2);      // the row's open qty, not the intent qty
+        assertThat(req.getValue().executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // distinct exit ref
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+    }
+
+    @Test
+    void close_capsExitQtyToBrokerNet_noOverCloseFlip() {
+        // Row records qty 2 but IBKR only holds long 1 (manual partial close). Closing the row qty (SELL 2)
+        // would flatten the long 1 and OPEN a short 1 — cap to the live broker qty → SELL 1.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L)); // row qty 2
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("1"), false)); // broker long 1
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().quantity()).isEqualTo(1);     // capped to broker net, not row qty 2
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // SELL to reduce the long
+    }
+
+    @Test
+    void close_immediatelyFilled_marksClosed() {
+        // A close IBKR fills immediately ("Filled" as first accepted status) must be CLOSED, not left
+        // EXIT_SUBMITTED — else a later CLOSE/FLATTEN hits the duplicate-exit guard over an already-flat row.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1"); // broker long 1
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Filled", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+    }
+
+    @Test
+    void close_rejectKeepsRowNonTerminal() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", null));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE); // NOT terminal: position still open
+    }
+
+    @Test
+    void close_marginOnCloseMapsToBrokerReject() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT); // a reducing order needs no margin
+    }
+
+    @Test
+    void close_rejectWithBrokerOrderId_staysActiveRetryable_notExitSubmitted() {
+        // IBKR allocated an order id then REJECTED the close. The position is still open — the row must stay
+        // ACTIVE (retryable on the next signal), NOT EXIT_SUBMITTED (which the duplicate guard would skip).
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", 555L)); // id, then rejected
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE); // retryable, NOT EXIT_SUBMITTED
+    }
+
+    @Test
+    void close_timeoutWithBrokerOrderId_marksExitSubmitted() {
+        // A close that timed out but got an order id is genuinely live (ACK_PENDING) — mark EXIT_SUBMITTED
+        // so the fill tracker resolves it on the Filled/Cancelled callback.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", 777L));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(cap.getValue().getIbkrOrderId()).isEqualTo(777); // close id recorded
+    }
+
+    @Test
+    void close_scopesActiveRowLookupToIntentAccount() {
+        // P1 guard: the active-row lookup MUST be account-scoped. A CLOSE for one account must never
+        // locate (and then flatten) another account's row — submitCloseLeg closes on the row's own
+        // brokerAccountId, so a wrong-account row would flatten the wrong position.
+        ArgumentCaptor<String> account = ArgumentCaptor.forClass(String.class);
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), account.capture()))
+            .thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(closeLong()); // intent account = "DU1"
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        assertThat(account.getValue()).isEqualTo("DU1"); // lookup scoped to the intent's resolved account
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_inFlightEntry_notFlat_skipsEntryInFlight() {
+        // Entry still resting (ENTRY_SUBMITTED) and broker NOT confirmed flat (real position or broker
+        // truth unavailable) — no confirmed full position to reduce. A close would be naked/over-sized.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_brokerTruthUnavailable_skipsNoBlindOrder() {
+        // Broker position truth unreadable — can't confirm a live position. This is the only path by which
+        // the REVERSE fill-ordering race could surface a naked exit (row ACTIVE while broker is flat). A
+        // reducing order must NOT fire blind; skip until truth is back.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_intentSideMismatchesBrokerHeld_skipsNoExposureIncrease() {
+        // CLOSE_LONG but IBKR actually holds a SHORT (broker truth is authoritative; the local row may be
+        // stale). Deriving SELL would increase the short — there is no long to close, so skip.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L)); // row even says LONG (default)
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("-2"), false)); // broker SHORT
+
+        RoutingResult r = router.route(closeLong()); // CLOSE_LONG vs broker SHORT
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ---- FLATTEN ---------------------------------------------------------------------------
+
+    private TradeIntent flatten() {
+        return TradeIntent.flatten("wtx:MNQ:5m:3:FLATTEN", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", 1, new BigDecimal("18010.00"), "DU1");
+    }
+
+    @Test
+    void flatten_closesHeldLong_withSell() {
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        row.setAction("LONG"); // held long
+        stubActive(row);
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(900L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // flatten a long = SELL
+    }
+
+    @Test
+    void flatten_closesHeldShort_withBuy() {
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 1, 100L);
+        row.setAction("SHORT"); // held short
+        stubActive(row);
+        when(reconciler.readPositionState(any(), any())) // broker holds SHORT (authoritative)
+            .thenReturn(new BrokerPositionState(new BigDecimal("-1"), false));
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(901L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("LONG"); // flatten a short = BUY
+    }
+
+    @Test
+    void flatten_staleRowOppositeBrokerSide_reducesBrokerSideNoIncrease() {
+        // Row says LONG but IBKR holds SHORT (drift / missed reverse). FLATTEN must reduce the broker's
+        // ACTUAL side — BUY to cover the short — NOT SELL (which would increase it).
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        row.setAction("LONG"); // stale local belief
+        stubActive(row);
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("-2"), false)); // broker SHORT
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(905L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("LONG"); // BUY to reduce the short, not SELL
+    }
+
+    @Test
+    void flatten_noRow_skipsNoOpenRow() {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ---- REVERSE ---------------------------------------------------------------------------
+
+    private TradeIntent reverseToShort() {
+        return TradeIntent.reverse("wtx:MNQ:5m:2:REVERSE_SHORT", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
+    }
+
+    private TradeIntent openShort() {
+        return TradeIntent.open("wtx:MNQ:5m:2:OPEN_SHORT", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
+    }
+
+    private TradeExecutionRecord priorLong() {
+        TradeExecutionRecord prior = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        prior.setAction("LONG"); // a held long, to be flattened by the reverse
+        return prior;
+    }
+
+    @Test
+    void reverse_closeThenOpen_routed() {
+        stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2 (the position the reverse flattens)
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // both legs ok
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        // Two legs: close (on the prior row) then open (a new row).
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(0).executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // close: distinct exit ref
+        assertThat(req.getAllValues().get(1).executionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT");  // open new row
+    }
+
+    @Test
+    void reverse_closeAckPending_abortsOpen() {
+        stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "PendingSubmit")); // close ack-pends
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // only the close leg; open NOT attempted
+    }
+
+    @Test
+    void reverse_closeRejected_abortsOpen() {
+        stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", null));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // close rejected; open NOT attempted
+    }
+
+    @Test
+    void reverse_openRejectedAfterClose_routedFlattenOnly() {
+        stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(submission(900L, "Submitted"))                       // close OK
+            .thenThrow(new IbkrOrderRejectionException(                       // open rejected
+                IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED_FLATTEN_ONLY); // broker FLAT, protected
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+    }
+
+    @Test
+    void open_upgradedToReverse_closesOppositeThenOpens() {
+        // An OPEN_SHORT that reconcile upgrades to a REVERSE because IBKR holds the opposite (long).
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.SHORT));
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(openShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any()); // close opposite + open short
+    }
+
+    @Test
+    void entry_reconciledSkip_returnsOutcome() {
+        // reconcile says the broker is already on the wanted side → skip, no submit.
+        when(reconciler.reconcile(any(), any())).thenReturn(
+            new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_DUPLICATE, "IBKR already long"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_alreadyExitSubmitted_skipsDuplicate() {
+        // A close is already resting (EXIT_SUBMITTED) — a second reducing order could over-close the position.
+        stubActive(activeRow(ExecutionStatus.EXIT_SUBMITTED, 1, 100L));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_noLocalRow_offsettingLegs_skipsToAvoidStacking() {
+        // Rollover overlap: IBKR net 0 but NOT flat (offsetting live legs), no local row — can't synthesise a
+        // single close, so opening would stack on the live legs. Skip.
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, false));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_noLocalRow_directionalIbkr_synthesizesCloseThenOpens() {
+        // No local row but IBKR holds a directional position (drift) — synthesise a phantom, close it, open.
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(repo).createIfAbsent(any());                          // phantom synthesised
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());  // synthesised close + open leg
+    }
+
+    @Test
+    void reverse_priorEntryStillSubmitted_skipsNoNakedOrders() {
+        // Prior entry resting unfilled (ENTRY_SUBMITTED), broker not confirmed flat — no confirmed position
+        // to flatten. The reverse must NOT fire a close (naked) then an open (stacked). Skip entirely.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 2, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any()); // neither close nor open fired
+    }
+
+    @Test
+    void reverse_priorEntryPartiallyFilled_skipsNoOverClose() {
+        // Partial fill — closing the full row qty would over-close/flip, then the open stacks. Skip.
+        stubActive(activeRow(ExecutionStatus.ENTRY_PARTIALLY_FILLED, 2, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_brokerTruthUnavailable_skipsNoBlindCloseOrStackedOpen() {
+        // Can't confirm broker truth — a reverse would fire a blind close (naked if IBKR is already flat
+        // after a restart/manual close) and then stack the open. Skip (mirrors executeExit). The skip happens
+        // before the open-row lookup, so no row stub is needed.
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_staleRowOppositeBrokerSide_closeFromBrokerTruth() {
+        // Row says LONG but IBKR actually holds SHORT (drift / a missed reverse). The reverse close leg must
+        // reduce the BROKER's side — BUY to cover the short — NOT derive SELL from the stale row (which would
+        // increase the live short before the open leg).
+        TradeExecutionRecord prior = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        prior.setAction("LONG"); // stale local belief
+        stubActive(prior);
+        stubBroker("-2"); // broker actually holds SHORT 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(0).action()).isEqualTo("LONG"); // close leg = BUY to reduce the short, not SELL
+    }
+
+    @Test
+    void open_nullAccount_persistsNonNullPlaceholder() {
+        // TradeIntent allows a null brokerAccountId (gateway resolves default), but the row column is
+        // NOT NULL — the router must persist a non-null placeholder the gateway resolves.
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+        TradeIntent noAccount = TradeIntent.open("wtx:MNQ:5m:9:OPEN_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 1, new BigDecimal("18000.25"), null);
+
+        RoutingResult r = router.route(noAccount);
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getBrokerAccountId()).isNotNull().isNotBlank();
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().brokerAccountId()).isNotNull();
+    }
+
+    @Test
+    void entry_skipDuplicate_noLocalRow_synthesizesTrackingRow() {
+        // Broker already long, no local row (drift / post-restart) — synthesise a tracking row so a later
+        // CLOSE/FLATTEN can manage the live position instead of finding nothing.
+        when(reconciler.reconcile(any(), any())).thenReturn(
+            new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_DUPLICATE, "IBKR already long 2"));
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        assertThat(r.executionId()).isEqualTo(9L);         // the synthesised tracking row
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).createIfAbsent(cap.capture());         // tracking row created
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(cap.getValue().getNormalizedEntryPrice()).isNotNull(); // NOT NULL column — must be set or flush fails
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void skipsWhenIbkrDisabled() {
+        props.setEnabled(false);
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_IBKR_DISABLED);
+        verifyNoInteractions(ibkrOrderService);
+    }
+
+    @Test
+    void skipsWhenNotReady() {
+        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler);
+
+        RoutingResult r = gated.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_RECONCILING);
+        verifyNoInteractions(ibkrOrderService);
+    }
+}

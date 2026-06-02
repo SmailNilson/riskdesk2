@@ -12,6 +12,24 @@ public interface TradeExecutionRepositoryPort {
 
     TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution);
 
+    /** Result of {@link #createIfAbsentTracked}: the row, and whether THIS call created it. */
+    record CreateOutcome(TradeExecutionRecord record, boolean created) {}
+
+    /**
+     * Like {@link #createIfAbsent} but reports whether THIS call <b>created</b> the row (so the caller
+     * may submit a broker order) or it <b>already existed</b> (the caller must NOT submit a second
+     * order). The DB unique constraint on {@code executionKey} / {@code mentorSignalReviewId} is the
+     * serialization point for concurrent callers — no pessimistic row lock is needed, so the caller
+     * never has to hold a transaction across the broker network call.
+     *
+     * <p>The JPA adapter overrides this to report created-vs-existing precisely from the
+     * unique-constraint outcome. The default (for simple in-memory test fakes) just delegates to
+     * {@link #createIfAbsent} and reports {@code created=true}.</p>
+     */
+    default CreateOutcome createIfAbsentTracked(TradeExecutionRecord execution) {
+        return new CreateOutcome(createIfAbsent(execution), true);
+    }
+
     /** All executions for a trigger source currently in the given status (e.g. WTX_AUTO + ENTRY_SUBMITTED). */
     List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource, ExecutionStatus status);
 
@@ -64,6 +82,25 @@ public interface TradeExecutionRepositoryPort {
      */
     Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSource(
             String instrument, String timeframe, ExecutionTriggerSource triggerSource);
+
+    /**
+     * Account-scoped variant of {@link #findActiveByInstrumentAndTimeframeAndTriggerSource}. The unified
+     * OrderRouter reconciles broker position truth per IBKR account, so it must locate ONLY its own
+     * account's open row — never another account's. Returning a different account's row would let a
+     * CLOSE/FLATTEN submit a reducing order on the wrong account (it closes using the row's own
+     * {@code brokerAccountId}), flattening a position the intent never meant to touch.
+     *
+     * <p>{@code brokerAccountId} is the resolved (non-null) account the row was persisted with. The JPA
+     * adapter overrides this to push the account filter into the query, so the right account's row is
+     * returned even when several accounts each hold one for the same (instrument, timeframe, source).
+     * This default (for in-memory test fakes) merely filters the unscoped single-row result by account
+     * — adequate for single-account fakes, not a substitute for the account-in-query adapter.</p>
+     */
+    default Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(
+            String instrument, String timeframe, ExecutionTriggerSource triggerSource, String brokerAccountId) {
+        return findActiveByInstrumentAndTimeframeAndTriggerSource(instrument, timeframe, triggerSource)
+            .filter(r -> brokerAccountId != null && brokerAccountId.equals(r.getBrokerAccountId()));
+    }
 
     /**
      * PR #303 — auto-arm pipeline.
