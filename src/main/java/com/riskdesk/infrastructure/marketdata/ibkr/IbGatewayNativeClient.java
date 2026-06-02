@@ -49,6 +49,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
@@ -687,17 +688,32 @@ public class IbGatewayNativeClient {
     }
 
     public Optional<NativeOrderSnapshot> findOrderByOrderRef(String requestedAccountId, String orderRef) {
-        if (orderRef == null || orderRef.isBlank() || !ensureConnected()) {
-            return Optional.empty();
-        }
+        return Optional.ofNullable(lookupOrderByOrderRef(requestedAccountId, orderRef).order());
+    }
 
+    /**
+     * Tri-state order lookup by {@code orderRef}: distinguishes <b>UNAVAILABLE</b> (could not query —
+     * blank ref, gateway disconnected, or no resolved account) from <b>NOT_FOUND</b> (queried the live
+     * and completed sets, order in neither). The connectivity check and the query happen atomically
+     * here so a caller can safely treat NOT_FOUND as "the order is genuinely gone" without racing a
+     * disconnect — UNAVAILABLE must never be read as absence.
+     */
+    public OrderLookupResult lookupOrderByOrderRef(String requestedAccountId, String orderRef) {
+        if (orderRef == null || orderRef.isBlank() || !ensureConnected()) {
+            return OrderLookupResult.unavailable();
+        }
         String accountId = resolveAccountId(requestedAccountId);
         if (accountId == null) {
-            return Optional.empty();
+            return OrderLookupResult.unavailable();
         }
-
-        Optional<NativeOrderSnapshot> openOrder = findOpenOrderByOrderRef(accountId, orderRef);
-        return openOrder.isPresent() ? openOrder : findCompletedOrderByOrderRef(accountId, orderRef);
+        // Live book first. FOUND or UNAVAILABLE (timeout/error querying it) is conclusive — return it.
+        // Only when the live book was fully delivered AND the order wasn't in it (NOT_FOUND) do we fall
+        // through to the completed book. A timeout on EITHER book yields UNAVAILABLE — never NOT_FOUND.
+        OrderLookupResult open = findOpenOrderByOrderRef(accountId, orderRef);
+        if (open.outcome() != OrderLookupOutcome.NOT_FOUND) {
+            return open;
+        }
+        return findCompletedOrderByOrderRef(accountId, orderRef);
     }
 
     public NativeOrderSubmission placeLimitOrder(Contract contract,
@@ -1423,9 +1439,13 @@ public class IbGatewayNativeClient {
         return value == null ? "" : value;
     }
 
-    private Optional<NativeOrderSnapshot> findOpenOrderByOrderRef(String accountId, String orderRef) {
+    private OrderLookupResult findOpenOrderByOrderRef(String accountId, String orderRef) {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+        // endReached is the truth signal: only openOrderEnd() means the live book was fully delivered.
+        // A timeout or an async error wakes the latch WITHOUT setting it → we must report UNAVAILABLE,
+        // never NOT_FOUND, so the reconciler doesn't read an unqueried book as proof the order is gone.
+        AtomicBoolean endReached = new AtomicBoolean(false);
 
         ApiController.ILiveOrderHandler handler = new ApiController.ILiveOrderHandler() {
             @Override
@@ -1444,6 +1464,7 @@ public class IbGatewayNativeClient {
 
             @Override
             public void openOrderEnd() {
+                endReached.set(true);
                 latch.countDown();
             }
 
@@ -1464,6 +1485,8 @@ public class IbGatewayNativeClient {
 
             @Override
             public void handle(int orderId, int errorCode, String errorMsg) {
+                // An async error means the query did NOT complete — wake the waiter but leave
+                // endReached false so the outcome is UNAVAILABLE, not a false NOT_FOUND.
                 log.debug("IB Gateway live order lookup error code={} msg={}", errorCode, errorMsg);
                 latch.countDown();
             }
@@ -1475,12 +1498,17 @@ public class IbGatewayNativeClient {
             controller.removeLiveOrderHandler(handler);
         } catch (Exception ignored) {
         }
-        return Optional.ofNullable(found.get());
+        if (!endReached.get()) {
+            return OrderLookupResult.unavailable();
+        }
+        NativeOrderSnapshot snapshot = found.get();
+        return snapshot != null ? OrderLookupResult.found(snapshot) : OrderLookupResult.notFound();
     }
 
-    private Optional<NativeOrderSnapshot> findCompletedOrderByOrderRef(String accountId, String orderRef) {
+    private OrderLookupResult findCompletedOrderByOrderRef(String accountId, String orderRef) {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<NativeOrderSnapshot> found = new AtomicReference<>();
+        AtomicBoolean endReached = new AtomicBoolean(false);
 
         ApiController.ICompletedOrdersHandler handler = new ApiController.ICompletedOrdersHandler() {
             @Override
@@ -1501,13 +1529,18 @@ public class IbGatewayNativeClient {
 
             @Override
             public void completedOrdersEnd() {
+                endReached.set(true);
                 latch.countDown();
             }
         };
 
         controller.reqCompletedOrders(handler);
         awaitLatch(latch, "completed orders", orderTimeout());
-        return Optional.ofNullable(found.get());
+        if (!endReached.get()) {
+            return OrderLookupResult.unavailable();
+        }
+        NativeOrderSnapshot snapshot = found.get();
+        return snapshot != null ? OrderLookupResult.found(snapshot) : OrderLookupResult.notFound();
     }
 
 
@@ -1521,6 +1554,22 @@ public class IbGatewayNativeClient {
                                      PersistentAccountSnapshotCache accountSubscription) {}
 
     public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
+
+    /** Outcome of {@link #lookupOrderByOrderRef}. UNAVAILABLE = couldn't query (must not be read as absence). */
+    public enum OrderLookupOutcome { FOUND, NOT_FOUND, UNAVAILABLE }
+
+    /** Tri-state order lookup result. {@code order} is non-null only when {@code outcome == FOUND}. */
+    public record OrderLookupResult(OrderLookupOutcome outcome, NativeOrderSnapshot order) {
+        public static OrderLookupResult found(NativeOrderSnapshot order) {
+            return new OrderLookupResult(OrderLookupOutcome.FOUND, order);
+        }
+        public static OrderLookupResult notFound() {
+            return new OrderLookupResult(OrderLookupOutcome.NOT_FOUND, null);
+        }
+        public static OrderLookupResult unavailable() {
+            return new OrderLookupResult(OrderLookupOutcome.UNAVAILABLE, null);
+        }
+    }
 
     public record NativeOrderSubmission(Long orderId, String status, String orderRef, Instant submittedAt) {}
 

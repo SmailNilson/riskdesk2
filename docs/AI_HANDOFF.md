@@ -19,22 +19,29 @@ same-side signals show `NONE`). Repro: user had no live order at IBKR but the pa
   grace period it looks the order up by `executionKey` (which IS the IBKR `orderRef`) — live
   orders first, then completed orders — and reconciles **deterministically**:
   `Cancelled`/`ApiCancelled`/`Inactive` → `CANCELLED`; `Filled` → `ACTIVE` (missed-fill);
-  live (`Submitted`/`PreSubmitted`/…) → left; not in either set **and** aged past
-  `not-found-max-age` (a DAY order can't outlive the session) → `CANCELLED`. Anything uncertain
-  (lookup failed, unknown status, recent not-found) is left untouched — it never guesses. No
-  broker side effect; it only writes the local tracking row.
-- Order lookup is exposed cleanly: `IbGatewayNativeClient.findOrderByOrderRef` (already existed,
-  used for submit idempotency) → new `IbkrBrokerGateway.findOrder` default → `IbkrOrderService
-  .findOrder` → returns `BrokerOrderStatusView`. New repo port method
-  `findByTriggerSourceAndStatus`.
+  live (`Submitted`/`PreSubmitted`/…) → left; **`NOT_FOUND` (confirmed absent) gated on the
+  position truth**: cancel only when IBKR holds **no position** for the instrument (the order
+  never filled into a position); if a position exists the order likely filled (fill aged out of
+  completed orders) → left. Anything uncertain is left untouched — it never guesses. No broker
+  side effect; it only writes the local tracking row.
+- Order lookup is a **tri-state** that never reads an outage as absence: `IbGatewayNativeClient
+  .lookupOrderByOrderRef` returns `FOUND` / `NOT_FOUND` / `UNAVAILABLE`. `NOT_FOUND` requires **both**
+  books to have been *fully delivered* (the live `openOrderEnd` / completed `completedOrdersEnd`
+  callback fired) and the order absent; a **timeout or async error** on either book yields
+  `UNAVAILABLE` (tracked via an `endReached` flag, not just an empty result). Surfaced as
+  `BrokerOrderLookup` via `IbkrBrokerGateway.findOrder` (default `UNAVAILABLE`) →
+  `IbkrOrderService.findOrder`. New repo port method `findByTriggerSourceAndStatus`.
+- The flat check `isInstrumentFlat` mirrors the bridge's confirmed-flat (no nonzero matching leg;
+  offsetting rollover legs count as a live position) **and scopes positions to the row's account**
+  (a multi-account gateway returning another account's position must not block the reconcile).
 - The bridge routing path is **unchanged** (still reads the cached position snapshot, stays fast);
-  the reconciler runs out-of-band and unblocks within one interval.
-- Config: `riskdesk.wtx.stale-entry.{reconcile-interval-ms,initial-delay-ms,grace-seconds,
-  not-found-max-age-hours}`.
+  the reconciler runs out-of-band and unblocks within one interval (~1 min).
+- Config: `riskdesk.wtx.stale-entry.{reconcile-interval-ms,initial-delay-ms,grace-seconds}`.
 
-Tests: `WtxStaleEntryReconcilerTest` (9) — cancelled/inactive→CANCELLED, filled→ACTIVE,
-live→left, not-found-old→CANCELLED, not-found-recent→left, within-grace→not-looked-up,
-IBKR-disabled→no-op, lookup-throws→left. Full suite green.
+Tests: `WtxStaleEntryReconcilerTest` (14) — cancelled/inactive→CANCELLED, filled→ACTIVE, live→left;
+not-found+flat→CANCELLED, +position→left, +offsetting-legs→left, +other-account-position→CANCELLED,
++same-account-position→left, +portfolio-unavailable→left; unavailable→left (no position read);
+within-grace→not-looked-up; IBKR-disabled→no-op; lookup-throws→left. Full suite green.
 
 ## WTX: no naked orders when IBKR is confirmed flat (2026-06-01)
 
