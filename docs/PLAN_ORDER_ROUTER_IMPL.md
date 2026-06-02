@@ -38,20 +38,17 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
 **Algorithme `route(TradeIntent)` — cas `OPEN` (PR1) :**
 
 ```text
-  // @Transactional : le verrou pessimiste (étape 5) doit couvrir le submit (étape 6).
+  // PAS de @Transactional tenue à travers le submit : la ligne PENDING + ibkrOrderId committent en
+  // txns COURTES, visibles par le fill-tracker (findByIbkrOrderId) dès que l'ordre est vivant.
 1. si !readiness.isReady()                         → RoutingResult.of(SKIPPED_RECONCILING)
 2. si !ibkrProperties.isEnabled()                  → of(SKIPPED_IBKR_DISABLED)
-3. si repo.findByExecutionKey(intent.idempotencyKey()).isPresent()
-                                                   → of(SKIPPED_DUPLICATE)        // fast-path
-4. candidate = toExecutionRecord(intent)           // status=PENDING_ENTRY_SUBMISSION,
+3. candidate = toExecutionRecord(intent)           // status=PENDING_ENTRY_SUBMISSION,
                                                    //   normalizedEntryPrice = round(intent.limitPrice)
-5. id = repo.createIfAbsent(candidate).id
-   // ANTI-RACE : deux ticks concurrents passent tous deux l'étape 3 et createIfAbsent ; le perdant
-   // récupère la ligne PENDING du gagnant. On RE-LIT sous verrou pessimiste pour décider :
-   persisted = repo.findByIdForUpdate(id)          // bloque tant qu'un autre tient le verrou
-   si persisted.status != PENDING_ENTRY_SUBMISSION → tracked(SKIPPED_DUPLICATE,   // l'autre a déjà soumis
-                                                              persisted.id, persisted.entryOrderId)
-6. try:
+4. (persisted, created) = repo.createIfAbsentTracked(candidate)
+   // ANTI-RACE via la contrainte unique executionKey (PAS de verrou pessimiste) : deux ticks
+   // concurrents → un seul created=true ; le perdant ne soumet PAS.
+   si !created → tracked(SKIPPED_DUPLICATE, persisted.id, persisted.entryOrderId)
+5. try:
      sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
               persisted.id, persisted.executionKey, persisted.brokerAccountId,
               persisted.instrument, brokerAction(intent), persisted.quantity,
@@ -82,7 +79,8 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
 **`mapKind(IbkrOrderRejectionException.Kind)` :**
 - `INSUFFICIENT_MARGIN` → `FAILED_INSUFFICIENT_MARGIN`
 - `TIMEOUT` → `e.brokerOrderId() != null ? ACK_PENDING : FAILED_TIMEOUT`
-- `BROKER_REJECT` / `CANCELLED` → `FAILED_BROKER_REJECT`
+- `BROKER_REJECT` / `CANCELLED` → **read-only ?** `FAILED_READ_ONLY` **:** `FAILED_BROKER_REJECT`
+  *(le kill-switch `native-read-only` et le TWS Read-Only API remontent en `BROKER_REJECT` avec un message « read-only » → garder le diagnostic distinct)*
 - sinon → `FAILED`
 
 **`brokerAction(intent)` :** OPEN/REVERSE → `side==LONG ? "LONG" : "SHORT"` ; CLOSE/FLATTEN → côté **opposé** à la position détenue (réconcilié via `findOrder`/positions).
