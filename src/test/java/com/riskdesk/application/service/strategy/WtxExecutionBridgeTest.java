@@ -16,6 +16,19 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
+import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.ExecutionReconciler;
+import com.riskdesk.application.execution.OrderRouter;
+import com.riskdesk.application.service.IbkrMarginPreflightService;
+import com.riskdesk.domain.execution.IntentKind;
+import com.riskdesk.domain.execution.RoutingOutcome;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
+import org.mockito.ArgumentCaptor;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
@@ -88,6 +101,148 @@ class WtxExecutionBridgeTest {
         bridge.submit(signal(WtxAction.OPEN_SHORT), state, bd(100));
 
         assertEquals("SHORT", repo.all().get(0).getAction());
+    }
+
+    // ---- unified-router migration (Slice B) ----------------------------------------------------
+
+    private static ExecutionProperties unifiedRouter(boolean enabled) {
+        ExecutionProperties p = new ExecutionProperties();
+        p.getUnifiedRouter().setEnabled(enabled);
+        return p;
+    }
+
+    private WtxExecutionBridge unifiedBridge(OrderRouter router, IbkrMarginPreflightService preflight, boolean flagOn) {
+        return new WtxExecutionBridge(ibkrOrderService, repo, ibkrProperties, wtxProperties,
+                preflight, null, router, unifiedRouter(flagOn));
+    }
+
+    @Test
+    void unifiedRouterOn_routesOpenViaOrderRouter_translatesIntent_mapsOutcome() {
+        OrderRouter router = mock(OrderRouter.class);
+        ArgumentCaptor<TradeIntent> cap = ArgumentCaptor.forClass(TradeIntent.class);
+        when(router.route(cap.capture())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED, "ok"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = unifiedBridge(router, null, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any()); // legacy broker path NOT used
+        assertEquals(0, repo.all().size());                         // the router owns persistence, not the bridge
+        TradeIntent intent = cap.getValue();
+        assertEquals(IntentKind.OPEN, intent.kind());
+        assertEquals(Side.LONG, intent.side());
+        assertEquals(Instrument.MCL, intent.instrument());
+        assertEquals("10m", intent.timeframe());
+        assertEquals(2, intent.quantity());
+        assertEquals(ExecutionTriggerSource.WTX_AUTO, intent.source());
+        // The "wtx-default" placeholder resolves to null so the router reads the REAL default account
+        // (its position filter is a no-op on null) instead of hiding live positions behind the placeholder.
+        assertNull(intent.brokerAccountId());
+        assertEquals(0, intent.limitPrice().compareTo(bd(70)));
+        org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().startsWith("wtx:MCL:10m:"));
+        org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().endsWith(":OPEN_LONG"));
+    }
+
+    @Test
+    void unifiedRouterOff_usesLegacyPath_routerNotCalled() {
+        OrderRouter router = mock(OrderRouter.class);
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+
+        unifiedBridge(router, null, false).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        verify(router, never()).route(any());
+        verify(ibkrOrderService).submitEntryOrder(any()); // legacy path submitted
+    }
+
+    @Test
+    void unifiedRouterOn_brokerMarginReject_mapsToSkippedInsufficientMargin_afterRouting() {
+        // No pre-route pre-flight in the unified path — the router must reconcile broker truth first (a margin
+        // pre-decline could skip routing and leave an existing position unmanaged). Affordability is enforced
+        // by the router's broker margin reject, mapped back to SKIPPED_INSUFFICIENT_MARGIN.
+        OrderRouter router = mock(OrderRouter.class);
+        when(router.route(any())).thenReturn(RoutingResult.of(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN, "no margin"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = unifiedBridge(router, null, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        verify(router).route(any()); // routed (reconcile ran); margin handled by the router, not a pre-decline
+    }
+
+    @Test
+    void cutover_normalizesLegacyDefaultAccountRows_onlyWhenFlagOn() {
+        // A legacy WTX row created before cutover stores brokerAccountId = "wtx-default".
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE));
+
+        // Flag OFF → no-op (zero impact): the row keeps its legacy placeholder.
+        unifiedBridge(mock(OrderRouter.class), null, false).normalizeLegacyDefaultAccountRowsForCutover();
+        assertEquals("wtx-default", repo.all().get(0).getBrokerAccountId());
+
+        // Flag ON → re-pointed to "__default__" so the router's account-scoped findOpenRow can locate it
+        // (else a CLOSE after cutover would SKIPPED_NO_OPEN_ROW and leave the live position open).
+        unifiedBridge(mock(OrderRouter.class), null, true).normalizeLegacyDefaultAccountRowsForCutover();
+        assertEquals("__default__", repo.all().get(0).getBrokerAccountId());
+    }
+
+    // ---- Slice C: legacy ↔ unified parity ------------------------------------------------------
+
+    /**
+     * Runs the same signal through the LEGACY path (flag OFF) and the UNIFIED path (flag ON, with a REAL
+     * OrderRouter), each with its own broker mock + repo, and returns the broker order each path submitted —
+     * [0] legacy, [1] unified. The router's reconciler sees no broker truth (unavailable → pass-through),
+     * matching the legacy path with no portfolio service, so both open from a clean slate.
+     */
+    private BrokerEntryOrderRequest[] runBothPaths(WtxAction action, WtxStrategyState state, BigDecimal refPrice) {
+        IbkrOrderService legacyBroker = mock(IbkrOrderService.class);
+        when(legacyBroker.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(1L, "Submitted", "ref", Instant.now()));
+        new WtxExecutionBridge(legacyBroker, new FakeRepo(), ibkrProperties, wtxProperties)
+                .submit(signal(action), state, refPrice);
+
+        IbkrOrderService unifiedBroker = mock(IbkrOrderService.class);
+        when(unifiedBroker.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(2L, "Submitted", "ref", Instant.now()));
+        FakeRepo unifiedRepo = new FakeRepo();
+        DefaultOrderRouter router = new DefaultOrderRouter(unifiedBroker, unifiedRepo, ibkrProperties,
+                () -> true, new ExecutionReconciler(null), Instrument::getTickSize);
+        new WtxExecutionBridge(unifiedBroker, unifiedRepo, ibkrProperties, wtxProperties,
+                null, null, router, unifiedRouter(true)).submit(signal(action), state, refPrice);
+
+        ArgumentCaptor<BrokerEntryOrderRequest> legacyCap = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(legacyBroker).submitEntryOrder(legacyCap.capture());
+        ArgumentCaptor<BrokerEntryOrderRequest> unifiedCap = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(unifiedBroker).submitEntryOrder(unifiedCap.capture());
+        return new BrokerEntryOrderRequest[]{legacyCap.getValue(), unifiedCap.getValue()};
+    }
+
+    private static void assertSameTrade(BrokerEntryOrderRequest legacy, BrokerEntryOrderRequest unified) {
+        assertEquals(legacy.action(), unified.action(), "broker action must match");
+        assertEquals(legacy.quantity(), unified.quantity(), "quantity must match");
+        assertEquals(legacy.instrument(), unified.instrument(), "instrument must match");
+        assertEquals(0, legacy.limitPrice().compareTo(unified.limitPrice()), "rounded limit price must match");
+        // Account differs only by placeholder ("wtx-default" vs "__default__") — both resolve to the same
+        // default managed account at the gateway, so it is intentionally not asserted here.
+    }
+
+    @Test
+    void parity_openLong_bothPathsSubmitSameBrokerOrder() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        BrokerEntryOrderRequest[] r = runBothPaths(WtxAction.OPEN_LONG, state, bd(70));
+        assertSameTrade(r[0], r[1]);
+        assertEquals("LONG", r[1].action()); // unified path BUYs a long, same as legacy
+    }
+
+    @Test
+    void parity_openShort_bothPathsSubmitSameBrokerOrder() {
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(2), bd(1));
+        BrokerEntryOrderRequest[] r = runBothPaths(WtxAction.OPEN_SHORT, state, bd(70));
+        assertSameTrade(r[0], r[1]);
+        assertEquals("SHORT", r[1].action());
     }
 
     @Test

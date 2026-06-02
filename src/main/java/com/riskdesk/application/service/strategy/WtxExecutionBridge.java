@@ -2,6 +2,10 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.OrderRouter;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
@@ -26,6 +30,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -107,13 +113,18 @@ public class WtxExecutionBridge {
      * a manual broker-side trade.
      */
     private final IbkrPortfolioService ibkrPortfolioService;
+    /** Unified execution core. Nullable: when present AND {@code riskdesk.execution.unified-router.enabled}
+     *  is ON (default OFF), WTX routes through it instead of the legacy handleEntry/handleClose path. */
+    private final OrderRouter orderRouter;
+    /** Migration kill-switch holder. Nullable in test constructors. */
+    private final ExecutionProperties executionProperties;
 
-    /** Test-only legacy constructor — production code uses the 6-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production code uses the 8-arg variant via Spring autowiring. */
     public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null, null, null);
     }
 
     /** Test-only — preflight wired, IBKR reconcile disabled. */
@@ -122,7 +133,18 @@ public class WtxExecutionBridge {
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
                               IbkrMarginPreflightService marginPreflight) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null, null, null);
+    }
+
+    /** Test-only — preflight + reconcile wired, unified router disabled. */
+    public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
+                              TradeExecutionRepositoryPort executionRepository,
+                              IbkrProperties ibkrProperties,
+                              WtxStrategyProperties wtxProperties,
+                              IbkrMarginPreflightService marginPreflight,
+                              IbkrPortfolioService ibkrPortfolioService) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight,
+                ibkrPortfolioService, null, null);
     }
 
     @Autowired
@@ -131,13 +153,17 @@ public class WtxExecutionBridge {
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
                               IbkrMarginPreflightService marginPreflight,
-                              IbkrPortfolioService ibkrPortfolioService) {
+                              IbkrPortfolioService ibkrPortfolioService,
+                              OrderRouter orderRouter,
+                              ExecutionProperties executionProperties) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.wtxProperties = wtxProperties;
         this.marginPreflight = marginPreflight;
         this.ibkrPortfolioService = ibkrPortfolioService;
+        this.orderRouter = orderRouter;
+        this.executionProperties = executionProperties;
     }
 
     public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state) {
@@ -174,12 +200,98 @@ public class WtxExecutionBridge {
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, "Unknown instrument: " + state.instrument());
         }
 
+        // Migration: when riskdesk.execution.unified-router.enabled is ON (default OFF) and the router bean
+        // is present, route every WTX action through the shared OrderRouter instead of the legacy
+        // handleEntry/handleClose path. Zero runtime effect while OFF — the legacy path below is unchanged.
+        if (orderRouter != null && executionProperties != null && executionProperties.isUnifiedRouterEnabled()) {
+            return routeViaUnifiedRouter(signal, state, instrument, action, referencePrice);
+        }
+
         return switch (action) {
             case CLOSE_LONG, CLOSE_SHORT, CLOSE_ALL -> handleClose(signal, state, instrument, action, referencePrice);
             case OPEN_LONG, OPEN_SHORT, REVERSE_TO_LONG, REVERSE_TO_SHORT ->
                     handleEntry(signal, state, instrument, action, referencePrice);
             default -> null;
         };
+    }
+
+    /**
+     * Unified-router path (migration Slice B). Derives the same (executionKey, qty, price, account) the
+     * legacy path uses, applies the OPEN margin pre-flight for parity, then translates the action to a
+     * {@link TradeIntent} and routes it through the {@link OrderRouter} — which owns reconciliation,
+     * idempotence, execution-row persistence and broker submission. The router's neutral
+     * {@link RoutingResult} is mapped back to the strategy-facing {@link WtxRoutingOutcome}. Reached only
+     * behind the default-OFF {@code riskdesk.execution.unified-router.enabled} flag.
+     */
+    private WtxRoutingResult routeViaUnifiedRouter(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                                                   WtxAction action, BigDecimal referencePrice) {
+        String tf = signal.timeframe();
+        String executionKey = "wtx:" + state.instrument() + ":" + tf + ":"
+                + signal.signalTs().getEpochSecond() + ":" + action.name();
+
+        BigDecimal price = referencePrice != null ? referencePrice : state.entryPrice();
+        if (price == null) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
+        int qty = positionQuantity(state);
+        if (qty <= 0) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
+        }
+        // Use the EFFECTIVE account (null for the "wtx-default" placeholder), NOT the literal placeholder:
+        // the router's readPositionState filters IBKR positions by exact account, so the placeholder would
+        // hide a real position (e.g. DU1) and the broker would read falsely flat — voiding/skipping exits or
+        // stacking opens. null → the router reads the default managed account (filter no-op) and persists the
+        // "__default__" placeholder (resolved at submit). Mirrors the legacy readIbkrPositionState path.
+        String brokerAccountId = effectiveBrokerAccountId();
+
+        // NO pre-route margin pre-flight here: the router reconciles broker truth INSIDE route() (skip a
+        // same-side duplicate while synthesising a tracking row, upgrade an opposite-side OPEN to a REVERSE
+        // that flattens first and frees margin, etc.). Pre-declining a full-OPEN-qty pre-flight before that
+        // reconcile would skip routing entirely and leave an existing live position unmanaged. Affordability
+        // is instead enforced by the router's broker margin reject (FAILED_INSUFFICIENT_MARGIN → mapped to
+        // SKIPPED_INSUFFICIENT_MARGIN). A router-side pre-flight applied AFTER reconcile, for the actual entry
+        // qty (full for OPEN, delta for REVERSE), is the correct affordability gate — a Slice D item.
+        TradeIntent intent = WtxIntentTranslator.toTradeIntent(action, executionKey,
+                ExecutionTriggerSource.WTX_AUTO, instrument, tf, qty, price, brokerAccountId);
+        RoutingResult result = orderRouter.route(intent);
+        WtxRoutingOutcome outcome = WtxIntentTranslator.toWtxOutcome(result.outcome());
+        String message = result.outcome().isFailure() ? result.message() : null;
+        log.info("WTX [{} {}] unified-router {} → {} (core {})",
+                state.instrument(), tf, action, outcome, result.outcome());
+        return WtxRoutingResult.of(outcome, message);
+    }
+
+    /**
+     * Cutover handoff (migration). Legacy WTX rows persisted the bridge placeholder {@code "wtx-default"};
+     * the unified path routes the default account as null, which the router persists/queries as
+     * {@link DefaultOrderRouter#DEFAULT_BROKER_ACCOUNT}. On startup AFTER the flag is enabled, re-point any
+     * non-terminal default-account WTX rows so the router's account-scoped {@code findOpenRow} can locate
+     * them — otherwise a CLOSE / CLOSE_ALL against an existing default-account position after cutover returns
+     * {@code SKIPPED_NO_OPEN_ROW} and leaves the live IBKR position open.
+     *
+     * <p>Flag-gated (no-op when OFF → zero impact) and idempotent (only {@code "wtx-default"} rows are
+     * touched, so subsequent restarts find none). Only the default placeholder is normalized — a configured
+     * real account already matches on both paths.</p>
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    void normalizeLegacyDefaultAccountRowsForCutover() {
+        if (orderRouter == null || executionProperties == null || !executionProperties.isUnifiedRouterEnabled()) {
+            return;
+        }
+        int normalized = 0;
+        for (TradeExecutionRecord row : executionRepository.findAllActive()) {
+            if (row.getTriggerSource() == ExecutionTriggerSource.WTX_AUTO
+                    && "wtx-default".equals(row.getBrokerAccountId())) {
+                row.setBrokerAccountId(DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+                row.setUpdatedAt(Instant.now());
+                executionRepository.save(row);
+                normalized++;
+            }
+        }
+        if (normalized > 0) {
+            log.info("WTX unified-router cutover: normalized {} legacy 'wtx-default' row(s) to '{}'",
+                    normalized, DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+        }
     }
 
     /**

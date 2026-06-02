@@ -40,8 +40,9 @@ public class DefaultOrderRouter implements OrderRouter {
     private static final Logger log = LoggerFactory.getLogger(DefaultOrderRouter.class);
 
     /** Non-null placeholder persisted when the intent leaves brokerAccountId null. The gateway's
-     *  resolveAccountId() resolves any value that is not a real managed account to the default. */
-    private static final String DEFAULT_BROKER_ACCOUNT = "__default__";
+     *  resolveAccountId() resolves any value that is not a real managed account to the default. Public so
+     *  a migrating strategy can normalize its own legacy default-account rows to this value at cutover. */
+    public static final String DEFAULT_BROKER_ACCOUNT = "__default__";
 
     /** Suffix appended to an exit leg's orderRef so it never collides with the entry order's ref in
      *  placeLimitOrder's orderRef idempotency lookup. The fill tracker strips it to map a close callback
