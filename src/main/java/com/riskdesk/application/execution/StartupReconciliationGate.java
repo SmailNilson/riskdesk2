@@ -1,6 +1,6 @@
 package com.riskdesk.application.execution;
 
-import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
@@ -18,9 +18,14 @@ import org.springframework.stereotype.Component;
  * reachable. Without it, a strategy signal firing immediately after a restart could submit blind —
  * before the core can read what the broker already holds — risking a double position.</p>
  *
- * <p>The gate opens once broker position truth is reachable: {@link IbkrAuthStatusView#connected()}
- * is {@code true}, or IBKR is disabled (nothing to reconcile — the router then short-circuits with
- * {@code SKIPPED_IBKR_DISABLED}). It is checked on {@link ApplicationReadyEvent} and retried on a
+ * <p>The gate opens once broker position truth is actually <b>readable</b> — a portfolio snapshot that
+ * is connected with a non-null positions list (the exact predicate
+ * {@link com.riskdesk.application.execution.ExecutionReconciler#readPositionState} requires) — or IBKR
+ * is disabled (nothing to reconcile — the router then short-circuits with {@code SKIPPED_IBKR_DISABLED}).
+ * A merely-connected socket is NOT enough: in the window where accounts/positions have not arrived yet,
+ * {@code readPositionState} returns unavailable and {@code routeEntry} would pass OPEN/REVERSE through
+ * blind over an existing broker position — the exact case this gate exists to prevent. It is checked on
+ * {@link ApplicationReadyEvent} and retried on a
  * fixed schedule so a transient boot-time broker outage delays — never permanently bricks — routing.
  * The gate is one-way (CLOSED&rarr;OPEN): a mid-session disconnect is handled at submission time, not
  * here, so we never re-close and silently halt a live strategy.</p>
@@ -76,14 +81,18 @@ public class StartupReconciliationGate implements ExecutionReadinessGate {
             return;
         }
         try {
-            IbkrAuthStatusView auth = portfolioService.getAuthStatus();
-            if (auth != null && auth.connected()) {
-                open("IBKR connected — broker position truth reachable");
+            // Require a READABLE snapshot, not just a connected socket: the same predicate
+            // readPositionState uses (connected + non-null positions). getPortfolio(null) resolves the
+            // default managed account; during the post-connect window before accounts arrive it returns
+            // a not-connected/empty snapshot, so the gate correctly stays closed.
+            IbkrPortfolioSnapshot snap = portfolioService.getPortfolio(null);
+            if (snap != null && snap.connected() && snap.positions() != null) {
+                open("IBKR position truth readable");
             } else {
-                log.debug("execution boot gate still CLOSED — IBKR not connected yet; will retry");
+                log.debug("execution boot gate still CLOSED — broker position truth not readable yet; will retry");
             }
         } catch (RuntimeException e) {
-            // Never let a transient auth/portfolio read failure brick the gate — stay CLOSED and retry.
+            // Never let a transient portfolio read failure brick the gate — stay CLOSED and retry.
             log.warn("execution boot gate reconciliation attempt failed — staying CLOSED, will retry: {}",
                 e.getMessage());
         }

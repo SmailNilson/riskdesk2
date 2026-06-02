@@ -1,12 +1,14 @@
 package com.riskdesk.application.execution;
 
-import com.riskdesk.application.dto.IbkrAuthStatusView;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -20,8 +22,16 @@ class StartupReconciliationGateTest {
         return p;
     }
 
-    private static IbkrAuthStatusView auth(boolean connected) {
-        return new IbkrAuthStatusView(connected, connected, connected, false, "socket://x:4003", "msg");
+    /** Connected snapshot with a non-null positions list — broker position truth IS readable. */
+    private static IbkrPortfolioSnapshot readable() {
+        return new IbkrPortfolioSnapshot(true, "DU1", List.of(), null, null, null, null, null, null, null,
+            "USD", List.of(), null);
+    }
+
+    /** Socket may be up but accounts/positions have not arrived — truth NOT readable (positions null). */
+    private static IbkrPortfolioSnapshot notReadable() {
+        return new IbkrPortfolioSnapshot(false, "DU1", List.of(), null, null, null, null, null, null, null,
+            "USD", null, null);
     }
 
     private StartupReconciliationGate gate(boolean enabled) {
@@ -45,8 +55,8 @@ class StartupReconciliationGateTest {
     }
 
     @Test
-    void ibkrEnabledAndConnected_opens() {
-        when(portfolio.getAuthStatus()).thenReturn(auth(true));
+    void positionTruthReadable_opens() {
+        when(portfolio.getPortfolio(nullable(String.class))).thenReturn(readable());
         StartupReconciliationGate gate = gate(true);
 
         gate.onApplicationReady();
@@ -55,21 +65,23 @@ class StartupReconciliationGateTest {
     }
 
     @Test
-    void ibkrEnabledNotConnected_staysClosed_thenOpensOnRetryWhenConnected() {
-        when(portfolio.getAuthStatus()).thenReturn(auth(false));
+    void socketConnectedButPortfolioNotReadable_staysClosed_thenOpensWhenReadable() {
+        // The exact gap the gate must close: a connected socket whose account/position snapshot has not
+        // arrived yet. readPositionState would return unavailable, so the gate must NOT open.
+        when(portfolio.getPortfolio(nullable(String.class))).thenReturn(notReadable());
         StartupReconciliationGate gate = gate(true);
 
         gate.onApplicationReady();
-        assertThat(gate.isReady()).isFalse(); // broker not reachable yet — keep refusing
+        assertThat(gate.isReady()).isFalse();
 
-        when(portfolio.getAuthStatus()).thenReturn(auth(true)); // connection comes up
+        when(portfolio.getPortfolio(nullable(String.class))).thenReturn(readable()); // positions arrive
         gate.retryUntilReady();
         assertThat(gate.isReady()).isTrue();
     }
 
     @Test
-    void authReadThrows_staysClosed_noException() {
-        when(portfolio.getAuthStatus()).thenThrow(new RuntimeException("gateway not ready"));
+    void portfolioReadThrows_staysClosed_noException() {
+        when(portfolio.getPortfolio(nullable(String.class))).thenThrow(new RuntimeException("gateway not ready"));
         StartupReconciliationGate gate = gate(true);
 
         gate.onApplicationReady(); // must swallow the error, not brick the gate
@@ -78,14 +90,14 @@ class StartupReconciliationGateTest {
     }
 
     @Test
-    void retryAfterOpen_isNoOp_doesNotReReadBroker() {
-        when(portfolio.getAuthStatus()).thenReturn(auth(true));
+    void retryAfterOpen_isNoOp_oneWayGate() {
+        when(portfolio.getPortfolio(nullable(String.class))).thenReturn(readable());
         StartupReconciliationGate gate = gate(true);
         gate.onApplicationReady();
         assertThat(gate.isReady()).isTrue();
 
-        // Once open the gate is one-way: a later disconnect must not re-close it (handled at submit time).
-        when(portfolio.getAuthStatus()).thenReturn(auth(false));
+        // Once open the gate is one-way: a later unreadable snapshot must not re-close it.
+        when(portfolio.getPortfolio(nullable(String.class))).thenReturn(notReadable());
         gate.retryUntilReady();
         assertThat(gate.isReady()).isTrue();
     }
