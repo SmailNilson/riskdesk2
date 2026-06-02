@@ -1,6 +1,73 @@
 # AI Handoff
 
-Last updated: 2026-05-31
+Last updated: 2026-06-01
+
+## WTX: no naked orders when IBKR is confirmed flat (2026-06-01)
+
+**Problem (prod, reported from the panel).** The WTX auto-IBKR bridge fired a REVERSE
+as TWO orders (close leg to flatten the prior side + open leg for the new side). When
+the broker position had been flattened **outside WTX** — a manual close, or a side that
+was opened while `Auto-IBKR` was OFF so no order ever reached IBKR — IBKR was actually
+**flat**, but the stale `trade_executions` row was still `ACTIVE`. `WtxExecutionBridge`'s
+IBKR-truth reconcile treated `livePos == 0` (confirmed flat) the same as `livePos == null`
+(snapshot unavailable) and passed the REVERSE through unchanged → the close leg became a
+**naked order** (a BUY that *opens* instead of flattening) on top of the open leg. Result:
+two orders, ~double exposure, one resting unfilled in limit. The pure CLOSE path
+(`handleClose`: MAX_LOSS / NY-force / trailing) never consulted IBKR at all, so it had the
+same naked-flatten risk.
+
+**Fix — trust a *confirmed-flat* IBKR snapshot, only in `WtxExecutionBridge`:**
+
+- `reconcileWithIbkr`: split `livePos == null` (snapshot unavailable → legacy passthrough)
+  from `livePos == 0` (IBKR confirmed flat). On confirmed flat, **downgrade**
+  `REVERSE_TO_LONG/SHORT → OPEN_LONG/SHORT` so no close leg runs — exactly one order at the
+  panel qty.
+- `handleEntry`: on confirmed flat, resolve our own non-terminal WTX row before opening.
+  An `ACTIVE` row (a filled position the broker no longer holds) is voided (`→ CANCELLED`)
+  so the new OPEN is the sole active row. An **in-flight** row (`ENTRY_SUBMITTED` /
+  `ENTRY_PARTIALLY_FILLED` …) means an entry is resting **unfilled** — IBKR reads flat only
+  because it hasn't filled yet, so the open is **skipped** with the dedicated
+  `SKIPPED_ENTRY_IN_FLIGHT` outcome to avoid a double fill once both rest. DB-only, no broker
+  side effect. The caller (`WtxStrategyService`) applies the action optimistically before
+  routing, so on `SKIPPED_ENTRY_IN_FLIGHT` it **reverts** the virtual state to `preActionState`
+  (the only live order is the resting one — keep pointing at that side, not the never-opened
+  new side). A new `WtxRoutingOutcome` value distinct from `SKIPPED_DUPLICATE`, whose
+  reconcile-same-side case must *keep* the applied state.
+- `handleClose`: on confirmed flat, never send a naked flatten. An `ACTIVE` row (filled
+  position the broker no longer holds) is voided → `SKIPPED_NO_OPEN_ROW`. An **in-flight** row
+  (`ENTRY_SUBMITTED` / `ENTRY_PARTIALLY_FILLED`) is the resting unfilled entry that *makes*
+  IBKR read flat — the flatten would be a naked opposite-side order, so it is skipped **without
+  voiding** (the order is still live & tracked) → `SKIPPED_ENTRY_IN_FLIGHT`. An `EXIT_SUBMITTED`
+  flatten already in flight is left for the fill tracker.
+- **Caller keeps the position side on `SKIPPED_ENTRY_IN_FLIGHT`.** All four `WtxStrategyService`
+  flatten sites (signal close, swing-bias rewrite-to-close, MAX_LOSS halt, NY force-close, plus
+  the main open/reverse branch) skip their virtual-state flatten on that outcome — no broker
+  order was sent, so the panel keeps pointing at the resting entry's side. The **MAX_LOSS halt**
+  additionally **defers the latch**: it skips `state.withMaxLossHit()` (which forces FLAT) when the
+  flatten was deferred, so the retry gate (`!state.maxLossHit()`) stays open and the halt re-fires
+  on a later bar once the entry fills — otherwise the resting entry would fill into an unmanaged,
+  un-haltable position.
+- **A filled `ACTIVE` row the broker no longer holds is genuine drift** (voided); an unfilled
+  resting entry legitimately reads flat and must never be voided (would corrupt the live order),
+  stacked on (would double fill), or flattened against (would be naked).
+- **"Confirmed flat" ≠ net == 0.** `readIbkrPositionState` does ONE account-scoped snapshot read
+  and returns both the signed `net` (for the same/opposite reconcile) and `confirmedFlat` — true
+  only when there is **no matching nonzero leg at all**. Offsetting legs across expiries (a rollover/
+  calendar overlap holding `+1 MCLM6` and `-1 MCLU6`) net to zero but are LIVE: `confirmedFlat` is
+  false, so the reverse keeps its two-leg behaviour and the close flattens the tracked leg instead of
+  voiding it. Only `confirmedFlat` gates the void / REVERSE→OPEN downgrade / in-flight skip.
+- Unchanged when the snapshot is unavailable (`null`) or when IBKR holds a real position —
+  the existing OPEN→REVERSE upgrade / duplicate-skip / synthesize paths are untouched.
+
+Tests: `WtxExecutionBridgeTest` +8 (reverse-on-flat downgrade with/without stale row,
+close-on-flat void+skip, snapshot-unavailable legacy two-leg, in-flight entry open-skip,
+in-flight entry close-skip, offsetting-legs reverse keeps two legs, offsetting-legs close
+flattens tracked leg) — 53 green; full suite 1830 green.
+
+**Known gap (follow-up, not in this change):** `IbkrWtxRsiExecutionBridge` (the separate
+WTX+RSI strategy) has no IBKR-truth reconcile at all — its `submitClose`/`submitOpen` trust
+the DB row, so the same naked-order class is latent there. It would need an
+`IbkrPortfolioService` wired in.
 
 ## WTX+RSI: unified FSM via Reducer + Command (2026-05-31)
 

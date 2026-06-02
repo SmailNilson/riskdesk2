@@ -884,6 +884,210 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void reconcile_ibkrFlat_reverseWithStaleRow_downgradesToSingleOpen_noNakedCloseLeg() {
+        // PROD REPRO (screenshot): WTX still thinks it holds a SHORT (stale ACTIVE row) and fires
+        // REVERSE_TO_LONG, but the user already flattened the position manually at the broker so
+        // IBKR is FLAT. The old code passed the REVERSE through → a NAKED close leg (BUY to flatten
+        // a short that's gone) PLUS the open leg = TWO orders, one resting unfilled in limit.
+        // Now: IBKR-flat downgrades REVERSE → OPEN, so exactly ONE order (the new long) is sent and
+        // the stale row is reconciled to CANCELLED.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        // Stale prior SHORT row — never closed in the app because the user flattened at the broker.
+        TradeExecutionRecord stale = wtxRow("SHORT", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(stale);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1)) // virtual state already flipped to the new side
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // EXACTLY ONE order — the open leg. No naked close leg.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());
+
+        // Stale row reconciled to terminal so a later CLOSE can't target the phantom.
+        TradeExecutionRecord staleAfter = repo.all().stream()
+                .filter(r -> r.getId().equals(stale.getId())).findFirst().orElseThrow();
+        assertEquals(ExecutionStatus.CANCELLED, staleAfter.getStatus(),
+                "stale row must be voided when IBKR is confirmed flat");
+        // Exactly one non-terminal row remains — the new open leg.
+        long active = repo.all().stream()
+                .filter(r -> r.getStatus() != ExecutionStatus.CANCELLED
+                        && r.getStatus() != ExecutionStatus.CLOSED).count();
+        assertEquals(1, active, "only the new OPEN row stays active after the downgrade");
+    }
+
+    @Test
+    void reconcile_ibkrFlat_reverseWithNoRow_opensSingleLong() {
+        // REVERSE_TO_LONG with IBKR flat and no local row (prior side opened while auto-exec was
+        // OFF, so nothing ever reached the broker). Must open a single long — no close leg.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+        assertEquals(1, repo.all().size(), "single OPEN row, no synthesized/naked close leg");
+    }
+
+    @Test
+    void close_ibkrFlat_skipsNakedFlatten_andVoidsStaleRow() {
+        // CLOSE path (MAX_LOSS / NY-force / trailing): WTX has an ACTIVE long row but IBKR is flat
+        // (manual close). A flatten now would be a NAKED SELL that opens an unintended short.
+        // Must skip the order entirely and void the stale row.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true); // service already flattened virtual state
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(ExecutionStatus.CANCELLED, repo.all().get(0).getStatus(),
+                "stale row must be voided — never flattened naked");
+    }
+
+    @Test
+    void reconcile_snapshotUnavailable_reverseUnchanged_legacyTwoLegs() {
+        // Snapshot unavailable (portfolio read returns null) → can't reconcile, so the REVERSE keeps
+        // its legacy behaviour: flatten the WTX-tracked prior side, then open the new one (two legs).
+        // Guards that ONLY the confirmed-flat path changed, not the unknown-snapshot path.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(null); // snapshot unavailable → livePos null
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("SHORT", 1, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_LONG), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // Two legs: close the tracked short (BUY) + open the new long (BUY).
+        verify(ibkrOrderService, times(2)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 1));
+    }
+
+    @Test
+    void reconcile_ibkrFlat_inFlightEntryRow_skipsOpen_noVoidNoSecondOrder() {
+        // Codex P1 (follow-up): when IBKR reads flat ONLY because a prior entry is still resting
+        // UNFILLED (ENTRY_SUBMITTED), the bridge must NOT void that row AND must NOT open another —
+        // otherwise the first resting entry and the new one can both fill → double exposure, two
+        // non-terminal rows on one panel. Skip and let the in-flight order resolve first.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0))); // entry unfilled → IBKR flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord inFlight = wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED);
+        repo.createIfAbsent(inFlight);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT, result.outcome());
+        // No second order — the open is skipped while the entry is in flight.
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        // In-flight entry row preserved (NOT voided) and no new row created.
+        assertEquals(1, repo.all().size(), "no new open row while an entry is in flight");
+        TradeExecutionRecord after = repo.all().get(0);
+        assertEquals(inFlight.getId(), after.getId());
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, after.getStatus(),
+                "in-flight ENTRY_SUBMITTED row must be preserved, not voided");
+    }
+
+    @Test
+    void close_ibkrFlat_inFlightEntryRow_skipsFlatten_noNakedOrder_rowPreserved() {
+        // Codex P1 (CLOSE symmetry): a CLOSE / MAX_LOSS / force-close against an ENTRY_SUBMITTED
+        // (unfilled) row must NOT send a flatten — IBKR reads flat only because the entry hasn't
+        // filled, so the opposite-side order would be NAKED and could open an unintended position.
+        // Skip WITHOUT voiding (the resting order is still live & tracked), returning
+        // SKIPPED_ENTRY_IN_FLIGHT so the caller keeps the position side.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED));
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, repo.all().get(0).getStatus(),
+                "in-flight entry row must be preserved — not voided, not flattened");
+    }
+
+    @Test
+    void reconcile_offsettingLegsNetZero_notTreatedAsFlat_reverseKeepsTwoLegs() {
+        // Codex P1: rollover/calendar overlap holds +1 MCLM6 and -1 MCLU6 — these net to zero but are
+        // LIVE legs. Must NOT be read as confirmed-flat: a REVERSE keeps its normal two-leg behaviour
+        // (close the tracked leg + open the new side), not the flat downgrade to a single open, and the
+        // local row is never voided as a phantom.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWithLegs(
+                new String[]{"MCLM6", "MCLU6"}, new BigDecimal[]{bd(1), bd(-1)})); // net 0, both live
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ACTIVE)); // WTX tracks the front-month long leg
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        // Two legs (close tracked long + open new short) — NOT downgraded to one open.
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+        long voided = repo.all().stream().filter(r -> r.getStatus() == ExecutionStatus.CANCELLED).count();
+        assertEquals(0, voided, "offsetting live legs must not be voided as confirmed-flat drift");
+    }
+
+    @Test
+    void close_offsettingLegsNetZero_notTreatedAsFlat_flattensTrackedLeg() {
+        // CLOSE counterpart: offsetting live legs (net 0) must not hit the confirmed-flat void/skip —
+        // run the normal close path and flatten the WTX-tracked leg.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWithLegs(
+                new String[]{"MCLM6", "MCLU6"}, new BigDecimal[]{bd(1), bd(-1)}));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        repo.createIfAbsent(wtxRow("LONG", 1, ExecutionStatus.ACTIVE));
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // the flatten of the tracked leg
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.all().get(0).getStatus(),
+                "tracked leg is flattened normally, not voided as confirmed-flat");
+    }
+
+    @Test
     void reconcile_scopesPortfolioReadToConfiguredBrokerAccount() {
         // wtx.broker-account-id is configured to "DU777"; the bridge must request that account
         // from the portfolio service AND filter out positions belonging to other accounts so a
@@ -1031,6 +1235,20 @@ class WtxExecutionBridgeTest {
         return new IbkrPortfolioSnapshot(
                 true, "DU123", List.of(), bd(10000), bd(2000), bd(8000),
                 bd(8000), bd(0), bd(0), bd(0), "USD", List.of(pos), null);
+    }
+
+    /** Multi-leg IBKR portfolio snapshot — for offsetting rollover/calendar reconcile tests. */
+    private static IbkrPortfolioSnapshot snapshotWithLegs(String[] contractDescs, BigDecimal[] positions) {
+        List<IbkrPositionView> legs = new ArrayList<>();
+        for (int i = 0; i < contractDescs.length; i++) {
+            legs.add(new IbkrPositionView(
+                    "DU123", 10000L + i, contractDescs[i], "FUT",
+                    positions[i], BigDecimal.ZERO, BigDecimal.ZERO,
+                    BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, "USD"));
+        }
+        return new IbkrPortfolioSnapshot(
+                true, "DU123", List.of(), bd(10000), bd(2000), bd(8000),
+                bd(8000), bd(0), bd(0), bd(0), "USD", legs, null);
     }
 
     /** Minimal in-memory TradeExecutionRepositoryPort for bridge unit tests. */

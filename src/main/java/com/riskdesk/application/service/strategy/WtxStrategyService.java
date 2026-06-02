@@ -201,10 +201,15 @@ public class WtxStrategyService {
                     // — applyAction → closePosition → withFlat clears entryQty to 0, which
                     // would shrink the IBKR close to a single contract for size > 1.
                     // Same ordering invariant as applyExit() and the MAX_LOSS_HALT path.
-                    signal = signal.withRouting(
-                            routeToExecution(signal, state, currentCandle.getClose()));
-                    state = applyAction(signal.suggestedAction(), state, instrument, config,
-                            currentCandle.getClose(), null);
+                    WtxRoutingResult closeRouting =
+                            routeToExecution(signal, state, currentCandle.getClose());
+                    signal = signal.withRouting(closeRouting);
+                    // Skip the flatten if a prior entry is still resting unfilled — no broker order
+                    // was sent, so keep the position side instead of marking it FLAT.
+                    if (!skippedEntryInFlight(closeRouting)) {
+                        state = applyAction(signal.suggestedAction(), state, instrument, config,
+                                currentCandle.getClose(), null);
+                    }
                 } else {
                     BigDecimal entryAtr = AtrCalculator.compute(candles, config.atrLength());
                     WtxStrategyState preActionState = state;
@@ -221,6 +226,14 @@ public class WtxStrategyService {
                         state = closePosition(preActionState, instrument, currentCandle.getClose());
                         log.warn("WTX [{} {}] reverse flattened only — virtual state corrected to FLAT "
                                 + "(open leg skipped for margin)", instrumentName, event.timeframe());
+                    } else if (routing.outcome() == WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT) {
+                        // The bridge skipped the open: a prior entry order is still resting unfilled at
+                        // the broker. No order was sent, so revert the optimistically-applied action —
+                        // the only live order is the resting one, so the virtual state must keep pointing
+                        // at its (pre-action) side, not the never-opened new side.
+                        state = preActionState;
+                        log.warn("WTX [{} {}] open/reverse skipped — prior entry still in flight; virtual "
+                                + "state kept at pre-action side", instrumentName, event.timeframe());
                     }
                 }
             }
@@ -239,20 +252,37 @@ public class WtxStrategyService {
                 && !state.maxLossHit()
                 && WtxRiskGuard.isMaxLossHit(state, config.maxDailyLossUsd())) {
             log.warn("WTX [{}] daily max-loss hit (dailyPnl={}), flattening + halting", instrumentName, state.dailyPnl());
+            boolean haltDeferred = false;
             if (state.currentPosition() != WtxPosition.FLAT) {
                 WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                         ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
                 WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
                         "MAX_LOSS_HALT", event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
-                haltSignal = haltSignal.withRouting(
-                        routeToExecution(haltSignal, state, currentCandle.getClose()));
-                state = closePosition(state, instrument, currentCandle.getClose());
+                WtxRoutingResult haltRouting =
+                        routeToExecution(haltSignal, state, currentCandle.getClose());
+                haltSignal = haltSignal.withRouting(haltRouting);
+                if (skippedEntryInFlight(haltRouting)) {
+                    // Prior entry still resting UNFILLED and IBKR flat → no broker flatten was sent.
+                    // Do NOT mark max-loss-hit: withMaxLossHit() forces the state FLAT and the retry
+                    // gate (!state.maxLossHit()) would then lock out the flatten forever, leaving the
+                    // entry to fill later as an unmanaged position. Defer — keep the position so the
+                    // halt re-fires on a later bar once the entry fills (or the snapshot updates).
+                    haltDeferred = true;
+                    log.warn("WTX [{}] max-loss halt deferred — prior entry still in flight; "
+                            + "position kept, will retry on a later bar", instrumentName);
+                } else {
+                    state = closePosition(state, instrument, currentCandle.getClose());
+                }
                 historyPort.save(haltSignal);
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
                 publishWtxEvent(haltSignal, currentCandle.getClose());
             }
-            state = state.withMaxLossHit();
+            // Only latch the halt (which also flattens the virtual state) when the flatten was not
+            // deferred — otherwise the next bar must be free to retry the max-loss flatten.
+            if (!haltDeferred) {
+                state = state.withMaxLossHit();
+            }
         }
 
         statePort.save(state.withLastCandleTs(event.timestamp()));
@@ -276,9 +306,13 @@ public class WtxStrategyService {
                             WtxSignal forceCloseSignal = buildCloseSignal(state, timeframe, closeAction,
                                     "FORCE_CLOSE:" + reason, java.time.Instant.now());
                             // Route to IBKR with the pre-close state so the open quantity is preserved.
-                            forceCloseSignal = forceCloseSignal.withRouting(
-                                    routeToExecution(forceCloseSignal, state, exitPrice));
-                            WtxStrategyState closed = closePosition(state, instrument, exitPrice);
+                            WtxRoutingResult fcRouting =
+                                    routeToExecution(forceCloseSignal, state, exitPrice);
+                            forceCloseSignal = forceCloseSignal.withRouting(fcRouting);
+                            // Prior entry still resting unfilled → keep the position (no flatten sent).
+                            WtxStrategyState closed = skippedEntryInFlight(fcRouting)
+                                    ? state
+                                    : closePosition(state, instrument, exitPrice);
                             historyPort.save(forceCloseSignal);
                             statePort.save(closed);
                             ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
@@ -423,8 +457,13 @@ public class WtxStrategyService {
                 exit.reason().name(), event.timestamp());
         // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
         // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)
-        exitSignal = exitSignal.withRouting(routeToExecution(exitSignal, state, exit.exitPrice()));
-        WtxStrategyState closed = closePosition(state, instrument, exit.exitPrice());
+        WtxRoutingResult routing = routeToExecution(exitSignal, state, exit.exitPrice());
+        exitSignal = exitSignal.withRouting(routing);
+        // Prior entry still resting unfilled → no broker flatten sent; keep the position so the
+        // protective stop stays armed until the entry fills (or a later bar reconciles).
+        WtxStrategyState closed = skippedEntryInFlight(routing)
+                ? state
+                : closePosition(state, instrument, exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
         publishWtxEvent(exitSignal, exit.exitPrice());
@@ -500,6 +539,16 @@ public class WtxStrategyService {
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED,
                     msg.length() > 200 ? msg.substring(0, 200) : msg);
         }
+    }
+
+    /**
+     * True when the bridge skipped an open/close because our own prior entry order is still resting
+     * UNFILLED at the broker. No broker order was sent, so the caller must NOT mutate the virtual
+     * state (neither apply the new action nor flatten) — the only live order is the resting entry,
+     * so the panel keeps pointing at its side until it fills or a later bar reconciles.
+     */
+    private static boolean skippedEntryInFlight(WtxRoutingResult routing) {
+        return routing != null && routing.outcome() == WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT;
     }
 
     private void publishState(WtxStrategyState state, WtxConfig config) {
