@@ -50,7 +50,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -158,18 +157,19 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
-    void unifiedRouterOn_openDeclinedByPreflight_skipsInsufficientMargin_noRoute() {
+    void unifiedRouterOn_brokerMarginReject_mapsToSkippedInsufficientMargin_afterRouting() {
+        // No pre-route pre-flight in the unified path — the router must reconcile broker truth first (a margin
+        // pre-decline could skip routing and leave an existing position unmanaged). Affordability is enforced
+        // by the router's broker margin reject, mapped back to SKIPPED_INSUFFICIENT_MARGIN.
         OrderRouter router = mock(OrderRouter.class);
-        IbkrMarginPreflightService preflight = mock(IbkrMarginPreflightService.class);
-        when(preflight.canAffordOrder(any(), any(), anyInt(), any()))
-                .thenReturn(new IbkrMarginPreflightService.PreflightDecision(false, "no margin"));
+        when(router.route(any())).thenReturn(RoutingResult.of(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN, "no margin"));
 
         WtxStrategyState state = flatState().withAutoExecution(true)
                 .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
-        WtxRoutingResult result = unifiedBridge(router, preflight, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+        WtxRoutingResult result = unifiedBridge(router, null, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
 
         assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
-        verify(router, never()).route(any()); // declined before routing
+        verify(router).route(any()); // routed (reconcile ran); margin handled by the router, not a pre-decline
     }
 
     @Test

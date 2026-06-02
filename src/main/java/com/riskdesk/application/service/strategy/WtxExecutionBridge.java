@@ -244,20 +244,13 @@ public class WtxExecutionBridge {
         // "__default__" placeholder (resolved at submit). Mirrors the legacy readIbkrPositionState path.
         String brokerAccountId = effectiveBrokerAccountId();
 
-        // Margin pre-flight parity — OPEN only. A CLOSE/FLATTEN reduces exposure (no margin) and a REVERSE's
-        // close leg frees margin first; any broker margin reject during routing maps to
-        // SKIPPED_INSUFFICIENT_MARGIN. (Full reverse-delta pre-flight parity is a documented refinement.)
-        boolean isOpen = action == WtxAction.OPEN_LONG || action == WtxAction.OPEN_SHORT;
-        if (isOpen && marginPreflight != null) {
-            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, mapToOrderAction(action), qty, price);
-            if (!decision.allowed()) {
-                log.warn("WTX [{} {}] unified-router OPEN declined by pre-flight — {}",
-                        state.instrument(), tf, decision.denyReason());
-                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
-                        truncate(decision.denyReason(), 200));
-            }
-        }
-
+        // NO pre-route margin pre-flight here: the router reconciles broker truth INSIDE route() (skip a
+        // same-side duplicate while synthesising a tracking row, upgrade an opposite-side OPEN to a REVERSE
+        // that flattens first and frees margin, etc.). Pre-declining a full-OPEN-qty pre-flight before that
+        // reconcile would skip routing entirely and leave an existing live position unmanaged. Affordability
+        // is instead enforced by the router's broker margin reject (FAILED_INSUFFICIENT_MARGIN → mapped to
+        // SKIPPED_INSUFFICIENT_MARGIN). A router-side pre-flight applied AFTER reconcile, for the actual entry
+        // qty (full for OPEN, delta for REVERSE), is the correct affordability gate — a Slice D item.
         TradeIntent intent = WtxIntentTranslator.toTradeIntent(action, executionKey,
                 ExecutionTriggerSource.WTX_AUTO, instrument, tf, qty, price, brokerAccountId);
         RoutingResult result = orderRouter.route(intent);
