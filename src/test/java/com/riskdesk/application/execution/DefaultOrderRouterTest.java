@@ -29,6 +29,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -178,6 +179,37 @@ class DefaultOrderRouterTest {
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void entry_flatBroker_staleExitRow_voidsItAndOpens() {
+        // Broker confirmed flat but a stale EXIT_SUBMITTED row lingers (its close filled while we missed the
+        // callback / restarted). It must be VOIDED — not treated as entry-in-flight — so the open proceeds
+        // instead of being blocked forever.
+        stubActive(activeRow(ExecutionStatus.EXIT_SUBMITTED, 1, 100L));
+        stubFlat(true);
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo, atLeastOnce()).save(cap.capture());
+        assertThat(cap.getAllValues()).anyMatch(rec -> rec.getStatus() == ExecutionStatus.CANCELLED); // stale exit voided
+        verify(ibkrOrderService).submitEntryOrder(any());
+    }
+
+    @Test
+    void entry_flatBroker_inFlightEntryRow_skipsToAvoidDoubleFill() {
+        // Broker flat but our entry order is genuinely resting unfilled (ENTRY_SUBMITTED) — opening another
+        // risks a double fill once both rest. This is the ONLY status that should skip on this path.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     // ---- CLOSE -----------------------------------------------------------------------------

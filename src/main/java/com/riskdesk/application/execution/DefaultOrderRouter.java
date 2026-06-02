@@ -94,16 +94,19 @@ public class DefaultOrderRouter implements OrderRouter {
             Optional<TradeExecutionRecord> existing = findOpenRow(intent);
             if (existing.isPresent()) {
                 TradeExecutionRecord row = existing.get();
-                if (row.getStatus() == ExecutionStatus.ACTIVE) {
-                    // Filled position the broker no longer holds (manual close / drift). Void it so the new
-                    // open is the sole active row and a later close can't flatten it naked.
-                    voidRow(row, "OrderRouter " + intent.kind() + " — IBKR flat; stale ACTIVE row voided before entry");
-                } else {
-                    // An entry order is resting UNFILLED at the broker — opening another risks a double fill.
+                if (isInFlightEntry(row.getStatus())) {
+                    // A genuine entry order is resting / partially filled at the broker while IBKR reads
+                    // flat — opening another risks a double fill once both rest. Skip.
                     return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
                         "entry still in flight (" + row.getStatus() + ") — open skipped to avoid double fill",
                         row.getId(), row.getEntryOrderId());
                 }
+                // ACTIVE / EXIT_SUBMITTED / VIRTUAL_EXIT_TRIGGERED — the position (or its close) completed
+                // outside us: a manual close, a missed fill callback, or a restart after the exit filled.
+                // IBKR is flat, so void the stale row (DB-only) so it can't block this entry or be flattened
+                // naked, leaving the fresh open as the sole active row.
+                voidRow(row, "OrderRouter " + intent.kind() + " — IBKR flat; stale " + row.getStatus()
+                    + " row voided before entry");
             }
         }
 
@@ -368,16 +371,17 @@ public class DefaultOrderRouter implements OrderRouter {
                     + " skipped to avoid a blind/naked reducing order", row.getId(), row.getEntryOrderId());
         }
         if (pos.confirmedFlat()) {
-            if (row.getStatus() == ExecutionStatus.ACTIVE) {
-                // Phantom: a filled position the broker no longer holds (manual close / drift). Void it
-                // (DB-only, no broker call) so a later open is never flattened naked.
-                voidRow(row, reasonPrefix + " — IBKR already flat; stale row voided, no naked order");
-                return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
-                    "IBKR already flat — exit skipped", row.getId(), row.getEntryOrderId());
+            if (isInFlightEntry(row.getStatus())) {
+                // Entry still resting unfilled while IBKR reads flat — don't fire a naked exit.
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                    "entry still in flight (" + row.getStatus() + ") — exit skipped", row.getId(), row.getEntryOrderId());
             }
-            // Entry still resting unfilled while IBKR reads flat — don't fire a naked exit.
-            return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
-                "entry still in flight (" + row.getStatus() + ") — exit skipped", row.getId(), row.getEntryOrderId());
+            // ACTIVE / VIRTUAL_EXIT_TRIGGERED — the position is gone (closed outside us / missed fill). Void
+            // the stale row (DB-only, no broker call) so a later open is never flattened naked. (EXIT_SUBMITTED
+            // is already handled as a duplicate exit above.)
+            voidRow(row, reasonPrefix + " — IBKR already flat; stale " + row.getStatus() + " row voided, no naked order");
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "IBKR already flat — exit skipped", row.getId(), row.getEntryOrderId());
         }
         // Broker is NOT confirmed flat (a real position, or broker truth unavailable). If our entry is
         // still resting / only partially filled we have no confirmed full position to reduce — a close
