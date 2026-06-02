@@ -32,6 +32,7 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
 | `IbkrOrderService` | `submitEntryOrder` + `findOrder` (lookup par orderRef) |
 | `TradeExecutionRepositoryPort` | idempotence + persistance + lookup des lignes actives (close/reverse) |
 | `ExecutionReconciler` *(livré)* | **position-truth** (`readPositionState` via `IbkrPortfolioService`) + décision `reconcile` — REQUIS pour REVERSE/CLOSE/FLATTEN (anti-stack open / anti-flatten à nu quand IBKR est plat) |
+| `IbkrMarginPreflightService` *(PR6 — parité WTX)* | **gate d'affordabilité AVANT submit** quand `preflight-mode != OFF` : `canAffordOrder` refusé → décline un OPEN **avant tout effet broker** → `SKIPPED_INSUFFICIENT_MARGIN` ; pour un REVERSE, le delta net décide flatten-only plutôt qu'un open leg inabordable. À câbler à la migration WTX, sinon le gate existant est perdu. |
 | `IbkrProperties` | `isEnabled()` |
 | `ExecutionReadinessGate` *(livré)* | gate `RECONCILING` au démarrage |
 | `MinTickResolver` *(via `IbGatewayContractResolver` — PR5)* | arrondi tick runtime |
@@ -137,7 +138,7 @@ record BrokerOrderStatusView(Long orderId, String orderRef, String accountId, St
 - **PR5 — `minTick` runtime** : via `ContractDetails`, fallback enum. Test cohérence enum vs broker.
 
 ### 🔴 Migrer — **touche le trading live · relecture soignée**
-- **PR6 — WTX pilote** : `WtxStrategyService` émet un `TradeIntent` → `orderRouter.route()` ; réagit au `RoutingResult` (revert état virtuel sur `SKIPPED_ENTRY_IN_FLIGHT` / `ROUTED_FLATTEN_ONLY`). `WtxExecutionBridge` vidé de sa logique broker. **Parité prouvée** : suite WTX existante verte + mêmes `routingOutcome`. Option : garder l'ancien bridge en fallback un cycle (feature flag).
+- **PR6 — WTX pilote** : `WtxStrategyService` émet un `TradeIntent` → `orderRouter.route()` ; réagit au `RoutingResult` (revert état virtuel sur `SKIPPED_ENTRY_IN_FLIGHT` / `ROUTED_FLATTEN_ONLY`). `WtxExecutionBridge` vidé de sa logique broker. **Préserver le gate d'affordabilité** : câbler `IbkrMarginPreflightService` dans le router (décline l'OPEN inabordable avant submit → `SKIPPED_INSUFFICIENT_MARGIN` ; REVERSE → flatten-only sur delta net inabordable) — sinon la parité WTX casse. **Parité prouvée** : suite WTX existante verte + mêmes `routingOutcome`. Option : garder l'ancien bridge en fallback un cycle (feature flag).
 - **PR7 — Autres stratégies** : WTX+RSI, Quant, Perfect Setup, Playbook émettent des `TradeIntent` ; suppression du code dupliqué. Playbook conserve `PlaybookRoutingOutcome` pour son historique (gates internes décidés **en amont** du routage), mappe vers `RoutingOutcome` au routage.
 
 ### ⚪ Finir
