@@ -28,9 +28,9 @@ import java.time.Instant;
  * by reusing the existing {@link IbkrOrderService} and {@link TradeExecutionRepositoryPort}; it does
  * not duplicate them. Generalises the proven {@code WtxExecutionBridge.handleEntry} flow.
  *
- * <p>This step implements {@code OPEN} and {@code CLOSE}. {@code REVERSE} (two-leg close-then-open) and
- * {@code FLATTEN} land in a later step — see docs/PLAN_ORDER_ROUTER_IMPL.md. The router is not yet wired
- * to any strategy.</p>
+ * <p>This step implements {@code OPEN}, {@code CLOSE} and {@code FLATTEN}. {@code REVERSE} (two-leg
+ * close-then-open) lands in a later step — see docs/PLAN_ORDER_ROUTER_IMPL.md. The router is not yet
+ * wired to any strategy.</p>
  */
 @Service
 public class DefaultOrderRouter implements OrderRouter {
@@ -71,8 +71,9 @@ public class DefaultOrderRouter implements OrderRouter {
         return switch (intent.kind()) {
             case OPEN -> routeOpen(intent);
             case CLOSE -> executeClose(intent);
-            case REVERSE, FLATTEN -> throw new UnsupportedOperationException(
-                "OrderRouter: " + intent.kind() + " is not implemented yet (see docs/PLAN_ORDER_ROUTER_IMPL.md)");
+            case FLATTEN -> executeFlatten(intent);
+            case REVERSE -> throw new UnsupportedOperationException(
+                "OrderRouter: REVERSE is not implemented yet (see docs/PLAN_ORDER_ROUTER_IMPL.md)");
         };
     }
 
@@ -145,17 +146,28 @@ public class DefaultOrderRouter implements OrderRouter {
         }
     }
 
+    /** CLOSE — exit this strategy's open row on the intent's side. */
+    private RoutingResult executeClose(TradeIntent intent) {
+        return executeExit(intent, false, "OrderRouter CLOSE");
+    }
+
+    /** FLATTEN — exit this strategy's open row regardless of side (held side derived from the row). */
+    private RoutingResult executeFlatten(TradeIntent intent) {
+        return executeExit(intent, true, "OrderRouter FLATTEN");
+    }
+
     /**
-     * CLOSE — flatten this strategy's open row (port of {@code WtxExecutionBridge.handleClose}). Reads
-     * broker position truth: when IBKR is confirmed flat a still-ACTIVE row is a phantom (closed outside
-     * us) and is voided DB-only, and an unfilled in-flight entry is left alone (no naked flatten). Else a
+     * Single-leg exit (CLOSE / FLATTEN) — port of {@code WtxExecutionBridge.handleClose}. Reads broker
+     * position truth: when IBKR is confirmed flat a still-ACTIVE row is a phantom (closed outside us) and
+     * is voided DB-only, and an unfilled in-flight entry is left alone (no naked flatten). Otherwise a
      * single close leg is submitted on the existing row.
      */
-    private RoutingResult executeClose(TradeIntent intent) {
+    private RoutingResult executeExit(TradeIntent intent, boolean flatten, String reasonPrefix) {
         var active = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
             intent.instrument().name(), intent.timeframe(), intent.source());
         if (active.isEmpty()) {
-            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "no open execution row to close");
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "no open execution row to " + (flatten ? "flatten" : "close"));
         }
         TradeExecutionRecord row = active.get();
         BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
@@ -163,16 +175,20 @@ public class DefaultOrderRouter implements OrderRouter {
             if (row.getStatus() == ExecutionStatus.ACTIVE) {
                 // Phantom: a filled position the broker no longer holds (manual close / drift). Void it
                 // (DB-only, no broker call) so a later open is never flattened naked.
-                voidRow(row, "OrderRouter CLOSE — IBKR already flat; stale row voided, no naked order");
+                voidRow(row, reasonPrefix + " — IBKR already flat; stale row voided, no naked order");
                 return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
-                    "IBKR already flat — close skipped", row.getId(), row.getEntryOrderId());
+                    "IBKR already flat — exit skipped", row.getId(), row.getEntryOrderId());
             }
-            // Entry still resting unfilled while IBKR reads flat — don't fire a naked flatten.
+            // Entry still resting unfilled while IBKR reads flat — don't fire a naked exit.
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
-                "entry still in flight (" + row.getStatus() + ") — close skipped", row.getId(), row.getEntryOrderId());
+                "entry still in flight (" + row.getStatus() + ") — exit skipped", row.getId(), row.getEntryOrderId());
         }
+        // Close the HELD side: FLATTEN derives it from the row's open action; CLOSE from the intent side.
+        String closeAction = flatten
+            ? ("LONG".equalsIgnoreCase(row.getAction()) ? "SHORT" : "LONG")
+            : brokerAction(intent);
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
-        return submitCloseLeg(row, intent.instrument(), brokerAction(intent), qty, intent.limitPrice(), "OrderRouter CLOSE");
+        return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix);
     }
 
     /**

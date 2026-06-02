@@ -276,6 +276,57 @@ class DefaultOrderRouterTest {
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT); // a reducing order needs no margin
     }
 
+    // ---- FLATTEN ---------------------------------------------------------------------------
+
+    private TradeIntent flatten() {
+        return TradeIntent.flatten("wtx:MNQ:5m:3:FLATTEN", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", 1, new BigDecimal("18010.00"), "DU1");
+    }
+
+    @Test
+    void flatten_closesHeldLong_withSell() {
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        row.setAction("LONG"); // held long
+        stubActive(row);
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(900L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // flatten a long = SELL
+    }
+
+    @Test
+    void flatten_closesHeldShort_withBuy() {
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 1, 100L);
+        row.setAction("SHORT"); // held short
+        stubActive(row);
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(901L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("LONG"); // flatten a short = BUY
+    }
+
+    @Test
+    void flatten_noRow_skipsNoOpenRow() {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
     @Test
     void skipsWhenIbkrDisabled() {
         props.setEnabled(false);
