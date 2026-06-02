@@ -404,15 +404,14 @@ class DefaultOrderRouterTest {
     }
 
     @Test
-    void close_intentSideMismatchesHeldRow_skipsNoExposureIncrease() {
-        // Stale CLOSE_LONG while the held row is SHORT — deriving SELL from the intent would ADD to the
-        // short. There is no long to close: skip, never increase exposure.
-        TradeExecutionRecord shortRow = activeRow(ExecutionStatus.ACTIVE, 1, 100L);
-        shortRow.setAction("SHORT");
-        stubActive(shortRow);
-        stubFlat(false);
+    void close_intentSideMismatchesBrokerHeld_skipsNoExposureIncrease() {
+        // CLOSE_LONG but IBKR actually holds a SHORT (broker truth is authoritative; the local row may be
+        // stale). Deriving SELL would increase the short — there is no long to close, so skip.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L)); // row even says LONG (default)
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("-2"), false)); // broker SHORT
 
-        RoutingResult r = router.route(closeLong()); // CLOSE_LONG vs held SHORT
+        RoutingResult r = router.route(closeLong()); // CLOSE_LONG vs broker SHORT
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
@@ -447,7 +446,8 @@ class DefaultOrderRouterTest {
         TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 1, 100L);
         row.setAction("SHORT"); // held short
         stubActive(row);
-        stubFlat(false);
+        when(reconciler.readPositionState(any(), any())) // broker holds SHORT (authoritative)
+            .thenReturn(new BrokerPositionState(new BigDecimal("-1"), false));
         when(ibkrOrderService.submitEntryOrder(any()))
             .thenReturn(new BrokerEntryOrderSubmission(901L, "Submitted", "k", Instant.now()));
 
@@ -457,6 +457,26 @@ class DefaultOrderRouterTest {
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().action()).isEqualTo("LONG"); // flatten a short = BUY
+    }
+
+    @Test
+    void flatten_staleRowOppositeBrokerSide_reducesBrokerSideNoIncrease() {
+        // Row says LONG but IBKR holds SHORT (drift / missed reverse). FLATTEN must reduce the broker's
+        // ACTUAL side — BUY to cover the short — NOT SELL (which would increase it).
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        row.setAction("LONG"); // stale local belief
+        stubActive(row);
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("-2"), false)); // broker SHORT
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(905L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(flatten());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("LONG"); // BUY to reduce the short, not SELL
     }
 
     @Test

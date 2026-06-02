@@ -42,6 +42,11 @@ public class DefaultOrderRouter implements OrderRouter {
      *  resolveAccountId() resolves any value that is not a real managed account to the default. */
     private static final String DEFAULT_BROKER_ACCOUNT = "__default__";
 
+    /** Suffix appended to an exit leg's orderRef so it never collides with the entry order's ref in
+     *  placeLimitOrder's orderRef idempotency lookup. The fill tracker strips it to map a close callback
+     *  back to the row by its base executionKey (see {@code ExecutionFillTrackingService.locate}). */
+    public static final String EXIT_ORDER_REF_SUFFIX = ":exit";
+
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
@@ -391,21 +396,30 @@ public class DefaultOrderRouter implements OrderRouter {
                 "entry still in flight (" + row.getStatus() + ") and position unconfirmed — "
                     + (flatten ? "flatten" : "close") + " skipped", row.getId(), row.getEntryOrderId());
         }
-        // CLOSE is directional — it reduces the side named by the intent. If the held row is on the OTHER
-        // side (stale / mismatched signal), the action derived from the intent would ADD to the position
-        // instead of reducing it. There is no matching position to close — skip. (FLATTEN derives its action
-        // from the held row, so it is always reducing and needs no such check.)
-        if (!flatten && (row.getAction() == null
-                || !row.getAction().equalsIgnoreCase(intent.side().name()))) {
+        // Derive the reducing side from BROKER TRUTH (authoritative), not the local row/intent: the row can
+        // be stale (manual drift, a missed reverse) and reducing on a stale side would INCREASE the live
+        // position. pos is available and NOT confirmedFlat here.
+        Side brokerSide;
+        if (pos.isLong()) {
+            brokerSide = Side.LONG;
+        } else if (pos.isShort()) {
+            brokerSide = Side.SHORT;
+        } else {
+            // net 0 but not flat = offsetting live legs (rollover / calendar overlap) — no single reducing
+            // action (per-leg flatten is out of scope). Skip rather than guess a side.
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
-                "CLOSE " + intent.side() + " but held row is " + row.getAction()
-                    + " — no matching position to close", row.getId(), row.getEntryOrderId());
+                "IBKR holds offsetting live legs (net 0, not flat) — " + (flatten ? "flatten" : "close")
+                    + " skipped", row.getId(), row.getEntryOrderId());
         }
-        // Close the HELD side: FLATTEN derives it from the row's open action; CLOSE from the intent side
-        // (validated above to match the held row).
-        String closeAction = flatten
-            ? ("LONG".equalsIgnoreCase(row.getAction()) ? "SHORT" : "LONG")
-            : brokerAction(intent);
+        // CLOSE is directional: only reduce when the broker actually holds the side the intent names.
+        if (!flatten && intent.side() != brokerSide) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "CLOSE " + intent.side() + " but IBKR holds " + brokerSide + " — no matching position to close",
+                row.getId(), row.getEntryOrderId());
+        }
+        // Reduce the broker's actual held side: LONG → SELL (SHORT), SHORT → BUY (LONG). Quantity stays the
+        // strategy's own row size so we never over-close another source's leg on the same instrument.
+        String closeAction = brokerSide == Side.LONG ? "SHORT" : "LONG";
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
         return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix);
     }
@@ -566,7 +580,7 @@ public class DefaultOrderRouter implements OrderRouter {
      * suffixed ref is safe.
      */
     private static String exitOrderRef(TradeExecutionRecord row) {
-        return row.getExecutionKey() + ":exit";
+        return row.getExecutionKey() + EXIT_ORDER_REF_SUFFIX;
     }
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {

@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.TradeExecutionView;
+import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
@@ -218,7 +219,19 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         }
         // Fallback: orderRef is set at submission to executionKey, so we can
         // recover the linkage even if the TWS orderId hasn't been persisted yet.
-        return tradeExecutionRepository.findByExecutionKey(orderRef);
+        Optional<TradeExecutionRecord> byKey = tradeExecutionRepository.findByExecutionKey(orderRef);
+        if (byKey.isPresent()) {
+            return byKey;
+        }
+        // Exit legs from the unified OrderRouter submit under "<executionKey>:exit" (a distinct orderRef so
+        // placeLimitOrder's idempotency can't return the completed ENTRY order). Map it back to the row by
+        // its base executionKey so a close callback that arrives before the close orderId is persisted is
+        // not silently dropped.
+        if (orderRef.endsWith(DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX)) {
+            String baseKey = orderRef.substring(0, orderRef.length() - DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX.length());
+            return tradeExecutionRepository.findByExecutionKey(baseKey);
+        }
+        return Optional.empty();
     }
 
     private boolean isAcceptedEntryStatus(String status) {
