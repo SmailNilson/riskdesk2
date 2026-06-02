@@ -1,7 +1,10 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerOrderLookup;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
@@ -37,11 +40,14 @@ import java.util.Locale;
  *   <li>order live ({@code Submitted}/{@code PreSubmitted}/…) → leave it (genuinely resting);</li>
  *   <li>order {@code Cancelled}/{@code ApiCancelled}/{@code Inactive} → mark the row CANCELLED;</li>
  *   <li>order {@code Filled} → mark the row ACTIVE (the fill callback was missed);</li>
- *   <li>order in neither set AND the row is older than {@code not-found-max-age} (a DAY order can't
- *       survive that long) → mark the row CANCELLED.</li>
+ *   <li>order in neither set (a confirmed query, so the order is gone — rejected at submit, never
+ *       placed, or aged out) AND IBKR holds <b>no position</b> for the instrument → mark the row
+ *       CANCELLED. The flat check is the safety gate: a NOT_FOUND order with a live position likely
+ *       filled (its fill aged out of completed orders), so it is left untouched.</li>
  * </ul>
- * Anything uncertain (lookup failed, unknown status, recent not-found) is left untouched — the
- * reconciler never guesses. No broker side effect: it only writes the local tracking row.
+ * Anything uncertain (lookup UNAVAILABLE, unknown status, NOT_FOUND while a position exists or the
+ * portfolio can't be read) is left untouched — the reconciler never guesses. No broker side effect:
+ * it only writes the local tracking row.
  *
  * <p>The bridge routing path is unchanged and stays fast (it reads the cached position snapshot);
  * this runs out-of-band and unblocks the strategy within one interval.
@@ -55,23 +61,22 @@ public class WtxStaleEntryReconciler {
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
+    private final IbkrPortfolioService ibkrPortfolioService;
 
     /** Don't touch a row younger than this — give the normal ack/fill flow time to land. */
     private final Duration grace;
-    /** A "not found in live or completed" row older than this is treated as gone (DAY order expired). */
-    private final Duration notFoundMaxAge;
 
     public WtxStaleEntryReconciler(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties,
-            @Value("${riskdesk.wtx.stale-entry.grace-seconds:120}") long graceSeconds,
-            @Value("${riskdesk.wtx.stale-entry.not-found-max-age-hours:24}") long notFoundMaxAgeHours) {
+            IbkrPortfolioService ibkrPortfolioService,
+            @Value("${riskdesk.wtx.stale-entry.grace-seconds:120}") long graceSeconds) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
+        this.ibkrPortfolioService = ibkrPortfolioService;
         this.grace = Duration.ofSeconds(Math.max(0, graceSeconds));
-        this.notFoundMaxAge = Duration.ofHours(Math.max(1, notFoundMaxAgeHours));
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.wtx.stale-entry.reconcile-interval-ms:60000}",
@@ -136,14 +141,52 @@ public class WtxStaleEntryReconciler {
             return;
         }
 
-        // NOT_FOUND — the live AND completed sets were both queried and the order is in neither. If the
-        // row has been pending past the DAY-order lifetime, the order is gone (expired/aged-out) —
-        // reconcile to CANCELLED. Otherwise leave it (a same-session order may still be findable on the
-        // next tick; never guess prematurely).
-        if (lastTouched != null && Duration.between(lastTouched, now).compareTo(notFoundMaxAge) > 0) {
-            cancel(row, "WTX stale-entry reconcile: no live/completed IBKR order found and row aged past "
-                    + notFoundMaxAge.toHours() + "h — reconciled");
+        // NOT_FOUND — the live AND completed sets were both queried and the order is in neither, so it
+        // is gone (rejected at submit, never placed, or aged out of completed orders). Only cancel when
+        // IBKR also holds NO position for the instrument: that proves the order did not fill into a
+        // position. If a position exists, the order likely filled and its fill aged out of completed
+        // orders — leave it (cancelling would hide a real position). If the portfolio can't be read,
+        // we can't confirm flat → leave it too.
+        if (isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId())) {
+            cancel(row, "WTX stale-entry reconcile: no live/completed IBKR order and IBKR flat — phantom row reconciled");
         }
+    }
+
+    /**
+     * True only when IBKR is connected and holds <b>no nonzero leg</b> for the instrument's symbol.
+     * Mirrors {@code WtxExecutionBridge}'s confirmed-flat definition (offsetting rollover legs count
+     * as a live position, so they are NOT flat). Returns false when the snapshot is unavailable — we
+     * must not treat "can't read positions" as flat.
+     */
+    private boolean isInstrumentFlat(String instrument, String brokerAccountId) {
+        if (instrument == null) return false;
+        IbkrPortfolioSnapshot snapshot;
+        try {
+            snapshot = ibkrPortfolioService.getPortfolio(brokerAccountId);
+        } catch (RuntimeException e) {
+            return false;
+        }
+        if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
+            return false;
+        }
+        String symbol = ibkrSymbol(instrument);
+        for (IbkrPositionView pos : snapshot.positions()) {
+            if (pos == null || pos.position() == null) continue;
+            if (matchesSymbol(pos.contractDesc(), symbol) && pos.position().signum() != 0) {
+                return false; // a live leg exists → not flat
+            }
+        }
+        return true;
+    }
+
+    /** IBKR ticker for a WTX instrument name. Differs only for E6 (IBKR symbol "6E"). */
+    private static String ibkrSymbol(String instrument) {
+        return "E6".equals(instrument) ? "6E" : instrument;
+    }
+
+    private static boolean matchesSymbol(String contractDesc, String symbol) {
+        if (contractDesc == null || symbol == null) return false;
+        return contractDesc.toUpperCase(Locale.ROOT).trim().startsWith(symbol.toUpperCase(Locale.ROOT));
     }
 
     private void cancel(TradeExecutionRecord row, String reason) {
