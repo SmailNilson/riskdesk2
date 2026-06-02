@@ -38,14 +38,18 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
 **Algorithme `route(TradeIntent)` — cas `OPEN` (PR1) :**
 
 ```text
+  // @Transactional : le verrou pessimiste (étape 5) doit couvrir le submit (étape 6).
 1. si !readiness.isReady()                         → RoutingResult.of(SKIPPED_RECONCILING)
-2. si !ibkrProperties.isEnabled()                  → of(SKIPPED_DISABLED)
+2. si !ibkrProperties.isEnabled()                  → of(SKIPPED_IBKR_DISABLED)
 3. si repo.findByExecutionKey(intent.idempotencyKey()).isPresent()
-                                                   → of(SKIPPED_DUPLICATE)
+                                                   → of(SKIPPED_DUPLICATE)        // fast-path
 4. candidate = toExecutionRecord(intent)           // status=PENDING_ENTRY_SUBMISSION,
                                                    //   normalizedEntryPrice = round(intent.limitPrice)
-5. persisted = repo.createIfAbsent(candidate)
-   si persisted.status != PENDING_ENTRY_SUBMISSION → tracked(SKIPPED_DUPLICATE,
+5. id = repo.createIfAbsent(candidate).id
+   // ANTI-RACE : deux ticks concurrents passent tous deux l'étape 3 et createIfAbsent ; le perdant
+   // récupère la ligne PENDING du gagnant. On RE-LIT sous verrou pessimiste pour décider :
+   persisted = repo.findByIdForUpdate(id)          // bloque tant qu'un autre tient le verrou
+   si persisted.status != PENDING_ENTRY_SUBMISSION → tracked(SKIPPED_DUPLICATE,   // l'autre a déjà soumis
                                                               persisted.id, persisted.entryOrderId)
 6. try:
      sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
