@@ -67,7 +67,8 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
                 // operator flips the toggle the explicit value wins.
                 e.getTelegramNotificationsEnabled() == null
                         ? WtxStrategyState.defaultTelegramEnabledFor(e.getInstrument())
-                        : Boolean.TRUE.equals(e.getTelegramNotificationsEnabled())
+                        : Boolean.TRUE.equals(e.getTelegramNotificationsEnabled()),
+                e.getPendingClosePnl() != null ? e.getPendingClosePnl() : BigDecimal.ZERO
         );
     }
 
@@ -91,5 +92,6 @@ public class JpaWtxStrategyStateAdapter implements WtxStrategyStatePort {
         e.setSwingBiasFilterEnabled(s.swingBiasFilterEnabled());
         e.setConfiguredOrderQty(s.configuredOrderQty());
         e.setTelegramNotificationsEnabled(s.telegramNotificationsEnabled());
+        e.setPendingClosePnl(s.pendingClosePnl());
     }
 }

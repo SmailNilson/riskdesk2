@@ -100,6 +100,11 @@ public class WtxStrategyStateEntity {
     @Column
     private Boolean telegramNotificationsEnabled;
 
+    /** Optimistic close P&L awaiting broker confirmation — rolled back if the close does not complete.
+     *  Nullable for legacy rows (resolved to 0 by the adapter); ddl-auto adds it clean. */
+    @Column(precision = 20, scale = 8)
+    private BigDecimal pendingClosePnl;
+
     public WtxStrategyStateEntity() {}
 
     public String getInstrument() { return instrument; }
@@ -158,4 +163,7 @@ public class WtxStrategyStateEntity {
 
     public Boolean getTelegramNotificationsEnabled() { return telegramNotificationsEnabled; }
     public void setTelegramNotificationsEnabled(Boolean telegramNotificationsEnabled) { this.telegramNotificationsEnabled = telegramNotificationsEnabled; }
+
+    public BigDecimal getPendingClosePnl() { return pendingClosePnl; }
+    public void setPendingClosePnl(BigDecimal pendingClosePnl) { this.pendingClosePnl = pendingClosePnl; }
 }
