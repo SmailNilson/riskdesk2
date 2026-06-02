@@ -188,12 +188,25 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                 || IBKR_STATUS_INACTIVE.equalsIgnoreCase(status))
             && execution.getStatus() != ExecutionStatus.CANCELLED
             && execution.getStatus() != ExecutionStatus.CLOSED) {
-            // Only flip to CANCELLED when nothing has been filled — a partial fill
-            // followed by a cancel leaves the position open and is handled in 3c.
+            // Only act when nothing has been filled — a partial fill followed by a cancel leaves the
+            // position open and is handled in 3c.
             if (execution.getFilledQuantity() == null
                 || execution.getFilledQuantity().signum() == 0) {
-                execution.setStatus(ExecutionStatus.CANCELLED);
-                execution.setStatusReason("IBKR order " + status);
+                if (execution.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                    // A CLOSE/exit order that cancelled WITHOUT a fill did NOT flatten — the position is
+                    // still live. Revive the row to ACTIVE (not CANCELLED) so it stays managed; otherwise
+                    // the live position is orphaned (a later CLOSE/FLATTEN finds no row) and the WTX close
+                    // settler would read the row as gone and wrongly FINALIZE a phantom close's P&L. Detach
+                    // the dead close order id so a replayed cancel callback can't re-cancel the revived row.
+                    execution.setStatus(ExecutionStatus.ACTIVE);
+                    execution.setStatusReason("IBKR close order " + status
+                        + " without a fill — position still live, revived to ACTIVE");
+                    execution.setIbkrOrderId(null);
+                } else {
+                    // An entry order (or any non-exit) that cancelled without a fill never opened — terminal.
+                    execution.setStatus(ExecutionStatus.CANCELLED);
+                    execution.setStatusReason("IBKR order " + status);
+                }
                 dirty = true;
             }
         }

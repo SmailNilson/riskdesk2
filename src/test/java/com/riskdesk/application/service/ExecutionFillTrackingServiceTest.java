@@ -302,6 +302,31 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void orderStatusCancelledOnExitSubmittedWithoutFill_revivesToActive_andDetachesOrderId() {
+        // A CLOSE order that cancelled WITHOUT a fill did not flatten — the position is still live, so the
+        // row must be revived to ACTIVE (not CANCELLED) and the dead close order id detached. This is what
+        // lets the WTX close settler distinguish a cancelled close (rollback) from a filled one (finalize).
+        TradeExecutionRecord stored = baseExecution();
+        stored.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.of(stored));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(
+            ORDER_ID,
+            "Cancelled",
+            BigDecimal.ZERO,
+            new BigDecimal("1"),
+            BigDecimal.ZERO,
+            Instant.parse("2026-04-23T15:30:00Z")
+        );
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        assertEquals(ExecutionStatus.ACTIVE, captor.getValue().getStatus());
+        assertNull(captor.getValue().getIbkrOrderId(), "dead close order id must be detached on revive");
+    }
+
+    @Test
     void orderStatusUnchangedDoesNotPublish() {
         TradeExecutionRecord stored = baseExecution();
         stored.setIbkrOrderId(ORDER_ID);
