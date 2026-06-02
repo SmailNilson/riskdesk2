@@ -687,17 +687,28 @@ public class IbGatewayNativeClient {
     }
 
     public Optional<NativeOrderSnapshot> findOrderByOrderRef(String requestedAccountId, String orderRef) {
-        if (orderRef == null || orderRef.isBlank() || !ensureConnected()) {
-            return Optional.empty();
-        }
+        return Optional.ofNullable(lookupOrderByOrderRef(requestedAccountId, orderRef).order());
+    }
 
+    /**
+     * Tri-state order lookup by {@code orderRef}: distinguishes <b>UNAVAILABLE</b> (could not query —
+     * blank ref, gateway disconnected, or no resolved account) from <b>NOT_FOUND</b> (queried the live
+     * and completed sets, order in neither). The connectivity check and the query happen atomically
+     * here so a caller can safely treat NOT_FOUND as "the order is genuinely gone" without racing a
+     * disconnect — UNAVAILABLE must never be read as absence.
+     */
+    public OrderLookupResult lookupOrderByOrderRef(String requestedAccountId, String orderRef) {
+        if (orderRef == null || orderRef.isBlank() || !ensureConnected()) {
+            return OrderLookupResult.unavailable();
+        }
         String accountId = resolveAccountId(requestedAccountId);
         if (accountId == null) {
-            return Optional.empty();
+            return OrderLookupResult.unavailable();
         }
-
         Optional<NativeOrderSnapshot> openOrder = findOpenOrderByOrderRef(accountId, orderRef);
-        return openOrder.isPresent() ? openOrder : findCompletedOrderByOrderRef(accountId, orderRef);
+        Optional<NativeOrderSnapshot> snapshot =
+            openOrder.isPresent() ? openOrder : findCompletedOrderByOrderRef(accountId, orderRef);
+        return snapshot.map(OrderLookupResult::found).orElseGet(OrderLookupResult::notFound);
     }
 
     public NativeOrderSubmission placeLimitOrder(Contract contract,
@@ -1521,6 +1532,22 @@ public class IbGatewayNativeClient {
                                      PersistentAccountSnapshotCache accountSubscription) {}
 
     public record NativeOrderSnapshot(Long orderId, String orderRef, String accountId, String status) {}
+
+    /** Outcome of {@link #lookupOrderByOrderRef}. UNAVAILABLE = couldn't query (must not be read as absence). */
+    public enum OrderLookupOutcome { FOUND, NOT_FOUND, UNAVAILABLE }
+
+    /** Tri-state order lookup result. {@code order} is non-null only when {@code outcome == FOUND}. */
+    public record OrderLookupResult(OrderLookupOutcome outcome, NativeOrderSnapshot order) {
+        public static OrderLookupResult found(NativeOrderSnapshot order) {
+            return new OrderLookupResult(OrderLookupOutcome.FOUND, order);
+        }
+        public static OrderLookupResult notFound() {
+            return new OrderLookupResult(OrderLookupOutcome.NOT_FOUND, null);
+        }
+        public static OrderLookupResult unavailable() {
+            return new OrderLookupResult(OrderLookupOutcome.UNAVAILABLE, null);
+        }
+    }
 
     public record NativeOrderSubmission(Long orderId, String status, String orderRef, Instant submittedAt) {}
 

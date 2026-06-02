@@ -2,14 +2,13 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
-import com.riskdesk.application.dto.BrokerOrderStatusView;
+import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrBackendMode;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -35,12 +34,14 @@ public class IbkrOrderService {
 
     /**
      * Looks up a broker order by its {@code orderRef} (the WTX {@code executionKey}) — live order
-     * book first, then completed/historical orders. Returns empty when IBKR is disabled, the order
-     * is in neither set, or the gateway can't be queried. Used by the stale-entry reconciler.
+     * book first, then completed/historical orders. Tri-state: {@code UNAVAILABLE} when IBKR is
+     * disabled or the gateway can't be queried, {@code NOT_FOUND} when the order is in neither set,
+     * {@code FOUND} with the status otherwise. Used by the stale-entry reconciler, which must never
+     * treat UNAVAILABLE as absence. {@code UNAVAILABLE} when IBKR is disabled.
      */
-    public Optional<BrokerOrderStatusView> findOrder(String accountId, String orderRef) {
+    public BrokerOrderLookup findOrder(String accountId, String orderRef) {
         if (!ibkrProperties.isEnabled()) {
-            return Optional.empty();
+            return BrokerOrderLookup.unavailable();
         }
         return selectedGateway().findOrder(accountId, orderRef);
     }
