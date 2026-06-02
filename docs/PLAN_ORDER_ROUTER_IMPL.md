@@ -29,10 +29,11 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
 
 | Dép | Usage |
 |---|---|
-| `IbkrOrderService` | `submitEntryOrder` + `findOrder` |
-| `TradeExecutionRepositoryPort` | idempotence + persistance |
+| `IbkrOrderService` | `submitEntryOrder` + `findOrder` (lookup par orderRef) |
+| `TradeExecutionRepositoryPort` | idempotence + persistance + lookup des lignes actives (close/reverse) |
+| `ExecutionReconciler` *(livré)* | **position-truth** (`readPositionState` via `IbkrPortfolioService`) + décision `reconcile` — REQUIS pour REVERSE/CLOSE/FLATTEN (anti-stack open / anti-flatten à nu quand IBKR est plat) |
 | `IbkrProperties` | `isEnabled()` |
-| `ExecutionReadinessGate` *(nouveau — PR3)* | gate `RECONCILING` au démarrage |
+| `ExecutionReadinessGate` *(livré)* | gate `RECONCILING` au démarrage |
 | `MinTickResolver` *(via `IbGatewayContractResolver` — PR5)* | arrondi tick runtime |
 
 **Algorithme `route(TradeIntent)` — cas `OPEN` (PR1) :**
@@ -53,9 +54,10 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
               persisted.id, persisted.executionKey, persisted.brokerAccountId,
               persisted.instrument, brokerAction(intent), persisted.quantity,
               persisted.normalizedEntryPrice))
-     persisted.entryOrderId = sub.brokerOrderId
-     persisted.ibkrOrderId  = (int) sub.brokerOrderId        // REQUIS pour le fill-tracker
-     persisted.status       = ENTRY_SUBMITTED
+     persisted.entryOrderId     = sub.brokerOrderId
+     persisted.ibkrOrderId      = (int) sub.brokerOrderId    // REQUIS pour le fill-tracker
+     persisted.entrySubmittedAt = sub.submittedAt ?? now     // âge primaire (UI + reconciler stale-entry)
+     persisted.status           = ENTRY_SUBMITTED
      repo.save(persisted)
      outcome = "PendingSubmit".equals(sub.brokerOrderStatus) ? ACK_PENDING : ROUTED
      → tracked(outcome, persisted.id, sub.brokerOrderId)
