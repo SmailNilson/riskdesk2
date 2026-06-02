@@ -257,6 +257,12 @@ class DefaultOrderRouterTest {
             .thenReturn(new BrokerPositionState(flat ? BigDecimal.ZERO : new BigDecimal("1"), flat));
     }
 
+    /** Stub broker truth to a signed net (available, not flat) — e.g. "2" = long 2, "-2" = short 2. */
+    private void stubBroker(String net) {
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal(net), false));
+    }
+
     @Test
     void close_noActiveRow_skipsNoOpenRow() {
         when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
@@ -331,6 +337,23 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().quantity()).isEqualTo(1);     // capped to broker net, not row qty 2
         assertThat(req.getValue().action()).isEqualTo("SHORT"); // SELL to reduce the long
+    }
+
+    @Test
+    void close_immediatelyFilled_marksClosed() {
+        // A close IBKR fills immediately ("Filled" as first accepted status) must be CLOSED, not left
+        // EXIT_SUBMITTED — else a later CLOSE/FLATTEN hits the duplicate-exit guard over an already-flat row.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1"); // broker long 1
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Filled", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
     }
 
     @Test
@@ -545,6 +568,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_closeThenOpen_routed() {
         stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2 (the position the reverse flattens)
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // both legs ok
 
         RoutingResult r = router.route(reverseToShort());
@@ -560,6 +584,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_closeAckPending_abortsOpen() {
         stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "PendingSubmit")); // close ack-pends
 
         RoutingResult r = router.route(reverseToShort());
@@ -571,6 +596,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_closeRejected_abortsOpen() {
         stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
         when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
             IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", null));
 
@@ -583,6 +609,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_openRejectedAfterClose_routedFlattenOnly() {
         stubActive(priorLong());
+        stubBroker("2"); // broker holds LONG 2
         when(ibkrOrderService.submitEntryOrder(any()))
             .thenReturn(submission(900L, "Submitted"))                       // close OK
             .thenThrow(new IbkrOrderRejectionException(                       // open rejected
@@ -681,6 +708,38 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_brokerTruthUnavailable_skipsNoBlindCloseOrStackedOpen() {
+        // Can't confirm broker truth — a reverse would fire a blind close (naked if IBKR is already flat
+        // after a restart/manual close) and then stack the open. Skip (mirrors executeExit). The skip happens
+        // before the open-row lookup, so no row stub is needed.
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_staleRowOppositeBrokerSide_closeFromBrokerTruth() {
+        // Row says LONG but IBKR actually holds SHORT (drift / a missed reverse). The reverse close leg must
+        // reduce the BROKER's side — BUY to cover the short — NOT derive SELL from the stale row (which would
+        // increase the live short before the open leg).
+        TradeExecutionRecord prior = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        prior.setAction("LONG"); // stale local belief
+        stubActive(prior);
+        stubBroker("-2"); // broker actually holds SHORT 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(0).action()).isEqualTo("LONG"); // close leg = BUY to reduce the short, not SELL
     }
 
     @Test

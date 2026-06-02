@@ -156,19 +156,25 @@ public class DefaultOrderRouter implements OrderRouter {
      * the broker is FLAT — surfaced as {@code ROUTED_FLATTEN_ONLY} (protected, not an error).
      */
     private RoutingResult executeReverse(TradeIntent intent, Side toSide, BrokerPositionState pos) {
+        // Can't confirm broker truth — a REVERSE would fire a blind close (naked if the broker is already
+        // flat after a restart / manual close) and then stack the open leg. Skip until truth is readable
+        // (mirrors executeExit).
+        if (!pos.available()) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE,
+                "broker position truth unavailable — reverse skipped to avoid a blind close + stacked open");
+        }
+
         Optional<TradeExecutionRecord> prior = findOpenRow(intent);
-        if (prior.isEmpty() && pos.available() && !pos.confirmedFlat()) {
+        if (prior.isEmpty() && !pos.confirmedFlat()) {
             // No local row but the broker is NOT flat — there is a live position we must flatten first.
             if (pos.net().signum() != 0) {
                 // Directional position opened outside us / drift — synthesise a phantom so the close leg
                 // flattens the broker side instead of the open stacking on top of it.
-                Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
-                int qty = Math.max(1, pos.net().abs().intValue());
-                prior = Optional.of(synthesizePhantom(intent, heldSide, qty));
+                Side heldSide = pos.isLong() ? Side.LONG : Side.SHORT;
+                prior = Optional.of(synthesizePhantom(intent, heldSide, Math.max(1, pos.net().abs().intValue())));
             } else {
                 // net==0 but NOT flat = offsetting live legs (rollover / calendar overlap) with no local
                 // row. We can't synthesise a single close, and opening would stack on top of the live legs.
-                // Skip rather than over-trade (per-leg flatten would be needed — out of scope here).
                 return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
                     "IBKR holds offsetting live legs (net 0, not flat) and no local row — reverse skipped to avoid stacking");
             }
@@ -187,26 +193,41 @@ public class DefaultOrderRouter implements OrderRouter {
                     priorRow.getId(), priorRow.getEntryOrderId());
             }
             if (priorStatus != ExecutionStatus.EXIT_SUBMITTED) {
-                // ACTIVE (or VIRTUAL_EXIT_TRIGGERED, or a synthesised phantom) — a confirmed position to flatten.
-                int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
-                    ? priorRow.getQuantity() : intent.quantity();
-                String closeAction = "LONG".equalsIgnoreCase(priorRow.getAction()) ? "SHORT" : "LONG"; // opposite of held
-                RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, priorQty,
-                    intent.limitPrice(), "OrderRouter REVERSE close");
-                if (close.outcome() == RoutingOutcome.ACK_PENDING) {
-                    // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
-                    // is effectively lost until a reconcile. Surface it loudly.
-                    log.error("OrderRouter REVERSE close leg ack-pending — open leg NOT attempted, reversal LOST "
-                        + "until reconcile: {}", intent.idempotencyKey());
-                    return RoutingResult.tracked(RoutingOutcome.ACK_PENDING,
-                        "reversal lost — close ack pending, open leg not attempted",
-                        close.executionId(), close.brokerOrderId());
+                if (pos.isLong() || pos.isShort()) {
+                    // Flatten the broker's ACTUAL held side (authoritative — the local row may be stale after
+                    // drift / a missed reverse): LONG → SELL, SHORT → BUY. Cap the qty to the live position so
+                    // a stale-larger row can't over-close and FLIP it.
+                    String closeAction = pos.isLong() ? "SHORT" : "LONG";
+                    int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
+                        ? priorRow.getQuantity() : intent.quantity();
+                    int qty = Math.min(priorQty, pos.net().abs().intValue());
+                    RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, qty,
+                        intent.limitPrice(), "OrderRouter REVERSE close");
+                    if (close.outcome() == RoutingOutcome.ACK_PENDING) {
+                        // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
+                        // is effectively lost until a reconcile. Surface it loudly.
+                        log.error("OrderRouter REVERSE close leg ack-pending — open leg NOT attempted, reversal LOST "
+                            + "until reconcile: {}", intent.idempotencyKey());
+                        return RoutingResult.tracked(RoutingOutcome.ACK_PENDING,
+                            "reversal lost — close ack pending, open leg not attempted",
+                            close.executionId(), close.brokerOrderId());
+                    }
+                    if (close.outcome().isFailure()) {
+                        // Close rejected — abort the reverse; the prior position keeps its (non-terminal) row.
+                        return close;
+                    }
+                    closeLegFired = true;
+                } else if (pos.confirmedFlat()) {
+                    // Broker already flat (closed outside us / a missed reverse already flattened) — nothing to
+                    // close. Void the stale prior row so it can't block, then just open the new leg.
+                    voidRow(priorRow, "OrderRouter REVERSE — IBKR flat; stale " + priorStatus + " row voided before open");
+                } else {
+                    // net 0 but NOT flat = offsetting live legs — no single directional close, and opening
+                    // would stack on the live legs. Skip.
+                    return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                        "IBKR holds offsetting live legs (net 0, not flat) — reverse skipped to avoid stacking",
+                        priorRow.getId(), priorRow.getEntryOrderId());
                 }
-                if (close.outcome().isFailure()) {
-                    // Close rejected — abort the reverse; the prior position keeps its (non-terminal) row.
-                    return close;
-                }
-                closeLegFired = true;
             }
         }
 
@@ -450,9 +471,15 @@ public class DefaultOrderRouter implements OrderRouter {
                 row.getId(), exitOrderRef(row), row.getBrokerAccountId(), row.getInstrument(),
                 closeAction, qty, normalizeToTick(price, instrument)));
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            // A close can come back Filled as its FIRST accepted status (marketable). Mark the row CLOSED
+            // now: the orderStatus callback may already have been dropped (close orderId not yet persisted)
+            // and execDetails only updates fill fields, not lifecycle — leaving it EXIT_SUBMITTED would make
+            // a later CLOSE/FLATTEN hit the duplicate-exit guard over an already-flat position.
+            boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
+            row.setStatus(filled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
             row.setIbkrOrderId(toIbkrOrderId(sub.brokerOrderId()));
-            row.setStatusReason(reasonPrefix + " — IBKR close submitted: " + sub.brokerOrderStatus());
+            row.setStatusReason(reasonPrefix + " — IBKR close " + (filled ? "filled" : "submitted") + ": "
+                + sub.brokerOrderStatus());
             row.setExitSubmittedAt(now);
             row.setUpdatedAt(now);
             executionRepository.save(row);
