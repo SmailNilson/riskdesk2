@@ -477,6 +477,42 @@ class DefaultOrderRouterTest {
     }
 
     @Test
+    void open_nullAccount_persistsNonNullPlaceholder() {
+        // TradeIntent allows a null brokerAccountId (gateway resolves default), but the row column is
+        // NOT NULL — the router must persist a non-null placeholder the gateway resolves.
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+        TradeIntent noAccount = TradeIntent.open("wtx:MNQ:5m:9:OPEN_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 1, new BigDecimal("18000.25"), null);
+
+        RoutingResult r = router.route(noAccount);
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getBrokerAccountId()).isNotNull().isNotBlank();
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().brokerAccountId()).isNotNull();
+    }
+
+    @Test
+    void entry_skipDuplicate_noLocalRow_synthesizesTrackingRow() {
+        // Broker already long, no local row (drift / post-restart) — synthesise a tracking row so a later
+        // CLOSE/FLATTEN can manage the live position instead of finding nothing.
+        when(reconciler.reconcile(any(), any())).thenReturn(
+            new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_DUPLICATE, "IBKR already long 2"));
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        assertThat(r.executionId()).isEqualTo(9L);         // the synthesised tracking row
+        verify(repo).createIfAbsent(any());                 // tracking row created
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
     void skipsWhenIbkrDisabled() {
         props.setEnabled(false);
 

@@ -38,6 +38,10 @@ public class DefaultOrderRouter implements OrderRouter {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultOrderRouter.class);
 
+    /** Non-null placeholder persisted when the intent leaves brokerAccountId null. The gateway's
+     *  resolveAccountId() resolves any value that is not a real managed account to the default. */
+    private static final String DEFAULT_BROKER_ACCOUNT = "__default__";
+
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
@@ -106,13 +110,36 @@ public class DefaultOrderRouter implements OrderRouter {
 
         ReconcilePlan plan = reconciler.reconcile(intent, pos);
         return switch (plan) {
-            case ReconcilePlan.Skip s -> RoutingResult.of(s.outcome(), s.message());
+            case ReconcilePlan.Skip s -> handleEntrySkip(intent, pos, s);
             case ReconcilePlan.Open o -> submitEntry(intent, false);
             case ReconcilePlan.Reverse r -> executeReverse(intent, r.toSide(), pos);
             // reconcile never produces Close/Flatten for an OPEN/REVERSE intent.
             case ReconcilePlan.Close c -> throw new IllegalStateException(intent.kind() + " reconciled to Close");
             case ReconcilePlan.Flatten f -> throw new IllegalStateException(intent.kind() + " reconciled to Flatten");
         };
+    }
+
+    /**
+     * Reconcile said the broker is already on the wanted side (SKIPPED_DUPLICATE). If we hold NO local
+     * row tracking that position (drift / post-restart / manual trade), synthesise an ACTIVE tracking row
+     * so a later CLOSE/FLATTEN can manage the live position instead of finding no row and leaving it
+     * unmanaged (matches WtxExecutionBridge).
+     */
+    private RoutingResult handleEntrySkip(TradeIntent intent, BrokerPositionState pos, ReconcilePlan.Skip s) {
+        if (s.outcome() == RoutingOutcome.SKIPPED_DUPLICATE && pos.available() && pos.net().signum() != 0) {
+            Optional<TradeExecutionRecord> existing = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
+                intent.instrument().name(), intent.timeframe(), intent.source());
+            if (existing.isEmpty()) {
+                Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
+                int qty = Math.max(1, pos.net().abs().intValue());
+                TradeExecutionRecord tracking = synthesizeActiveRow(intent, heldSide, qty, ":tracking");
+                log.info("OrderRouter {} SKIPPED_DUPLICATE — synthesised tracking row {} for the live IBKR position",
+                    intent.kind(), tracking.getId());
+                return RoutingResult.tracked(s.outcome(), s.message() + " (tracking row synthesised)",
+                    tracking.getId(), null);
+            }
+        }
+        return RoutingResult.of(s.outcome(), s.message());
     }
 
     /**
@@ -169,18 +196,23 @@ public class DefaultOrderRouter implements OrderRouter {
         return submitEntry(intent, closeLegFired);
     }
 
-    /** Persist a phantom ACTIVE row representing a live IBKR position with no local row, so a close leg
-     *  can flatten it. DB-only; a distinct executionKey so it does not collide with the open leg's row. */
+    /** Phantom ACTIVE row for a live IBKR position the close leg of a REVERSE will flatten. */
     private TradeExecutionRecord synthesizePhantom(TradeIntent intent, Side heldSide, int qty) {
+        return synthesizeActiveRow(intent, heldSide, qty, ":reconcile-close");
+    }
+
+    /** Persist an ACTIVE row representing a live IBKR position with no local row, with a distinct
+     *  executionKey (suffix) so it does not collide with the open leg. DB-only. */
+    private TradeExecutionRecord synthesizeActiveRow(TradeIntent intent, Side heldSide, int qty, String keySuffix) {
         Instant now = Instant.now();
         TradeExecutionRecord r = new TradeExecutionRecord();
-        r.setExecutionKey(intent.idempotencyKey() + ":reconcile-close");
+        r.setExecutionKey(intent.idempotencyKey() + keySuffix);
         r.setInstrument(intent.instrument().name());
         r.setTimeframe(intent.timeframe());
         r.setAction(heldSide == Side.LONG ? "LONG" : "SHORT");
         r.setQuantity(qty);
         r.setTriggerSource(intent.source());
-        r.setBrokerAccountId(intent.brokerAccountId());
+        r.setBrokerAccountId(accountId(intent));
         r.setRequestedBy(intent.source().name());
         r.setStatus(ExecutionStatus.ACTIVE);
         r.setCreatedAt(now);
@@ -391,7 +423,7 @@ public class DefaultOrderRouter implements OrderRouter {
         r.setAction(brokerAction(intent));
         r.setQuantity(intent.quantity());
         r.setTriggerSource(intent.source());
-        r.setBrokerAccountId(intent.brokerAccountId());
+        r.setBrokerAccountId(accountId(intent));
         r.setRequestedBy(intent.source().name());
         r.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         r.setNormalizedEntryPrice(normalizeToTick(intent.limitPrice(), intent.instrument()));
@@ -406,8 +438,17 @@ public class DefaultOrderRouter implements OrderRouter {
         return switch (intent.kind()) {
             case OPEN, REVERSE -> side == Side.LONG ? "LONG" : "SHORT";   // BUY a long / SELL a short
             case CLOSE -> side == Side.LONG ? "SHORT" : "LONG";           // closing a long is a SELL
-            case FLATTEN -> throw new IllegalStateException("FLATTEN requires the held side (broker-truth) — later step");
+            // FLATTEN derives its close action from the held row, not the intent — brokerAction is never
+            // called for it.
+            case FLATTEN -> throw new IllegalStateException("FLATTEN close action is derived from the held row");
         };
+    }
+
+    /** Non-null broker account for persistence: the intent's account, or the default placeholder when
+     *  the intent leaves it null (the gateway resolves the placeholder to the real default account). */
+    private static String accountId(TradeIntent intent) {
+        String acct = intent.brokerAccountId();
+        return acct != null && !acct.isBlank() ? acct : DEFAULT_BROKER_ACCOUNT;
     }
 
     private static RoutingOutcome mapRejection(IbkrOrderRejectionException e) {
