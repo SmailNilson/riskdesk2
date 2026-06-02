@@ -20,6 +20,9 @@ class RoutingOutcomeTest {
         assertThat(RoutingOutcome.ACK_PENDING.isSuccess()).isTrue();
         assertThat(RoutingOutcome.SKIPPED_RECONCILING.isSkipped()).isTrue();
         assertThat(RoutingOutcome.SKIPPED_AUTO_OFF.isSkipped()).isTrue();
+        // Behavioural skip preserved from WtxRoutingOutcome — caller reverts virtual state.
+        assertThat(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT.isSkipped()).isTrue();
+        assertThat(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN.isSkipped()).isTrue();
         assertThat(RoutingOutcome.FAILED_READ_ONLY.isFailure()).isTrue();
         assertThat(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN.isFailure()).isTrue();
     }
@@ -31,6 +34,8 @@ class RoutingOutcomeTest {
         assertThat(RoutingOutcome.ACK_PENDING.orderReachedBroker()).isTrue();
         assertThat(RoutingOutcome.SKIPPED_DUPLICATE.orderReachedBroker()).isFalse();
         assertThat(RoutingOutcome.SKIPPED_RECONCILING.orderReachedBroker()).isFalse();
+        // No NEW order is sent while a prior entry is resting — caller must not track a new row.
+        assertThat(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT.orderReachedBroker()).isFalse();
         assertThat(RoutingOutcome.FAILED_BROKER_REJECT.orderReachedBroker()).isFalse();
     }
 }
