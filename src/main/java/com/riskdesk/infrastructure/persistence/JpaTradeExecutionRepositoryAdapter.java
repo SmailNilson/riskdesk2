@@ -30,34 +30,38 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
 
     @Override
     public TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution) {
+        return createIfAbsentTracked(execution).record();
+    }
+
+    @Override
+    public CreateOutcome createIfAbsentTracked(TradeExecutionRecord execution) {
         // Auto-armed quant executions (PR #303) carry a NULL mentorSignalReviewId
         // — the de-dup key for those is executionKey only.
         if (execution.getMentorSignalReviewId() != null) {
             Optional<TradeExecutionEntity> existing = repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId());
             if (existing.isPresent()) {
-                return TradeExecutionEntityMapper.toDomain(existing.get());
+                return new CreateOutcome(TradeExecutionEntityMapper.toDomain(existing.get()), false);
             }
         } else if (execution.getExecutionKey() != null) {
             Optional<TradeExecutionEntity> existing = repository.findByExecutionKey(execution.getExecutionKey());
             if (existing.isPresent()) {
-                return TradeExecutionEntityMapper.toDomain(existing.get());
+                return new CreateOutcome(TradeExecutionEntityMapper.toDomain(existing.get()), false);
             }
         }
 
         try {
-            return TradeExecutionEntityMapper.toDomain(
+            TradeExecutionRecord created = TradeExecutionEntityMapper.toDomain(
                 repository.saveAndFlush(TradeExecutionEntityMapper.toEntity(execution))
             );
+            return new CreateOutcome(created, true);
         } catch (DataIntegrityViolationException e) {
+            // Lost the unique-constraint race: another caller created the row first.
             entityManager.clear();
-            if (execution.getMentorSignalReviewId() != null) {
-                return repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId())
-                    .map(TradeExecutionEntityMapper::toDomain)
-                    .orElseThrow(() -> e);
-            }
-            return repository.findByExecutionKey(execution.getExecutionKey())
-                .map(TradeExecutionEntityMapper::toDomain)
-                .orElseThrow(() -> e);
+            Optional<TradeExecutionEntity> existing = execution.getMentorSignalReviewId() != null
+                ? repository.findByMentorSignalReviewId(execution.getMentorSignalReviewId())
+                : repository.findByExecutionKey(execution.getExecutionKey());
+            TradeExecutionRecord row = existing.map(TradeExecutionEntityMapper::toDomain).orElseThrow(() -> e);
+            return new CreateOutcome(row, false);
         }
     }
 

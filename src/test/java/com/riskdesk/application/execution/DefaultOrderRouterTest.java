@@ -6,6 +6,7 @@ import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
+import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
@@ -22,11 +23,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -41,22 +40,18 @@ class DefaultOrderRouterTest {
 
     private IbkrProperties props;
     private DefaultOrderRouter router;
-    private TradeExecutionRecord lastCreated;
 
     @BeforeEach
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true);
-        // createIfAbsent simulates persistence assigning the PK; findByIdForUpdate returns the same
-        // (still-PENDING) row under the pessimistic lock; save echoes the row.
-        lenient().when(repo.createIfAbsent(any())).thenAnswer(inv -> {
+        // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
+        lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
-            r.setId(1L);
-            lastCreated = r;
-            return r;
+            if (r != null) r.setId(1L); // null-safe: re-stubbing in a test re-invokes this with a null arg
+            return new CreateOutcome(r, true);
         });
-        lenient().when(repo.findByIdForUpdate(1L)).thenAnswer(inv -> Optional.ofNullable(lastCreated));
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
     }
 
@@ -71,7 +66,6 @@ class DefaultOrderRouterTest {
 
     @Test
     void routesOpen_persistsBothIds_roundsTick() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         RoutingResult r = router.route(openLong());
@@ -92,7 +86,6 @@ class DefaultOrderRouterTest {
 
     @Test
     void pendingSubmitMapsToAckPending() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(777L, "PendingSubmit"));
 
         RoutingResult r = router.route(openLong());
@@ -102,26 +95,13 @@ class DefaultOrderRouterTest {
     }
 
     @Test
-    void skipsDuplicateWhenExecutionKeyExists() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.of(new TradeExecutionRecord()));
-
-        RoutingResult r = router.route(openLong());
-
-        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
-        verify(ibkrOrderService, never()).submitEntryOrder(any());
-    }
-
-    @Test
-    void racingTickSeesLockedRowAlreadyClaimed_noDoubleSubmit() {
-        // Two ticks race the same key: both pass findByExecutionKey, both createIfAbsent. By the time
-        // this (loser) caller acquires the row lock (findByIdForUpdate), the winner has already moved
-        // the row to ENTRY_SUBMITTED. The loser must NOT submit a second order.
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
-        TradeExecutionRecord claimedByWinner = new TradeExecutionRecord();
-        claimedByWinner.setId(1L);
-        claimedByWinner.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-        claimedByWinner.setEntryOrderId(555L);
-        when(repo.findByIdForUpdate(1L)).thenReturn(Optional.of(claimedByWinner));
+    void skipsDuplicateWhenRowAlreadyExisted_noDoubleSubmit() {
+        // Race resolved by the DB unique constraint: createIfAbsentTracked reports created=false, so this
+        // (loser) caller must NOT submit a second order.
+        TradeExecutionRecord existing = new TradeExecutionRecord();
+        existing.setId(1L);
+        existing.setEntryOrderId(555L);
+        when(repo.createIfAbsentTracked(any())).thenReturn(new CreateOutcome(existing, false));
 
         RoutingResult r = router.route(openLong());
 
@@ -132,24 +112,32 @@ class DefaultOrderRouterTest {
     }
 
     @Test
-    void mapsInsufficientMargin() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
+    void mapsInsufficientMargin_terminalFailed() {
         when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
             IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
 
         RoutingResult r = router.route(openLong());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN);
-        assertThat(r.executionId()).isEqualTo(1L);
-
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
-        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED); // terminal: broker rejected, no position
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED); // terminal: broker rejected
+    }
+
+    @Test
+    void readOnlyRejectMapsToFailedReadOnly() {
+        // The kill-switch / TWS Read-Only surface as BROKER_REJECT carrying a read-only message.
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "native-read-only kill-switch is ON",
+            "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch).", null));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_READ_ONLY);
     }
 
     @Test
     void timeoutWithBrokerIdIsAckPending() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
         when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
             IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", 999L));
 
@@ -160,8 +148,7 @@ class DefaultOrderRouterTest {
     }
 
     @Test
-    void timeoutWithoutBrokerIdIsFailedTimeout() {
-        when(repo.findByExecutionKey(anyString())).thenReturn(Optional.empty());
+    void timeoutWithoutBrokerIdIsFailedTimeout_nonTerminal() {
         when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
             IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", null));
 
@@ -169,9 +156,7 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_TIMEOUT);
         assertThat(r.brokerOrderId()).isNull();
-
-        // Broker state is UNKNOWN on a no-id timeout — the row MUST stay non-terminal so the
-        // stale-entry reconciler / late callbacks can resolve it, and no retry double-submits.
+        // Broker state UNKNOWN on a no-id timeout — row MUST stay non-terminal for the reconciler.
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);

@@ -12,6 +12,24 @@ public interface TradeExecutionRepositoryPort {
 
     TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution);
 
+    /** Result of {@link #createIfAbsentTracked}: the row, and whether THIS call created it. */
+    record CreateOutcome(TradeExecutionRecord record, boolean created) {}
+
+    /**
+     * Like {@link #createIfAbsent} but reports whether THIS call <b>created</b> the row (so the caller
+     * may submit a broker order) or it <b>already existed</b> (the caller must NOT submit a second
+     * order). The DB unique constraint on {@code executionKey} / {@code mentorSignalReviewId} is the
+     * serialization point for concurrent callers — no pessimistic row lock is needed, so the caller
+     * never has to hold a transaction across the broker network call.
+     *
+     * <p>The JPA adapter overrides this to report created-vs-existing precisely from the
+     * unique-constraint outcome. The default (for simple in-memory test fakes) just delegates to
+     * {@link #createIfAbsent} and reports {@code created=true}.</p>
+     */
+    default CreateOutcome createIfAbsentTracked(TradeExecutionRecord execution) {
+        return new CreateOutcome(createIfAbsent(execution), true);
+    }
+
     /** All executions for a trigger source currently in the given status (e.g. WTX_AUTO + ENTRY_SUBMITTED). */
     List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource, ExecutionStatus status);
 

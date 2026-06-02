@@ -13,10 +13,10 @@ import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
+import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -53,7 +53,6 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     @Override
-    @Transactional
     public RoutingResult route(TradeIntent intent) {
         if (intent == null) {
             throw new IllegalArgumentException("intent is required");
@@ -74,22 +73,16 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     private RoutingResult routeOpen(TradeIntent intent) {
-        if (executionRepository.findByExecutionKey(intent.idempotencyKey()).isPresent()) {
-            return RoutingResult.of(RoutingOutcome.SKIPPED_DUPLICATE,
-                "execution already exists for " + intent.idempotencyKey());
-        }
-
-        // createIfAbsent de-dups on the unique executionKey constraint, but two racing callers can BOTH
-        // receive a PENDING row (the loser gets the winner's freshly-created, not-yet-submitted row), so
-        // a plain status check would let both proceed and double-submit. Re-fetch under a pessimistic row
-        // lock and decide there: only one caller holds the lock and sees PENDING; the other blocks, then
-        // sees ENTRY_SUBMITTED and is rejected as a duplicate. route() is @Transactional so the lock spans
-        // the submit. (Matches ExecutionManagerService.submitEntryOrder.)
-        Long executionId = executionRepository.createIfAbsent(toPendingRecord(intent)).getId();
-        TradeExecutionRecord persisted = executionRepository.findByIdForUpdate(executionId)
-            .orElseThrow(() -> new IllegalStateException("execution row vanished after createIfAbsent: " + executionId));
-        if (persisted.getStatus() != ExecutionStatus.PENDING_ENTRY_SUBMISSION) {
-            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already in flight",
+        // createIfAbsentTracked de-dups on the unique executionKey constraint AND tells us whether THIS
+        // call created the row. Two racing ticks: exactly one gets created=true (and submits), the other
+        // created=false (SKIPPED_DUPLICATE). No pessimistic lock — so route() holds NO transaction across
+        // the broker submit, and the PENDING row + the ibkrOrderId are committed in short txns visible to
+        // the fill-tracker callbacks (findByIbkrOrderId / the findByExecutionKey fallback) the moment the
+        // broker order goes live.
+        CreateOutcome createResult = executionRepository.createIfAbsentTracked(toPendingRecord(intent));
+        TradeExecutionRecord persisted = createResult.record();
+        if (!createResult.created()) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already exists",
                 persisted.getId(), persisted.getEntryOrderId());
         }
 
@@ -180,9 +173,23 @@ public class DefaultOrderRouter implements OrderRouter {
         return switch (e.kind()) {
             case INSUFFICIENT_MARGIN -> RoutingOutcome.FAILED_INSUFFICIENT_MARGIN;
             case TIMEOUT -> e.brokerOrderId() != null ? RoutingOutcome.ACK_PENDING : RoutingOutcome.FAILED_TIMEOUT;
-            case BROKER_REJECT, CANCELLED -> RoutingOutcome.FAILED_BROKER_REJECT;
+            // The kill-switch (riskdesk.ibkr.native-read-only) and the TWS Read-Only API both surface as
+            // a BROKER_REJECT carrying a read-only message — keep that distinct in the outcome so signal
+            // history / UI show FAILED_READ_ONLY when the global kill switch blocks all orders.
+            case BROKER_REJECT, CANCELLED -> looksReadOnly(e)
+                ? RoutingOutcome.FAILED_READ_ONLY : RoutingOutcome.FAILED_BROKER_REJECT;
             case UNKNOWN -> RoutingOutcome.FAILED;
         };
+    }
+
+    private static boolean looksReadOnly(IbkrOrderRejectionException e) {
+        return containsReadOnly(e.brokerMessage()) || containsReadOnly(e.getMessage());
+    }
+
+    private static boolean containsReadOnly(String s) {
+        if (s == null) return false;
+        String lower = s.toLowerCase();
+        return lower.contains("read-only") || lower.contains("read only") || lower.contains("kill-switch");
     }
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {
