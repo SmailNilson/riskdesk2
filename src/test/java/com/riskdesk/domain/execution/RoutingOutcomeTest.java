@@ -26,6 +26,10 @@ class RoutingOutcomeTest {
         // Disabled reasons kept distinct (diagnosable in signal history / UI).
         assertThat(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE.isSkipped()).isTrue();
         assertThat(RoutingOutcome.SKIPPED_IBKR_DISABLED.isSkipped()).isTrue();
+        // Cross-cutting routing reasons other strategies need (e.g. Playbook).
+        assertThat(RoutingOutcome.PAPER_ONLY.isSkipped()).isTrue();
+        assertThat(RoutingOutcome.SKIPPED_NO_ACCOUNT.isSkipped()).isTrue();
+        assertThat(RoutingOutcome.SKIPPED_STALE_PRICE_SOURCE.isSkipped()).isTrue();
         assertThat(RoutingOutcome.FAILED_READ_ONLY.isFailure()).isTrue();
         assertThat(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN.isFailure()).isTrue();
     }

@@ -1,11 +1,17 @@
 package com.riskdesk.domain.execution;
 
 /**
- * Strategy-neutral outcome of routing a {@link TradeIntent} through the execution core. This is the
- * replacement vocabulary for every strategy, so it is a faithful <b>superset</b> of the per-strategy
- * {@code WtxRoutingOutcome} — no behavioural signal is lost when WTX (or any strategy) migrates onto
- * it. Each value carries a {@link Category} so callers branch on success vs skip vs failure without
- * string / prefix matching.
+ * Strategy-neutral outcome of routing a {@link TradeIntent} through the execution core — the shared
+ * <b>routing-decision</b> vocabulary, surfaced in signal history / WS payloads / UI. It is a faithful
+ * superset of WTX's {@code WtxRoutingOutcome} (the pilot) and covers the cross-cutting routing reasons
+ * other strategies need (paper mode, no account, stale price, …). Each value carries a {@link Category}
+ * so callers branch on success vs skip vs failure without string / prefix matching.
+ *
+ * <p><b>Boundary.</b> A strategy's own <i>internal entry gates</i> — decided BEFORE an intent is built,
+ * e.g. Playbook's {@code SKIPPED_BELOW_*_THRESHOLD} / {@code SKIPPED_PROFILE_*} / {@code SKIPPED_LATE_ENTRY}
+ * / {@code SKIPPED_NO_PLAN} — are not routing outcomes and stay in that strategy's own enum + signal
+ * history (and may be conveyed via {@link RoutingResult#message()}). This enum is deliberately NOT a
+ * union of every strategy's internal vocabulary; it captures what the core decides while routing.</p>
  *
  * <p>Two values require the <b>caller</b> to realign its optimistic virtual position state — switch
  * on the exact value, the {@link Category} alone is not enough: {@link #ROUTED_FLATTEN_ONLY} (correct
@@ -24,6 +30,8 @@ public enum RoutingOutcome {
     /** Order reached the broker (has an id) but the first ack was late; fill callbacks reconcile it. */
     ACK_PENDING(Category.SUCCESS),
 
+    /** Handled in paper / simulation mode — intentionally not routed to the broker. */
+    PAPER_ONLY(Category.SKIPPED),
     /** Auto-execution is OFF for this (instrument, timeframe). */
     SKIPPED_AUTO_OFF(Category.SKIPPED),
     /** The execution bridge / router bean is not wired (e.g. riskdesk.wtx.enabled off, or IBKR mode off). */
@@ -36,10 +44,14 @@ public enum RoutingOutcome {
     SKIPPED_RECONCILING(Category.SKIPPED),
     /** No reference price available to build the Limit order. */
     SKIPPED_NO_PRICE(Category.SKIPPED),
+    /** The price source is too stale to build a safe Limit order. */
+    SKIPPED_STALE_PRICE_SOURCE(Category.SKIPPED),
     /** Resulting position quantity was non-positive. */
     SKIPPED_NO_QTY(Category.SKIPPED),
     /** A close / reverse was requested but no open execution row exists for this (instrument, timeframe). */
     SKIPPED_NO_OPEN_ROW(Category.SKIPPED),
+    /** No broker account is configured / resolvable for this routing. */
+    SKIPPED_NO_ACCOUNT(Category.SKIPPED),
     /**
      * An OPEN / REVERSE was skipped because a prior entry order is still <b>in flight</b> (a
      * non-terminal {@code ENTRY_SUBMITTED} / {@code ENTRY_PARTIALLY_FILLED} row) while IBKR reads
