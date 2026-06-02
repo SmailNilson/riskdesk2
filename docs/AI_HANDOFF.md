@@ -23,18 +23,21 @@ same-side signals show `NONE`). Repro: user had no live order at IBKR but the pa
   `not-found-max-age` (a DAY order can't outlive the session) → `CANCELLED`. Anything uncertain
   (lookup failed, unknown status, recent not-found) is left untouched — it never guesses. No
   broker side effect; it only writes the local tracking row.
-- Order lookup is exposed cleanly: `IbGatewayNativeClient.findOrderByOrderRef` (already existed,
-  used for submit idempotency) → new `IbkrBrokerGateway.findOrder` default → `IbkrOrderService
-  .findOrder` → returns `BrokerOrderStatusView`. New repo port method
-  `findByTriggerSourceAndStatus`.
+- Order lookup is a **tri-state** to keep an outage from looking like absence: `IbGatewayNativeClient
+  .lookupOrderByOrderRef` returns `FOUND` / `NOT_FOUND` / `UNAVAILABLE` (the connectivity check +
+  query are atomic, so there's no disconnect race), surfaced as `BrokerOrderLookup` via
+  `IbkrBrokerGateway.findOrder` (default `UNAVAILABLE`) → `IbkrOrderService.findOrder`. The
+  reconciler **only** acts on `FOUND` (status) and `NOT_FOUND` (aged-cancel); `UNAVAILABLE` is never
+  read as "gone" — cancelling during a gateway outage could hide a real filled position. New repo
+  port method `findByTriggerSourceAndStatus`.
 - The bridge routing path is **unchanged** (still reads the cached position snapshot, stays fast);
   the reconciler runs out-of-band and unblocks within one interval.
 - Config: `riskdesk.wtx.stale-entry.{reconcile-interval-ms,initial-delay-ms,grace-seconds,
   not-found-max-age-hours}`.
 
-Tests: `WtxStaleEntryReconcilerTest` (9) — cancelled/inactive→CANCELLED, filled→ACTIVE,
-live→left, not-found-old→CANCELLED, not-found-recent→left, within-grace→not-looked-up,
-IBKR-disabled→no-op, lookup-throws→left. Full suite green.
+Tests: `WtxStaleEntryReconcilerTest` (10) — cancelled/inactive→CANCELLED, filled→ACTIVE,
+live→left, not-found-old→CANCELLED, not-found-recent→left, **unavailable-old→left (no cancel
+during outage)**, within-grace→not-looked-up, IBKR-disabled→no-op, lookup-throws→left. Full suite green.
 
 ## WTX: no naked orders when IBKR is confirmed flat (2026-06-01)
 

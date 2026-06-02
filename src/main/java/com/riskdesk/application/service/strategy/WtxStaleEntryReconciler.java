@@ -1,6 +1,6 @@
 package com.riskdesk.application.service.strategy;
 
-import com.riskdesk.application.dto.BrokerOrderStatusView;
+import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
@@ -18,7 +18,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
 
 /**
  * Reconciles WTX {@code ENTRY_SUBMITTED} rows that the live fill-tracker never resolved against
@@ -105,17 +104,26 @@ public class WtxStaleEntryReconciler {
             return; // can't look it up without the orderRef
         }
 
-        Optional<BrokerOrderStatusView> order;
+        BrokerOrderLookup lookup;
         try {
-            order = ibkrOrderService.findOrder(row.getBrokerAccountId(), row.getExecutionKey());
+            lookup = ibkrOrderService.findOrder(row.getBrokerAccountId(), row.getExecutionKey());
         } catch (RuntimeException e) {
             log.debug("WTX stale-entry reconcile: lookup failed for row {} (key={}) — {}",
                     row.getId(), row.getExecutionKey(), e.getMessage());
             return; // can't confirm — leave it
         }
 
-        if (order.isPresent()) {
-            String status = order.get().status();
+        // CRITICAL: never reconcile on UNAVAILABLE. The gateway couldn't be queried (disabled,
+        // disconnected, no resolved account) — an empty result here is NOT evidence the order is gone.
+        // Treating it as absence during an outage could cancel a filled-but-unreconciled row and hide
+        // a real broker position. Only NOT_FOUND (live + completed both queried, order in neither) and
+        // an explicit FOUND status drive a reconcile.
+        if (lookup.isUnavailable()) {
+            return;
+        }
+
+        if (lookup.isFound()) {
+            String status = lookup.order().status();
             if (isLive(status)) {
                 return; // genuinely resting at the broker — not stale
             }
@@ -128,9 +136,10 @@ public class WtxStaleEntryReconciler {
             return;
         }
 
-        // Not in the live OR completed order set. If the row has been pending past the DAY-order
-        // lifetime, the order is gone (expired/aged-out) — reconcile to CANCELLED. Otherwise leave it
-        // (a same-session order may still be findable on the next tick; never guess prematurely).
+        // NOT_FOUND — the live AND completed sets were both queried and the order is in neither. If the
+        // row has been pending past the DAY-order lifetime, the order is gone (expired/aged-out) —
+        // reconcile to CANCELLED. Otherwise leave it (a same-session order may still be findable on the
+        // next tick; never guess prematurely).
         if (lastTouched != null && Duration.between(lastTouched, now).compareTo(notFoundMaxAge) > 0) {
             cancel(row, "WTX stale-entry reconcile: no live/completed IBKR order found and row aged past "
                     + notFoundMaxAge.toHours() + "h — reconciled");

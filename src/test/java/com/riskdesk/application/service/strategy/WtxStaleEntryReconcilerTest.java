@@ -1,5 +1,6 @@
 package com.riskdesk.application.service.strategy;
 
+import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.dto.BrokerOrderStatusView;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -13,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -68,7 +68,7 @@ class WtxStaleEntryReconcilerTest {
         TradeExecutionRecord row = stuckRow("wtx:MNQ:5m:1:OPEN_SHORT", 10);
         seed(row);
         when(orderService.findOrder(any(), eq(row.getExecutionKey())))
-                .thenReturn(Optional.of(new BrokerOrderStatusView(99L, row.getExecutionKey(), "acct", "Cancelled")));
+                .thenReturn(BrokerOrderLookup.found(new BrokerOrderStatusView(99L, row.getExecutionKey(), "acct", "Cancelled")));
 
         reconciler(120, 24).reconcileStaleEntries();
 
@@ -81,7 +81,7 @@ class WtxStaleEntryReconcilerTest {
         TradeExecutionRecord row = stuckRow("k", 10);
         seed(row);
         when(orderService.findOrder(any(), any()))
-                .thenReturn(Optional.of(new BrokerOrderStatusView(99L, "k", "acct", "Inactive")));
+                .thenReturn(BrokerOrderLookup.found(new BrokerOrderStatusView(99L, "k", "acct", "Inactive")));
 
         reconciler(120, 24).reconcileStaleEntries();
 
@@ -93,7 +93,7 @@ class WtxStaleEntryReconcilerTest {
         TradeExecutionRecord row = stuckRow("k", 10);
         seed(row);
         when(orderService.findOrder(any(), any()))
-                .thenReturn(Optional.of(new BrokerOrderStatusView(99L, "k", "acct", "Filled")));
+                .thenReturn(BrokerOrderLookup.found(new BrokerOrderStatusView(99L, "k", "acct", "Filled")));
 
         reconciler(120, 24).reconcileStaleEntries();
 
@@ -107,7 +107,7 @@ class WtxStaleEntryReconcilerTest {
         TradeExecutionRecord row = stuckRow("k", 10);
         seed(row);
         when(orderService.findOrder(any(), any()))
-                .thenReturn(Optional.of(new BrokerOrderStatusView(99L, "k", "acct", "Submitted")));
+                .thenReturn(BrokerOrderLookup.found(new BrokerOrderStatusView(99L, "k", "acct", "Submitted")));
 
         reconciler(120, 24).reconcileStaleEntries();
 
@@ -120,7 +120,7 @@ class WtxStaleEntryReconcilerTest {
         // 30h old, not found in live OR completed → a DAY order can't survive that long → gone.
         TradeExecutionRecord row = stuckRow("k", 30 * 60);
         seed(row);
-        when(orderService.findOrder(any(), any())).thenReturn(Optional.empty());
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
 
         reconciler(120, 24).reconcileStaleEntries();
 
@@ -128,11 +128,27 @@ class WtxStaleEntryReconcilerTest {
     }
 
     @Test
+    void unavailableAndOld_leavesRowUntouched_noCancelDuringOutage() {
+        // Codex P1: UNAVAILABLE (gateway disconnected / no account) must NEVER be read as absence.
+        // Even a 30h-old row must be left alone during an outage — cancelling it could hide a real
+        // filled position behind a false-flat local state.
+        TradeExecutionRecord row = stuckRow("k", 30 * 60);
+        seed(row);
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.unavailable());
+
+        reconciler(120, 24).reconcileStaleEntries();
+
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, row.getStatus(),
+                "must not reconcile a row when the broker lookup is unavailable (outage), regardless of age");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
     void notFoundButRecent_leavesRowUntouched() {
         // 10 min old, not found → could be transient / same-session; never guess prematurely.
         TradeExecutionRecord row = stuckRow("k", 10);
         seed(row);
-        when(orderService.findOrder(any(), any())).thenReturn(Optional.empty());
+        when(orderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
 
         reconciler(120, 24).reconcileStaleEntries();
 

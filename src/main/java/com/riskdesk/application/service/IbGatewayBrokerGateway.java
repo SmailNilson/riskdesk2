@@ -151,11 +151,16 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
     }
 
     @Override
-    public Optional<com.riskdesk.application.dto.BrokerOrderStatusView> findOrder(
-            String requestedAccountId, String orderRef) {
-        return nativeClient.findOrderByOrderRef(requestedAccountId, orderRef)
-            .map(s -> new com.riskdesk.application.dto.BrokerOrderStatusView(
-                s.orderId(), s.orderRef(), s.accountId(), s.status()));
+    public com.riskdesk.application.dto.BrokerOrderLookup findOrder(String requestedAccountId, String orderRef) {
+        var result = nativeClient.lookupOrderByOrderRef(requestedAccountId, orderRef);
+        return switch (result.outcome()) {
+            case FOUND -> com.riskdesk.application.dto.BrokerOrderLookup.found(
+                new com.riskdesk.application.dto.BrokerOrderStatusView(
+                    result.order().orderId(), result.order().orderRef(),
+                    result.order().accountId(), result.order().status()));
+            case NOT_FOUND -> com.riskdesk.application.dto.BrokerOrderLookup.notFound();
+            case UNAVAILABLE -> com.riskdesk.application.dto.BrokerOrderLookup.unavailable();
+        };
     }
 
     private IbkrPositionView toPositionView(Position position) {
