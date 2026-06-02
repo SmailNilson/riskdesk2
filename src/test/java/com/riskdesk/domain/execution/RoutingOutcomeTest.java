@@ -23,19 +23,25 @@ class RoutingOutcomeTest {
         // Behavioural skip preserved from WtxRoutingOutcome — caller reverts virtual state.
         assertThat(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT.isSkipped()).isTrue();
         assertThat(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN.isSkipped()).isTrue();
+        // Disabled reasons kept distinct (diagnosable in signal history / UI).
+        assertThat(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE.isSkipped()).isTrue();
+        assertThat(RoutingOutcome.SKIPPED_IBKR_DISABLED.isSkipped()).isTrue();
         assertThat(RoutingOutcome.FAILED_READ_ONLY.isFailure()).isTrue();
         assertThat(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN.isFailure()).isTrue();
     }
 
     @Test
-    void orderReachedBrokerOnlyForSubmittedOutcomes() {
-        assertThat(RoutingOutcome.ROUTED.orderReachedBroker()).isTrue();
-        assertThat(RoutingOutcome.ROUTED_FLATTEN_ONLY.orderReachedBroker()).isTrue();
-        assertThat(RoutingOutcome.ACK_PENDING.orderReachedBroker()).isTrue();
-        assertThat(RoutingOutcome.SKIPPED_DUPLICATE.orderReachedBroker()).isFalse();
-        assertThat(RoutingOutcome.SKIPPED_RECONCILING.orderReachedBroker()).isFalse();
-        // No NEW order is sent while a prior entry is resting — caller must not track a new row.
-        assertThat(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT.orderReachedBroker()).isFalse();
-        assertThat(RoutingOutcome.FAILED_BROKER_REJECT.orderReachedBroker()).isFalse();
+    void mustTrackExecutionRowIncludesTimeoutNotRejects() {
+        // Submitted (or possibly-live) outcomes need a persisted row.
+        assertThat(RoutingOutcome.ROUTED.mustTrackExecutionRow()).isTrue();
+        assertThat(RoutingOutcome.ROUTED_FLATTEN_ONLY.mustTrackExecutionRow()).isTrue();
+        assertThat(RoutingOutcome.ACK_PENDING.mustTrackExecutionRow()).isTrue();
+        // Timeout = broker state UNKNOWN → keep the row non-terminal for late reconcile / dedup.
+        assertThat(RoutingOutcome.FAILED_TIMEOUT.mustTrackExecutionRow()).isTrue();
+        // Explicit reject / blocked / skip → no row to track.
+        assertThat(RoutingOutcome.FAILED_BROKER_REJECT.mustTrackExecutionRow()).isFalse();
+        assertThat(RoutingOutcome.FAILED_READ_ONLY.mustTrackExecutionRow()).isFalse();
+        assertThat(RoutingOutcome.SKIPPED_DUPLICATE.mustTrackExecutionRow()).isFalse();
+        assertThat(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT.mustTrackExecutionRow()).isFalse();
     }
 }

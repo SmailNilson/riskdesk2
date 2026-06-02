@@ -26,8 +26,10 @@ public enum RoutingOutcome {
 
     /** Auto-execution is OFF for this (instrument, timeframe). */
     SKIPPED_AUTO_OFF(Category.SKIPPED),
-    /** Execution is not active — the bridge/router bean is not wired, or IBKR is disabled in config. */
-    SKIPPED_DISABLED(Category.SKIPPED),
+    /** The execution bridge / router bean is not wired (e.g. riskdesk.wtx.enabled off, or IBKR mode off). */
+    SKIPPED_BRIDGE_UNAVAILABLE(Category.SKIPPED),
+    /** IBKR is disabled in the backend config ({@code ibkrProperties.isEnabled() == false}). */
+    SKIPPED_IBKR_DISABLED(Category.SKIPPED),
     /** An execution already exists for this {@link TradeIntent#idempotencyKey()}. */
     SKIPPED_DUPLICATE(Category.SKIPPED),
     /** The core is still reconciling broker truth at startup — the intent is refused, not queued. */
@@ -91,8 +93,15 @@ public enum RoutingOutcome {
         return category == Category.FAILED;
     }
 
-    /** True when an order actually reached the broker, so the caller must track an execution row. */
-    public boolean orderReachedBroker() {
-        return this == ROUTED || this == ROUTED_FLATTEN_ONLY || this == ACK_PENDING;
+    /**
+     * True when the caller must persist a <b>non-terminal</b> execution row for this outcome, because
+     * the order is — or may be — live at the broker. Covers the submitted outcomes AND
+     * {@link #FAILED_TIMEOUT}: a timeout leaves broker state <b>unknown</b> (the order may have been
+     * received but the ack was lost), so the row must be kept non-terminal so late
+     * {@code orderStatus}/{@code execDetails} callbacks can reconcile it and a duplicate retry is not
+     * fired against an order the broker may already hold. Pure rejects / skips need no row.
+     */
+    public boolean mustTrackExecutionRow() {
+        return this == ROUTED || this == ROUTED_FLATTEN_ONLY || this == ACK_PENDING || this == FAILED_TIMEOUT;
     }
 }
