@@ -201,7 +201,7 @@ class DefaultOrderRouterTest {
     }
 
     private void stubActive(TradeExecutionRecord row) {
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.of(row));
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.of(row));
     }
 
     private void stubFlat(boolean flat) {
@@ -211,7 +211,7 @@ class DefaultOrderRouterTest {
 
     @Test
     void close_noActiveRow_skipsNoOpenRow() {
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
 
         RoutingResult r = router.route(closeLong());
 
@@ -291,6 +291,22 @@ class DefaultOrderRouterTest {
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT); // a reducing order needs no margin
     }
 
+    @Test
+    void close_scopesActiveRowLookupToIntentAccount() {
+        // P1 guard: the active-row lookup MUST be account-scoped. A CLOSE for one account must never
+        // locate (and then flatten) another account's row — submitCloseLeg closes on the row's own
+        // brokerAccountId, so a wrong-account row would flatten the wrong position.
+        ArgumentCaptor<String> account = ArgumentCaptor.forClass(String.class);
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), account.capture()))
+            .thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(closeLong()); // intent account = "DU1"
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        assertThat(account.getValue()).isEqualTo("DU1"); // lookup scoped to the intent's resolved account
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
     // ---- FLATTEN ---------------------------------------------------------------------------
 
     private TradeIntent flatten() {
@@ -334,7 +350,7 @@ class DefaultOrderRouterTest {
 
     @Test
     void flatten_noRow_skipsNoOpenRow() {
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
 
         RoutingResult r = router.route(flatten());
 
@@ -453,7 +469,7 @@ class DefaultOrderRouterTest {
     void reverse_noLocalRow_offsettingLegs_skipsToAvoidStacking() {
         // Rollover overlap: IBKR net 0 but NOT flat (offsetting live legs), no local row — can't synthesise a
         // single close, so opening would stack on the live legs. Skip.
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, false));
 
         RoutingResult r = router.route(reverseToShort());
@@ -465,7 +481,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_noLocalRow_directionalIbkr_synthesizesCloseThenOpens() {
         // No local row but IBKR holds a directional position (drift) — synthesise a phantom, close it, open.
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
 
@@ -502,7 +518,7 @@ class DefaultOrderRouterTest {
         when(reconciler.reconcile(any(), any())).thenReturn(
             new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_DUPLICATE, "IBKR already long 2"));
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
-        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
 
         RoutingResult r = router.route(openLong());
 

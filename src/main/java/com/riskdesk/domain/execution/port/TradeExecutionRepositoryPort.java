@@ -84,6 +84,25 @@ public interface TradeExecutionRepositoryPort {
             String instrument, String timeframe, ExecutionTriggerSource triggerSource);
 
     /**
+     * Account-scoped variant of {@link #findActiveByInstrumentAndTimeframeAndTriggerSource}. The unified
+     * OrderRouter reconciles broker position truth per IBKR account, so it must locate ONLY its own
+     * account's open row — never another account's. Returning a different account's row would let a
+     * CLOSE/FLATTEN submit a reducing order on the wrong account (it closes using the row's own
+     * {@code brokerAccountId}), flattening a position the intent never meant to touch.
+     *
+     * <p>{@code brokerAccountId} is the resolved (non-null) account the row was persisted with. The JPA
+     * adapter overrides this to push the account filter into the query, so the right account's row is
+     * returned even when several accounts each hold one for the same (instrument, timeframe, source).
+     * This default (for in-memory test fakes) merely filters the unscoped single-row result by account
+     * — adequate for single-account fakes, not a substitute for the account-in-query adapter.</p>
+     */
+    default Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(
+            String instrument, String timeframe, ExecutionTriggerSource triggerSource, String brokerAccountId) {
+        return findActiveByInstrumentAndTimeframeAndTriggerSource(instrument, timeframe, triggerSource)
+            .filter(r -> brokerAccountId != null && brokerAccountId.equals(r.getBrokerAccountId()));
+    }
+
+    /**
      * PR #303 — auto-arm pipeline.
      * Returns all currently-armed (PENDING_ENTRY_SUBMISSION) executions whose
      * {@code triggerSource} matches the supplied source. Used by the

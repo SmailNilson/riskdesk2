@@ -163,6 +163,21 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
     }
 
     @Override
+    public Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(
+            String instrument, String timeframe, ExecutionTriggerSource triggerSource, String brokerAccountId) {
+        if (instrument == null || instrument.isBlank()
+                || timeframe == null || timeframe.isBlank()
+                || triggerSource == null
+                || brokerAccountId == null || brokerAccountId.isBlank()) {
+            return Optional.empty();
+        }
+        return repository.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccountRaw(
+                instrument, timeframe, triggerSource, brokerAccountId, TERMINAL_STATUSES).stream()
+            .findFirst()
+            .map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
     public List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource triggerSource) {
         if (triggerSource == null) {
             return List.of();

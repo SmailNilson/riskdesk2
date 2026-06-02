@@ -91,8 +91,7 @@ public class DefaultOrderRouter implements OrderRouter {
 
         // In-flight / phantom precondition: IBKR confirmed flat but we hold a non-terminal local row.
         if (pos.confirmedFlat()) {
-            Optional<TradeExecutionRecord> existing = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
-                intent.instrument().name(), intent.timeframe(), intent.source());
+            Optional<TradeExecutionRecord> existing = findOpenRow(intent);
             if (existing.isPresent()) {
                 TradeExecutionRecord row = existing.get();
                 if (row.getStatus() == ExecutionStatus.ACTIVE) {
@@ -127,8 +126,7 @@ public class DefaultOrderRouter implements OrderRouter {
      */
     private RoutingResult handleEntrySkip(TradeIntent intent, BrokerPositionState pos, ReconcilePlan.Skip s) {
         if (s.outcome() == RoutingOutcome.SKIPPED_DUPLICATE && pos.available() && pos.net().signum() != 0) {
-            Optional<TradeExecutionRecord> existing = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
-                intent.instrument().name(), intent.timeframe(), intent.source());
+            Optional<TradeExecutionRecord> existing = findOpenRow(intent);
             if (existing.isEmpty()) {
                 Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
                 int qty = Math.max(1, pos.net().abs().intValue());
@@ -150,8 +148,7 @@ public class DefaultOrderRouter implements OrderRouter {
      * the broker is FLAT — surfaced as {@code ROUTED_FLATTEN_ONLY} (protected, not an error).
      */
     private RoutingResult executeReverse(TradeIntent intent, Side toSide, BrokerPositionState pos) {
-        Optional<TradeExecutionRecord> prior = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
-            intent.instrument().name(), intent.timeframe(), intent.source());
+        Optional<TradeExecutionRecord> prior = findOpenRow(intent);
         if (prior.isEmpty() && pos.available() && !pos.confirmedFlat()) {
             // No local row but the broker is NOT flat — there is a live position we must flatten first.
             if (pos.net().signum() != 0) {
@@ -320,8 +317,7 @@ public class DefaultOrderRouter implements OrderRouter {
      * single close leg is submitted on the existing row.
      */
     private RoutingResult executeExit(TradeIntent intent, boolean flatten, String reasonPrefix) {
-        var active = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
-            intent.instrument().name(), intent.timeframe(), intent.source());
+        var active = findOpenRow(intent);
         if (active.isEmpty()) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
                 "no open execution row to " + (flatten ? "flatten" : "close"));
@@ -412,6 +408,17 @@ public class DefaultOrderRouter implements OrderRouter {
         row.setStatusReason(truncate(reason, 256));
         row.setUpdatedAt(Instant.now());
         executionRepository.save(row);
+    }
+
+    /**
+     * Locate THIS strategy's open row for the intent — scoped to (instrument, timeframe, source) AND the
+     * resolved broker account. Account scoping is mandatory: every exit path closes on the row's own
+     * {@code brokerAccountId}, so returning another account's row would flatten the wrong account. Uses
+     * {@link #accountId} so it matches the (non-null) account these rows are persisted with.
+     */
+    private Optional<TradeExecutionRecord> findOpenRow(TradeIntent intent) {
+        return executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(
+            intent.instrument().name(), intent.timeframe(), intent.source(), accountId(intent));
     }
 
     private TradeExecutionRecord toPendingRecord(TradeIntent intent) {
