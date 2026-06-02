@@ -30,6 +30,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -264,6 +266,39 @@ public class WtxExecutionBridge {
         log.info("WTX [{} {}] unified-router {} → {} (core {})",
                 state.instrument(), tf, action, outcome, result.outcome());
         return WtxRoutingResult.of(outcome, message);
+    }
+
+    /**
+     * Cutover handoff (migration). Legacy WTX rows persisted the bridge placeholder {@code "wtx-default"};
+     * the unified path routes the default account as null, which the router persists/queries as
+     * {@link DefaultOrderRouter#DEFAULT_BROKER_ACCOUNT}. On startup AFTER the flag is enabled, re-point any
+     * non-terminal default-account WTX rows so the router's account-scoped {@code findOpenRow} can locate
+     * them — otherwise a CLOSE / CLOSE_ALL against an existing default-account position after cutover returns
+     * {@code SKIPPED_NO_OPEN_ROW} and leaves the live IBKR position open.
+     *
+     * <p>Flag-gated (no-op when OFF → zero impact) and idempotent (only {@code "wtx-default"} rows are
+     * touched, so subsequent restarts find none). Only the default placeholder is normalized — a configured
+     * real account already matches on both paths.</p>
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    void normalizeLegacyDefaultAccountRowsForCutover() {
+        if (orderRouter == null || executionProperties == null || !executionProperties.isUnifiedRouterEnabled()) {
+            return;
+        }
+        int normalized = 0;
+        for (TradeExecutionRecord row : executionRepository.findAllActive()) {
+            if (row.getTriggerSource() == ExecutionTriggerSource.WTX_AUTO
+                    && "wtx-default".equals(row.getBrokerAccountId())) {
+                row.setBrokerAccountId(DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+                row.setUpdatedAt(Instant.now());
+                executionRepository.save(row);
+                normalized++;
+            }
+        }
+        if (normalized > 0) {
+            log.info("WTX unified-router cutover: normalized {} legacy 'wtx-default' row(s) to '{}'",
+                    normalized, DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+        }
     }
 
     /**

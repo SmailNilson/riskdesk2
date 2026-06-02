@@ -170,6 +170,21 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void cutover_normalizesLegacyDefaultAccountRows_onlyWhenFlagOn() {
+        // A legacy WTX row created before cutover stores brokerAccountId = "wtx-default".
+        repo.createIfAbsent(wtxRow("LONG", 2, ExecutionStatus.ACTIVE));
+
+        // Flag OFF → no-op (zero impact): the row keeps its legacy placeholder.
+        unifiedBridge(mock(OrderRouter.class), null, false).normalizeLegacyDefaultAccountRowsForCutover();
+        assertEquals("wtx-default", repo.all().get(0).getBrokerAccountId());
+
+        // Flag ON → re-pointed to "__default__" so the router's account-scoped findOpenRow can locate it
+        // (else a CLOSE after cutover would SKIPPED_NO_OPEN_ROW and leave the live position open).
+        unifiedBridge(mock(OrderRouter.class), null, true).normalizeLegacyDefaultAccountRowsForCutover();
+        assertEquals("__default__", repo.all().get(0).getBrokerAccountId());
+    }
+
+    @Test
     void closeLong_marksExistingRowExitSubmitted_andCreatesNoNewRow() {
         // Seed an open WTX long entry row
         TradeExecutionRecord open = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
