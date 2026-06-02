@@ -125,12 +125,21 @@ public class DefaultOrderRouter implements OrderRouter {
     private RoutingResult executeReverse(TradeIntent intent, Side toSide, BrokerPositionState pos) {
         Optional<TradeExecutionRecord> prior = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
             intent.instrument().name(), intent.timeframe(), intent.source());
-        if (prior.isEmpty() && pos.available() && pos.net().signum() != 0) {
-            // No local row but IBKR holds a live position (opened outside us / drift) — synthesise a phantom
-            // so the close leg flattens the broker side instead of the open stacking on top of it.
-            Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
-            int qty = Math.max(1, pos.net().abs().intValue());
-            prior = Optional.of(synthesizePhantom(intent, heldSide, qty));
+        if (prior.isEmpty() && pos.available() && !pos.confirmedFlat()) {
+            // No local row but the broker is NOT flat — there is a live position we must flatten first.
+            if (pos.net().signum() != 0) {
+                // Directional position opened outside us / drift — synthesise a phantom so the close leg
+                // flattens the broker side instead of the open stacking on top of it.
+                Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
+                int qty = Math.max(1, pos.net().abs().intValue());
+                prior = Optional.of(synthesizePhantom(intent, heldSide, qty));
+            } else {
+                // net==0 but NOT flat = offsetting live legs (rollover / calendar overlap) with no local
+                // row. We can't synthesise a single close, and opening would stack on top of the live legs.
+                // Skip rather than over-trade (per-leg flatten would be needed — out of scope here).
+                return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                    "IBKR holds offsetting live legs (net 0, not flat) and no local row — reverse skipped to avoid stacking");
+            }
         }
 
         boolean closeLegFired = false;
@@ -286,6 +295,12 @@ public class DefaultOrderRouter implements OrderRouter {
                 "no open execution row to " + (flatten ? "flatten" : "close"));
         }
         TradeExecutionRecord row = active.get();
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            // A close is already resting at the broker (awaiting fill). A second reducing order could
+            // over-close and flip the position once both fill — skip (matches WtxExecutionBridge.handleClose).
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                "close already in flight (EXIT_SUBMITTED) — duplicate exit skipped", row.getId(), row.getEntryOrderId());
+        }
         BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
         if (pos.confirmedFlat()) {
             if (row.getStatus() == ExecutionStatus.ACTIVE) {

@@ -58,6 +58,12 @@ class DefaultOrderRouterTest {
             return new CreateOutcome(r, true);
         });
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        // createIfAbsent (used to synthesise a phantom close row in a reverse against drift).
+        lenient().when(repo.createIfAbsent(any())).thenAnswer(inv -> {
+            TradeExecutionRecord r = inv.getArgument(0);
+            if (r != null) r.setId(9L);
+            return r;
+        });
         // Default reconcile: position unavailable, plan = pass-through (Open for OPEN, Reverse for REVERSE).
         lenient().when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
         lenient().when(reconciler.reconcile(any(), any())).thenAnswer(inv -> {
@@ -430,6 +436,44 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_alreadyExitSubmitted_skipsDuplicate() {
+        // A close is already resting (EXIT_SUBMITTED) — a second reducing order could over-close the position.
+        stubActive(activeRow(ExecutionStatus.EXIT_SUBMITTED, 1, 100L));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_noLocalRow_offsettingLegs_skipsToAvoidStacking() {
+        // Rollover overlap: IBKR net 0 but NOT flat (offsetting live legs), no local row — can't synthesise a
+        // single close, so opening would stack on the live legs. Skip.
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, false));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reverse_noLocalRow_directionalIbkr_synthesizesCloseThenOpens() {
+        // No local row but IBKR holds a directional position (drift) — synthesise a phantom, close it, open.
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(repo).createIfAbsent(any());                          // phantom synthesised
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());  // synthesised close + open leg
     }
 
     @Test
