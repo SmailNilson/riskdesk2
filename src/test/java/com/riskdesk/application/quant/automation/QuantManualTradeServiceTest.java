@@ -186,6 +186,9 @@ class QuantManualTradeServiceTest {
         @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTriggerSource(String instrument, ExecutionTriggerSource src) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTimeframeAndTriggerSource(String instrument, String timeframe, ExecutionTriggerSource src) { return Optional.empty(); }
         @Override public List<TradeExecutionRecord> findPendingByTriggerSource(ExecutionTriggerSource src) { return List.of(); }
+        @Override public List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource src, ExecutionStatus status) {
+            return byId.values().stream().filter(r -> r.getTriggerSource() == src && r.getStatus() == status).toList();
+        }
         @Override public List<TradeExecutionRecord> findAllActive() { return List.of(); }
     }
 }

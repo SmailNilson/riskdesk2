@@ -226,6 +226,11 @@ class QuantAutoArmServiceTest {
                 .filter(r -> r.getStatus() == ExecutionStatus.PENDING_ENTRY_SUBMISSION)
                 .toList();
         }
+        @Override public List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource src, ExecutionStatus status) {
+            return byId.values().stream()
+                .filter(r -> r.getTriggerSource() == src && r.getStatus() == status)
+                .toList();
+        }
         @Override public List<TradeExecutionRecord> findAllActive() {
             return byId.values().stream()
                 .filter(r -> r.getStatus() != ExecutionStatus.CLOSED

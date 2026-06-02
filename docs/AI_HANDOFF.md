@@ -1,6 +1,40 @@
 # AI Handoff
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
+
+## WTX: reconcile stuck ENTRY_SUBMITTED rows (un-freeze the strategy) (2026-06-02)
+
+**Problem (prod follow-up to #368).** WTX entries are `LMT` `DAY` limit orders. The fill
+tracker only flips a row `ENTRY_SUBMITTED → ACTIVE/CANCELLED` on the matching `orderStatus`
+callback. If that callback is missed (disconnect, restart, or the DAY order expiring while the
+app is down) the row stays `ENTRY_SUBMITTED` forever. The confirmed-flat reconcile from #368 then
+reads it as an entry still "in flight" → returns `SKIPPED_ENTRY_IN_FLIGHT` on every signal,
+**freezing the strategy** (panel shows a phantom position; reverses show `ENTRY IN FLIGHT`,
+same-side signals show `NONE`). Repro: user had no live order at IBKR but the panel stayed stuck.
+
+**Fix — a scheduled reconciler that checks the broker's order truth:**
+
+- New `WtxStaleEntryReconciler` (`application/service/strategy`, `@ConditionalOnProperty
+  riskdesk.wtx.enabled`, `@Scheduled`). For each `WTX_AUTO` + `ENTRY_SUBMITTED` row older than a
+  grace period it looks the order up by `executionKey` (which IS the IBKR `orderRef`) — live
+  orders first, then completed orders — and reconciles **deterministically**:
+  `Cancelled`/`ApiCancelled`/`Inactive` → `CANCELLED`; `Filled` → `ACTIVE` (missed-fill);
+  live (`Submitted`/`PreSubmitted`/…) → left; not in either set **and** aged past
+  `not-found-max-age` (a DAY order can't outlive the session) → `CANCELLED`. Anything uncertain
+  (lookup failed, unknown status, recent not-found) is left untouched — it never guesses. No
+  broker side effect; it only writes the local tracking row.
+- Order lookup is exposed cleanly: `IbGatewayNativeClient.findOrderByOrderRef` (already existed,
+  used for submit idempotency) → new `IbkrBrokerGateway.findOrder` default → `IbkrOrderService
+  .findOrder` → returns `BrokerOrderStatusView`. New repo port method
+  `findByTriggerSourceAndStatus`.
+- The bridge routing path is **unchanged** (still reads the cached position snapshot, stays fast);
+  the reconciler runs out-of-band and unblocks within one interval.
+- Config: `riskdesk.wtx.stale-entry.{reconcile-interval-ms,initial-delay-ms,grace-seconds,
+  not-found-max-age-hours}`.
+
+Tests: `WtxStaleEntryReconcilerTest` (9) — cancelled/inactive→CANCELLED, filled→ACTIVE,
+live→left, not-found-old→CANCELLED, not-found-recent→left, within-grace→not-looked-up,
+IBKR-disabled→no-op, lookup-throws→left. Full suite green.
 
 ## WTX: no naked orders when IBKR is confirmed flat (2026-06-01)
 
