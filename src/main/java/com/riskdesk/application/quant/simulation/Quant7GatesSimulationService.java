@@ -6,6 +6,8 @@ import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationPublisher;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationStatus;
+import com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -68,6 +70,7 @@ public class Quant7GatesSimulationService {
     static final String TAG_ABS_BEAR = "[ABS BEAR ACTIVE]";
 
     private final ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider;
+    private final ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider;
     private final AtomicLong sequence = new AtomicLong(1);
 
     /**
@@ -78,8 +81,40 @@ public class Quant7GatesSimulationService {
      */
     private final Map<Instrument, List<Quant7GatesSimulation>> byInstrument = new EnumMap<>(Instrument.class);
 
-    public Quant7GatesSimulationService(ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider) {
+    public Quant7GatesSimulationService(
+            ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
+            ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider) {
         this.publisherProvider = publisherProvider;
+        this.repositoryProvider = repositoryProvider;
+    }
+
+    /**
+     * Rehydrates harness state from the durable store on startup (no-op when no
+     * repository is wired — e.g. unit tests). Seeds the id sequence past the
+     * highest persisted id so restarts never reuse an id, and reloads still-OPEN
+     * rows so in-flight trades keep tracking. Closed history is read on demand
+     * from the store, so it is intentionally NOT loaded into the capped buckets.
+     */
+    @PostConstruct
+    synchronized void rehydrate() {
+        Quant7GatesSimulationRepositoryPort repo = repo();
+        if (repo == null) return;
+        try {
+            long max = repo.maxId();
+            if (max >= sequence.get()) sequence.set(max + 1);
+            int reloaded = 0;
+            for (Quant7GatesSimulation open : repo.findAllOpen()) {
+                bucket(open.instrument()).add(open);
+                reloaded++;
+            }
+            log.info("quant-sim rehydrated from DB: nextId={} openRowsReloaded={}", sequence.get(), reloaded);
+        } catch (RuntimeException e) {
+            log.warn("quant-sim rehydrate failed (continuing in-memory): {}", e.toString());
+        }
+    }
+
+    private Quant7GatesSimulationRepositoryPort repo() {
+        return repositoryProvider == null ? null : repositoryProvider.getIfAvailable();
     }
 
     /**
@@ -111,6 +146,7 @@ public class Quant7GatesSimulationService {
             if (closed != null) {
                 rows.set(i, closed);
                 publish(closed);
+                persist(closed);
             } else {
                 // Refresh mark-to-market view so the frontend P&L stays live —
                 // tag with the CURRENT snapshot's source, not the row's entry
@@ -173,6 +209,7 @@ public class Quant7GatesSimulationService {
         log.info("quant-sim OPEN id={} instr={} dir={} entry={} src={} sl={} tp1={} tp2={} reason=\"{}\"",
             opened.id(), instrument, direction, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
         publish(opened);
+        persist(opened);
     }
 
     private Quant7GatesSimulation maybeClose(Quant7GatesSimulation sim,
@@ -291,10 +328,40 @@ public class Quant7GatesSimulationService {
         }
     }
 
-    /** Pure read — returns a snapshot copy of all simulations across instruments, newest first. */
+    /**
+     * Mirrors an OPEN (insert) or terminal CLOSE (update) into the durable
+     * store when one is wired. Mark-to-market refreshes are intentionally NOT
+     * persisted — they are transient live-view noise; only the entry snapshot
+     * and the final resolved row matter for the historical report.
+     */
+    private void persist(Quant7GatesSimulation sim) {
+        Quant7GatesSimulationRepositoryPort repo = repo();
+        if (repo == null) return;
+        try {
+            repo.save(sim);
+        } catch (RuntimeException e) {
+            log.warn("quant-sim persist failed id={}: {}", sim.id(), e.toString());
+        }
+    }
+
+    /**
+     * Pure read — all simulations across instruments, newest first. When a
+     * durable store is wired, the full closed history comes from the DB (not
+     * the capped in-memory buckets) and is merged with the live OPEN rows
+     * (which carry the latest mark-to-market price); otherwise the in-memory
+     * buckets are returned as-is.
+     */
     public synchronized List<Quant7GatesSimulation> listAll() {
+        Quant7GatesSimulationRepositoryPort repo = repo();
         List<Quant7GatesSimulation> out = new ArrayList<>();
-        for (List<Quant7GatesSimulation> rows : byInstrument.values()) out.addAll(rows);
+        if (repo == null) {
+            for (List<Quant7GatesSimulation> rows : byInstrument.values()) out.addAll(rows);
+        } else {
+            out.addAll(repo.findAllClosed());
+            for (List<Quant7GatesSimulation> rows : byInstrument.values()) {
+                for (Quant7GatesSimulation s : rows) if (s.isOpen()) out.add(s);
+            }
+        }
         out.sort(Comparator.comparing(Quant7GatesSimulation::openedAt).reversed());
         return Collections.unmodifiableList(out);
     }
@@ -309,24 +376,39 @@ public class Quant7GatesSimulationService {
         return Collections.unmodifiableList(out);
     }
 
-    /** Pure read — aggregated win/loss stats across resolved rows. */
+    /**
+     * Pure read — aggregated win/loss stats across resolved rows. Reads the
+     * full closed history from the durable store when wired, otherwise the
+     * (capped) in-memory closed rows.
+     */
     public synchronized Stats stats() {
+        Quant7GatesSimulationRepositoryPort repo = repo();
+        if (repo != null) {
+            return aggregate(repo.findAllClosed());
+        }
+        List<Quant7GatesSimulation> closed = new ArrayList<>();
+        for (List<Quant7GatesSimulation> rows : byInstrument.values()) {
+            for (Quant7GatesSimulation s : rows) if (!s.isOpen()) closed.add(s);
+        }
+        return aggregate(closed);
+    }
+
+    /** Aggregates win/loss + net P&amp;L over a list of (already resolved) rows. */
+    private static Stats aggregate(List<Quant7GatesSimulation> rows) {
         int total = 0;
         int wins = 0;
         int losses = 0;
         double netPts = 0.0;
         double netUsd = 0.0;
-        for (List<Quant7GatesSimulation> rows : byInstrument.values()) {
-            for (Quant7GatesSimulation s : rows) {
-                if (s.isOpen()) continue;
-                total++;
-                double pts = s.pnlPoints() == null ? 0.0 : s.pnlPoints();
-                double usd = s.pnlUsd() == null ? 0.0 : s.pnlUsd();
-                netPts += pts;
-                netUsd += usd;
-                if (pts > 0) wins++;
-                else if (pts < 0) losses++;
-            }
+        for (Quant7GatesSimulation s : rows) {
+            if (s.isOpen()) continue;
+            total++;
+            double pts = s.pnlPoints() == null ? 0.0 : s.pnlPoints();
+            double usd = s.pnlUsd() == null ? 0.0 : s.pnlUsd();
+            netPts += pts;
+            netUsd += usd;
+            if (pts > 0) wins++;
+            else if (pts < 0) losses++;
         }
         return new Stats(total, wins, losses, netPts, netUsd);
     }

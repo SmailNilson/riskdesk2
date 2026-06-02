@@ -33,7 +33,7 @@ class Quant7GatesSimulationServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new Quant7GatesSimulationService(emptyProvider());
+        service = new Quant7GatesSimulationService(emptyProvider(), emptyRepoProvider());
         service.resetForTesting();
     }
 
@@ -247,6 +247,15 @@ class Quant7GatesSimulationServiceTest {
             @Override public Quant7GatesSimulationPublisher getObject(Object... args) { return null; }
             @Override public Quant7GatesSimulationPublisher getIfAvailable() { return null; }
             @Override public Quant7GatesSimulationPublisher getIfUnique() { return null; }
+        };
+    }
+
+    private static ObjectProvider<com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort> emptyRepoProvider() {
+        return new ObjectProvider<>() {
+            @Override public com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort getObject() { return null; }
+            @Override public com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort getObject(Object... args) { return null; }
+            @Override public com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort getIfAvailable() { return null; }
+            @Override public com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort getIfUnique() { return null; }
         };
     }
 }
