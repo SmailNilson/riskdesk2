@@ -307,6 +307,19 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
+    @Test
+    void close_inFlightEntry_notFlat_skipsEntryInFlight() {
+        // Entry still resting (ENTRY_SUBMITTED) and broker NOT confirmed flat (real position or broker
+        // truth unavailable) — no confirmed full position to reduce. A close would be naked/over-sized.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
     // ---- FLATTEN ---------------------------------------------------------------------------
 
     private TradeIntent flatten() {
@@ -490,6 +503,31 @@ class DefaultOrderRouterTest {
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
         verify(repo).createIfAbsent(any());                          // phantom synthesised
         verify(ibkrOrderService, times(2)).submitEntryOrder(any());  // synthesised close + open leg
+    }
+
+    @Test
+    void reverse_priorEntryStillSubmitted_skipsNoNakedOrders() {
+        // Prior entry resting unfilled (ENTRY_SUBMITTED), broker not confirmed flat — no confirmed position
+        // to flatten. The reverse must NOT fire a close (naked) then an open (stacked). Skip entirely.
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 2, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any()); // neither close nor open fired
+    }
+
+    @Test
+    void reverse_priorEntryPartiallyFilled_skipsNoOverClose() {
+        // Partial fill — closing the full row qty would over-close/flip, then the open stacks. Skip.
+        stubActive(activeRow(ExecutionStatus.ENTRY_PARTIALLY_FILLED, 2, 100L));
+        stubFlat(false);
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     @Test

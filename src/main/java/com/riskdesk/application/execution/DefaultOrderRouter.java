@@ -167,27 +167,39 @@ public class DefaultOrderRouter implements OrderRouter {
         }
 
         boolean closeLegFired = false;
-        if (prior.isPresent() && prior.get().getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
+        if (prior.isPresent()) {
             TradeExecutionRecord priorRow = prior.get();
-            int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
-                ? priorRow.getQuantity() : intent.quantity();
-            String closeAction = "LONG".equalsIgnoreCase(priorRow.getAction()) ? "SHORT" : "LONG"; // opposite of held
-            RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, priorQty,
-                intent.limitPrice(), "OrderRouter REVERSE close");
-            if (close.outcome() == RoutingOutcome.ACK_PENDING) {
-                // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
-                // is effectively lost until a reconcile. Surface it loudly.
-                log.error("OrderRouter REVERSE close leg ack-pending — open leg NOT attempted, reversal LOST "
-                    + "until reconcile: {}", intent.idempotencyKey());
-                return RoutingResult.tracked(RoutingOutcome.ACK_PENDING,
-                    "reversal lost — close ack pending, open leg not attempted",
-                    close.executionId(), close.brokerOrderId());
+            ExecutionStatus priorStatus = priorRow.getStatus();
+            if (isInFlightEntry(priorStatus)) {
+                // The prior entry is still resting / only partially filled — there is NO confirmed full
+                // position to flatten. Firing a close (then the open leg) would place naked / opposite /
+                // over-sized orders. Skip the whole reverse; a later signal reverses once it is ACTIVE.
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                    "reverse skipped — prior entry still in flight (" + priorStatus + "), no confirmed position to flatten",
+                    priorRow.getId(), priorRow.getEntryOrderId());
             }
-            if (close.outcome().isFailure()) {
-                // Close rejected — abort the reverse; the prior position keeps its (non-terminal) row.
-                return close;
+            if (priorStatus != ExecutionStatus.EXIT_SUBMITTED) {
+                // ACTIVE (or VIRTUAL_EXIT_TRIGGERED, or a synthesised phantom) — a confirmed position to flatten.
+                int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
+                    ? priorRow.getQuantity() : intent.quantity();
+                String closeAction = "LONG".equalsIgnoreCase(priorRow.getAction()) ? "SHORT" : "LONG"; // opposite of held
+                RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, priorQty,
+                    intent.limitPrice(), "OrderRouter REVERSE close");
+                if (close.outcome() == RoutingOutcome.ACK_PENDING) {
+                    // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
+                    // is effectively lost until a reconcile. Surface it loudly.
+                    log.error("OrderRouter REVERSE close leg ack-pending — open leg NOT attempted, reversal LOST "
+                        + "until reconcile: {}", intent.idempotencyKey());
+                    return RoutingResult.tracked(RoutingOutcome.ACK_PENDING,
+                        "reversal lost — close ack pending, open leg not attempted",
+                        close.executionId(), close.brokerOrderId());
+                }
+                if (close.outcome().isFailure()) {
+                    // Close rejected — abort the reverse; the prior position keeps its (non-terminal) row.
+                    return close;
+                }
+                closeLegFired = true;
             }
-            closeLegFired = true;
         }
 
         return submitEntry(intent, closeLegFired);
@@ -342,6 +354,14 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
                 "entry still in flight (" + row.getStatus() + ") — exit skipped", row.getId(), row.getEntryOrderId());
         }
+        // Broker is NOT confirmed flat (a real position, or broker truth unavailable). If our entry is
+        // still resting / only partially filled we have no confirmed full position to reduce — a close
+        // would be naked or over-sized. Skip rather than fire (mirrors the reverse close-leg guard).
+        if (isInFlightEntry(row.getStatus())) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                "entry still in flight (" + row.getStatus() + ") and position unconfirmed — "
+                    + (flatten ? "flatten" : "close") + " skipped", row.getId(), row.getEntryOrderId());
+        }
         // Close the HELD side: FLATTEN derives it from the row's open action; CLOSE from the intent side.
         String closeAction = flatten
             ? ("LONG".equalsIgnoreCase(row.getAction()) ? "SHORT" : "LONG")
@@ -456,6 +476,18 @@ public class DefaultOrderRouter implements OrderRouter {
     private static String accountId(TradeIntent intent) {
         String acct = intent.brokerAccountId();
         return acct != null && !acct.isBlank() ? acct : DEFAULT_BROKER_ACCOUNT;
+    }
+
+    /**
+     * True for entry statuses where no confirmed full position exists yet (order armed, resting, or only
+     * partially filled). A reducing leg — a CLOSE, a FLATTEN, or the close leg of a REVERSE — against such
+     * a row would be naked (entry never filled) or over-sized (partial fill), so the router skips it with
+     * {@code SKIPPED_ENTRY_IN_FLIGHT} and lets a later signal act once the row is {@code ACTIVE}.
+     */
+    private static boolean isInFlightEntry(ExecutionStatus status) {
+        return status == ExecutionStatus.PENDING_ENTRY_SUBMISSION
+            || status == ExecutionStatus.ENTRY_SUBMITTED
+            || status == ExecutionStatus.ENTRY_PARTIALLY_FILLED;
     }
 
     private static RoutingOutcome mapRejection(IbkrOrderRejectionException e) {
