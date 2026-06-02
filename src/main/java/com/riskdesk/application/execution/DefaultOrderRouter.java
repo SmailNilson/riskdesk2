@@ -278,11 +278,21 @@ public class DefaultOrderRouter implements OrderRouter {
 
             // BOTH ids must be set: entryOrderId for the audit, ibkrOrderId (Integer) so the fill
             // tracker can locate this row on the orderStatus/execDetails callbacks.
+            Instant submittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
+            boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("OrderRouter " + intent.kind() + " submitted: " + submission.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
+            // A marketable limit can come back Filled as its FIRST accepted status. Activate the row now: the
+            // orderStatus callback may already have been dropped (ibkrOrderId not yet persisted) and
+            // execDetails only updates fill fields, not lifecycle — leaving it ENTRY_SUBMITTED would make a
+            // later CLOSE/FLATTEN skip a LIVE position as entry-in-flight.
+            persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("OrderRouter " + intent.kind() + (filled ? " filled: " : " submitted: ")
+                + submission.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(submittedAt);
+            if (filled) {
+                persisted.setEntryFilledAt(submittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
 
@@ -417,10 +427,14 @@ public class DefaultOrderRouter implements OrderRouter {
                 "CLOSE " + intent.side() + " but IBKR holds " + brokerSide + " — no matching position to close",
                 row.getId(), row.getEntryOrderId());
         }
-        // Reduce the broker's actual held side: LONG → SELL (SHORT), SHORT → BUY (LONG). Quantity stays the
-        // strategy's own row size so we never over-close another source's leg on the same instrument.
+        // Reduce the broker's actual held side: LONG → SELL (SHORT), SHORT → BUY (LONG).
         String closeAction = brokerSide == Side.LONG ? "SHORT" : "LONG";
-        int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
+        // Quantity is bounded BOTH ways: never more than the row owns (don't close another source's leg on
+        // the same instrument) AND never more than the broker actually holds (a stale row recording more than
+        // the live position would otherwise over-close and FLIP it — e.g. row 2 vs IBKR long 1 → SELL 1, not
+        // SELL 2 which opens a short 1).
+        int rowQty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
+        int qty = Math.min(rowQty, pos.net().abs().intValue());
         return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix);
     }
 

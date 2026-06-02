@@ -114,6 +114,21 @@ class DefaultOrderRouterTest {
     }
 
     @Test
+    void open_immediatelyFilled_marksActive() {
+        // A marketable entry IBKR fills immediately (first accepted status "Filled") must be ACTIVE, not
+        // ENTRY_SUBMITTED — else a later CLOSE/FLATTEN skips the LIVE position as entry-in-flight.
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Filled"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(cap.getValue().getEntryFilledAt()).isNotNull();
+    }
+
+    @Test
     void skipsDuplicateWhenRowAlreadyExisted_noDoubleSubmit() {
         // Race resolved by the DB unique constraint: createIfAbsentTracked reports created=false, so this
         // (loser) caller must NOT submit a second order.
@@ -280,7 +295,8 @@ class DefaultOrderRouterTest {
     @Test
     void close_submits_exitSubmitted_oppositeActionAndRowQty() {
         stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
-        stubFlat(false);
+        when(reconciler.readPositionState(any(), any())) // broker holds long 2 (matches the row)
+            .thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
         when(ibkrOrderService.submitEntryOrder(any()))
             .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
 
@@ -296,6 +312,25 @@ class DefaultOrderRouterTest {
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+    }
+
+    @Test
+    void close_capsExitQtyToBrokerNet_noOverCloseFlip() {
+        // Row records qty 2 but IBKR only holds long 1 (manual partial close). Closing the row qty (SELL 2)
+        // would flatten the long 1 and OPEN a short 1 — cap to the live broker qty → SELL 1.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L)); // row qty 2
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(new BigDecimal("1"), false)); // broker long 1
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().quantity()).isEqualTo(1);     // capped to broker net, not row qty 2
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // SELL to reduce the long
     }
 
     @Test
