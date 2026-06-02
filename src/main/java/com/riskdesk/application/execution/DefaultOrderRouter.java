@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.Optional;
 
 /**
  * The single entry point through which every strategy submits to IBKR. Owns the shared mechanics —
@@ -28,9 +29,9 @@ import java.time.Instant;
  * by reusing the existing {@link IbkrOrderService} and {@link TradeExecutionRepositoryPort}; it does
  * not duplicate them. Generalises the proven {@code WtxExecutionBridge.handleEntry} flow.
  *
- * <p>This step implements {@code OPEN}, {@code CLOSE} and {@code FLATTEN}. {@code REVERSE} (two-leg
- * close-then-open) lands in a later step — see docs/PLAN_ORDER_ROUTER_IMPL.md. The router is not yet
- * wired to any strategy.</p>
+ * <p>Implements all four {@code IntentKind}s — {@code OPEN}, {@code CLOSE}, {@code FLATTEN} and the
+ * two-leg {@code REVERSE} (close-then-open). The router is not yet wired to any strategy (that is the
+ * migration step — see docs/PLAN_ORDER_ROUTER_IMPL.md).</p>
  */
 @Service
 public class DefaultOrderRouter implements OrderRouter {
@@ -69,21 +70,122 @@ public class DefaultOrderRouter implements OrderRouter {
                 "IBKR is disabled in the backend configuration");
         }
         return switch (intent.kind()) {
-            case OPEN -> routeOpen(intent);
+            case OPEN, REVERSE -> routeEntry(intent);
             case CLOSE -> executeClose(intent);
             case FLATTEN -> executeFlatten(intent);
-            case REVERSE -> throw new UnsupportedOperationException(
-                "OrderRouter: REVERSE is not implemented yet (see docs/PLAN_ORDER_ROUTER_IMPL.md)");
         };
     }
 
-    private RoutingResult routeOpen(TradeIntent intent) {
-        // createIfAbsentTracked de-dups on the unique executionKey constraint AND tells us whether THIS
-        // call created the row. Two racing ticks: exactly one gets created=true (and submits), the other
-        // created=false (SKIPPED_DUPLICATE). No pessimistic lock — so route() holds NO transaction across
-        // the broker submit, and the PENDING row + the ibkrOrderId are committed in short txns visible to
-        // the fill-tracker callbacks (findByIbkrOrderId / the findByExecutionKey fallback) the moment the
-        // broker order goes live.
+    /**
+     * Entry orchestration for OPEN / REVERSE. Reconciles against broker position truth first: may
+     * downgrade REVERSE→OPEN (broker flat), upgrade OPEN→REVERSE (broker holds the opposite) or skip a
+     * duplicate (broker already on the wanted side). A confirmed-flat broker with a stale local row voids
+     * the phantom (or skips an in-flight entry) before opening fresh.
+     */
+    private RoutingResult routeEntry(TradeIntent intent) {
+        BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
+
+        // In-flight / phantom precondition: IBKR confirmed flat but we hold a non-terminal local row.
+        if (pos.confirmedFlat()) {
+            Optional<TradeExecutionRecord> existing = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
+                intent.instrument().name(), intent.timeframe(), intent.source());
+            if (existing.isPresent()) {
+                TradeExecutionRecord row = existing.get();
+                if (row.getStatus() == ExecutionStatus.ACTIVE) {
+                    // Filled position the broker no longer holds (manual close / drift). Void it so the new
+                    // open is the sole active row and a later close can't flatten it naked.
+                    voidRow(row, "OrderRouter " + intent.kind() + " — IBKR flat; stale ACTIVE row voided before entry");
+                } else {
+                    // An entry order is resting UNFILLED at the broker — opening another risks a double fill.
+                    return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                        "entry still in flight (" + row.getStatus() + ") — open skipped to avoid double fill",
+                        row.getId(), row.getEntryOrderId());
+                }
+            }
+        }
+
+        ReconcilePlan plan = reconciler.reconcile(intent, pos);
+        return switch (plan) {
+            case ReconcilePlan.Skip s -> RoutingResult.of(s.outcome(), s.message());
+            case ReconcilePlan.Open o -> submitEntry(intent, false);
+            case ReconcilePlan.Reverse r -> executeReverse(intent, r.toSide(), pos);
+            // reconcile never produces Close/Flatten for an OPEN/REVERSE intent.
+            case ReconcilePlan.Close c -> throw new IllegalStateException(intent.kind() + " reconciled to Close");
+            case ReconcilePlan.Flatten f -> throw new IllegalStateException(intent.kind() + " reconciled to Flatten");
+        };
+    }
+
+    /**
+     * REVERSE — flatten the opposite position, THEN open on {@code toSide}. Two 1:1 legs: the close leg
+     * fires FIRST (on the prior local row, or a phantom synthesised from the live IBKR position). If the
+     * close ack-pends or is rejected the reverse is ABORTED — the open leg is never attempted (firing it
+     * would stack on the un-flattened position). When the close succeeds but the open leg is then rejected,
+     * the broker is FLAT — surfaced as {@code ROUTED_FLATTEN_ONLY} (protected, not an error).
+     */
+    private RoutingResult executeReverse(TradeIntent intent, Side toSide, BrokerPositionState pos) {
+        Optional<TradeExecutionRecord> prior = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
+            intent.instrument().name(), intent.timeframe(), intent.source());
+        if (prior.isEmpty() && pos.available() && pos.net().signum() != 0) {
+            // No local row but IBKR holds a live position (opened outside us / drift) — synthesise a phantom
+            // so the close leg flattens the broker side instead of the open stacking on top of it.
+            Side heldSide = pos.net().signum() > 0 ? Side.LONG : Side.SHORT;
+            int qty = Math.max(1, pos.net().abs().intValue());
+            prior = Optional.of(synthesizePhantom(intent, heldSide, qty));
+        }
+
+        boolean closeLegFired = false;
+        if (prior.isPresent() && prior.get().getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
+            TradeExecutionRecord priorRow = prior.get();
+            int priorQty = priorRow.getQuantity() != null && priorRow.getQuantity() > 0
+                ? priorRow.getQuantity() : intent.quantity();
+            String closeAction = "LONG".equalsIgnoreCase(priorRow.getAction()) ? "SHORT" : "LONG"; // opposite of held
+            RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, priorQty,
+                intent.limitPrice(), "OrderRouter REVERSE close");
+            if (close.outcome() == RoutingOutcome.ACK_PENDING) {
+                // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
+                // is effectively lost until a reconcile. Surface it loudly.
+                log.error("OrderRouter REVERSE close leg ack-pending — open leg NOT attempted, reversal LOST "
+                    + "until reconcile: {}", intent.idempotencyKey());
+                return RoutingResult.tracked(RoutingOutcome.ACK_PENDING,
+                    "reversal lost — close ack pending, open leg not attempted",
+                    close.executionId(), close.brokerOrderId());
+            }
+            if (close.outcome().isFailure()) {
+                // Close rejected — abort the reverse; the prior position keeps its (non-terminal) row.
+                return close;
+            }
+            closeLegFired = true;
+        }
+
+        return submitEntry(intent, closeLegFired);
+    }
+
+    /** Persist a phantom ACTIVE row representing a live IBKR position with no local row, so a close leg
+     *  can flatten it. DB-only; a distinct executionKey so it does not collide with the open leg's row. */
+    private TradeExecutionRecord synthesizePhantom(TradeIntent intent, Side heldSide, int qty) {
+        Instant now = Instant.now();
+        TradeExecutionRecord r = new TradeExecutionRecord();
+        r.setExecutionKey(intent.idempotencyKey() + ":reconcile-close");
+        r.setInstrument(intent.instrument().name());
+        r.setTimeframe(intent.timeframe());
+        r.setAction(heldSide == Side.LONG ? "LONG" : "SHORT");
+        r.setQuantity(qty);
+        r.setTriggerSource(intent.source());
+        r.setBrokerAccountId(intent.brokerAccountId());
+        r.setRequestedBy(intent.source().name());
+        r.setStatus(ExecutionStatus.ACTIVE);
+        r.setCreatedAt(now);
+        r.setUpdatedAt(now);
+        return executionRepository.createIfAbsent(r);
+    }
+
+    /**
+     * Submit a fresh entry leg (OPEN, or the open leg of a REVERSE). De-dups via createIfAbsentTracked (no
+     * lock, no transaction held across the broker submit). {@code reverseFlattened} = the reverse close leg
+     * already flattened the broker, so a subsequent NON-timeout open rejection means the broker is FLAT
+     * (protected) → {@code ROUTED_FLATTEN_ONLY}, not a plain failure.
+     */
+    private RoutingResult submitEntry(TradeIntent intent, boolean reverseFlattened) {
         CreateOutcome createResult = executionRepository.createIfAbsentTracked(toPendingRecord(intent));
         TradeExecutionRecord persisted = createResult.record();
         if (!createResult.created()) {
@@ -106,7 +208,7 @@ public class DefaultOrderRouter implements OrderRouter {
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
             persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("OrderRouter OPEN submitted: " + submission.brokerOrderStatus());
+            persisted.setStatusReason("OrderRouter " + intent.kind() + " submitted: " + submission.brokerOrderStatus());
             persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
@@ -117,15 +219,29 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.tracked(outcome, persisted.getId(), submission.brokerOrderId());
 
         } catch (IbkrOrderRejectionException e) {
+            // Reverse already flattened + a non-timeout open rejection → the broker is FLAT (protected).
+            // Surface ROUTED_FLATTEN_ONLY (the caller re-derives virtual state to FLAT) and terminal-fail
+            // the never-opened leg. A TIMEOUT is different: broker state is unknown, fall through.
+            if (reverseFlattened && e.kind() != IbkrOrderRejectionException.Kind.TIMEOUT) {
+                persisted.setStatus(ExecutionStatus.FAILED);
+                persisted.setStatusReason(truncate("OrderRouter REVERSE flattened — open leg not opened ("
+                    + e.kind() + "): " + e.getMessage(), 256));
+                persisted.setUpdatedAt(Instant.now());
+                executionRepository.save(persisted);
+                log.warn("OrderRouter REVERSE flattened, open leg rejected ({}) — broker FLAT, protected: {}",
+                    e.kind(), intent.idempotencyKey());
+                return RoutingResult.tracked(RoutingOutcome.ROUTED_FLATTEN_ONLY,
+                    "reversed to flat — open leg not opened (" + e.kind() + ")", persisted.getId(), null);
+            }
+
             RoutingOutcome outcome = mapRejection(e);
             // Keep the row NON-TERMINAL whenever the order is — or may be — live at the broker:
             // ACK_PENDING (id present, late ack) AND FAILED_TIMEOUT (no id, broker state UNKNOWN). Late
             // orderStatus/execDetails callbacks (or the stale-entry reconciler) must still resolve it,
-            // and terminal-failing here would allow a retry against an order the broker may already
-            // hold. mustTrackExecutionRow() is the single source of truth for that distinction.
+            // and terminal-failing here would allow a retry against an order the broker may already hold.
             persisted.setStatus(outcome.mustTrackExecutionRow()
                 ? ExecutionStatus.ENTRY_SUBMITTED : ExecutionStatus.FAILED);
-            persisted.setStatusReason(truncate("OrderRouter OPEN " + e.kind() + ": " + e.getMessage(), 256));
+            persisted.setStatusReason(truncate("OrderRouter " + intent.kind() + " " + e.kind() + ": " + e.getMessage(), 256));
             if (e.brokerOrderId() != null) {
                 persisted.setEntryOrderId(e.brokerOrderId());
                 persisted.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
@@ -133,15 +249,15 @@ public class DefaultOrderRouter implements OrderRouter {
             }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("OrderRouter OPEN {} ({}) — {}", outcome, e.kind(), intent.idempotencyKey());
+            log.info("OrderRouter {} {} ({}) — {}", intent.kind(), outcome, e.kind(), intent.idempotencyKey());
             return RoutingResult.tracked(outcome, persisted.getId(), e.brokerOrderId());
 
         } catch (RuntimeException e) {
             persisted.setStatus(ExecutionStatus.FAILED);
-            persisted.setStatusReason(truncate("OrderRouter OPEN failed: " + e.getMessage(), 256));
+            persisted.setStatusReason(truncate("OrderRouter " + intent.kind() + " failed: " + e.getMessage(), 256));
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.warn("OrderRouter OPEN failed for {}: {}", intent.idempotencyKey(), e.getMessage());
+            log.warn("OrderRouter {} failed for {}: {}", intent.kind(), intent.idempotencyKey(), e.getMessage());
             return RoutingResult.tracked(RoutingOutcome.FAILED, e.getMessage(), persisted.getId(), null);
         }
     }

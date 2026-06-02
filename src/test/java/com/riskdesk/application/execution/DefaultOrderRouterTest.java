@@ -3,6 +3,7 @@ package com.riskdesk.application.execution;
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.domain.execution.IntentKind;
 import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
@@ -30,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -56,6 +58,13 @@ class DefaultOrderRouterTest {
             return new CreateOutcome(r, true);
         });
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        // Default reconcile: position unavailable, plan = pass-through (Open for OPEN, Reverse for REVERSE).
+        lenient().when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+        lenient().when(reconciler.reconcile(any(), any())).thenAnswer(inv -> {
+            TradeIntent i = inv.getArgument(0);
+            if (i == null) return null; // null-safe: re-stubbing in a test re-invokes this with a null arg
+            return i.kind() == IntentKind.REVERSE ? new ReconcilePlan.Reverse(i.side()) : new ReconcilePlan.Open(i.side());
+        });
     }
 
     private TradeIntent openLong() {
@@ -324,6 +333,102 @@ class DefaultOrderRouterTest {
         RoutingResult r = router.route(flatten());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ---- REVERSE ---------------------------------------------------------------------------
+
+    private TradeIntent reverseToShort() {
+        return TradeIntent.reverse("wtx:MNQ:5m:2:REVERSE_SHORT", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
+    }
+
+    private TradeIntent openShort() {
+        return TradeIntent.open("wtx:MNQ:5m:2:OPEN_SHORT", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
+    }
+
+    private TradeExecutionRecord priorLong() {
+        TradeExecutionRecord prior = activeRow(ExecutionStatus.ACTIVE, 2, 100L);
+        prior.setAction("LONG"); // a held long, to be flattened by the reverse
+        return prior;
+    }
+
+    @Test
+    void reverse_closeThenOpen_routed() {
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // both legs ok
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        // Two legs: close (on the prior row) then open (a new row).
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(0).executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG");   // close on prior row
+        assertThat(req.getAllValues().get(1).executionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT"); // open new row
+    }
+
+    @Test
+    void reverse_closeAckPending_abortsOpen() {
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "PendingSubmit")); // close ack-pends
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // only the close leg; open NOT attempted
+    }
+
+    @Test
+    void reverse_closeRejected_abortsOpen() {
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", null));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // close rejected; open NOT attempted
+    }
+
+    @Test
+    void reverse_openRejectedAfterClose_routedFlattenOnly() {
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(submission(900L, "Submitted"))                       // close OK
+            .thenThrow(new IbkrOrderRejectionException(                       // open rejected
+                IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED_FLATTEN_ONLY); // broker FLAT, protected
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any());
+    }
+
+    @Test
+    void open_upgradedToReverse_closesOppositeThenOpens() {
+        // An OPEN_SHORT that reconcile upgrades to a REVERSE because IBKR holds the opposite (long).
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
+        when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.SHORT));
+        stubActive(priorLong());
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+
+        RoutingResult r = router.route(openShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(any()); // close opposite + open short
+    }
+
+    @Test
+    void entry_reconciledSkip_returnsOutcome() {
+        // reconcile says the broker is already on the wanted side → skip, no submit.
+        when(reconciler.reconcile(any(), any())).thenReturn(
+            new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_DUPLICATE, "IBKR already long"));
+
+        RoutingResult r = router.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
