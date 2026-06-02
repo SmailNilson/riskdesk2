@@ -13,6 +13,7 @@ import com.riskdesk.domain.simulation.ReviewType;
 import com.riskdesk.domain.simulation.TradeSimulation;
 import com.riskdesk.domain.simulation.port.TradeSimulationRepositoryPort;
 import com.riskdesk.infrastructure.config.MentorProperties;
+import com.riskdesk.infrastructure.config.PlaybookAutomationProperties;
 import com.riskdesk.infrastructure.config.TrailingStopProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -252,6 +253,11 @@ class TradeSimulationServiceSchedulerTest {
     @Test
     void playbookSimulation_resolvesFromFrozenDecisionPlan() {
         when(playbookDecisionRepositoryProvider.getIfAvailable()).thenReturn(playbookDecisionRepository);
+        // Mentor OFF, PLAYBOOK automation ON: the playbook resolver must still
+        // run. This is the #355 regression — gating playbook resolution on the
+        // Mentor flag left every sim stuck at PENDING_ENTRY when Mentor was off.
+        MentorProperties mentorOff = new MentorProperties();
+        mentorOff.setEnabled(false);
         TradeSimulationService playbookService = new TradeSimulationService(
             reviewRepository,
             auditRepository,
@@ -261,7 +267,8 @@ class TradeSimulationServiceSchedulerTest {
             new TrailingStopProperties(),
             simulationRepository,
             playbookDecisionRepositoryProvider,
-            new MentorProperties()
+            mentorOff,
+            new PlaybookAutomationProperties()
         );
 
         // Use a relative timestamp so the simulation does not trip the 1h
@@ -303,6 +310,32 @@ class TradeSimulationServiceSchedulerTest {
         assertThat(saved.reviewType()).isEqualTo(ReviewType.PLAYBOOK);
         assertThat(saved.simulationStatus()).isEqualTo(TradeSimulationStatus.WIN);
         assertThat(saved.activationTime()).isEqualTo(createdAt.plusSeconds(300));
+    }
+
+    @Test
+    void playbookSimulation_skipsWhenPlaybookAutomationDisabled() {
+        // PLAYBOOK resolution is gated by riskdesk.playbook.automation.enabled,
+        // not the Mentor flag. With automation OFF the resolver short-circuits
+        // before touching the simulation repository — even if Mentor is ON.
+        PlaybookAutomationProperties automationOff = new PlaybookAutomationProperties();
+        automationOff.setEnabled(false);
+        TradeSimulationService playbookService = new TradeSimulationService(
+            reviewRepository,
+            auditRepository,
+            candleRepositoryPort,
+            new ObjectMapper(),
+            messagingProvider,
+            new TrailingStopProperties(),
+            simulationRepository,
+            playbookDecisionRepositoryProvider,
+            new MentorProperties(),
+            automationOff
+        );
+
+        playbookService.refreshPendingPlaybookSimulations();
+
+        verify(simulationRepository, never()).findByStatuses(any());
+        verify(simulationRepository, never()).save(any(TradeSimulation.class));
     }
 
     // ── Directional reversal ─────────────────────────────────────────────
