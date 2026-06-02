@@ -2,12 +2,14 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.dto.BrokerOrderStatusView;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrBackendMode;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -29,6 +31,18 @@ public class IbkrOrderService {
             throw new IllegalStateException("IBKR is disabled in the backend configuration.");
         }
         return selectedGateway().submitEntryOrder(request);
+    }
+
+    /**
+     * Looks up a broker order by its {@code orderRef} (the WTX {@code executionKey}) — live order
+     * book first, then completed/historical orders. Returns empty when IBKR is disabled, the order
+     * is in neither set, or the gateway can't be queried. Used by the stale-entry reconciler.
+     */
+    public Optional<BrokerOrderStatusView> findOrder(String accountId, String orderRef) {
+        if (!ibkrProperties.isEnabled()) {
+            return Optional.empty();
+        }
+        return selectedGateway().findOrder(accountId, orderRef);
     }
 
     private IbkrBrokerGateway selectedGateway() {

@@ -169,6 +169,17 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
     }
 
     @Override
+    public List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource,
+                                                                   ExecutionStatus status) {
+        if (triggerSource == null || status == null) {
+            return List.of();
+        }
+        return repository.findAllByTriggerSourceAndStatus(triggerSource, status).stream()
+            .map(TradeExecutionEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     public List<TradeExecutionRecord> findAllActive() {
         return repository.findAllByStatusNotIn(TERMINAL_STATUSES).stream()
             .map(TradeExecutionEntityMapper::toDomain)

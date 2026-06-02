@@ -1,5 +1,6 @@
 package com.riskdesk.domain.execution.port;
 
+import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 
@@ -10,6 +11,9 @@ import java.util.Optional;
 public interface TradeExecutionRepositoryPort {
 
     TradeExecutionRecord createIfAbsent(TradeExecutionRecord execution);
+
+    /** All executions for a trigger source currently in the given status (e.g. WTX_AUTO + ENTRY_SUBMITTED). */
+    List<TradeExecutionRecord> findByTriggerSourceAndStatus(ExecutionTriggerSource triggerSource, ExecutionStatus status);
 
     TradeExecutionRecord save(TradeExecutionRecord execution);
 

@@ -150,6 +150,14 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         );
     }
 
+    @Override
+    public Optional<com.riskdesk.application.dto.BrokerOrderStatusView> findOrder(
+            String requestedAccountId, String orderRef) {
+        return nativeClient.findOrderByOrderRef(requestedAccountId, orderRef)
+            .map(s -> new com.riskdesk.application.dto.BrokerOrderStatusView(
+                s.orderId(), s.orderRef(), s.accountId(), s.status()));
+    }
+
     private IbkrPositionView toPositionView(Position position) {
         String assetClass = position.contract().getSecType();
         String contractDesc = position.contract().localSymbol() != null && !position.contract().localSymbol().isBlank()
