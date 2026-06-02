@@ -2,6 +2,7 @@ package com.riskdesk.application.service.strategy.wtxrsi;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
@@ -192,7 +193,10 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                     row.getId(),
-                    row.getExecutionKey(),
+                    // Distinct exit orderRef — see WtxExecutionBridge#submitCloseLeg: reusing the entry
+                    // executionKey lets placeLimitOrder's idempotency return the completed entry order
+                    // instead of placing the close (silent close failure). Fill tracker keys by orderId.
+                    row.getExecutionKey() + DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX,
                     row.getBrokerAccountId(),
                     row.getInstrument(),
                     closeAction,

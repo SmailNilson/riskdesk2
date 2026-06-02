@@ -107,9 +107,11 @@ class WtxExecutionBridgeTest {
         assertNull(row.getClosedAt(), "closedAt must stay null until the broker fill is reconciled");
         // The close order id is persisted on ibkrOrderId so onOrderStatus can reconcile the fill.
         assertEquals(999, row.getIbkrOrderId());
-        // The flatten order is a SHORT (sell) of the original 2 contracts
+        // The flatten order is a SHORT (sell) of the original 2 contracts, submitted under a DISTINCT exit
+        // orderRef (":exit") so placeLimitOrder's idempotency can't return the completed entry order.
         verify(ibkrOrderService).submitEntryOrder(argThat(r ->
-                "SHORT".equals(r.action()) && r.quantity() == 2));
+                "SHORT".equals(r.action()) && r.quantity() == 2
+                        && r.executionKey().endsWith(":exit")));
     }
 
     @Test

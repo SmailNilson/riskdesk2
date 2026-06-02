@@ -1,6 +1,7 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
@@ -634,7 +635,11 @@ public class WtxExecutionBridge {
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                     row.getId(),
-                    row.getExecutionKey(),
+                    // Distinct exit orderRef: reusing the entry executionKey makes placeLimitOrder's orderRef
+                    // idempotency lookup return the already-completed ENTRY order instead of placing the close,
+                    // so the row goes EXIT_SUBMITTED while the position stays open (silent close failure). The
+                    // fill tracker keys exits by the close brokerOrderId (persisted below), not the ref.
+                    row.getExecutionKey() + DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX,
                     row.getBrokerAccountId(),
                     row.getInstrument(),
                     orderAction,
