@@ -28,9 +28,9 @@ import java.time.Instant;
  * by reusing the existing {@link IbkrOrderService} and {@link TradeExecutionRepositoryPort}; it does
  * not duplicate them. Generalises the proven {@code WtxExecutionBridge.handleEntry} flow.
  *
- * <p>This step implements {@code OPEN}. {@code REVERSE}/{@code CLOSE}/{@code FLATTEN} (which need
- * broker-truth reconciliation and, for FLATTEN, the held side) land in a later step — see
- * docs/PLAN_ORDER_ROUTER_IMPL.md. The router is not yet wired to any strategy.</p>
+ * <p>This step implements {@code OPEN} and {@code CLOSE}. {@code REVERSE} (two-leg close-then-open) and
+ * {@code FLATTEN} land in a later step — see docs/PLAN_ORDER_ROUTER_IMPL.md. The router is not yet wired
+ * to any strategy.</p>
  */
 @Service
 public class DefaultOrderRouter implements OrderRouter {
@@ -41,15 +41,18 @@ public class DefaultOrderRouter implements OrderRouter {
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
     private final ExecutionReadinessGate readinessGate;
+    private final ExecutionReconciler reconciler;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
-                              ExecutionReadinessGate readinessGate) {
+                              ExecutionReadinessGate readinessGate,
+                              ExecutionReconciler reconciler) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.readinessGate = readinessGate;
+        this.reconciler = reconciler;
     }
 
     @Override
@@ -67,7 +70,8 @@ public class DefaultOrderRouter implements OrderRouter {
         }
         return switch (intent.kind()) {
             case OPEN -> routeOpen(intent);
-            case REVERSE, CLOSE, FLATTEN -> throw new UnsupportedOperationException(
+            case CLOSE -> executeClose(intent);
+            case REVERSE, FLATTEN -> throw new UnsupportedOperationException(
                 "OrderRouter: " + intent.kind() + " is not implemented yet (see docs/PLAN_ORDER_ROUTER_IMPL.md)");
         };
     }
@@ -139,6 +143,96 @@ public class DefaultOrderRouter implements OrderRouter {
             log.warn("OrderRouter OPEN failed for {}: {}", intent.idempotencyKey(), e.getMessage());
             return RoutingResult.tracked(RoutingOutcome.FAILED, e.getMessage(), persisted.getId(), null);
         }
+    }
+
+    /**
+     * CLOSE — flatten this strategy's open row (port of {@code WtxExecutionBridge.handleClose}). Reads
+     * broker position truth: when IBKR is confirmed flat a still-ACTIVE row is a phantom (closed outside
+     * us) and is voided DB-only, and an unfilled in-flight entry is left alone (no naked flatten). Else a
+     * single close leg is submitted on the existing row.
+     */
+    private RoutingResult executeClose(TradeIntent intent) {
+        var active = executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
+            intent.instrument().name(), intent.timeframe(), intent.source());
+        if (active.isEmpty()) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "no open execution row to close");
+        }
+        TradeExecutionRecord row = active.get();
+        BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
+        if (pos.confirmedFlat()) {
+            if (row.getStatus() == ExecutionStatus.ACTIVE) {
+                // Phantom: a filled position the broker no longer holds (manual close / drift). Void it
+                // (DB-only, no broker call) so a later open is never flattened naked.
+                voidRow(row, "OrderRouter CLOSE — IBKR already flat; stale row voided, no naked order");
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                    "IBKR already flat — close skipped", row.getId(), row.getEntryOrderId());
+            }
+            // Entry still resting unfilled while IBKR reads flat — don't fire a naked flatten.
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                "entry still in flight (" + row.getStatus() + ") — close skipped", row.getId(), row.getEntryOrderId());
+        }
+        int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
+        return submitCloseLeg(row, intent.instrument(), brokerAction(intent), qty, intent.limitPrice(), "OrderRouter CLOSE");
+    }
+
+    /**
+     * Submit a close/exit leg on an existing row, mutating it to {@code EXIT_SUBMITTED}. Reuses
+     * {@code ibkrOrderService.submitEntryOrder} with the opposite action. A close is NEVER terminal-failed
+     * on a reject: the position is still open, so the row stays as-is for the next bar to retry.
+     */
+    private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
+                                         int qty, BigDecimal price, String reasonPrefix) {
+        try {
+            BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
+                row.getId(), row.getExecutionKey(), row.getBrokerAccountId(), row.getInstrument(),
+                closeAction, qty, normalizeToTick(price, instrument)));
+            Instant now = Instant.now();
+            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setIbkrOrderId(toIbkrOrderId(sub.brokerOrderId()));
+            row.setStatusReason(reasonPrefix + " — IBKR close submitted: " + sub.brokerOrderStatus());
+            row.setExitSubmittedAt(now);
+            row.setUpdatedAt(now);
+            executionRepository.save(row);
+            RoutingOutcome outcome = "PendingSubmit".equalsIgnoreCase(sub.brokerOrderStatus())
+                ? RoutingOutcome.ACK_PENDING : RoutingOutcome.ROUTED;
+            return RoutingResult.tracked(outcome, row.getId(), sub.brokerOrderId());
+        } catch (IbkrOrderRejectionException e) {
+            RoutingOutcome outcome = mapCloseRejection(e);
+            Instant now = Instant.now();
+            if (e.brokerOrderId() != null) {
+                // Close reached the broker (late ack) — mark EXIT_SUBMITTED so the fill tracker resolves it.
+                row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+                row.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
+                row.setExitSubmittedAt(now);
+            }
+            // else: the close never reached the broker — leave the row non-terminal (still open) to retry.
+            row.setStatusReason(truncate(reasonPrefix + " close " + e.kind() + ": " + e.getMessage(), 256));
+            row.setUpdatedAt(now);
+            executionRepository.save(row);
+            log.warn("OrderRouter close leg {} ({}) for execution {}", outcome, e.kind(), row.getId());
+            return RoutingResult.tracked(outcome, row.getId(), e.brokerOrderId());
+        }
+    }
+
+    /**
+     * Close-leg rejection mapping. A reducing order never needs margin, so a spurious INSUFFICIENT_MARGIN
+     * on a close is treated as a broker reject; otherwise mirror the entry mapping (timeout, read-only).
+     */
+    private static RoutingOutcome mapCloseRejection(IbkrOrderRejectionException e) {
+        return switch (e.kind()) {
+            case TIMEOUT -> e.brokerOrderId() != null ? RoutingOutcome.ACK_PENDING : RoutingOutcome.FAILED_TIMEOUT;
+            case INSUFFICIENT_MARGIN, BROKER_REJECT, CANCELLED -> looksReadOnly(e)
+                ? RoutingOutcome.FAILED_READ_ONLY : RoutingOutcome.FAILED_BROKER_REJECT;
+            case UNKNOWN -> RoutingOutcome.FAILED;
+        };
+    }
+
+    /** Void a stale local row (DB-only, no broker call). */
+    private void voidRow(TradeExecutionRecord row, String reason) {
+        row.setStatus(ExecutionStatus.CANCELLED);
+        row.setStatusReason(truncate(reason, 256));
+        row.setUpdatedAt(Instant.now());
+        executionRepository.save(row);
     }
 
     private TradeExecutionRecord toPendingRecord(TradeIntent intent) {

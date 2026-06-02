@@ -1,5 +1,6 @@
 package com.riskdesk.application.execution;
 
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.RoutingOutcome;
@@ -23,6 +24,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,6 +39,7 @@ class DefaultOrderRouterTest {
 
     @Mock private IbkrOrderService ibkrOrderService;
     @Mock private TradeExecutionRepositoryPort repo;
+    @Mock private ExecutionReconciler reconciler;
 
     private IbkrProperties props;
     private DefaultOrderRouter router;
@@ -45,7 +48,7 @@ class DefaultOrderRouterTest {
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
-        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true);
+        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -162,6 +165,117 @@ class DefaultOrderRouterTest {
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
     }
 
+    // ---- CLOSE -----------------------------------------------------------------------------
+
+    private TradeIntent closeLong() {
+        return TradeIntent.close("wtx:MNQ:5m:2:CLOSE_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 1, new BigDecimal("18010.00"), "DU1");
+    }
+
+    private TradeExecutionRecord activeRow(ExecutionStatus status, int qty, Long entryOrderId) {
+        TradeExecutionRecord r = new TradeExecutionRecord();
+        r.setId(7L);
+        r.setExecutionKey("wtx:MNQ:5m:1:OPEN_LONG");
+        r.setInstrument("MNQ");
+        r.setTimeframe("5m");
+        r.setBrokerAccountId("DU1");
+        r.setQuantity(qty);
+        r.setStatus(status);
+        r.setEntryOrderId(entryOrderId);
+        return r;
+    }
+
+    private void stubActive(TradeExecutionRecord row) {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.of(row));
+    }
+
+    private void stubFlat(boolean flat) {
+        when(reconciler.readPositionState(any(), any()))
+            .thenReturn(new BrokerPositionState(flat ? BigDecimal.ZERO : new BigDecimal("1"), flat));
+    }
+
+    @Test
+    void close_noActiveRow_skipsNoOpenRow() {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any())).thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_flatAndActiveRow_voidsPhantom() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CANCELLED); // phantom voided, DB-only
+    }
+
+    @Test
+    void close_flatAndInFlight_skipsEntryInFlight() {
+        stubActive(activeRow(ExecutionStatus.ENTRY_SUBMITTED, 1, 100L));
+        stubFlat(true);
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_submits_exitSubmitted_oppositeActionAndRowQty() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        assertThat(r.brokerOrderId()).isEqualTo(888L);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // closing a long = SELL
+        assertThat(req.getValue().quantity()).isEqualTo(2);      // the row's open qty, not the intent qty
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+    }
+
+    @Test
+    void close_rejectKeepsRowNonTerminal() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", null));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE); // NOT terminal: position still open
+    }
+
+    @Test
+    void close_marginOnCloseMapsToBrokerReject() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT); // a reducing order needs no margin
+    }
+
     @Test
     void skipsWhenIbkrDisabled() {
         props.setEnabled(false);
@@ -174,7 +288,7 @@ class DefaultOrderRouterTest {
 
     @Test
     void skipsWhenNotReady() {
-        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false);
+        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler);
 
         RoutingResult r = gated.route(openLong());
 
