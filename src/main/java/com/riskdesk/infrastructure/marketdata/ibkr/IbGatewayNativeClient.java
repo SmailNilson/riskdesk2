@@ -795,20 +795,6 @@ public class IbGatewayNativeClient {
         if (orderRef == null || orderRef.isBlank()) {
             throw new IllegalArgumentException("orderRef is required");
         }
-        // Phase 0.2 — software kill-switch. When riskdesk.ibkr.native-read-only=true, refuse EVERY
-        // order submission here at the single broker choke point, so the halt is uniform across all
-        // strategies (WTX, WTX+RSI, Quant, Perfect Setup, Playbook). Default is false (trading
-        // allowed). Reuses BROKER_REJECT (not a new Kind) to avoid touching the exhaustive Kind
-        // switches in the strategy bridges; the message makes the cause unambiguous.
-        if (properties.isNativeReadOnly()) {
-            log.warn("Order NOT sent (ref={}): riskdesk.ibkr.native-read-only kill-switch is ON. "
-                + "Set it to false to allow order submission.", orderRef);
-            throw new IbkrOrderRejectionException(
-                IbkrOrderRejectionException.Kind.BROKER_REJECT, null,
-                "native-read-only kill-switch is ON",
-                "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch). "
-                    + "Set it to false to allow order submission.");
-        }
         if (!ensureConnected()) {
             throw new IllegalStateException("IB Gateway native API is not connected.");
         }
@@ -822,6 +808,22 @@ public class IbGatewayNativeClient {
         if (existing.isPresent()) {
             NativeOrderSnapshot snapshot = existing.get();
             return new NativeOrderSubmission(snapshot.orderId(), snapshot.status(), snapshot.orderRef(), Instant.now());
+        }
+
+        // Phase 0.2 — software kill-switch. When riskdesk.ibkr.native-read-only=true, refuse the NEW
+        // order submission at the single broker choke point (uniform halt across WTX, WTX+RSI, Quant,
+        // Perfect Setup, Playbook). Placed AFTER the existing-order idempotency check above so a
+        // retry/recovery for an already-live orderRef still returns the existing broker order id (no new
+        // order would be sent) rather than being recorded as a reject. Default false (trading allowed).
+        // Reuses BROKER_REJECT (not a new Kind) to avoid touching the exhaustive Kind switches.
+        if (properties.isNativeReadOnly()) {
+            log.warn("Order NOT sent (ref={}): riskdesk.ibkr.native-read-only kill-switch is ON. "
+                + "Set it to false to allow order submission.", orderRef);
+            throw new IbkrOrderRejectionException(
+                IbkrOrderRejectionException.Kind.BROKER_REJECT, null,
+                "native-read-only kill-switch is ON",
+                "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch). "
+                    + "Set it to false to allow order submission.");
         }
 
         Order order = new Order();
