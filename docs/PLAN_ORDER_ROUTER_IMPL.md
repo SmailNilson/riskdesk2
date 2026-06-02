@@ -65,10 +65,15 @@ L'exploration de l'existant confirme qu'il **ne faut PAS** créer le port `Execu
      // Un FAILED terminal ici autoriserait un retry sur un ordre que le broker tient peut-être ;
      // les callbacks tardifs / le reconciler doivent encore résoudre la ligne.
      persisted.status = outcome.mustTrackExecutionRow() ? ENTRY_SUBMITTED : FAILED
+     si e.brokerOrderId != null:                          // ACK_PENDING — l'ordre EST au broker
+       persisted.entryOrderId     = e.brokerOrderId
+       persisted.ibkrOrderId      = (int) e.brokerOrderId // REQUIS : le fill-tracker localise par ibkrOrderId
+       persisted.entrySubmittedAt = now                   //          (findByIbkrOrderId) — sinon la ligne est isolée
      repo.save(persisted)
      → tracked(outcome, persisted.id, e.brokerOrderId())
 ```
 > ⚠️ `FAILED_TIMEOUT` reste **non-terminal** — cohérent avec `RoutingOutcome.mustTrackExecutionRow()` et `WtxExecutionBridge.handleEntryRejection`.
+> ⚠️ Sur `ACK_PENDING` (timeout avec id), persister `entryOrderId` **et** `ibkrOrderId` avant `save` — sinon `ExecutionFillTrackingService.onOrderStatus` (qui localise via `findByIbkrOrderId`) perd les callbacks tardifs.
 
 **`mapKind(IbkrOrderRejectionException.Kind)` :**
 - `INSUFFICIENT_MARGIN` → `FAILED_INSUFFICIENT_MARGIN`
