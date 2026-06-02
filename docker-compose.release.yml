@@ -36,8 +36,9 @@ services:
       RISKDESK_IBKR_NATIVE_HOST: ${RISKDESK_IBKR_NATIVE_HOST:-100.113.139.64}
       RISKDESK_IBKR_NATIVE_PORT: ${RISKDESK_IBKR_NATIVE_PORT:-4003}
       RISKDESK_IBKR_NATIVE_CLIENT_ID: ${RISKDESK_IBKR_NATIVE_CLIENT_ID:-1}
-      # Kill-switch (ENFORCED — Phase 0.2): true blocks ALL order submission. Default false = trading allowed.
-      RISKDESK_IBKR_NATIVE_READ_ONLY: ${RISKDESK_IBKR_NATIVE_READ_ONLY:-false}
+      # Kill-switch (ENFORCED — Phase 0.2): true blocks ALL order submission. Hardcoded false so a stray
+      # host env var can never block trading; to halt orders, set this to "true" here and redeploy.
+      RISKDESK_IBKR_NATIVE_READ_ONLY: "false"
     depends_on:
       - postgres
 

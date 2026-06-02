@@ -76,7 +76,8 @@ chmod 700 /etc/riskdesk
   printf 'RISKDESK_IBKR_NATIVE_HOST=ibkr-gateway\n'
   printf 'RISKDESK_IBKR_NATIVE_PORT=%s\n' "${ibkr_socket_port}"
   printf 'RISKDESK_IBKR_NATIVE_CLIENT_ID=%s\n' "${IBKR_CLIENT_ID:-1}"
-  printf 'RISKDESK_IBKR_NATIVE_READ_ONLY=%s\n' "${RISKDESK_IBKR_NATIVE_READ_ONLY:-false}"
+  # Kill-switch hardcoded false (Phase 0.2) so a stray env var can never block trading.
+  printf 'RISKDESK_IBKR_NATIVE_READ_ONLY=false\n'
   printf 'GEMINI_API_KEY=%s\n' "$(read_secret "${GEMINI_API_KEY_SECRET}")"
   printf 'GEMINI_MODEL=%s\n' "${GEMINI_MODEL:-gemini-3.1-pro-preview}"
   printf 'GEMINI_EMBEDDING_MODEL=%s\n' "${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}"
