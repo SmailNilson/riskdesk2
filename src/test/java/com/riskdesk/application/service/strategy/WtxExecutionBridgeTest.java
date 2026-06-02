@@ -134,6 +134,9 @@ class WtxExecutionBridgeTest {
         assertEquals("10m", intent.timeframe());
         assertEquals(2, intent.quantity());
         assertEquals(ExecutionTriggerSource.WTX_AUTO, intent.source());
+        // The "wtx-default" placeholder resolves to null so the router reads the REAL default account
+        // (its position filter is a no-op on null) instead of hiding live positions behind the placeholder.
+        assertNull(intent.brokerAccountId());
         assertEquals(0, intent.limitPrice().compareTo(bd(70)));
         org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().startsWith("wtx:MCL:10m:"));
         org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().endsWith(":OPEN_LONG"));

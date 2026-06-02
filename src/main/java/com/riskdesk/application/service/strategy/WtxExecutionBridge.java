@@ -235,7 +235,12 @@ public class WtxExecutionBridge {
         if (qty <= 0) {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
         }
-        String brokerAccountId = firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default");
+        // Use the EFFECTIVE account (null for the "wtx-default" placeholder), NOT the literal placeholder:
+        // the router's readPositionState filters IBKR positions by exact account, so the placeholder would
+        // hide a real position (e.g. DU1) and the broker would read falsely flat — voiding/skipping exits or
+        // stacking opens. null → the router reads the default managed account (filter no-op) and persists the
+        // "__default__" placeholder (resolved at submit). Mirrors the legacy readIbkrPositionState path.
+        String brokerAccountId = effectiveBrokerAccountId();
 
         // Margin pre-flight parity — OPEN only. A CLOSE/FLATTEN reduces exposure (no margin) and a REVERSE's
         // close leg frees margin first; any broker margin reject during routing maps to
