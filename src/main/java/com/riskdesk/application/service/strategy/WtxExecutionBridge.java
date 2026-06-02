@@ -340,7 +340,7 @@ public class WtxExecutionBridge {
                     return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
                 }
                 CloseLegResult closeResult = submitCloseLeg(priorRow, instrument, orderAction, priorQty, priorPrice,
-                        "WTX reversed by " + action.name());
+                        "WTX reversed by " + action.name(), signal.signalTs());
                 if (!closeResult.accepted()) {
                     if (closeResult.outcomeOnFailure() == WtxRoutingOutcome.ACK_PENDING) {
                         // The reversal is effectively lost — the close ack-pends and there is
@@ -608,7 +608,7 @@ public class WtxExecutionBridge {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
         }
         CloseLegResult closeResult = submitCloseLeg(row, instrument, mapToOrderAction(action), qty, price,
-                "WTX " + action.name());
+                "WTX " + action.name(), signal.signalTs());
         if (closeResult.accepted()) {
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         }
@@ -631,15 +631,19 @@ public class WtxExecutionBridge {
      *         position stays visible and the close is retryable next bar.
      */
     private CloseLegResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument,
-                                          String orderAction, int qty, BigDecimal price, String reasonPrefix) {
+                                          String orderAction, int qty, BigDecimal price, String reasonPrefix,
+                                          Instant signalTs) {
+        // Per-bar discriminator for the exit orderRef (see below). Stable within a bar; fresh next bar.
+        long exitAttempt = (signalTs != null ? signalTs : Instant.now()).toEpochMilli();
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                     row.getId(),
-                    // Distinct exit orderRef: reusing the entry executionKey makes placeLimitOrder's orderRef
-                    // idempotency lookup return the already-completed ENTRY order instead of placing the close,
-                    // so the row goes EXIT_SUBMITTED while the position stays open (silent close failure). The
-                    // fill tracker keys exits by the close brokerOrderId (persisted below), not the ref.
-                    row.getExecutionKey() + DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX,
+                    // Distinct, retry-safe exit orderRef. The ":exit" suffix stops placeLimitOrder's orderRef
+                    // idempotency from returning the completed ENTRY order (silent close failure). The per-bar
+                    // discriminator makes a close retried after a terminal-non-filled one (e.g. an EOD-cancelled
+                    // limit) get a FRESH ref instead of matching the dead order — while staying idempotent for a
+                    // same-bar in-flight retry. The fill tracker keys exits by the close orderId, not the ref.
+                    row.getExecutionKey() + DefaultOrderRouter.EXIT_ORDER_REF_SUFFIX + ":" + exitAttempt,
                     row.getBrokerAccountId(),
                     row.getInstrument(),
                     orderAction,
