@@ -331,7 +331,9 @@ public class DefaultOrderRouter implements OrderRouter {
         if (affordability == null || qty <= 0) {
             return OrderAffordabilityPort.Affordability.allow();
         }
-        return affordability.check(intent.instrument(), action, qty, intent.limitPrice());
+        // Assess against the intent's ACCOUNT (the same account readPositionState reconciles), not the
+        // gateway default — a multi-account gateway must not judge a DU2 order against DU1's funds.
+        return affordability.check(intent.instrument(), action, qty, intent.limitPrice(), intent.brokerAccountId());
     }
 
     /**

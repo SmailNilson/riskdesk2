@@ -832,7 +832,7 @@ class DefaultOrderRouterTest {
     @Test
     void open_marginDenied_skipsInsufficientMargin_noBrokerOrder() {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
-        when(aff.check(any(), any(), anyInt(), any()))
+        when(aff.check(any(), any(), anyInt(), any(), any()))
             .thenReturn(OrderAffordabilityPort.Affordability.deny("AvailFunds 5 < InitMargin 9"));
 
         RoutingResult r = routerWith(aff).route(openLong());
@@ -840,13 +840,13 @@ class DefaultOrderRouterTest {
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN);
         assertThat(r.message()).contains("AvailFunds 5 < InitMargin 9");
         verify(ibkrOrderService, never()).submitEntryOrder(any());      // declined before any broker side effect
-        verify(aff).check(eq(Instrument.MNQ), eq("LONG"), eq(2), any()); // full position qty
+        verify(aff).check(eq(Instrument.MNQ), eq("LONG"), eq(2), any(), eq("DU1")); // full qty, routed account
     }
 
     @Test
     void open_marginAllowed_routes() {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
-        when(aff.check(any(), any(), anyInt(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
+        when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         RoutingResult r = routerWith(aff).route(openLong());
@@ -858,7 +858,7 @@ class DefaultOrderRouterTest {
     @Test
     void reverse_sizeIncrease_openLegUnaffordable_closeStillFires_routedFlattenOnly() {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
-        when(aff.check(any(), any(), anyInt(), any()))
+        when(aff.check(any(), any(), anyInt(), any(), any()))
             .thenReturn(OrderAffordabilityPort.Affordability.deny("no funds for the extra contract"));
         TradeExecutionRecord prior = priorLong();
         prior.setQuantity(1);                                            // held LONG 1
@@ -870,14 +870,14 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED_FLATTEN_ONLY); // flatten protects the user
         verify(ibkrOrderService, times(1)).submitEntryOrder(any());      // ONLY the close leg; open skipped
-        verify(aff).check(eq(Instrument.MNQ), eq("SHORT"), eq(1), any()); // delta = 2 − 1
+        verify(aff).check(eq(Instrument.MNQ), eq("SHORT"), eq(1), any(), eq("DU1")); // delta 2−1, routed account
     }
 
     @Test
     void reverse_sameSize_marginPreflightSkipped_bothLegsRoute() {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
         // A hard-deny stub that must NEVER be consulted: a same-size reverse frees exactly what it consumes.
-        lenient().when(aff.check(any(), any(), anyInt(), any()))
+        lenient().when(aff.check(any(), any(), anyInt(), any(), any()))
             .thenReturn(OrderAffordabilityPort.Affordability.deny("should never be called"));
         stubActive(priorLong());                                        // LONG 2
         stubBroker("2");                                                 // broker LONG 2 → reverse SHORT 2, delta 0
@@ -887,6 +887,6 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
         verify(ibkrOrderService, times(2)).submitEntryOrder(any());     // close + open both fired
-        verify(aff, never()).check(any(), any(), anyInt(), any());      // delta 0 → never pre-checked
+        verify(aff, never()).check(any(), any(), anyInt(), any(), any());      // delta 0 → never pre-checked
     }
 }

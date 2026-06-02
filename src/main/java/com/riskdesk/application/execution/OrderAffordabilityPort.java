@@ -33,14 +33,17 @@ public interface OrderAffordabilityPort {
      * Decide whether an order of {@code qty} contracts at {@code refPrice} is affordable. Fails open on
      * missing broker data.
      *
-     * @param instrument contract (its multiplier) for the margin estimate
-     * @param action     {@code "LONG"} / {@code "SHORT"} — informational; futures consume margin
-     *                   equally on either side
-     * @param qty        contracts to pre-check ({@code > 0}); the router passes the full size for an
-     *                   OPEN, or the net delta for a size-increasing REVERSE
-     * @param refPrice   reference price for the estimate
+     * @param instrument      contract (its multiplier) for the margin estimate
+     * @param action          {@code "LONG"} / {@code "SHORT"} — informational; futures consume margin
+     *                        equally on either side
+     * @param qty             contracts to pre-check ({@code > 0}); the router passes the full size for an
+     *                        OPEN, or the net delta for a size-increasing REVERSE
+     * @param refPrice        reference price for the estimate
+     * @param brokerAccountId the account this order routes to (the intent's account; {@code null} =
+     *                        default) — affordability MUST be assessed against THAT account's funds, the
+     *                        same account the reconcile reads, not the gateway default
      */
-    Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice);
+    Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice, String brokerAccountId);
 
     /** Allow / deny verdict. {@code denyReason} is non-null only when {@code !allowed}. */
     record Affordability(boolean allowed, String denyReason) {

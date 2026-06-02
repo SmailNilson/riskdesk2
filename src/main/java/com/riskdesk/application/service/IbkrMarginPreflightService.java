@@ -72,6 +72,18 @@ public class IbkrMarginPreflightService implements OrderAffordabilityPort {
      * @return a {@link PreflightDecision} carrying allow/deny + an explanatory message
      */
     public PreflightDecision canAffordOrder(Instrument instrument, String orderAction, int qty, BigDecimal refPrice) {
+        // Legacy 4-arg entry point (single-account WTX) — assess against the default account.
+        return canAffordOrder(instrument, orderAction, qty, refPrice, null);
+    }
+
+    /**
+     * Account-scoped variant: assess affordability against {@code brokerAccountId}'s funds (the account the
+     * order routes to), not the gateway default. The unified router passes the intent's account so a
+     * multi-account gateway denies/allows against the correct account — matching the per-account reconcile.
+     * {@code null} resolves to the default account.
+     */
+    public PreflightDecision canAffordOrder(Instrument instrument, String orderAction, int qty, BigDecimal refPrice,
+                                            String brokerAccountId) {
         if (instrument == null || refPrice == null || qty <= 0) {
             return PreflightDecision.allow();
         }
@@ -88,7 +100,7 @@ public class IbkrMarginPreflightService implements OrderAffordabilityPort {
 
         IbkrPortfolioSnapshot snapshot;
         try {
-            snapshot = portfolioService.getPortfolio(null);
+            snapshot = portfolioService.getPortfolio(brokerAccountId);
         } catch (RuntimeException e) {
             log.warn("WTX preflight: portfolio snapshot unavailable, failing open: {}", e.getMessage());
             return PreflightDecision.allow();
@@ -120,8 +132,8 @@ public class IbkrMarginPreflightService implements OrderAffordabilityPort {
      * identical. Delegates straight to {@link #canAffordOrder}.
      */
     @Override
-    public Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice) {
-        PreflightDecision decision = canAffordOrder(instrument, action, qty, refPrice);
+    public Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice, String brokerAccountId) {
+        PreflightDecision decision = canAffordOrder(instrument, action, qty, refPrice, brokerAccountId);
         return decision.allowed() ? Affordability.allow() : Affordability.deny(decision.denyReason());
     }
 

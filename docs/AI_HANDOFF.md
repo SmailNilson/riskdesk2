@@ -2,6 +2,39 @@
 
 Last updated: 2026-06-02
 
+## Unified execution core — Slice D: D4 + D3 (live-flip prerequisites) (2026-06-02)
+
+Two of the three prerequisites that gate flipping `riskdesk.execution.unified-router` live for WTX
+(flag still **default-OFF** → zero live impact). The unified `DefaultOrderRouter` was already
+functionally complete and parity-tested behind the flag (Slices A–C, D1).
+
+- **D4 — margin pre-flight after reconcile.** New `OrderAffordabilityPort` (application.execution);
+  `IbkrMarginPreflightService` implements it, so the unified deny decision is byte-for-byte the legacy
+  `WtxExecutionBridge` pre-flight. Injected as `Optional` into the router (absent → fail-open). OPEN
+  pre-checks the FULL qty → deny = `SKIPPED_INSUFFICIENT_MARGIN` (no broker side effect). REVERSE
+  pre-checks only the **net margin delta** (same-size/smaller frees margin → skipped); a denial never
+  aborts the close — open skipped, user flat → `ROUTED_FLATTEN_ONLY`. Runs AFTER reconcile (a pre-route
+  pre-flight would skip the broker-truth reconcile and leave a live position unmanaged). The pre-flight
+  is scoped to the **routed account** (`getPortfolio(intent.brokerAccountId())`), not the gateway default.
+- **D3 — router-account-aware ENTRY_SUBMITTED boot replay.** The router persists WTX entries under
+  `WTX_AUTO`, exactly the set `WtxStaleEntryReconciler` already scans, so it IS the per-row boot/stale
+  replay. Fixed `effectiveAccount()` to treat the router's `"__default__"` placeholder as "no specific
+  account" — without it a `NOT_FOUND` order read as flat and a row backed by a **live position was wrongly
+  CANCELLED** (orphaned). Added a gate-tied one-shot `bootReplayWhenReady()` so a restart unblocks the
+  strategy in seconds.
+
+**D2 (reverse open serialised behind the close FILL) was pulled.** It was built and tested, but Codex
+correctly flagged that fill-driven deferral is incompatible with WTX's *synchronous* virtual-state model:
+`WtxStrategyService` commits the optimistic new side from the synchronous routing outcome and never
+reconciles `currentPosition` from broker truth, so a deferred reverse whose close later cancels leaves the
+strategy on the wrong side (unmanaged position, wrong PnL / 17:00 force-close). D2 therefore depends on a
+**WTX-state-reconcile-from-broker-truth** that does not exist yet. The pre-D2 behavior (open on
+close-accept) remains — it is already downstream-protected (no naked exit). D2 + the state-reconcile is the
+next slice (reflog refs `e9a12f2`/`0b55c41`/`72a9273` hold the pulled implementation).
+
+**Next:** build the WTX virtual-state reconcile-from-truth, then re-land D2 on it; then flip the flag for
+WTX and migrate the other four strategies.
+
 ## WTX: reconcile stuck ENTRY_SUBMITTED rows (un-freeze the strategy) (2026-06-02)
 
 **Problem (prod follow-up to #368).** WTX entries are `LMT` `DAY` limit orders. The fill
