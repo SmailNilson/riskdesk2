@@ -292,6 +292,7 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().action()).isEqualTo("SHORT"); // closing a long = SELL
         assertThat(req.getValue().quantity()).isEqualTo(2);      // the row's open qty, not the intent qty
+        assertThat(req.getValue().executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // distinct exit ref
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
@@ -322,6 +323,41 @@ class DefaultOrderRouterTest {
         RoutingResult r = router.route(closeLong());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT); // a reducing order needs no margin
+    }
+
+    @Test
+    void close_rejectWithBrokerOrderId_staysActiveRetryable_notExitSubmitted() {
+        // IBKR allocated an order id then REJECTED the close. The position is still open — the row must stay
+        // ACTIVE (retryable on the next signal), NOT EXIT_SUBMITTED (which the duplicate guard would skip).
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.BROKER_REJECT, null, "reject", "rejected", 555L)); // id, then rejected
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_BROKER_REJECT);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE); // retryable, NOT EXIT_SUBMITTED
+    }
+
+    @Test
+    void close_timeoutWithBrokerOrderId_marksExitSubmitted() {
+        // A close that timed out but got an order id is genuinely live (ACK_PENDING) — mark EXIT_SUBMITTED
+        // so the fill tracker resolves it on the Filled/Cancelled callback.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubFlat(false);
+        when(ibkrOrderService.submitEntryOrder(any())).thenThrow(new IbkrOrderRejectionException(
+            IbkrOrderRejectionException.Kind.TIMEOUT, null, "timeout", "no ack", 777L));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ACK_PENDING);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(cap.getValue().getIbkrOrderId()).isEqualTo(777); // close id recorded
     }
 
     @Test
@@ -462,8 +498,8 @@ class DefaultOrderRouterTest {
         // Two legs: close (on the prior row) then open (a new row).
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
-        assertThat(req.getAllValues().get(0).executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG");   // close on prior row
-        assertThat(req.getAllValues().get(1).executionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT"); // open new row
+        assertThat(req.getAllValues().get(0).executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // close: distinct exit ref
+        assertThat(req.getAllValues().get(1).executionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT");  // open new row
     }
 
     @Test

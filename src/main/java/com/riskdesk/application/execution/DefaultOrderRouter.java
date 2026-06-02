@@ -419,7 +419,7 @@ public class DefaultOrderRouter implements OrderRouter {
                                          int qty, BigDecimal price, String reasonPrefix) {
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
-                row.getId(), row.getExecutionKey(), row.getBrokerAccountId(), row.getInstrument(),
+                row.getId(), exitOrderRef(row), row.getBrokerAccountId(), row.getInstrument(),
                 closeAction, qty, normalizeToTick(price, instrument)));
             Instant now = Instant.now();
             row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
@@ -434,13 +434,17 @@ public class DefaultOrderRouter implements OrderRouter {
         } catch (IbkrOrderRejectionException e) {
             RoutingOutcome outcome = mapCloseRejection(e);
             Instant now = Instant.now();
-            if (e.brokerOrderId() != null) {
-                // Close reached the broker (late ack) — mark EXIT_SUBMITTED so the fill tracker resolves it.
+            if (outcome == RoutingOutcome.ACK_PENDING) {
+                // Genuinely live at the broker (late ack with an order id) — mark EXIT_SUBMITTED so the fill
+                // tracker resolves it on the Filled/Cancelled callback.
                 row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
                 row.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
                 row.setExitSubmittedAt(now);
             }
-            // else: the close never reached the broker — leave the row non-terminal (still open) to retry.
+            // else: REJECTED / CANCELLED / timed-out-without-id — even if IBKR allocated an order id it is
+            // NOT working, and the position is still open. Leave the row in its current (non-terminal) state
+            // so the next exit signal RETRIES; marking EXIT_SUBMITTED here would make the duplicate guard skip
+            // the retry forever while the position stays open.
             row.setStatusReason(truncate(reasonPrefix + " close " + e.kind() + ": " + e.getMessage(), 256));
             row.setUpdatedAt(now);
             executionRepository.save(row);
@@ -551,6 +555,18 @@ public class DefaultOrderRouter implements OrderRouter {
         if (s == null) return false;
         String lower = s.toLowerCase();
         return lower.contains("read-only") || lower.contains("read only") || lower.contains("kill-switch");
+    }
+
+    /**
+     * A distinct orderRef for an exit leg. {@code placeLimitOrder} runs an orderRef idempotency lookup
+     * (live AND completed orders) before placing; reusing the entry's executionKey would let that lookup
+     * find the already-completed ENTRY order and return it instead of submitting the reducing close — the
+     * row would be marked EXIT_SUBMITTED with the entry's id while the position stays open. The fill tracker
+     * keys exits by the close's brokerOrderId (persisted synchronously at submit), not the ref, so a
+     * suffixed ref is safe.
+     */
+    private static String exitOrderRef(TradeExecutionRecord row) {
+        return row.getExecutionKey() + ":exit";
     }
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {
