@@ -24,7 +24,14 @@ public class IbkrProperties {
     private int     nativeClientId    = 7;
     /** Separate clientId for the tick-by-tick EClientSocket connection (bypasses ApiController). */
     private int     nativeTickClientId = -1; // -1 = auto (nativeClientId + 1)
-    private boolean nativeReadOnly    = true;
+    /**
+     * Software kill-switch. When {@code true}, {@link IbGatewayNativeClient#placeLimitOrder} refuses
+     * ALL order submission at the single broker choke point (covers every strategy uniformly) — market
+     * data and reconciliation keep running. Default {@code false} (trading allowed); flip to {@code true}
+     * to halt new orders without disconnecting. NOTE: this is enforced as of Phase 0.2 — it was
+     * previously dead config. See docs/PLAN_AUTO_IBKR_EXECUTION.md.
+     */
+    private boolean nativeReadOnly    = false;
     private boolean sslVerify         = false;
     private int     connectTimeoutMs  = 5000;
     private int     readTimeoutMs     = 10000;

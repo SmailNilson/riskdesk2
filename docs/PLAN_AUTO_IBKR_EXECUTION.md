@@ -12,7 +12,7 @@
 | Élément | Statut |
 |---|---|
 | **Phase 0.1 — Détection Read-Only** (capture erreur 321/"read-only" → ERROR loggué une fois + exposé dans `/api/ibkr/auth/status` + reject typé dans `placeLimitOrder`) | ✅ **Livré** (+ test `IbGatewayNativeClientReadOnlyTest`, 7/7 verts) |
-| **Phase 0.2 — Gate `native-read-only` bloquant + bascule des défauts** | ⏸ **En attente décision** — `RISKDESK_IBKR_NATIVE_READ_ONLY` vaut `true` partout (dont `docker-compose.release.yml:39`). Câbler le blocage sans basculer les défauts couperait le trading prod. Décision porteur requise. |
+| **Phase 0.2 — Gate `native-read-only` bloquant + bascule des défauts** | ✅ **Livré** — kill-switch enforced dans `placeLimitOrder` (point d'étranglement unique → couvre toutes les stratégies). **Tous** les défauts bascules à `false` (`application.properties`, `application-ibkr-tailscale.properties`, `application-local.properties.example`, `docker-compose.release.yml`, `render-secrets-env.sh`). ⚠️ **Action opérateur** : vérifier qu'aucun env de déploiement n'exporte `RISKDESK_IBKR_NATIVE_READ_ONLY=true` (sinon trading bloqué). |
 | **ADR cœur unifié** (`TradeIntent`/`ExecutionGateway`/`OrderRouter`) | ✅ **Rédigé** — [ADR_UNIFIED_EXECUTION_CORE.md](ADR_UNIFIED_EXECUTION_CORE.md) (à valider) |
 | Phases 1, 2, 2b, 3 | ⏳ À planifier après validation de l'ADR |
 

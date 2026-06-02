@@ -1,8 +1,13 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.ib.client.Contract;
+import com.ib.client.Types.Action;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Phase 0.1 — IBKR Read-Only detection. The TWS / IB Gateway "Read-Only API" box being checked is
@@ -79,12 +84,26 @@ class IbGatewayNativeClientReadOnlyTest {
         assertThat(client.isBrokerReadOnly()).isTrue();
     }
 
-    // ---- documents the current (dead) default so the Phase 0.2 flip is intentional ----------
+    // ---- Phase 0.2: native-read-only kill-switch (enforced submission gate) -----------------
 
     @Test
-    void nativeReadOnlyConfigDefaultsTrueButIsAdvisoryOnly() {
-        // The flag defaults TRUE everywhere (application.properties, docker-compose.release.yml) but
-        // is NOT yet enforced as a submission gate — see docs/PLAN_AUTO_IBKR_EXECUTION.md Phase 0.2.
-        assertThat(new IbkrProperties().isNativeReadOnly()).isTrue();
+    void killSwitchDefaultsOff() {
+        // Phase 0.2 flipped the default to false (trading allowed) across all configs, now that the
+        // flag is enforced as a submission gate. See docs/PLAN_AUTO_IBKR_EXECUTION.md.
+        assertThat(new IbkrProperties().isNativeReadOnly()).isFalse();
+    }
+
+    @Test
+    void killSwitchOnBlocksSubmissionBeforeConnecting() {
+        IbkrProperties props = new IbkrProperties();
+        props.setNativeReadOnly(true);
+        IbGatewayNativeClient client = new IbGatewayNativeClient(props);
+
+        // With the kill-switch ON the order is refused at the choke point BEFORE any connection
+        // attempt — so this test needs no live gateway.
+        assertThatThrownBy(() -> client.placeLimitOrder(
+                new Contract(), "DU123", Action.BUY, 1, new BigDecimal("100.25"), "test-ref"))
+            .isInstanceOf(IbkrOrderRejectionException.class)
+            .hasMessageContaining("kill-switch");
     }
 }

@@ -7,5 +7,6 @@
 riskdesk.ibkr.native-host=${RISKDESK_IBKR_NATIVE_HOST:127.0.0.1}
 riskdesk.ibkr.native-port=${RISKDESK_IBKR_NATIVE_PORT:4003}
 riskdesk.ibkr.native-client-id=${RISKDESK_IBKR_NATIVE_CLIENT_ID:17}
-riskdesk.ibkr.native-read-only=true
+# Kill-switch (ENFORCED — Phase 0.2): true = block all order submission, false = trading allowed.
+riskdesk.ibkr.native-read-only=false
 server.port=${RISKDESK_LOCAL_BACKEND_PORT:8081}

@@ -795,6 +795,20 @@ public class IbGatewayNativeClient {
         if (orderRef == null || orderRef.isBlank()) {
             throw new IllegalArgumentException("orderRef is required");
         }
+        // Phase 0.2 — software kill-switch. When riskdesk.ibkr.native-read-only=true, refuse EVERY
+        // order submission here at the single broker choke point, so the halt is uniform across all
+        // strategies (WTX, WTX+RSI, Quant, Perfect Setup, Playbook). Default is false (trading
+        // allowed). Reuses BROKER_REJECT (not a new Kind) to avoid touching the exhaustive Kind
+        // switches in the strategy bridges; the message makes the cause unambiguous.
+        if (properties.isNativeReadOnly()) {
+            log.warn("Order NOT sent (ref={}): riskdesk.ibkr.native-read-only kill-switch is ON. "
+                + "Set it to false to allow order submission.", orderRef);
+            throw new IbkrOrderRejectionException(
+                IbkrOrderRejectionException.Kind.BROKER_REJECT, null,
+                "native-read-only kill-switch is ON",
+                "Order NOT sent: riskdesk.ibkr.native-read-only is ON (software kill-switch). "
+                    + "Set it to false to allow order submission.");
+        }
         if (!ensureConnected()) {
             throw new IllegalStateException("IB Gateway native API is not connected.");
         }
@@ -1664,10 +1678,15 @@ public class IbGatewayNativeClient {
             }
             log.info("IB Gateway native API connected on {}:{} with clientId={}",
                 properties.getNativeHost(), properties.getNativePort(), properties.getNativeClientId());
-            // Visibility: surface the effective read-only config flag. NOTE: this flag is currently
-            // advisory only (not enforced as a submission gate) — see docs/PLAN_AUTO_IBKR_EXECUTION.md
-            // (Phase 0.2). Broker-side Read-Only is auto-detected on the first order reject above.
-            log.info("IB Gateway native-read-only config flag = {} (advisory)", properties.isNativeReadOnly());
+            // Visibility: surface the effective kill-switch state at connect. Enforced as of Phase 0.2
+            // in placeLimitOrder. Broker-side Read-Only (a different thing — set in TWS/IB Gateway) is
+            // auto-detected separately on the first order reject above.
+            if (properties.isNativeReadOnly()) {
+                log.warn("IB Gateway native-read-only kill-switch is ON — order submission is BLOCKED "
+                    + "for ALL strategies. Set riskdesk.ibkr.native-read-only=false to allow trading.");
+            } else {
+                log.info("IB Gateway native-read-only kill-switch is OFF — order submission allowed.");
+            }
             // Slice 3a — if a fill listener was registered before connect,
             // attach the persistent handlers now that the controller is live.
             try {
