@@ -55,19 +55,24 @@ public class DefaultOrderRouter implements OrderRouter {
     private final ExecutionReadinessGate readinessGate;
     private final ExecutionReconciler reconciler;
     private final InstrumentTickProvider tickProvider;
+    /** Optional margin pre-flight (D4). Null when no bean is present → the router fails open (no check),
+     *  matching the legacy bridge's {@code marginPreflight != null} guard. */
+    private final OrderAffordabilityPort affordability;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               ExecutionReadinessGate readinessGate,
                               ExecutionReconciler reconciler,
-                              InstrumentTickProvider tickProvider) {
+                              InstrumentTickProvider tickProvider,
+                              Optional<OrderAffordabilityPort> affordability) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.readinessGate = readinessGate;
         this.reconciler = reconciler;
         this.tickProvider = tickProvider;
+        this.affordability = affordability == null ? null : affordability.orElse(null);
     }
 
     @Override
@@ -123,7 +128,7 @@ public class DefaultOrderRouter implements OrderRouter {
         ReconcilePlan plan = reconciler.reconcile(intent, pos);
         return switch (plan) {
             case ReconcilePlan.Skip s -> handleEntrySkip(intent, pos, s);
-            case ReconcilePlan.Open o -> submitEntry(intent, false);
+            case ReconcilePlan.Open o -> submitOpen(intent);
             case ReconcilePlan.Reverse r -> executeReverse(intent, r.toSide(), pos);
             // reconcile never produces Close/Flatten for an OPEN/REVERSE intent.
             case ReconcilePlan.Close c -> throw new IllegalStateException(intent.kind() + " reconciled to Close");
@@ -168,6 +173,14 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.of(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE,
                 "broker position truth unavailable — reverse skipped to avoid a blind close + stacked open");
         }
+
+        // D4 — affordability of the open leg, sized by the NET margin delta this reverse creates:
+        // (new size − the live position it flattens). A same-size / smaller reverse frees margin
+        // (delta <= 0 → skipped); a size-increasing reverse pre-checks only the extra contracts. Computed
+        // here against broker truth, but ENFORCED only after the close leg fires below — a margin denial
+        // must NEVER abort the close (flattening protects the user); it only skips the open.
+        int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
+        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), reverseDeltaQty);
 
         Optional<TradeExecutionRecord> prior = findOpenRow(intent);
         if (prior.isEmpty() && !pos.confirmedFlat()) {
@@ -236,6 +249,21 @@ public class DefaultOrderRouter implements OrderRouter {
             }
         }
 
+        // D4 — open-leg affordability gate. A denial NEVER undoes the close that already fired: the user
+        // ends up FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A
+        // pure reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
+        if (!aff.allowed()) {
+            if (closeLegFired) {
+                log.warn("OrderRouter REVERSE flattened, open leg skipped — insufficient margin ({}): {}",
+                    intent.idempotencyKey(), aff.denyReason());
+                return RoutingResult.of(RoutingOutcome.ROUTED_FLATTEN_ONLY,
+                    truncate("reversed to flat — open leg skipped (insufficient margin): " + aff.denyReason(), 200));
+            }
+            log.info("OrderRouter REVERSE→open declined by margin pre-flight ({}): {}",
+                intent.idempotencyKey(), aff.denyReason());
+            return RoutingResult.of(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, truncate(aff.denyReason(), 200));
+        }
+
         // KNOWN LIMITATION — fill-ordering race (tracked follow-up): this fires the open leg once the close
         // leg is ACCEPTED, not once it is FILLED, matching the locked close-then-open design ported from
         // WtxExecutionBridge. For futures both legs are the same BUY/SELL, so an out-of-order fill (open
@@ -276,6 +304,34 @@ public class DefaultOrderRouter implements OrderRouter {
         r.setCreatedAt(now);
         r.setUpdatedAt(now);
         return executionRepository.createIfAbsent(r);
+    }
+
+    /**
+     * Plain OPEN — runs the margin pre-flight (D4) on the FULL position quantity BEFORE any broker side
+     * effect, then submits. A denial declines outright with {@code SKIPPED_INSUFFICIENT_MARGIN} (there is
+     * no position to flatten, unlike a REVERSE). The pre-flight runs here — AFTER reconcile — not before
+     * route(): pre-declining ahead of the reconcile would skip the broker-truth pass that synthesises a
+     * tracking row for a duplicate / upgrades to a REVERSE, leaving a live position unmanaged.
+     */
+    private RoutingResult submitOpen(TradeIntent intent) {
+        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), intent.quantity());
+        if (!aff.allowed()) {
+            log.info("OrderRouter OPEN declined by margin pre-flight ({}): {}",
+                intent.idempotencyKey(), aff.denyReason());
+            return RoutingResult.of(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, truncate(aff.denyReason(), 200));
+        }
+        return submitEntry(intent, false);
+    }
+
+    /**
+     * Margin pre-flight (D4), fail-open. Returns {@code allow()} when no pre-flight bean is wired or
+     * {@code qty <= 0} (a same-size / size-decreasing REVERSE frees margin — nothing to check).
+     */
+    private OrderAffordabilityPort.Affordability checkAffordability(TradeIntent intent, String action, int qty) {
+        if (affordability == null || qty <= 0) {
+            return OrderAffordabilityPort.Affordability.allow();
+        }
+        return affordability.check(intent.instrument(), action, qty, intent.limitPrice());
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.execution.OrderAffordabilityPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties.PreflightMode;
@@ -46,7 +47,7 @@ import java.math.RoundingMode;
  */
 @Service
 @ConditionalOnProperty(name = "riskdesk.wtx.enabled", havingValue = "true")
-public class IbkrMarginPreflightService {
+public class IbkrMarginPreflightService implements OrderAffordabilityPort {
 
     private static final Logger log = LoggerFactory.getLogger(IbkrMarginPreflightService.class);
 
@@ -111,6 +112,17 @@ public class IbkrMarginPreflightService {
             return PreflightDecision.deny(msg);
         }
         return PreflightDecision.allow();
+    }
+
+    /**
+     * {@link OrderAffordabilityPort} adapter — the unified {@link com.riskdesk.application.execution.DefaultOrderRouter}
+     * consults the SAME pre-flight the legacy WTX bridge used, so the unified path's deny decision is
+     * identical. Delegates straight to {@link #canAffordOrder}.
+     */
+    @Override
+    public Affordability check(Instrument instrument, String action, int qty, BigDecimal refPrice) {
+        PreflightDecision decision = canAffordOrder(instrument, action, qty, refPrice);
+        return decision.allowed() ? Affordability.allow() : Affordability.deny(decision.denyReason());
     }
 
     /**
