@@ -207,7 +207,7 @@ public class DefaultOrderRouter implements OrderRouter {
                         ? priorRow.getQuantity() : intent.quantity();
                     int qty = Math.min(priorQty, pos.net().abs().intValue());
                     RoutingResult close = submitCloseLeg(priorRow, intent.instrument(), closeAction, qty,
-                        intent.limitPrice(), "OrderRouter REVERSE close");
+                        intent.limitPrice(), "OrderRouter REVERSE close", intent.idempotencyKey());
                     if (close.outcome() == RoutingOutcome.ACK_PENDING) {
                         // The close ack-pends: we can't safely fire the open (no fill-driven retry) — the reversal
                         // is effectively lost until a reconcile. Surface it loudly.
@@ -461,7 +461,8 @@ public class DefaultOrderRouter implements OrderRouter {
         // SELL 2 which opens a short 1).
         int rowQty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
         int qty = Math.min(rowQty, pos.net().abs().intValue());
-        return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix);
+        return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix,
+            intent.idempotencyKey());
     }
 
     /**
@@ -470,11 +471,11 @@ public class DefaultOrderRouter implements OrderRouter {
      * on a reject: the position is still open, so the row stays as-is for the next bar to retry.
      */
     private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
-                                         int qty, BigDecimal price, String reasonPrefix) {
+                                         int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator) {
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
-                row.getId(), exitOrderRef(row), row.getBrokerAccountId(), row.getInstrument(),
-                closeAction, qty, normalizeToTick(price, instrument)));
+                row.getId(), exitOrderRef(row.getExecutionKey(), exitDiscriminator), row.getBrokerAccountId(),
+                row.getInstrument(), closeAction, qty, normalizeToTick(price, instrument)));
             Instant now = Instant.now();
             // A close can come back Filled as its FIRST accepted status (marketable). Mark the row CLOSED
             // now: the orderStatus callback may already have been dropped (close orderId not yet persisted)
@@ -618,15 +619,17 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     /**
-     * A distinct orderRef for an exit leg. {@code placeLimitOrder} runs an orderRef idempotency lookup
-     * (live AND completed orders) before placing; reusing the entry's executionKey would let that lookup
-     * find the already-completed ENTRY order and return it instead of submitting the reducing close — the
-     * row would be marked EXIT_SUBMITTED with the entry's id while the position stays open. The fill tracker
-     * keys exits by the close's brokerOrderId (persisted synchronously at submit), not the ref, so a
-     * suffixed ref is safe.
+     * A distinct, retry-safe orderRef for an exit leg: {@code <executionKey>:exit:<discriminator>}.
+     * placeLimitOrder runs an orderRef idempotency lookup (live AND completed orders) before placing — the
+     * ":exit" suffix stops it returning the already-completed ENTRY order (which would mark the row
+     * EXIT_SUBMITTED with the entry id while the position stays open), and the per-attempt {@code
+     * discriminator} (the close intent's idempotency key, fresh per close signal) stops a close retried
+     * after a terminal-non-filled one (e.g. an EOD-cancelled limit) from matching the dead order — while
+     * staying idempotent within the same intent. The fill tracker keys exits by the close brokerOrderId
+     * (persisted at submit) and strips from ":exit" to recover the base key, so the discriminator is safe.
      */
-    private static String exitOrderRef(TradeExecutionRecord row) {
-        return row.getExecutionKey() + EXIT_ORDER_REF_SUFFIX;
+    private static String exitOrderRef(String executionKey, String discriminator) {
+        return executionKey + EXIT_ORDER_REF_SUFFIX + ":" + discriminator;
     }
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {

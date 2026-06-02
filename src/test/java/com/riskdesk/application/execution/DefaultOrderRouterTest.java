@@ -328,7 +328,9 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().action()).isEqualTo("SHORT"); // closing a long = SELL
         assertThat(req.getValue().quantity()).isEqualTo(2);      // the row's open qty, not the intent qty
-        assertThat(req.getValue().executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // distinct exit ref
+        // Distinct, retry-safe exit ref: "<entry key>:exit:<close intent key>" (per-signal discriminator).
+        assertThat(req.getValue().executionKey()).startsWith("wtx:MNQ:5m:1:OPEN_LONG:exit:");
+        assertThat(req.getValue().executionKey()).endsWith(":wtx:MNQ:5m:2:CLOSE_LONG");
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
@@ -591,7 +593,7 @@ class DefaultOrderRouterTest {
         // Two legs: close (on the prior row) then open (a new row).
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
-        assertThat(req.getAllValues().get(0).executionKey()).isEqualTo("wtx:MNQ:5m:1:OPEN_LONG:exit"); // close: distinct exit ref
+        assertThat(req.getAllValues().get(0).executionKey()).startsWith("wtx:MNQ:5m:1:OPEN_LONG:exit:"); // close: distinct, retry-safe exit ref
         assertThat(req.getAllValues().get(1).executionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT");  // open new row
     }
 
