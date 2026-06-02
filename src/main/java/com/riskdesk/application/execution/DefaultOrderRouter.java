@@ -111,9 +111,12 @@ public class DefaultOrderRouter implements OrderRouter {
 
         } catch (IbkrOrderRejectionException e) {
             RoutingOutcome outcome = mapRejection(e);
-            // ACK_PENDING means the order reached the broker (id present) but the ack was late — keep
-            // the row non-terminal so the fill tracker reconciles it. Everything else is terminal.
-            persisted.setStatus(outcome == RoutingOutcome.ACK_PENDING
+            // Keep the row NON-TERMINAL whenever the order is — or may be — live at the broker:
+            // ACK_PENDING (id present, late ack) AND FAILED_TIMEOUT (no id, broker state UNKNOWN). Late
+            // orderStatus/execDetails callbacks (or the stale-entry reconciler) must still resolve it,
+            // and terminal-failing here would allow a retry against an order the broker may already
+            // hold. mustTrackExecutionRow() is the single source of truth for that distinction.
+            persisted.setStatus(outcome.mustTrackExecutionRow()
                 ? ExecutionStatus.ENTRY_SUBMITTED : ExecutionStatus.FAILED);
             persisted.setStatusReason(truncate("OrderRouter OPEN " + e.kind() + ": " + e.getMessage(), 256));
             if (e.brokerOrderId() != null) {

@@ -117,6 +117,10 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_INSUFFICIENT_MARGIN);
         assertThat(r.executionId()).isEqualTo(1L);
+
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.FAILED); // terminal: broker rejected, no position
     }
 
     @Test
@@ -141,6 +145,12 @@ class DefaultOrderRouterTest {
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.FAILED_TIMEOUT);
         assertThat(r.brokerOrderId()).isNull();
+
+        // Broker state is UNKNOWN on a no-id timeout — the row MUST stay non-terminal so the
+        // stale-entry reconciler / late callbacks can resolve it, and no retry double-submits.
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
     }
 
     @Test
