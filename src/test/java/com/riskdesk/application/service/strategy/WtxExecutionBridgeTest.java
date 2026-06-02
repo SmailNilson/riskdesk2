@@ -16,6 +16,16 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
+import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
+import com.riskdesk.application.execution.OrderRouter;
+import com.riskdesk.application.service.IbkrMarginPreflightService;
+import com.riskdesk.domain.execution.IntentKind;
+import com.riskdesk.domain.execution.RoutingOutcome;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
+import org.mockito.ArgumentCaptor;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.config.WtxStrategyProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
@@ -37,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -88,6 +99,71 @@ class WtxExecutionBridgeTest {
         bridge.submit(signal(WtxAction.OPEN_SHORT), state, bd(100));
 
         assertEquals("SHORT", repo.all().get(0).getAction());
+    }
+
+    // ---- unified-router migration (Slice B) ----------------------------------------------------
+
+    private static ExecutionProperties unifiedRouter(boolean enabled) {
+        ExecutionProperties p = new ExecutionProperties();
+        p.getUnifiedRouter().setEnabled(enabled);
+        return p;
+    }
+
+    private WtxExecutionBridge unifiedBridge(OrderRouter router, IbkrMarginPreflightService preflight, boolean flagOn) {
+        return new WtxExecutionBridge(ibkrOrderService, repo, ibkrProperties, wtxProperties,
+                preflight, null, router, unifiedRouter(flagOn));
+    }
+
+    @Test
+    void unifiedRouterOn_routesOpenViaOrderRouter_translatesIntent_mapsOutcome() {
+        OrderRouter router = mock(OrderRouter.class);
+        ArgumentCaptor<TradeIntent> cap = ArgumentCaptor.forClass(TradeIntent.class);
+        when(router.route(cap.capture())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED, "ok"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = unifiedBridge(router, null, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any()); // legacy broker path NOT used
+        assertEquals(0, repo.all().size());                         // the router owns persistence, not the bridge
+        TradeIntent intent = cap.getValue();
+        assertEquals(IntentKind.OPEN, intent.kind());
+        assertEquals(Side.LONG, intent.side());
+        assertEquals(Instrument.MCL, intent.instrument());
+        assertEquals("10m", intent.timeframe());
+        assertEquals(2, intent.quantity());
+        assertEquals(ExecutionTriggerSource.WTX_AUTO, intent.source());
+        assertEquals(0, intent.limitPrice().compareTo(bd(70)));
+        org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().startsWith("wtx:MCL:10m:"));
+        org.junit.jupiter.api.Assertions.assertTrue(intent.idempotencyKey().endsWith(":OPEN_LONG"));
+    }
+
+    @Test
+    void unifiedRouterOff_usesLegacyPath_routerNotCalled() {
+        OrderRouter router = mock(OrderRouter.class);
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+
+        unifiedBridge(router, null, false).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        verify(router, never()).route(any());
+        verify(ibkrOrderService).submitEntryOrder(any()); // legacy path submitted
+    }
+
+    @Test
+    void unifiedRouterOn_openDeclinedByPreflight_skipsInsufficientMargin_noRoute() {
+        OrderRouter router = mock(OrderRouter.class);
+        IbkrMarginPreflightService preflight = mock(IbkrMarginPreflightService.class);
+        when(preflight.canAffordOrder(any(), any(), anyInt(), any()))
+                .thenReturn(new IbkrMarginPreflightService.PreflightDecision(false, "no margin"));
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+        WtxRoutingResult result = unifiedBridge(router, preflight, true).submit(signal(WtxAction.OPEN_LONG), state, bd(70));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, result.outcome());
+        verify(router, never()).route(any()); // declined before routing
     }
 
     @Test

@@ -2,6 +2,10 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.OrderRouter;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
@@ -107,13 +111,18 @@ public class WtxExecutionBridge {
      * a manual broker-side trade.
      */
     private final IbkrPortfolioService ibkrPortfolioService;
+    /** Unified execution core. Nullable: when present AND {@code riskdesk.execution.unified-router.enabled}
+     *  is ON (default OFF), WTX routes through it instead of the legacy handleEntry/handleClose path. */
+    private final OrderRouter orderRouter;
+    /** Migration kill-switch holder. Nullable in test constructors. */
+    private final ExecutionProperties executionProperties;
 
-    /** Test-only legacy constructor — production code uses the 6-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production code uses the 8-arg variant via Spring autowiring. */
     public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null, null, null);
     }
 
     /** Test-only — preflight wired, IBKR reconcile disabled. */
@@ -122,7 +131,18 @@ public class WtxExecutionBridge {
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
                               IbkrMarginPreflightService marginPreflight) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null, null, null);
+    }
+
+    /** Test-only — preflight + reconcile wired, unified router disabled. */
+    public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
+                              TradeExecutionRepositoryPort executionRepository,
+                              IbkrProperties ibkrProperties,
+                              WtxStrategyProperties wtxProperties,
+                              IbkrMarginPreflightService marginPreflight,
+                              IbkrPortfolioService ibkrPortfolioService) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight,
+                ibkrPortfolioService, null, null);
     }
 
     @Autowired
@@ -131,13 +151,17 @@ public class WtxExecutionBridge {
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
                               IbkrMarginPreflightService marginPreflight,
-                              IbkrPortfolioService ibkrPortfolioService) {
+                              IbkrPortfolioService ibkrPortfolioService,
+                              OrderRouter orderRouter,
+                              ExecutionProperties executionProperties) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.wtxProperties = wtxProperties;
         this.marginPreflight = marginPreflight;
         this.ibkrPortfolioService = ibkrPortfolioService;
+        this.orderRouter = orderRouter;
+        this.executionProperties = executionProperties;
     }
 
     public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state) {
@@ -174,12 +198,67 @@ public class WtxExecutionBridge {
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, "Unknown instrument: " + state.instrument());
         }
 
+        // Migration: when riskdesk.execution.unified-router.enabled is ON (default OFF) and the router bean
+        // is present, route every WTX action through the shared OrderRouter instead of the legacy
+        // handleEntry/handleClose path. Zero runtime effect while OFF — the legacy path below is unchanged.
+        if (orderRouter != null && executionProperties != null && executionProperties.isUnifiedRouterEnabled()) {
+            return routeViaUnifiedRouter(signal, state, instrument, action, referencePrice);
+        }
+
         return switch (action) {
             case CLOSE_LONG, CLOSE_SHORT, CLOSE_ALL -> handleClose(signal, state, instrument, action, referencePrice);
             case OPEN_LONG, OPEN_SHORT, REVERSE_TO_LONG, REVERSE_TO_SHORT ->
                     handleEntry(signal, state, instrument, action, referencePrice);
             default -> null;
         };
+    }
+
+    /**
+     * Unified-router path (migration Slice B). Derives the same (executionKey, qty, price, account) the
+     * legacy path uses, applies the OPEN margin pre-flight for parity, then translates the action to a
+     * {@link TradeIntent} and routes it through the {@link OrderRouter} — which owns reconciliation,
+     * idempotence, execution-row persistence and broker submission. The router's neutral
+     * {@link RoutingResult} is mapped back to the strategy-facing {@link WtxRoutingOutcome}. Reached only
+     * behind the default-OFF {@code riskdesk.execution.unified-router.enabled} flag.
+     */
+    private WtxRoutingResult routeViaUnifiedRouter(WtxSignal signal, WtxStrategyState state, Instrument instrument,
+                                                   WtxAction action, BigDecimal referencePrice) {
+        String tf = signal.timeframe();
+        String executionKey = "wtx:" + state.instrument() + ":" + tf + ":"
+                + signal.signalTs().getEpochSecond() + ":" + action.name();
+
+        BigDecimal price = referencePrice != null ? referencePrice : state.entryPrice();
+        if (price == null) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
+        int qty = positionQuantity(state);
+        if (qty <= 0) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_QTY);
+        }
+        String brokerAccountId = firstNonBlank(wtxProperties.getBrokerAccountId(), "wtx-default");
+
+        // Margin pre-flight parity — OPEN only. A CLOSE/FLATTEN reduces exposure (no margin) and a REVERSE's
+        // close leg frees margin first; any broker margin reject during routing maps to
+        // SKIPPED_INSUFFICIENT_MARGIN. (Full reverse-delta pre-flight parity is a documented refinement.)
+        boolean isOpen = action == WtxAction.OPEN_LONG || action == WtxAction.OPEN_SHORT;
+        if (isOpen && marginPreflight != null) {
+            PreflightDecision decision = marginPreflight.canAffordOrder(instrument, mapToOrderAction(action), qty, price);
+            if (!decision.allowed()) {
+                log.warn("WTX [{} {}] unified-router OPEN declined by pre-flight — {}",
+                        state.instrument(), tf, decision.denyReason());
+                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN,
+                        truncate(decision.denyReason(), 200));
+            }
+        }
+
+        TradeIntent intent = WtxIntentTranslator.toTradeIntent(action, executionKey,
+                ExecutionTriggerSource.WTX_AUTO, instrument, tf, qty, price, brokerAccountId);
+        RoutingResult result = orderRouter.route(intent);
+        WtxRoutingOutcome outcome = WtxIntentTranslator.toWtxOutcome(result.outcome());
+        String message = result.outcome().isFailure() ? result.message() : null;
+        log.info("WTX [{} {}] unified-router {} → {} (core {})",
+                state.instrument(), tf, action, outcome, result.outcome());
+        return WtxRoutingResult.of(outcome, message);
     }
 
     /**
