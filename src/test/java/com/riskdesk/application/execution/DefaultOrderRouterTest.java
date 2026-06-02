@@ -51,7 +51,7 @@ class DefaultOrderRouterTest {
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
-        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler);
+        router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler, Instrument::getTickSize);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -101,6 +101,20 @@ class DefaultOrderRouterTest {
         assertThat(saved.getIbkrOrderId()).isEqualTo(12345);                 // Integer cast for fill tracker
         assertThat(saved.getAction()).isEqualTo("LONG");
         assertThat(saved.getNormalizedEntryPrice()).isEqualByComparingTo("18000.25"); // rounded to 0.25 tick
+    }
+
+    @Test
+    void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
+        // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
+        DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            instr -> new BigDecimal("0.50")); // broker minTick 0.50
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
+
+        r.route(openLong()); // entry 18000.30
+
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getNormalizedEntryPrice()).isEqualByComparingTo("18000.50"); // 18000.30 → nearest 0.50
     }
 
     @Test
@@ -793,7 +807,7 @@ class DefaultOrderRouterTest {
 
     @Test
     void skipsWhenNotReady() {
-        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler);
+        DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler, Instrument::getTickSize);
 
         RoutingResult r = gated.route(openLong());
 
