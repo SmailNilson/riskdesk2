@@ -391,7 +391,18 @@ public class DefaultOrderRouter implements OrderRouter {
                 "entry still in flight (" + row.getStatus() + ") and position unconfirmed — "
                     + (flatten ? "flatten" : "close") + " skipped", row.getId(), row.getEntryOrderId());
         }
-        // Close the HELD side: FLATTEN derives it from the row's open action; CLOSE from the intent side.
+        // CLOSE is directional — it reduces the side named by the intent. If the held row is on the OTHER
+        // side (stale / mismatched signal), the action derived from the intent would ADD to the position
+        // instead of reducing it. There is no matching position to close — skip. (FLATTEN derives its action
+        // from the held row, so it is always reducing and needs no such check.)
+        if (!flatten && (row.getAction() == null
+                || !row.getAction().equalsIgnoreCase(intent.side().name()))) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "CLOSE " + intent.side() + " but held row is " + row.getAction()
+                    + " — no matching position to close", row.getId(), row.getEntryOrderId());
+        }
+        // Close the HELD side: FLATTEN derives it from the row's open action; CLOSE from the intent side
+        // (validated above to match the held row).
         String closeAction = flatten
             ? ("LONG".equalsIgnoreCase(row.getAction()) ? "SHORT" : "LONG")
             : brokerAction(intent);

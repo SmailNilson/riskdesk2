@@ -226,6 +226,7 @@ class DefaultOrderRouterTest {
         r.setInstrument("MNQ");
         r.setTimeframe("5m");
         r.setBrokerAccountId("DU1");
+        r.setAction("LONG"); // held side (NOT NULL in the entity); flatten/reverse tests override as needed
         r.setQuantity(qty);
         r.setStatus(status);
         r.setEntryOrderId(entryOrderId);
@@ -363,6 +364,21 @@ class DefaultOrderRouterTest {
         RoutingResult r = router.route(closeLong());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_intentSideMismatchesHeldRow_skipsNoExposureIncrease() {
+        // Stale CLOSE_LONG while the held row is SHORT — deriving SELL from the intent would ADD to the
+        // short. There is no long to close: skip, never increase exposure.
+        TradeExecutionRecord shortRow = activeRow(ExecutionStatus.ACTIVE, 1, 100L);
+        shortRow.setAction("SHORT");
+        stubActive(shortRow);
+        stubFlat(false);
+
+        RoutingResult r = router.route(closeLong()); // CLOSE_LONG vs held SHORT
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 

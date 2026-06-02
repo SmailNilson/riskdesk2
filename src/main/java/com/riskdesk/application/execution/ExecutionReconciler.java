@@ -92,12 +92,17 @@ public class ExecutionReconciler {
             return reverse ? new ReconcilePlan.Reverse(side) : new ReconcilePlan.Open(side);
         }
         if (pos.isNetZero()) {
-            // Downgrade REVERSE -> OPEN only when CONFIRMED FLAT (no nonzero leg). A net of zero from
-            // offsetting expiries is NOT flat — keep the two-leg reverse so the live legs stay managed.
-            if (pos.confirmedFlat() && reverse) {
+            if (pos.confirmedFlat()) {
+                // Truly flat (no nonzero leg) — open fresh; a REVERSE downgrades to a plain OPEN.
                 return new ReconcilePlan.Open(side);
             }
-            return reverse ? new ReconcilePlan.Reverse(side) : new ReconcilePlan.Open(side);
+            // Net zero but NOT flat = offsetting LIVE legs (rollover / calendar overlap). Keep a REVERSE
+            // (its executor skips offsetting legs rather than stacking); a plain OPEN must NOT stack a fresh
+            // entry on top of the live legs — skip until they are managed/flattened.
+            return reverse
+                ? new ReconcilePlan.Reverse(side)
+                : new ReconcilePlan.Skip(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                    "IBKR holds offsetting live legs (net 0, not flat) — open skipped to avoid stacking");
         }
         boolean wantLong = side == Side.LONG;
         if (wantLong && pos.isLong()) {

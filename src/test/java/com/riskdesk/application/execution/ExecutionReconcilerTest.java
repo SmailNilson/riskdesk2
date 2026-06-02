@@ -57,6 +57,13 @@ class ExecutionReconcilerTest {
         assertThat(pure.reconcile(reverse(Side.LONG), pos("0", false))).isEqualTo(new ReconcilePlan.Reverse(Side.LONG));
     }
 
+    @Test void open_netZeroButOffsettingLegs_skipsToAvoidStacking() {
+        // net 0 but NOT confirmedFlat (offsetting live legs) → a plain OPEN must NOT stack a fresh entry
+        ReconcilePlan p = pure.reconcile(open(Side.LONG), pos("0", false));
+        assertThat(p).isInstanceOf(ReconcilePlan.Skip.class);
+        assertThat(((ReconcilePlan.Skip) p).outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+    }
+
     @Test void open_sameSideHeld_skipsDuplicate() {
         ReconcilePlan p = pure.reconcile(open(Side.LONG), pos("2", false));
         assertThat(p).isInstanceOf(ReconcilePlan.Skip.class);
