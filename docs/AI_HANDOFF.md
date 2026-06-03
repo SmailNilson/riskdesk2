@@ -25,8 +25,13 @@ like WTX / WTX-RSI / Playbook. 6th routed `ExecutionTriggerSource`: `QUANT_SIM_A
   resting DAY entries are bounded + expire at the break).
 - **REST/UI:** `PUT /api/quant/simulations/{instrument}/auto-execution`, `GET …/exec-state`; the panel shows
   a per-instrument Auto-IBKR toggle (MNQ/MCL) as an *instrument-armed* status (no misleading per-row badge).
-- **Default OFF everywhere** — master flag off ⇒ the bridge bean isn't built. Enabling needs the master flag
-  + `broker-account-id` (fail-fast) + the instrument toggle + the allowlist.
+- **Account:** no account to configure — the bridge sets a placeholder (`quant-sim-default`) and the gateway
+  resolves it to the session's managed account (`resolveAccountId`), exactly like WTX-RSI. (Earlier the flag
+  fail-fasted on a missing `broker-account-id`; that crashed the prod boot / deploy health check and was
+  removed — see the broker-account simplification.)
+- **Gating:** `riskdesk.quant.sim-exec.enabled=true` is the committed default (operator decision); a live
+  order still requires IBKR connected + a per-instrument MNQ/MCL toggle armed (default OFF, in-memory) + the
+  allowlist. Tests force the flag OFF in `application-test.properties`.
 
 ## D2 re-land — reverse open serialised behind the close FILL (2026-06-03)
 

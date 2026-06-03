@@ -107,12 +107,11 @@ no-op une ligne déjà `EXIT_SUBMITTED`/terminale.
 
 ### 2.7 Config (`application.properties`)
 ```properties
-riskdesk.quant.sim-exec.enabled=false
+riskdesk.quant.sim-exec.enabled=true        # défaut committed (décision opérateur)
 riskdesk.quant.sim-exec.instruments=MNQ,MCL
-riskdesk.quant.sim-exec.broker-account-id=
 riskdesk.quant.sim-exec.default-quantity=1
 ```
-Nouveau `QuantSimExecutionProperties` (`@ConfigurationProperties("riskdesk.quant.sim-exec")`). `broker-account-id` requis quand `enabled=true` (lève `IllegalStateException` sinon, comme `QuantAutoArmService`).
+`QuantSimExecutionProperties` (`@ConfigurationProperties("riskdesk.quant.sim-exec")`). **Aucun compte à configurer** : le bridge pose un placeholder `quant-sim-default` et le gateway le résout vers le compte managé de la session (`IbGatewayNativeClient.resolveAccountId`), comme WTX-RSI. *(Une version initiale exigeait `broker-account-id` avec fail-fast — supprimé : ça faisait crasher le boot prod / le health-check du deploy.)*
 
 ### 2.8 REST (étend `Quant7GatesSimulationController`, base `/api/quant/simulations`)
 - `PUT /{instrument}/auto-execution` `{ "enabled": true|false }` → refuse 400 si instrument hors allowlist.
