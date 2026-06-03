@@ -57,10 +57,26 @@ public record WtxStrategyState(
          * pairs), OFF elsewhere — see {@link #defaultTelegramEnabledFor(String)}.
          * The operator can flip it per panel at runtime regardless of the default.
          */
-        boolean telegramNotificationsEnabled
+        boolean telegramNotificationsEnabled,
+        /**
+         * Close P&L booked OPTIMISTICALLY on a close-submission whose broker fill is not yet confirmed
+         * (auto-execution only). It is added to {@link #dailyRealizedPnl} immediately so the panel/cap
+         * react, but tracked here so it can be ROLLED BACK if the close ends up not completing (the close
+         * order rests then cancels/expires). The close settler clears it once the close is confirmed (the
+         * position is actually flat) or rolls it back when the position is still live. {@code 0} = nothing
+         * pending. Always non-null.
+         */
+        BigDecimal pendingClosePnl
 ) {
     /** Panel default — matches what the user sees on first load. */
     public static final int DEFAULT_ORDER_QTY = 2;
+
+    /** Compact canonical constructor — defensively normalise {@code pendingClosePnl} to non-null. */
+    public WtxStrategyState {
+        if (pendingClosePnl == null) {
+            pendingClosePnl = BigDecimal.ZERO;
+        }
+    }
 
     /**
      * Instrument-scoped default for the Telegram notification toggle.
@@ -89,7 +105,8 @@ public record WtxStrategyState(
                 null, null, null,
                 false,
                 DEFAULT_ORDER_QTY,
-                defaultTelegramEnabledFor(instrument)
+                defaultTelegramEnabledFor(instrument),
+                BigDecimal.ZERO
         );
     }
 
@@ -99,7 +116,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, BigDecimal.ZERO);
     }
 
     public WtxStrategyState withPosition(WtxPosition pos, BigDecimal entryPrice, BigDecimal qty, BigDecimal entryAtr) {
@@ -108,7 +125,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, entryPrice, null,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, BigDecimal.ZERO);
     }
 
     public WtxStrategyState withFlat(BigDecimal realizedPnlAdd) {
@@ -119,7 +136,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withDayReset(BigDecimal newStartEquity) {
@@ -128,7 +145,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, BigDecimal.ZERO);
     }
 
     public WtxStrategyState withMaxLossHit() {
@@ -137,7 +154,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 null, null, null,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, BigDecimal.ZERO);
     }
 
     public WtxStrategyState withLastCandleTs(Instant ts) {
@@ -146,7 +163,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withProfile(WtxProfile profile) {
@@ -155,7 +172,7 @@ public record WtxStrategyState(
                 profile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withAutoExecution(boolean enabled) {
@@ -164,7 +181,7 @@ public record WtxStrategyState(
                 activeProfile, enabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withSwingBiasFilter(boolean enabled) {
@@ -173,7 +190,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 enabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withTrailing(BigDecimal bestFavorablePrice, BigDecimal trailingStopPrice) {
@@ -182,7 +199,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withConfiguredOrderQty(int qty) {
@@ -192,7 +209,7 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, sanitized,
-                telegramNotificationsEnabled);
+                telegramNotificationsEnabled, pendingClosePnl);
     }
 
     public WtxStrategyState withTelegramNotifications(boolean enabled) {
@@ -201,7 +218,51 @@ public record WtxStrategyState(
                 activeProfile, autoExecutionEnabled,
                 entryAtr, bestFavorablePrice, trailingStopPrice,
                 swingBiasFilterEnabled, configuredOrderQty,
-                enabled);
+                enabled, pendingClosePnl);
+    }
+
+    /**
+     * Record that {@code pnl} was just booked by an optimistic close whose broker fill is unconfirmed, so
+     * the close settler can roll it back if the close does not complete. Preserves every other field.
+     */
+    public WtxStrategyState withPendingClose(BigDecimal pnl) {
+        return new WtxStrategyState(instrument, timeframe, currentPosition, entryPrice, entryQty,
+                dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled, pnl == null ? BigDecimal.ZERO : pnl);
+    }
+
+    /**
+     * The optimistic close did NOT complete (the close order rested then cancelled/expired) — un-book the
+     * pending close P&L from realized + equity and clear the marker. The position side is corrected
+     * separately (by the position reconciler) from execution-row truth.
+     */
+    public WtxStrategyState withClosePnlRolledBack() {
+        BigDecimal newRealized = dailyRealizedPnl.subtract(pendingClosePnl);
+        BigDecimal newEquity = dayStartEquity.add(newRealized);
+        return new WtxStrategyState(instrument, timeframe, currentPosition, entryPrice, entryQty,
+                dayStartEquity, newEquity, newRealized, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled, BigDecimal.ZERO);
+    }
+
+    /** The optimistic close is now broker-confirmed — the booked P&L is final; just clear the marker. */
+    public WtxStrategyState withPendingClosePnlFinalized() {
+        return new WtxStrategyState(instrument, timeframe, currentPosition, entryPrice, entryQty,
+                dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled, BigDecimal.ZERO);
+    }
+
+    /** True when an optimistic close is awaiting broker confirmation (non-zero pending P&L marker). */
+    public boolean hasPendingClose() {
+        return pendingClosePnl != null && pendingClosePnl.signum() != 0;
     }
 
     /** Daily P&L = current equity - day start equity */

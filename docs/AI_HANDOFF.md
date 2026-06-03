@@ -1,6 +1,29 @@
 # AI Handoff
 
-Last updated: 2026-06-02
+Last updated: 2026-06-03
+
+## WTX close-PnL finalized only on a confirmed close (fill-driven) (2026-06-03)
+
+The real-money accounting prerequisite for the WTX position reconciler (#385, held draft). WTX booked
+close-PnL **synchronously** on close-submission, but a `LMT DAY` close can rest then cancel/expire; the
+reconciler re-adopting such a position would leave the optimistic PnL booked and double-book the eventual
+real close (Codex P1 on #385). This makes close-PnL final only once the broker confirms the close.
+
+- `WtxStrategyState.pendingClosePnl` — close PnL booked optimistically but not yet broker-confirmed (+ a
+  compact-ctor null→0 normalization; persisted column; cleared by open/day-reset/max-loss).
+- `closePosition` (auto-exec): books as today **and** marks the amount pending.
+- `WtxClosePnlSettler` (bar start, before day-reset): resolves the pending against execution-row truth —
+  row gone/`CLOSED` (filled, flat) → **finalize**; row `ACTIVE` (close cancelled without a fill, or none
+  went out → still live) → **roll back**; `EXIT_SUBMITTED`/`VIRTUAL_EXIT_TRIGGERED` (in flight) → **wait**.
+  Side-agnostic (the side is the reconciler's job).
+- Fill-tracker: an `EXIT_SUBMITTED` close that cancels without a fill now revives the row to `ACTIVE` (+
+  detaches the dead order id), so the settler can distinguish a cancelled close (rollback) from a filled
+  one (finalize).
+
+Paper (auto-exec off) closes are immediate/real → never pending. Full suite 1993 green.
+
+**Next:** rebase #385 (the WTX side-reconcile) onto this — its re-adopt becomes safe (no optimistic PnL to
+double-book), and it drops its own PnL-realization (close-PnL now lives here). Then re-land D2.
 
 ## Unified execution core — Slice D: D4 + D3 (live-flip prerequisites) (2026-06-02)
 

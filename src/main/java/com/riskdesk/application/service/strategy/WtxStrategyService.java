@@ -49,6 +49,7 @@ public class WtxStrategyService {
     private final WtxStrategyProperties properties;
     private final ObjectProvider<WtxExecutionBridge> executionBridgeProvider;
     private final ApplicationEventPublisher eventPublisher;
+    private final WtxClosePnlSettler closePnlSettler;
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -58,7 +59,8 @@ public class WtxStrategyService {
             SimpMessagingTemplate ws,
             WtxStrategyProperties properties,
             ObjectProvider<WtxExecutionBridge> executionBridgeProvider,
-            ApplicationEventPublisher eventPublisher
+            ApplicationEventPublisher eventPublisher,
+            WtxClosePnlSettler closePnlSettler
     ) {
         this.statePort = statePort;
         this.historyPort = historyPort;
@@ -68,6 +70,7 @@ public class WtxStrategyService {
         this.properties = properties;
         this.executionBridgeProvider = executionBridgeProvider;
         this.eventPublisher = eventPublisher;
+        this.closePnlSettler = closePnlSettler;
     }
 
     private void publishWtxEvent(WtxSignal signal, BigDecimal price) {
@@ -110,6 +113,10 @@ public class WtxStrategyService {
         WtxStrategyState state = statePort.load(instrumentName, event.timeframe())
                 .orElseGet(() -> WtxStrategyState.initial(instrumentName, event.timeframe(),
                         properties.getInitialEquity()));
+
+        // ── 0. Settle any optimistic close P&L against execution-row truth (roll back an unfilled close,
+        // finalize a confirmed one) BEFORE day-reset archives the day's realized P&L into dayStartEquity.
+        state = closePnlSettler.settle(state);
 
         // Day-change detection (America/New_York)
         if (WtxRiskGuard.isNewTradingDay(state.lastCandleTs(), event.timestamp())) {
@@ -497,7 +504,11 @@ public class WtxStrategyService {
         Side side = state.currentPosition() == WtxPosition.LONG ? Side.LONG : Side.SHORT;
         int qty = state.entryQty() != null ? state.entryQty().intValue() : 1;
         BigDecimal pnl = instrument.calculatePnL(state.entryPrice(), exitPrice, qty, side);
-        return state.withFlat(pnl);
+        WtxStrategyState flat = state.withFlat(pnl);
+        // Auto-execution: the close ORDER may rest then cancel/expire unfilled, so book the realized P&L
+        // PENDING — WtxClosePnlSettler rolls it back if the close never completes (and finalizes it once the
+        // broker confirms). Paper closes are immediate/real, so nothing is pending.
+        return state.autoExecutionEnabled() ? flat.withPendingClose(pnl) : flat;
     }
 
     private WtxHtfBiasFilter.HtfBiasContext buildHtfContext(Instrument instrument, WtxConfig config) {
