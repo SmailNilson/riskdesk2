@@ -3,7 +3,9 @@ package com.riskdesk.application.service.strategy.wtxrsi;
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.execution.DefaultOrderRouter;
+import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.application.service.strategy.WtxIntentTranslator;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiPosition;
@@ -11,14 +13,22 @@ import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiRiskPlan;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSignal;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiSignalRecord;
 import com.riskdesk.domain.engine.strategy.wtxrsi.WtxRsiStrategyState;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
+import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -57,14 +67,36 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
+    /** Unified execution core (P3). Nullable: when present AND {@code riskdesk.execution.unified-router.enabled}
+     *  is ON (default OFF), WTX-RSI routes through it instead of the legacy submitOpen/submitClose path. */
+    private final OrderRouter orderRouter;
+    /** Migration kill-switch holder. Nullable in the test constructor. */
+    private final ExecutionProperties executionProperties;
 
+    /** Test-only legacy constructor — production uses the 5-arg variant via Spring autowiring. */
     public IbkrWtxRsiExecutionBridge(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, null, null);
+    }
+
+    @Autowired
+    public IbkrWtxRsiExecutionBridge(
+            IbkrOrderService ibkrOrderService,
+            TradeExecutionRepositoryPort executionRepository,
+            IbkrProperties ibkrProperties,
+            OrderRouter orderRouter,
+            ExecutionProperties executionProperties) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
+        this.orderRouter = orderRouter;
+        this.executionProperties = executionProperties;
+    }
+
+    private boolean unifiedRouterEnabled() {
+        return orderRouter != null && executionProperties != null && executionProperties.isUnifiedRouterEnabled();
     }
 
     @Override
@@ -80,6 +112,12 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
         }
         if (plan.entryPrice() == null) {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
+
+        // P3 — unified-router migration: when the flag is ON, route the OPEN through the shared OrderRouter
+        // (broker-truth reconcile, idempotence, row persistence, synchronous-fill). Zero effect while OFF.
+        if (unifiedRouterEnabled()) {
+            return routeOpenViaRouter(signal, plan, state);
         }
 
         String executionKey = executionKey(state.instrument(), state.timeframe(),
@@ -164,6 +202,12 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
                 || state.entryQty().signum() <= 0) {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_OPEN_ROW);
         }
+
+        // P3 — unified-router migration: route the CLOSE through the shared OrderRouter when the flag is ON.
+        if (unifiedRouterEnabled()) {
+            return routeCloseViaRouter(state, action, referencePrice);
+        }
+
         Optional<TradeExecutionRecord> openRow = executionRepository
                 .findActiveByInstrumentAndTimeframeAndTriggerSource(
                         state.instrument(), state.timeframe(), ExecutionTriggerSource.WTXRSI_AUTO);
@@ -248,6 +292,92 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
             log.error("WTX-RSI [{} {}] CLOSE failed (row {} left non-terminal for retry): {}",
                     state.instrument(), state.timeframe(), row.getId(), msg, e);
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, msg);
+        }
+    }
+
+    /**
+     * P3 — route a WTX-RSI OPEN through the unified {@link OrderRouter}. Builds a {@link TradeIntent#open}
+     * under {@link ExecutionTriggerSource#WTXRSI_AUTO} and maps the router's neutral outcome back to the
+     * strategy-facing {@link WtxRoutingOutcome} (reusing {@link WtxIntentTranslator#toWtxOutcome}). The
+     * account is passed null so the router reads the REAL default managed account (its position filter is a
+     * no-op on null) and persists {@link DefaultOrderRouter#DEFAULT_BROKER_ACCOUNT}; legacy "wtxrsi-default"
+     * rows are re-pointed at cutover so exits still locate them.
+     */
+    private WtxRoutingResult routeOpenViaRouter(WtxRsiSignal signal, WtxRsiRiskPlan plan, WtxRsiStrategyState state) {
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(state.instrument());
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, "Unknown instrument: " + state.instrument());
+        }
+        boolean isLong = signal.side() == WtxRsiSignal.Side.LONG;
+        String key = executionKey(state.instrument(), state.timeframe(), signal.timestamp(),
+                isLong ? "OPEN_LONG" : "OPEN_SHORT");
+        TradeIntent intent = TradeIntent.open(key, ExecutionTriggerSource.WTXRSI_AUTO, instrument,
+                state.timeframe(), isLong ? Side.LONG : Side.SHORT, plan.contracts(), plan.entryPrice(), null);
+        return routeAndMap(intent, state, "OPEN " + (isLong ? "LONG" : "SHORT"));
+    }
+
+    /**
+     * P3 — route a WTX-RSI CLOSE through the unified {@link OrderRouter}. The held side comes from the
+     * strategy state; the router confirms it against broker truth (a stale side can't INCREASE the live
+     * position). Quantity is a fallback only — the router caps it to what the row/broker actually hold.
+     */
+    private WtxRoutingResult routeCloseViaRouter(WtxRsiStrategyState state, WtxRsiSignalRecord.Action action,
+                                                 BigDecimal referencePrice) {
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(state.instrument());
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, "Unknown instrument: " + state.instrument());
+        }
+        if (referencePrice == null) {
+            // The router prices the close limit off the intent — without a reference price it cannot.
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
+        boolean isLong = state.currentPosition() == WtxRsiPosition.LONG;
+        // Stable within a bar (idempotent in-flight), fresh next bar — matches the legacy exit discriminator.
+        Instant ts = state.lastCandleTs() != null ? state.lastCandleTs() : Instant.now();
+        String key = executionKey(state.instrument(), state.timeframe(), ts, isLong ? "CLOSE_LONG" : "CLOSE_SHORT");
+        int qty = state.entryQty().intValue();
+        TradeIntent intent = TradeIntent.close(key, ExecutionTriggerSource.WTXRSI_AUTO, instrument,
+                state.timeframe(), isLong ? Side.LONG : Side.SHORT, qty, referencePrice, null);
+        return routeAndMap(intent, state, action.name());
+    }
+
+    private WtxRoutingResult routeAndMap(TradeIntent intent, WtxRsiStrategyState state, String label) {
+        RoutingResult result = orderRouter.route(intent);
+        WtxRoutingOutcome outcome = WtxIntentTranslator.toWtxOutcome(result.outcome());
+        log.info("WTX-RSI [{} {}] unified-router {} → {} (core {})",
+                state.instrument(), state.timeframe(), label, outcome, result.outcome());
+        return WtxRoutingResult.of(outcome, result.outcome().isFailure() ? result.message() : null);
+    }
+
+    /**
+     * P3 cutover — re-point non-terminal legacy {@code wtxrsi-default} rows to the router's
+     * {@link DefaultOrderRouter#DEFAULT_BROKER_ACCOUNT} so the router's account-scoped open-row lookup can
+     * locate them after the flag flips; otherwise a CLOSE against an existing position would return
+     * {@code SKIPPED_NO_OPEN_ROW} and leave the live IBKR position open. Flag-gated (no-op OFF) and
+     * idempotent (only the placeholder is touched).
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    void normalizeLegacyDefaultAccountRowsForCutover() {
+        if (!unifiedRouterEnabled()) {
+            return;
+        }
+        int normalized = 0;
+        for (TradeExecutionRecord row : executionRepository.findAllActive()) {
+            if (row.getTriggerSource() == ExecutionTriggerSource.WTXRSI_AUTO
+                    && BROKER_ACCOUNT_FALLBACK.equals(row.getBrokerAccountId())) {
+                row.setBrokerAccountId(DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
+                row.setUpdatedAt(Instant.now());
+                executionRepository.save(row);
+                normalized++;
+            }
+        }
+        if (normalized > 0) {
+            log.info("WTX-RSI unified-router cutover: normalized {} 'wtxrsi-default' row(s) to '{}'",
+                    normalized, DefaultOrderRouter.DEFAULT_BROKER_ACCOUNT);
         }
     }
 
