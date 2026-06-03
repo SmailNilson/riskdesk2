@@ -1,5 +1,6 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.application.dto.BrokerCancelResult;
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.BrokerOrderLookup;
@@ -44,6 +45,17 @@ public class IbkrOrderService {
             return BrokerOrderLookup.unavailable();
         }
         return selectedGateway().findOrder(accountId, orderRef);
+    }
+
+    /**
+     * Cancels a working broker order by its broker order id. {@code UNAVAILABLE} when IBKR is disabled.
+     * Used to replace a still-resting WTX entry when a new opposite signal arrives.
+     */
+    public BrokerCancelResult cancelOrder(String accountId, long orderId) {
+        if (!ibkrProperties.isEnabled()) {
+            return BrokerCancelResult.UNAVAILABLE;
+        }
+        return selectedGateway().cancelOrder(accountId, orderId);
     }
 
     private IbkrBrokerGateway selectedGateway() {

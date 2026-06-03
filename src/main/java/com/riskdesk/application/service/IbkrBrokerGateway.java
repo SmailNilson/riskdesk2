@@ -1,5 +1,6 @@
 package com.riskdesk.application.service;
 
+import com.riskdesk.application.dto.BrokerCancelResult;
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.dto.BrokerOrderLookup;
@@ -28,5 +29,17 @@ public interface IbkrBrokerGateway {
      */
     default BrokerOrderLookup findOrder(String requestedAccountId, String orderRef) {
         return BrokerOrderLookup.unavailable();
+    }
+
+    /**
+     * Cancels a working broker order by its broker order id and reports the outcome. Used to replace a
+     * still-resting WTX entry when a new opposite signal arrives (cancel the stale order, then submit the
+     * fresh one) instead of skipping the new signal indefinitely. The result keeps {@code UNAVAILABLE} /
+     * {@code FAILED} (order may still be live) distinct from {@code CANCELLED} / {@code NOT_FOUND} /
+     * {@code ALREADY_INACTIVE} (nothing resting — safe to replace). Default: {@code UNAVAILABLE}
+     * (gateway has no cancel capability).
+     */
+    default BrokerCancelResult cancelOrder(String requestedAccountId, long orderId) {
+        return BrokerCancelResult.UNAVAILABLE;
     }
 }

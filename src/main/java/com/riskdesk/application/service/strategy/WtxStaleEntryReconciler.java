@@ -84,6 +84,22 @@ public class WtxStaleEntryReconciler {
     /** The one-shot boot replay (D3) fires exactly once, as soon as broker truth is readable. */
     private volatile boolean bootReplayDone = false;
 
+    /**
+     * Outcome of reconciling a single {@code ENTRY_SUBMITTED} row against broker truth. Lets an on-demand
+     * caller (e.g. {@code WtxPositionReconciler}) react to a phantom row immediately instead of waiting for
+     * the next scheduled sweep.
+     */
+    public enum Resolution {
+        /** The order is genuinely resting at the broker — the row is correct, left untouched. */
+        LEFT_RESTING,
+        /** The order Filled (missed callback) — the row was flipped to ACTIVE. */
+        ACTIVATED,
+        /** The order is gone and IBKR is flat (or the broker reports it cancelled) — the row was CANCELLED. */
+        CANCELLED,
+        /** Could not confirm (too fresh, no orderRef, lookup unavailable, NOT_FOUND but a position exists). */
+        UNRESOLVED
+    }
+
     public WtxStaleEntryReconciler(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
@@ -140,13 +156,20 @@ public class WtxStaleEntryReconciler {
         reconcileStaleEntries();
     }
 
-    private void reconcileOne(TradeExecutionRecord row, Instant now) {
+    /**
+     * Reconciles one {@code ENTRY_SUBMITTED} row against broker truth and reports what it did. Public so an
+     * on-demand caller ({@code WtxPositionReconciler}) can clear a phantom row the instant it blocks a
+     * same-side signal, instead of waiting up to a scheduled interval. Idempotent and side-effect-safe:
+     * never reconciles on uncertainty (too fresh, no orderRef, lookup UNAVAILABLE, or NOT_FOUND while a
+     * position exists).
+     */
+    public Resolution reconcileOne(TradeExecutionRecord row, Instant now) {
         Instant lastTouched = referenceTimestamp(row);
         if (lastTouched != null && Duration.between(lastTouched, now).compareTo(grace) < 0) {
-            return; // too fresh — let the normal ack/fill flow resolve it first
+            return Resolution.UNRESOLVED; // too fresh — let the normal ack/fill flow resolve it first
         }
         if (row.getExecutionKey() == null || row.getExecutionKey().isBlank()) {
-            return; // can't look it up without the orderRef
+            return Resolution.UNRESOLVED; // can't look it up without the orderRef
         }
 
         BrokerOrderLookup lookup;
@@ -155,7 +178,7 @@ public class WtxStaleEntryReconciler {
         } catch (RuntimeException e) {
             log.debug("WTX stale-entry reconcile: lookup failed for row {} (key={}) — {}",
                     row.getId(), row.getExecutionKey(), e.getMessage());
-            return; // can't confirm — leave it
+            return Resolution.UNRESOLVED; // can't confirm — leave it
         }
 
         // CRITICAL: never reconcile on UNAVAILABLE. The gateway couldn't be queried (disabled,
@@ -163,22 +186,24 @@ public class WtxStaleEntryReconciler {
         // Treating it as absence during an outage could cancel a filled-but-unreconciled row and hide
         // a real broker position. Only NOT_FOUND (live + completed both queried, order in neither) and
         // an explicit FOUND status drive a reconcile.
-        if (lookup.isUnavailable()) {
-            return;
+        if (lookup == null || lookup.isUnavailable()) {
+            return Resolution.UNRESOLVED;
         }
 
         if (lookup.isFound()) {
             String status = lookup.order().status();
             if (isLive(status)) {
-                return; // genuinely resting at the broker — not stale
+                return Resolution.LEFT_RESTING; // genuinely resting at the broker — not stale
             }
             if (isCancelled(status)) {
                 cancel(row, "WTX stale-entry reconcile: IBKR order " + status + " — row reconciled");
-            } else if (isFilled(status)) {
-                activate(row, now);
+                return Resolution.CANCELLED;
             }
-            // Unknown status → leave untouched (conservative).
-            return;
+            if (isFilled(status)) {
+                activate(row, now);
+                return Resolution.ACTIVATED;
+            }
+            return Resolution.UNRESOLVED; // unknown status → leave untouched (conservative).
         }
 
         // NOT_FOUND — the live AND completed sets were both queried and the order is in neither, so it
@@ -189,7 +214,9 @@ public class WtxStaleEntryReconciler {
         // we can't confirm flat → leave it too.
         if (isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId())) {
             cancel(row, "WTX stale-entry reconcile: no live/completed IBKR order and IBKR flat — phantom row reconciled");
+            return Resolution.CANCELLED;
         }
+        return Resolution.UNRESOLVED;
     }
 
     /**

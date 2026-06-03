@@ -172,6 +172,19 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         };
     }
 
+    @Override
+    public com.riskdesk.application.dto.BrokerCancelResult cancelOrder(String requestedAccountId, long orderId) {
+        // Cancel is addressed by broker order id (permId-scoped at IBKR), so the account hint is not
+        // needed here — the id alone identifies the working order.
+        return switch (nativeClient.cancelOrder(orderId)) {
+            case CANCELLED -> com.riskdesk.application.dto.BrokerCancelResult.CANCELLED;
+            case NOT_FOUND -> com.riskdesk.application.dto.BrokerCancelResult.NOT_FOUND;
+            case ALREADY_INACTIVE -> com.riskdesk.application.dto.BrokerCancelResult.ALREADY_INACTIVE;
+            case UNAVAILABLE -> com.riskdesk.application.dto.BrokerCancelResult.UNAVAILABLE;
+            case FAILED -> com.riskdesk.application.dto.BrokerCancelResult.FAILED;
+        };
+    }
+
     private IbkrPositionView toPositionView(Position position) {
         String assetClass = position.contract().getSecType();
         String contractDesc = position.contract().localSymbol() != null && !position.contract().localSymbol().isBlank()

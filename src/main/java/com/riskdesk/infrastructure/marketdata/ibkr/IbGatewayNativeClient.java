@@ -7,6 +7,7 @@ import com.ib.client.Decimal;
 import com.ib.client.Execution;
 import com.ib.client.ExecutionFilter;
 import com.ib.client.Order;
+import com.ib.client.OrderCancel;
 import com.ib.client.OrderState;
 import com.ib.client.OrderStatus;
 import com.ib.client.OrderType;
@@ -979,6 +980,95 @@ public class IbGatewayNativeClient {
                 detail,
                 brokerOrderId);
     }
+
+    /**
+     * Cancels a working order at the broker by its order id and waits for confirmation.
+     *
+     * <p>Used to <i>replace</i> a still-resting WTX entry when a new, opposite signal arrives — instead
+     * of indefinitely skipping the new signal (the old {@code SKIPPED_ENTRY_IN_FLIGHT} freeze), the
+     * caller cancels the stale resting order, then submits the fresh one. Conservatively typed: only a
+     * confirmed cancel ({@code CANCELLED}) or an order the broker no longer has ({@code NOT_FOUND}) is
+     * treated as "nothing resting"; an unconfirmed cancel is {@code FAILED} so the caller never doubles
+     * up on an order that might still be live.</p>
+     */
+    public OrderCancelOutcome cancelOrder(long orderId) {
+        if (orderId <= 0) {
+            return OrderCancelOutcome.FAILED;
+        }
+        if (!ensureConnected()) {
+            return OrderCancelOutcome.UNAVAILABLE;
+        }
+        ApiController ctrl = controller;
+        if (ctrl == null) {
+            return OrderCancelOutcome.UNAVAILABLE;
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<OrderCancelOutcome> result = new AtomicReference<>();
+        ApiController.IOrderCancelHandler handler = new ApiController.IOrderCancelHandler() {
+            @Override
+            public void orderStatus(String status) {
+                if (isCancelledOrderStatus(status)) {
+                    result.compareAndSet(null, OrderCancelOutcome.CANCELLED);
+                    latch.countDown();
+                }
+            }
+
+            @Override
+            public void handle(int errorCode, String errorMsg) {
+                // 10147 ("OrderId ... that needs to be cancelled is not found") — the order is already
+                // gone (filled, cancelled, or aged out). Nothing rests, so a replacement is safe.
+                if (errorCode == 10147
+                        || (errorMsg != null && errorMsg.toLowerCase(java.util.Locale.ROOT).contains("not found"))) {
+                    result.compareAndSet(null, OrderCancelOutcome.NOT_FOUND);
+                } else {
+                    result.compareAndSet(null, OrderCancelOutcome.FAILED);
+                }
+                latch.countDown();
+            }
+        };
+
+        synchronized (orderPlacementLock) {
+            try {
+                ctrl.cancelOrder((int) orderId, new OrderCancel(), handler);
+            } catch (RuntimeException e) {
+                try { ctrl.removeOrderCancelHandler(handler); } catch (Exception ignored) { }
+                log.warn("IB Gateway cancelOrder({}) failed to dispatch — {}", orderId, e.getMessage());
+                return OrderCancelOutcome.FAILED;
+            }
+        }
+
+        boolean completed;
+        try {
+            completed = latch.await(orderTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            completed = false;
+        } finally {
+            try { ctrl.removeOrderCancelHandler(handler); } catch (Exception ignored) { }
+        }
+
+        OrderCancelOutcome outcome = result.get();
+        if (outcome != null) {
+            return outcome;
+        }
+        // No terminal callback within the window — the cancel was NOT confirmed. Treat as FAILED so the
+        // caller keeps the original safe behaviour (do not stack a replacement on a possibly-live order).
+        log.warn("IB Gateway cancelOrder({}) not confirmed within {} — treated as FAILED",
+                orderId, orderTimeout());
+        return OrderCancelOutcome.FAILED;
+    }
+
+    private static boolean isCancelledOrderStatus(String status) {
+        if (status == null) {
+            return false;
+        }
+        String s = status.trim().toLowerCase(java.util.Locale.ROOT);
+        return s.equals("cancelled") || s.equals("apicancelled") || s.equals("inactive");
+    }
+
+    /** Outcome of {@link #cancelOrder(long)}. Mirrors the application-layer {@code BrokerCancelResult}. */
+    public enum OrderCancelOutcome { CANCELLED, NOT_FOUND, ALREADY_INACTIVE, UNAVAILABLE, FAILED }
 
 
     // -------------------------------------------------------------------------

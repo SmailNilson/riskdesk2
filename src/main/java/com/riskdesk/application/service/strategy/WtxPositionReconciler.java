@@ -9,10 +9,13 @@ import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Optional;
 
 /**
@@ -49,8 +52,26 @@ public class WtxPositionReconciler {
 
     private final TradeExecutionRepositoryPort executionRepository;
 
+    /**
+     * Resolves a stuck {@code ENTRY_SUBMITTED} row against broker truth on demand. Nullable — in the
+     * test-only single-arg constructor it is absent, and an in-flight entry then keeps the optimistic
+     * side (the legacy "defer" behaviour). When wired (production), a row the live fill tracker never
+     * resolved is checked against IBKR <i>this bar</i>: a confirmed phantom (no broker order, IBKR flat)
+     * flips the strategy to FLAT so a same-side signal stops evaluating to {@code NONE}.
+     */
+    @Nullable
+    private final WtxStaleEntryReconciler staleEntryReconciler;
+
+    /** Test-only constructor — no broker resolution; an in-flight entry keeps the optimistic side. */
     public WtxPositionReconciler(TradeExecutionRepositoryPort executionRepository) {
+        this(executionRepository, null);
+    }
+
+    @Autowired
+    public WtxPositionReconciler(TradeExecutionRepositoryPort executionRepository,
+                                 @Nullable WtxStaleEntryReconciler staleEntryReconciler) {
         this.executionRepository = executionRepository;
+        this.staleEntryReconciler = staleEntryReconciler;
     }
 
     /**
@@ -76,17 +97,9 @@ public class WtxPositionReconciler {
                 state.instrument(), state.timeframe(), ExecutionTriggerSource.WTX_AUTO)
             .orElse(null);
 
-        WtxPosition rowSide;
-        if (row == null) {
-            rowSide = WtxPosition.FLAT; // no non-terminal row → the position is closed
-        } else {
-            switch (row.getStatus()) {
-                case ACTIVE, EXIT_SUBMITTED, VIRTUAL_EXIT_TRIGGERED -> rowSide = sideOf(row);
-                case PENDING_ENTRY_SUBMISSION, ENTRY_SUBMITTED, ENTRY_PARTIALLY_FILLED -> {
-                    return state; // entry resting / partial — keep the optimistic side
-                }
-                default -> rowSide = WtxPosition.FLAT; // terminal (findActive excludes these) — be defensive
-            }
+        WtxPosition rowSide = resolveRowSide(row);
+        if (rowSide == null) {
+            return state; // entry resting / uncertain — keep the optimistic side
         }
 
         if (rowSide == state.currentPosition()) {
@@ -122,6 +135,42 @@ public class WtxPositionReconciler {
             corrected = corrected.withPosition(rowSide, adoptEntryPrice(row), adoptQty(row), barAtr);
         }
         return corrected;
+    }
+
+    /**
+     * The position SIDE implied by the execution-row truth, or {@code null} when the row is an in-flight
+     * entry whose side must stay optimistic (genuinely resting, partial, or unconfirmable). A {@code null}
+     * row means no non-terminal row exists → the position is FLAT.
+     */
+    @Nullable
+    private WtxPosition resolveRowSide(@Nullable TradeExecutionRecord row) {
+        if (row == null) {
+            return WtxPosition.FLAT; // no non-terminal row → the position is closed
+        }
+        return switch (row.getStatus()) {
+            case ACTIVE, EXIT_SUBMITTED, VIRTUAL_EXIT_TRIGGERED -> sideOf(row);
+            case ENTRY_SUBMITTED -> resolveInFlightSide(row);
+            // PENDING (not yet at broker) / PARTIAL (a real position partly exists) — always keep optimistic.
+            case PENDING_ENTRY_SUBMISSION, ENTRY_PARTIALLY_FILLED -> null;
+            default -> WtxPosition.FLAT; // terminal (findActive excludes these) — be defensive
+        };
+    }
+
+    /**
+     * Resolves an {@code ENTRY_SUBMITTED} row against broker truth. Normally the side stays optimistic
+     * (return {@code null} → keep waiting for the fill). But a PHANTOM row — one the live fill tracker
+     * never resolved while there is no order resting at the broker and IBKR is flat — would otherwise
+     * freeze the side forever and make a same-side signal evaluate to {@code NONE}. Confirming that
+     * phantom (the stale-entry reconciler flips it to CANCELLED) returns {@code FLAT} so the optimistic
+     * side is corrected this bar. Without a wired reconciler (tests) the legacy defer behaviour stands.
+     */
+    @Nullable
+    private WtxPosition resolveInFlightSide(TradeExecutionRecord row) {
+        if (staleEntryReconciler != null
+                && staleEntryReconciler.reconcileOne(row, Instant.now()) == WtxStaleEntryReconciler.Resolution.CANCELLED) {
+            return WtxPosition.FLAT; // phantom cleared → correct the optimistic side to flat
+        }
+        return null; // genuinely resting / uncertain → keep the optimistic side
     }
 
     private static WtxPosition sideOf(TradeExecutionRecord row) {

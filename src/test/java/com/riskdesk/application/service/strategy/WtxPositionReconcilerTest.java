@@ -128,6 +128,34 @@ class WtxPositionReconcilerTest {
     }
 
     @Test
+    void inFlightEntry_phantomCancelledByBrokerTruth_correctsToFlat() {
+        // The reported NONE bug: the optimistic LONG comes from an ENTRY_SUBMITTED phantom the broker never
+        // had. When the stale-entry reconciler confirms it against IBKR (no order, flat → CANCELLED), the
+        // optimistic side must be corrected to FLAT so a same-side signal stops evaluating to NONE.
+        WtxStaleEntryReconciler stale = mock(WtxStaleEntryReconciler.class);
+        when(stale.reconcileOne(any(), any())).thenReturn(WtxStaleEntryReconciler.Resolution.CANCELLED);
+        WtxPositionReconciler reconcilerWithBroker = new WtxPositionReconciler(repo, stale);
+        stubRow(row(ExecutionStatus.ENTRY_SUBMITTED, "LONG", null, 2));
+
+        WtxStrategyState in = liveLong("18000.00", 2);
+        WtxStrategyState out = reconcilerWithBroker.reconcile(in, MNQ, CLOSE, ATR);
+
+        assertThat(out.currentPosition()).isEqualTo(WtxPosition.FLAT);
+    }
+
+    @Test
+    void inFlightEntry_brokerUnresolved_keepsOptimisticSide() {
+        // Genuinely resting / unconfirmable — keep the optimistic side (defer), exactly as before.
+        WtxStaleEntryReconciler stale = mock(WtxStaleEntryReconciler.class);
+        when(stale.reconcileOne(any(), any())).thenReturn(WtxStaleEntryReconciler.Resolution.UNRESOLVED);
+        WtxPositionReconciler reconcilerWithBroker = new WtxPositionReconciler(repo, stale);
+        stubRow(row(ExecutionStatus.ENTRY_SUBMITTED, "LONG", null, 2));
+
+        WtxStrategyState in = liveLong("18000.00", 2);
+        assertThat(reconcilerWithBroker.reconcile(in, MNQ, CLOSE, ATR)).isSameAs(in);
+    }
+
+    @Test
     void strategyFlat_rowActiveLong_adoptsFromFill() {
         stubRow(row(ExecutionStatus.ACTIVE, "LONG", "18002.50", 3));
 

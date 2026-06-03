@@ -1,6 +1,8 @@
 package com.riskdesk.application.service.strategy;
 
+import com.riskdesk.application.dto.BrokerCancelResult;
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.domain.execution.RoutingResult;
@@ -373,14 +375,20 @@ public class WtxExecutionBridge {
                     log.warn("WTX [{} {}] reconcile: voided stale ACTIVE row {} — IBKR flat, position closed outside WTX",
                             state.instrument(), tf, existing.getId());
                 } else {
-                    // An entry order is resting UNFILLED at the broker — IBKR reads flat only because it
-                    // hasn't filled yet. Opening another now risks a DOUBLE FILL once both rest, leaving
-                    // two non-terminal rows on one panel. Skip and let the in-flight order resolve
-                    // (fill → ACTIVE, or terminal) before any new entry on a later bar.
-                    log.info("WTX [{} {}] open/reverse skipped — entry row {} still in flight ({}) while IBKR flat; "
-                            + "not stacking a second order", state.instrument(), tf, existing.getId(), existing.getStatus());
-                    return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
-                            "entry still in flight (" + existing.getStatus() + ") — open skipped to avoid double fill");
+                    // A non-terminal entry row exists while IBKR reads flat. Historically we ALWAYS skipped
+                    // (SKIPPED_ENTRY_IN_FLIGHT) to avoid a double fill — but that froze the strategy whenever
+                    // the row was a PHANTOM the live fill tracker never resolved (missed callback, restart, a
+                    // DAY order that expired) and there is in fact NO order resting at the broker. Resolve it
+                    // against broker truth now instead of waiting for the 60s stale-entry scheduler:
+                    //   • order genuinely resting → cancel it, then void the row and open fresh (replace);
+                    //   • order gone / terminal and IBKR flat → phantom row → void it and open fresh;
+                    //   • broker unqueryable or the cancel was not confirmed → keep skipping (never risk a
+                    //     double fill on an order we could not prove is gone).
+                    WtxRoutingResult skip = resolveInFlightEntryOrSkip(existing, action);
+                    if (skip != null) {
+                        return skip;
+                    }
+                    // Row cleared (and any genuinely-resting order cancelled) — fall through to open fresh.
                 }
             }
         }
@@ -1166,6 +1174,93 @@ public class WtxExecutionBridge {
     private Optional<TradeExecutionRecord> findOpenWtxExecution(String instrument, String timeframe) {
         return executionRepository.findActiveByInstrumentAndTimeframeAndTriggerSource(
                 instrument, timeframe, ExecutionTriggerSource.WTX_AUTO);
+    }
+
+    /**
+     * Resolves a non-terminal WTX entry row found while IBKR reads flat, on the path of a NEW
+     * {@code OPEN}/{@code REVERSE} signal. Queries the broker for the row's order and either clears the
+     * row (so the caller submits a fresh order) or returns a {@link WtxRoutingOutcome#SKIPPED_ENTRY_IN_FLIGHT}
+     * result to short-circuit routing.
+     *
+     * <ul>
+     *   <li>broker unqueryable ({@code UNAVAILABLE}, lookup error, or no orderRef) → SKIP (unchanged safe
+     *       behaviour — we can't prove the order is gone, so never risk a double fill);</li>
+     *   <li>order genuinely resting (Submitted/PreSubmitted/…) → cancel it; only when the cancel is
+     *       confirmed ({@link BrokerCancelResult#clearedToReplace()}) do we void the row and proceed,
+     *       otherwise SKIP;</li>
+     *   <li>order gone / terminal ({@code NOT_FOUND}, Cancelled, Inactive, Filled) → phantom row → void
+     *       it and proceed.</li>
+     * </ul>
+     *
+     * @return a skip result to short-circuit routing, or {@code null} when the row was cleared and the
+     *         caller should submit the new order.
+     */
+    private WtxRoutingResult resolveInFlightEntryOrSkip(TradeExecutionRecord existing, WtxAction action) {
+        String key = existing.getExecutionKey();
+        if (key == null || key.isBlank()) {
+            // No orderRef to look up — can't confirm the broker order is gone. Keep the safe skip.
+            return skipInFlight(existing, "no orderRef to confirm the broker order is gone");
+        }
+        String account = existing.getBrokerAccountId();
+
+        BrokerOrderLookup lookup;
+        try {
+            lookup = ibkrOrderService.findOrder(account, key);
+        } catch (RuntimeException e) {
+            return skipInFlight(existing, "broker order lookup failed (" + e.getMessage() + ")");
+        }
+        if (lookup == null || lookup.isUnavailable()) {
+            return skipInFlight(existing, "broker order state unavailable");
+        }
+
+        if (lookup.isFound() && isLiveOrderStatus(lookup.order().status())) {
+            // A real order is resting at the broker — cancel it before opening fresh so the resting order
+            // and the replacement can never both fill.
+            Long orderId = lookup.order().orderId();
+            BrokerCancelResult cancel = (orderId == null)
+                    ? BrokerCancelResult.FAILED
+                    : safeCancel(account, orderId);
+            if (!cancel.clearedToReplace()) {
+                return skipInFlight(existing, "resting entry order " + lookup.order().status()
+                        + " could not be cancelled (" + cancel + ")");
+            }
+            log.warn("WTX [{} {}] resting entry order {} ({}) cancelled to make way for {} — replacing",
+                    existing.getInstrument(), existing.getTimeframe(), orderId, lookup.order().status(), action);
+        }
+
+        // No live order remains (cancelled above, or FOUND-terminal, or NOT_FOUND): clear the phantom row.
+        voidRow(existing, "WTX reconcile: in-flight entry resolved against broker (" + lookup.outcome()
+                + ") — phantom/cancelled row voided before " + action.name());
+        log.warn("WTX [{} {}] voided in-flight entry row {} ({}) — broker lookup={}, proceeding with {}",
+                existing.getInstrument(), existing.getTimeframe(), existing.getId(), existing.getStatus(),
+                lookup.outcome(), action);
+        return null;
+    }
+
+    private WtxRoutingResult skipInFlight(TradeExecutionRecord existing, String why) {
+        log.info("WTX [{} {}] open/reverse skipped — entry row {} still in flight ({}) while IBKR flat; {}",
+                existing.getInstrument(), existing.getTimeframe(), existing.getId(), existing.getStatus(), why);
+        return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                "entry still in flight (" + existing.getStatus() + ") — " + why);
+    }
+
+    private BrokerCancelResult safeCancel(String account, long orderId) {
+        try {
+            return ibkrOrderService.cancelOrder(account, orderId);
+        } catch (RuntimeException e) {
+            log.warn("WTX in-flight cancel failed for order {} — {}", orderId, e.getMessage());
+            return BrokerCancelResult.FAILED;
+        }
+    }
+
+    /** True for an IBKR order status that is still working (could still fill) — must be cancelled before a replace. */
+    private static boolean isLiveOrderStatus(String status) {
+        if (status == null) {
+            return false;
+        }
+        String s = status.trim().toLowerCase(java.util.Locale.ROOT);
+        return s.equals("submitted") || s.equals("presubmitted") || s.equals("pendingsubmit")
+                || s.equals("apipending") || s.equals("pendingcancel") || s.equals("partiallyfilled");
     }
 
     /** Marks a row {@code CANCELLED} with a reason and persists it. No broker side effect. */

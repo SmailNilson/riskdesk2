@@ -1,6 +1,9 @@
 package com.riskdesk.application.service.strategy;
 
+import com.riskdesk.application.dto.BrokerCancelResult;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.dto.BrokerOrderLookup;
+import com.riskdesk.application.dto.BrokerOrderStatusView;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.application.service.IbkrOrderService;
@@ -50,7 +53,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -1196,6 +1201,82 @@ class WtxExecutionBridgeTest {
         verify(ibkrOrderService, never()).submitEntryOrder(any());
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, repo.all().get(0).getStatus(),
                 "in-flight entry row must be preserved — not voided, not flattened");
+    }
+
+    @Test
+    void inFlightEntry_brokerHasNoOrder_phantomRowVoided_opensFresh() {
+        // The reported bug: IBKR reads flat AND the broker has NO order at all (the ENTRY_SUBMITTED row is a
+        // phantom the fill tracker never resolved). Instead of freezing on SKIPPED_ENTRY_IN_FLIGHT, the
+        // bridge confirms the order is gone (findOrder → NOT_FOUND), voids the phantom row, and opens fresh.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
+        when(ibkrOrderService.findOrder(any(), any())).thenReturn(BrokerOrderLookup.notFound());
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord phantom = wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED);
+        repo.createIfAbsent(phantom);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        // IBKR flat downgrades REVERSE_TO_SHORT → OPEN_SHORT; the phantom is cleared so the fresh open routes.
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r -> "SHORT".equals(r.action())));
+        verify(ibkrOrderService, never()).cancelOrder(any(), anyLong()); // nothing to cancel — no broker order
+        assertEquals(ExecutionStatus.CANCELLED, phantom.getStatus(), "phantom row must be voided");
+    }
+
+    @Test
+    void inFlightEntry_brokerOrderResting_cancelledThenReplaced() {
+        // A genuinely resting entry order: cancel it at the broker, then open the fresh side (replace).
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
+        when(ibkrOrderService.findOrder(any(), any())).thenReturn(
+                BrokerOrderLookup.found(new BrokerOrderStatusView(555L, "ref", "DU123", "Submitted")));
+        when(ibkrOrderService.cancelOrder(any(), eq(555L))).thenReturn(BrokerCancelResult.CANCELLED);
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord resting = wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED);
+        repo.createIfAbsent(resting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome());
+        verify(ibkrOrderService, times(1)).cancelOrder(any(), eq(555L));
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r -> "SHORT".equals(r.action())));
+        assertEquals(ExecutionStatus.CANCELLED, resting.getStatus(), "resting row voided after its order was cancelled");
+    }
+
+    @Test
+    void inFlightEntry_brokerOrderResting_cancelFails_keepsSkipping() {
+        // The order is resting but the cancel could NOT be confirmed — never stack a replacement on a
+        // possibly-live order. Keep the safe SKIPPED_ENTRY_IN_FLIGHT and preserve the row.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(0)));
+        when(ibkrOrderService.findOrder(any(), any())).thenReturn(
+                BrokerOrderLookup.found(new BrokerOrderStatusView(555L, "ref", "DU123", "Submitted")));
+        when(ibkrOrderService.cancelOrder(any(), eq(555L))).thenReturn(BrokerCancelResult.FAILED);
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord resting = wtxRow("LONG", 1, ExecutionStatus.ENTRY_SUBMITTED);
+        repo.createIfAbsent(resting);
+
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.SHORT, bd(100), bd(1), bd(1))
+                .withConfiguredOrderQty(1);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.REVERSE_TO_SHORT), state, bd(100));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+        assertEquals(ExecutionStatus.ENTRY_SUBMITTED, resting.getStatus(), "row preserved when cancel unconfirmed");
     }
 
     @Test

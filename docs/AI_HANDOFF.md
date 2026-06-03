@@ -2,6 +2,32 @@
 
 Last updated: 2026-06-03
 
+## WTX phantom ENTRY_SUBMITTED — cancel/replace + live position reconcile (2026-06-03)
+
+Fixes two user-reported symptoms that share ONE root cause: a stale `ENTRY_SUBMITTED` row the live fill
+tracker never resolved (missed callback / restart / DAY-order expiry) while there is **no order at the
+broker** and IBKR is flat. The phantom row (a) made every new opposite signal return
+`SKIPPED_ENTRY_IN_FLIGHT` ("ENTRY IN FLIGHT" with no real order), and (b) froze the optimistic side, so a
+same-side signal evaluated to `NONE`. Both previously self-healed only after the 60s `WtxStaleEntryReconciler`
+sweep (+120s grace).
+
+- **New broker cancel primitive.** `IbkrBrokerGateway.cancelOrder(account, orderId)` (default UNAVAILABLE) →
+  `IbGatewayBrokerGateway` → `IbGatewayNativeClient.cancelOrder(orderId)` using `ApiController.cancelOrder` +
+  `IOrderCancelHandler`. Tri-stately typed via `BrokerCancelResult` ({CANCELLED, NOT_FOUND, ALREADY_INACTIVE,
+  UNAVAILABLE, FAILED}); only `clearedToReplace()` outcomes allow a replacement (never double-fill on an
+  order we can't prove is gone).
+- **`WtxExecutionBridge` in-flight branch** (confirmed-flat path) no longer blindly skips. It now does a
+  synchronous `findOrder`: UNAVAILABLE / lookup-error / no-orderRef → keep `SKIPPED_ENTRY_IN_FLIGHT`; a
+  genuinely resting order → cancel then void the row and open fresh (replace); NOT_FOUND / terminal → void
+  the phantom row and open fresh.
+- **`WtxPositionReconciler`** gets a nullable `WtxStaleEntryReconciler` (wired in prod, null in the test-only
+  ctor). For an `ENTRY_SUBMITTED` row it calls `reconcileOne(row, now)` on demand: only a confirmed phantom
+  (`Resolution.CANCELLED`) flips the optimistic side to FLAT this bar; genuinely-resting / uncertain keeps
+  the optimistic side (legacy defer). `reconcileOne` was made public and now returns a `Resolution`.
+- Safety preserved: when the broker can't be queried, both paths fall back to the old "skip / defer"
+  behaviour. New tests cover phantom-void, resting-cancel-replace, cancel-failed-skip, and the reconciler's
+  phantom→FLAT vs unresolved→optimistic branches.
+
 ## D2 re-land — reverse open serialised behind the close FILL (2026-06-03)
 
 The last execution-core slice (D2 was pulled earlier because the WTX state model couldn't absorb its async
