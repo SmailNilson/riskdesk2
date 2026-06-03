@@ -7,6 +7,7 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -97,20 +98,30 @@ class ReverseDeferredOpenSchedulerTest {
     }
 
     @Test
-    void closeStuckExitSubmittedWithTerminalOrderStatus_cancelsDeferredOpen() {
-        // Partial fill then cancel: the fill tracker leaves the close row EXIT_SUBMITTED (filledQty>0) while
-        // its raw orderStatus is Cancelled. The scheduler must NOT wait forever → cancel the deferred open.
+    void closeStuckExitSubmittedWithTerminalOrderStatus_revivesCloseAndCancelsDeferredOpen() {
+        // Partial fill (1 of 2) then cancel: the fill tracker leaves the close row EXIT_SUBMITTED (filledQty>0)
+        // while its raw orderStatus is Cancelled. The scheduler must NOT wait forever → revive the close row to
+        // ACTIVE for the remaining 1 (so a later reverse flattens it, not stacks) and cancel the deferred open.
         TradeExecutionRecord open = deferredOpen(99L);
         TradeExecutionRecord close = closeRow(ExecutionStatus.EXIT_SUBMITTED);
         close.setOrderStatus("Cancelled");
+        close.setQuantity(2);
+        close.setFilledQuantity(new BigDecimal("1")); // partial close fill
+        close.setIbkrOrderId(900);
         when(repo.findPendingDeferredReverseOpens()).thenReturn(List.of(open));
         when(repo.findById(99L)).thenReturn(Optional.of(close));
 
         scheduler.submitReadyDeferredOpens();
 
         verify(router, never()).submitDeferredReverseOpen(any());
+        // the live remainder is revived so the next reverse flattens it instead of stacking
+        assertThat(close.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(close.getQuantity()).isEqualTo(1);  // 2 − 1 partial fill
+        assertThat(close.getIbkrOrderId()).isNull();   // dead order id detached
+        // the deferred open is dropped
         assertThat(open.getStatus()).isEqualTo(ExecutionStatus.CANCELLED);
         assertThat(open.getDeferredReverseCloseRowId()).isNull();
+        verify(repo).save(close);
         verify(repo).save(open);
     }
 

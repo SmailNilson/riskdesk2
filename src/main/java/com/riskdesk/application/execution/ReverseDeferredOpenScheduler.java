@@ -9,9 +9,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Slice D — D2: submits each deferred REVERSE open leg once its close has FILLED.
@@ -99,12 +99,43 @@ public class ReverseDeferredOpenScheduler {
         // close order is DEAD (partially flattened, NOT flat). Don't wait forever (which would freeze routing
         // for this signal/timeframe): the position remainder is still live, so cancel the deferred open.
         if (isTerminalCancelStatus(close.getOrderStatus())) {
-            cancel(open, "reverse deferred-open cancelled — close row " + closeRowId + " stuck " + closeStatus
-                + " with terminal orderStatus '" + close.getOrderStatus() + "' (partial-cancel, close dead);"
-                + " position remainder still live, open not submitted");
+            // Revive the stuck close row to ACTIVE for the remaining live position (reduced by the partial
+            // fill) + detach the dead order id BEFORE dropping the deferred open. Otherwise the next reverse's
+            // findOpenRow returns this stale EXIT_SUBMITTED row, skips submitting a close for it, and STACKS a
+            // new entry on the still-live remainder.
+            reviveStuckPartialCancelClose(close);
+            cancel(open, "reverse deferred-open cancelled — close row " + closeRowId + " was stuck " + closeStatus
+                + " with terminal orderStatus '" + close.getOrderStatus() + "' (partial-cancel); close row revived"
+                + " to ACTIVE for the live remainder, open not submitted");
             return;
         }
         // genuinely resting → wait for the fill; a later tick retries.
+    }
+
+    /**
+     * A close that PARTIALLY filled then died (terminal orderStatus while the lifecycle stayed
+     * EXIT_SUBMITTED): revive the row to ACTIVE for the remaining live position (original qty minus the
+     * partial close fill) and detach the dead close order id, so a later reverse flattens it first (capped to
+     * broker truth) instead of stacking. Full partial-fill quantity reconciliation remains the 3c gap; this
+     * is the minimal correct un-sticking.
+     */
+    private void reviveStuckPartialCancelClose(TradeExecutionRecord close) {
+        BigDecimal filled = close.getFilledQuantity();
+        Integer qty = close.getQuantity();
+        if (qty != null && qty > 0 && filled != null && filled.signum() > 0) {
+            int remaining = qty - filled.intValue();
+            if (remaining > 0) {
+                close.setQuantity(remaining); // position reduced by the partial close fill
+            }
+        }
+        close.setStatus(ExecutionStatus.ACTIVE);
+        close.setStatusReason("close partially filled then " + close.getOrderStatus()
+            + " — remaining position revived to ACTIVE");
+        close.setIbkrOrderId(null); // detach the dead close order id (replayed cancel can't re-touch it)
+        close.setUpdatedAt(Instant.now());
+        executionRepository.save(close);
+        log.warn("reverse deferred-open: revived stuck partial-cancel close row {} to ACTIVE (remaining qty {})",
+            close.getId(), close.getQuantity());
     }
 
     /** Close states that mean the close did NOT complete (the position is, or may still be, live). {@code
