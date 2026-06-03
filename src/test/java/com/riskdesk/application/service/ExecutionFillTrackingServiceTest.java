@@ -360,6 +360,42 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void replayedCancelledAfterReviveByPermId_keepsRowActive_doesNotReCancel() {
+        // bug_007 regression: permId-first locate() means the revive branch must detach BOTH the dead
+        // close orderId AND its permId. Otherwise a replayed Cancelled callback (IBKR re-delivers them)
+        // re-locates the revived ACTIVE row by the close's still-attached permId and wrongly CANCELS a
+        // position that is still live at the broker — orphaning it as a phantom. With permId detached the
+        // replay matches nothing (its permId and orderId are both gone from the row) and is ignored.
+        final long permId = 555_000_222L;
+        TradeExecutionRecord stored = baseExecution();
+        stored.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        stored.setIbkrOrderId(ORDER_ID);
+        stored.setPermId(permId);
+        // Faithful DB behaviour: the row is found by a key only while it still carries that key.
+        when(repository.findByPermId(permId)).thenAnswer(inv ->
+            Long.valueOf(permId).equals(stored.getPermId()) ? Optional.of(stored) : Optional.empty());
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenAnswer(inv ->
+            Integer.valueOf(ORDER_ID).equals(stored.getIbkrOrderId()) ? Optional.of(stored) : Optional.empty());
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        // First Cancelled (no fill) on the EXIT order → revive to ACTIVE, detach orderId + permId.
+        service.onOrderStatus(ORDER_ID, permId, "Cancelled",
+            BigDecimal.ZERO, BigDecimal.ONE, BigDecimal.ZERO, Instant.parse("2026-06-03T15:30:00Z"));
+
+        assertEquals(ExecutionStatus.ACTIVE, stored.getStatus());
+        assertNull(stored.getIbkrOrderId(), "dead close order id must be detached on revive");
+        assertNull(stored.getPermId(), "dead close permId must be detached so a replayed cancel can't re-target it");
+
+        // Replay the SAME Cancelled callback — it must NOT re-locate and re-cancel the live position.
+        service.onOrderStatus(ORDER_ID, permId, "Cancelled",
+            BigDecimal.ZERO, BigDecimal.ONE, BigDecimal.ZERO, Instant.parse("2026-06-03T15:30:00Z"));
+
+        assertEquals(ExecutionStatus.ACTIVE, stored.getStatus(), "replayed cancel must leave the revived row ACTIVE");
+        // Exactly one save — the revive. The replay locates nothing and is ignored before any write.
+        verify(repository, times(1)).save(any(TradeExecutionRecord.class));
+    }
+
+    @Test
     void orderStatusUnchangedDoesNotPublish() {
         TradeExecutionRecord stored = baseExecution();
         stored.setIbkrOrderId(ORDER_ID);

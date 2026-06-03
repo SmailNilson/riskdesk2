@@ -200,11 +200,14 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                     // still live. Revive the row to ACTIVE (not CANCELLED) so it stays managed; otherwise
                     // the live position is orphaned (a later CLOSE/FLATTEN finds no row) and the WTX close
                     // settler would read the row as gone and wrongly FINALIZE a phantom close's P&L. Detach
-                    // the dead close order id so a replayed cancel callback can't re-cancel the revived row.
+                    // BOTH the dead close order id AND its permId so a replayed cancel callback can't
+                    // re-locate the revived row (permId-first locate would otherwise re-target it by the
+                    // close's still-attached permId and CANCEL a row whose position is still live).
                     execution.setStatus(ExecutionStatus.ACTIVE);
                     execution.setStatusReason("IBKR close order " + status
                         + " without a fill — position still live, revived to ACTIVE");
                     execution.setIbkrOrderId(null);
+                    execution.setPermId(null);
                 } else {
                     // An entry order (or any non-exit) that cancelled without a fill never opened — terminal.
                     execution.setStatus(ExecutionStatus.CANCELLED);
