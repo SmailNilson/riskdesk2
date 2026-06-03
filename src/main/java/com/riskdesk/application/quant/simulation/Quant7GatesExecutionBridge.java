@@ -1,6 +1,7 @@
 package com.riskdesk.application.quant.simulation;
 
 import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 
 /**
@@ -35,4 +36,13 @@ public interface Quant7GatesExecutionBridge {
 
     /** Flatten the open IBKR position mirroring a just-resolved paper simulation. */
     RoutingResult submitClose(Quant7GatesSimulation closed);
+
+    /**
+     * Re-flatten an orphaned mirrored row: its paper simulation already closed but
+     * the live IBKR position is still open after a failed/skipped close. The
+     * retry seam used by {@code QuantSimFlattenReconciler} so a single transient
+     * close-routing failure can never leave a position open indefinitely.
+     * Idempotent — a terminal or already {@code EXIT_SUBMITTED} row is a no-op.
+     */
+    RoutingResult flatten(TradeExecutionRecord openRow);
 }

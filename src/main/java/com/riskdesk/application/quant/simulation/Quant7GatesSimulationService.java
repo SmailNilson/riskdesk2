@@ -312,6 +312,15 @@ public class Quant7GatesSimulationService {
         return false;
     }
 
+    /**
+     * True when an OPEN paper simulation exists for {@code (instrument, direction)}.
+     * Used by {@code QuantSimFlattenReconciler} to tell a still-legitimate mirrored
+     * position (paper sim still open) from an orphan whose paper sim has closed.
+     */
+    public synchronized boolean hasOpenSimulation(Instrument instrument, Quant7GatesSimulation.Direction direction) {
+        return hasOpen(instrument, direction);
+    }
+
     private List<Quant7GatesSimulation> bucket(Instrument instrument) {
         return byInstrument.computeIfAbsent(instrument, k -> new ArrayList<>());
     }

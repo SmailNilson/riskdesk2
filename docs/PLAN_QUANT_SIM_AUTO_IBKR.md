@@ -87,6 +87,21 @@ QuantGateService.scan()
 - Dans `onSnapshot(...)`, quand `maybeClose` renvoie une ligne fermée → `bridge.submitClose(...)`.
 - **Le papier n'est jamais altéré** par le résultat du bridge (les stats restent celles de la simulation).
 
+### 2.5b Filet de sécurité — reconciler de flatten (revue Codex P1-A)
+
+`QuantSimFlattenReconciler` (`@Scheduled`, gaté par `enabled`) ré-attaque le flatten
+des positions **orphelines** : une ligne `QUANT_SIM_AUTO` `ACTIVE` (entrée fillée,
+position réelle ouverte) sans simulation papier OPEN correspondante
+(`hasOpenSimulation(instrument, direction)`). Sans lui, un échec transitoire du
+close (IBKR off / reject) laisserait la position ouverte indéfiniment — le harnais
+papier ne traite que les sims OPEN et ne retente jamais. Idempotent : `flatten()`
+no-op une ligne déjà `EXIT_SUBMITTED`/terminale.
+
+> **Revue Codex P1-B** : `submitClose` flatten désormais la ligne **réellement
+> ouverte** (sens dérivé de `row.getAction()`, pas de `closed.direction()`) et
+> **no-op** si le sens du sim papier ne correspond pas à la position réelle — évite
+> de fermer le mauvais trade quand un côté papier n'a jamais été mirroré.
+
 ### 2.6 Sortie de session — force-close 17:00 ET
 `WtxNySessionCloseScheduler` est scopé WTX. **Étendre** le force-close (ou ajouter un scheduler jumeau) pour flatten aussi les positions `QUANT_SIM_AUTO` avant la clôture — filet de sécurité « no-SL » : pas de position orpheline la nuit si la sim ne ferme pas.
 
@@ -150,6 +165,7 @@ Nouveau `QuantSimExecutionProperties` (`@ConfigurationProperties("riskdesk.quant
 |---|---|
 | Harnais simulation (à câbler) | `application/quant/simulation/Quant7GatesSimulationService.java` |
 | **Bridge (nouveau)** | `application/quant/simulation/Quant7GatesExecutionBridge.java` (+ `IbkrQuant7GatesExecutionBridge.java`) |
+| **Reconciler flatten (nouveau)** | `application/quant/simulation/QuantSimFlattenReconciler.java` |
 | Modèle de référence | `application/service/strategy/wtxrsi/IbkrWtxRsiExecutionBridge.java` |
 | Soumission ordre | `application/service/IbkrOrderService.java` |
 | Résultat de routage générique | `domain/execution/RoutingResult.java`, `RoutingOutcome.java` |

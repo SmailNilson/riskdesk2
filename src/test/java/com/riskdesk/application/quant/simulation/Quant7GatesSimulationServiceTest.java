@@ -290,6 +290,9 @@ class Quant7GatesSimulationServiceTest {
             closes.add(closed);
             return RoutingResult.of(RoutingOutcome.ROUTED);
         }
+        @Override public RoutingResult flatten(com.riskdesk.domain.model.TradeExecutionRecord row) {
+            return RoutingResult.of(RoutingOutcome.ROUTED);
+        }
     }
 
     private static ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider(Quant7GatesExecutionBridge bridge) {

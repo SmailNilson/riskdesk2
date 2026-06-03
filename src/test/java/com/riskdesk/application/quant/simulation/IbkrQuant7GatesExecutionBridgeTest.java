@@ -179,6 +179,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         TradeExecutionRecord openRow = new TradeExecutionRecord();
         openRow.setId(42L);
         openRow.setStatus(ExecutionStatus.ACTIVE);
+        openRow.setAction("LONG");
         openRow.setQuantity(1);
         openRow.setInstrument("MNQ");
         openRow.setExecutionKey("quant-sim:MNQ:LONG:1:OPEN");
@@ -214,12 +215,75 @@ class IbkrQuant7GatesExecutionBridgeTest {
     void closeSkippedWhenAlreadyExitSubmitted() {
         TradeExecutionRecord exiting = new TradeExecutionRecord();
         exiting.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        exiting.setAction("LONG");
         when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any()))
             .thenReturn(Optional.of(exiting));
         RoutingResult r = bridge.submitClose(
             close(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30050.0,
                 Quant7GatesSimulationStatus.CLOSED_SL));
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void closeNoOpsWhenActiveRowDirectionMismatches() {
+        // The active broker row is a SHORT (a different trade); the closing paper
+        // sim is LONG and was never mirrored. Flattening the SHORT would be wrong.
+        TradeExecutionRecord shortRow = new TradeExecutionRecord();
+        shortRow.setStatus(ExecutionStatus.ACTIVE);
+        shortRow.setAction("SHORT");
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any()))
+            .thenReturn(Optional.of(shortRow));
+        RoutingResult r = bridge.submitClose(
+            close(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30050.0,
+                Quant7GatesSimulationStatus.CLOSED_TP1));
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ── flatten (reconciler retry — Codex P1-A) ──────────────────────────────
+
+    @Test
+    void flattenReSubmitsActiveOrphan() {
+        TradeExecutionRecord orphan = new TradeExecutionRecord();
+        orphan.setId(99L);
+        orphan.setStatus(ExecutionStatus.ACTIVE);
+        orphan.setAction("LONG");
+        orphan.setQuantity(1);
+        orphan.setInstrument("MNQ");
+        orphan.setExecutionKey("quant-sim:MNQ:LONG:1:OPEN");
+        orphan.setBrokerAccountId("DU-TEST");
+        orphan.setNormalizedEntryPrice(new java.math.BigDecimal("30000.00"));
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(999L, "Submitted", "ref", Instant.now()));
+
+        RoutingResult r = bridge.flatten(orphan);
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // flatten a LONG
+        assertThat(orphan.getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+    }
+
+    @Test
+    void flattenNoOpWhenRowTerminal() {
+        TradeExecutionRecord closedRow = new TradeExecutionRecord();
+        closedRow.setStatus(ExecutionStatus.CLOSED);
+        closedRow.setAction("LONG");
+        RoutingResult r = bridge.flatten(closedRow);
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void flattenSkippedWhenIbkrDisabled() {
+        when(ibkrProperties.isEnabled()).thenReturn(false);
+        TradeExecutionRecord orphan = new TradeExecutionRecord();
+        orphan.setStatus(ExecutionStatus.ACTIVE);
+        orphan.setAction("LONG");
+        RoutingResult r = bridge.flatten(orphan);
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_IBKR_DISABLED);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
