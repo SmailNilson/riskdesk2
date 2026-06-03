@@ -21,18 +21,6 @@ export default function Quant7GatesSimulationPanel() {
   const { rows, stats, connected } = useQuant7GatesSimulations();
   const { state: execState, error: execError, busy: execBusy, setEnabled } = useQuantSimExecState();
 
-  // Instruments actively mirroring to IBKR right now (master flag on AND the
-  // per-instrument toggle on). Used to flag OPEN rows that have a real order.
-  const armed = useMemo(() => {
-    const set = new Set<string>();
-    if (execState?.masterEnabled) {
-      for (const [instr, on] of Object.entries(execState.toggles)) {
-        if (on) set.add(instr);
-      }
-    }
-    return set;
-  }, [execState]);
-
   const { open, closed } = useMemo(() => {
     const o: Quant7GatesSimulationView[] = [];
     const c: Quant7GatesSimulationView[] = [];
@@ -76,7 +64,7 @@ export default function Quant7GatesSimulationPanel() {
       <AutoIbkrControls state={execState} error={execError} busy={execBusy} onToggle={setEnabled} />
 
       <div className="mt-3 space-y-3">
-        <Section label="Open positions" rows={open} armed={armed}
+        <Section label="Open positions" rows={open}
           emptyHint="No open trades — waiting for the next qualified setup." />
         <Section label="Recently closed" rows={closed.slice(0, 20)} emptyHint="No closed trades yet." closed />
       </div>
@@ -147,6 +135,10 @@ function AutoIbkrControls({
         );
       })}
       {error && <span className="text-[9px] font-mono text-rose-400">{error}</span>}
+      <span className="basis-full text-[9px] font-mono text-slate-600">
+        ON arms a live IBKR order for the next qualifying setup on that instrument — it is an arming
+        state, not a per-row position indicator.
+      </span>
     </div>
   );
 }
@@ -205,13 +197,11 @@ function Section({
   rows,
   emptyHint,
   closed,
-  armed,
 }: {
   label: string;
   rows: Quant7GatesSimulationView[];
   emptyHint: string;
   closed?: boolean;
-  armed?: Set<string>;
 }) {
   return (
     <div>
@@ -225,7 +215,7 @@ function Section({
       ) : (
         <div className="space-y-2">
           {rows.map(r => (
-            <TradeCard key={r.id} row={r} closed={closed} mirrored={!closed && (armed?.has(r.instrument) ?? false)} />
+            <TradeCard key={r.id} row={r} closed={closed} />
           ))}
         </div>
       )}
@@ -233,7 +223,7 @@ function Section({
   );
 }
 
-function TradeCard({ row, closed, mirrored }: { row: Quant7GatesSimulationView; closed?: boolean; mirrored?: boolean }) {
+function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: boolean }) {
   const isLong = row.direction === 'LONG';
   const dirTone = isLong ? 'border-emerald-700 text-emerald-300 bg-emerald-950/30'
                          : 'border-rose-700 text-rose-300 bg-rose-950/30';
@@ -253,14 +243,6 @@ function TradeCard({ row, closed, mirrored }: { row: Quant7GatesSimulationView; 
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${statusTone}`}>
           {row.status.replace('CLOSED_', '').replace(/_/g, ' ')}
         </span>
-        {mirrored && (
-          <span
-            className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border border-sky-600 bg-sky-950/40 text-sky-300"
-            title="Auto-IBKR armed for this instrument — this setup is mirrored to a live broker order"
-          >
-            ▶ IBKR
-          </span>
-        )}
         <PriceSourceBadge source={row.priceSource} label="entry" />
         {row.exitPriceSource && row.exitPriceSource !== row.priceSource && (
           <PriceSourceBadge source={row.exitPriceSource} label={closed ? 'exit' : 'mark'} />
