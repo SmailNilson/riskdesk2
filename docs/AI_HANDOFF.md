@@ -2,6 +2,29 @@
 
 Last updated: 2026-06-03
 
+## Stuck EXIT_SUBMITTED reconciliation — broker-truth replay (2026-06-03)
+
+Across all strategies, `trade_executions` rows were piling up stuck in `EXIT_SUBMITTED` (broker truth:
+IBKR flat, `positions: []`) — the position WAS closed but the row never reached `CLOSED`, so the Active
+Positions panel showed phantom positions and the one-position-per-instrument guards blocked new routing.
+
+Root cause: a **marketable close fills during `submitEntryOrder`**; the `orderStatus(Filled)` callback
+fires before the bridge persists the close `ibkrOrderId`, so `ExecutionFillTrackingService.onOrderStatus`
+(`findByIbkrOrderId`) can't locate the row and drops it; no later callback re-fires. `onOrderStatus` also
+has no `orderRef` fallback (the TWS callback carries none), and `onExecDetails` (which does carry
+`orderRef`) never applies the lifecycle transition.
+
+Fix — `application/execution/StaleCloseReconciler` (additive, NOT on the order-placement hot path):
+a scheduled sweep (60s + boot replay via `ExecutionReadinessGate`, 90s grace) that, for each stale
+`EXIT_SUBMITTED` row, **replays the missed callback** through the existing
+`ExecutionFillTrackingService.onOrderStatus` — the same path a live fill takes, so publish + WTX
+close-P&L settler + position reconciler all run identically. The authoritative "close completed" signal
+is **position flatness** (not the by-`orderRef` status, which is ambiguous when entry+close share the
+key): a live order still working under the ref → skip; else IBKR **confirmed flat** for the instrument →
+replay `Filled` → `CLOSED`; UNAVAILABLE / portfolio-unreadable / a position still open → skip (never marks
+CLOSED while a real position could exist). Flag: `riskdesk.execution.close-reconcile.enabled` (default on).
+Does NOT change how any strategy submits/closes; the deeper permId-keyed fix stays with the unified core.
+
 ## Quant 7-Gates Simulation → Auto-IBKR mirror (2026-06-03)
 
 The Quant 7-Gates **simulation** harness can now mirror each qualified paper trade to a real IBKR order,
