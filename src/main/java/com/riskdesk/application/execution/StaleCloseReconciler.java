@@ -8,6 +8,8 @@ import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.notification.event.ExecutionReconciledEvent;
+import com.riskdesk.domain.notification.port.NotificationPort;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,20 +59,30 @@ import java.util.stream.Collectors;
  *       it never marks a row CLOSED while a real position could exist.</li>
  * </ul>
  *
- * <p><b>ACTIVE phantoms.</b> It also closes rows the app believes {@code ACTIVE} but IBKR holds no
- * position for (a missed close fill, or an external close) so the WTX position reconciler can resync the
- * virtual state to FLAT. This path is <b>debounced</b> ({@code active-phantom-confirm-seconds}): it only
- * acts after IBKR has been confirmed flat for that row continuously across the window, so a transient
- * empty snapshot can never close a real open position (which would leave it unmanaged). Gated by
+ * <p><b>Open-position phantoms.</b> It also closes rows the app believes hold a live position but IBKR
+ * holds none for (a missed close fill, or an external close) so the WTX position reconciler can resync the
+ * virtual state to FLAT. This covers {@code ACTIVE} <b>and</b> the two other "position should be open"
+ * states the loop used to ignore — {@code ENTRY_PARTIALLY_FILLED} (a partial fill is a real, smaller
+ * position) and {@code VIRTUAL_EXIT_TRIGGERED} (exit decided but not yet filled; if IBKR is already flat
+ * the position is gone). This path is <b>debounced</b> ({@code confirm-seconds}): it only acts after IBKR
+ * has been confirmed flat for that row continuously across the window, so a transient empty snapshot can
+ * never close a real open position (which would leave it unmanaged). Gated by
  * {@code reconcile-active-phantoms} (default on).</p>
  *
- * <p><b>Zombie entries.</b> It also cancels {@code ENTRY_SUBMITTED} rows whose order never reached the
- * exchange — a {@code PendingSubmit} that was never transmitted (gateway disconnected at submit, …) or a
- * broker order that's simply gone — while IBKR holds no position. These freeze a reversal strategy (every
- * new signal hits {@code SKIPPED_ENTRY_IN_FLIGHT}) AND keep its virtual state desynced from a flat broker.
- * It only cancels when the broker order is NOT genuinely working ({@code Submitted}/{@code PreSubmitted}/
- * {@code PartiallyFilled} are left alone — those are real resting limits that may still fill) and IBKR is
- * confirmed flat, debounced like the ACTIVE path. Gated by {@code reconcile-stuck-entries} (default on).</p>
+ * <p><b>Zombie entries.</b> It also cancels {@code ENTRY_SUBMITTED} <b>and {@code PENDING_ENTRY_SUBMISSION}</b>
+ * rows whose order never reached the exchange — a {@code PendingSubmit} that was never transmitted (gateway
+ * disconnected at submit, …), a submit that threw before its {@code orderStatus} ack, or a broker order
+ * that's simply gone — while IBKR holds no position. These freeze a reversal strategy (every new signal
+ * hits {@code SKIPPED_ENTRY_IN_FLIGHT} or shows {@code NONE}) AND keep its virtual state desynced from a
+ * flat broker. It only cancels when the broker order is NOT genuinely working ({@code Submitted}/
+ * {@code PreSubmitted}/{@code PartiallyFilled} are left alone — those are real resting limits that may
+ * still fill) and IBKR is confirmed flat, debounced like the open-position path. Gated by
+ * {@code reconcile-stuck-entries} (default on).</p>
+ *
+ * <p><b>Divergence alarm (R7).</b> Every correction fires {@code NotificationPort.sendExecutionReconciled}
+ * (Telegram) so a phantom is surfaced within seconds instead of being discovered by losing money. Each
+ * phantom goes terminal exactly once, so this is one message per divergence — never spam. The alarm is
+ * best-effort: a notification failure never aborts the state correction (which has already persisted).</p>
  */
 @Component
 public class StaleCloseReconciler {
@@ -82,6 +94,7 @@ public class StaleCloseReconciler {
     private final IbkrPortfolioService ibkrPortfolioService;
     private final ExecutionReadinessGate readinessGate;
     private final IbkrProperties ibkrProperties;
+    private final NotificationPort notificationPort;
     private final boolean enabled;
     private final boolean reconcileActivePhantoms;
     private final boolean reconcileStuckEntries;
@@ -104,6 +117,7 @@ public class StaleCloseReconciler {
                                     IbkrPortfolioService ibkrPortfolioService,
                                     ExecutionReadinessGate readinessGate,
                                     IbkrProperties ibkrProperties,
+                                    NotificationPort notificationPort,
                                     @Value("${riskdesk.execution.close-reconcile.enabled:true}") boolean enabled,
                                     @Value("${riskdesk.execution.close-reconcile.reconcile-active-phantoms:true}") boolean reconcileActivePhantoms,
                                     @Value("${riskdesk.execution.close-reconcile.reconcile-stuck-entries:true}") boolean reconcileStuckEntries,
@@ -114,6 +128,7 @@ public class StaleCloseReconciler {
         this.ibkrPortfolioService = ibkrPortfolioService;
         this.readinessGate = readinessGate;
         this.ibkrProperties = ibkrProperties;
+        this.notificationPort = notificationPort;
         this.enabled = enabled;
         this.reconcileActivePhantoms = reconcileActivePhantoms;
         this.reconcileStuckEntries = reconcileStuckEntries;
@@ -137,9 +152,9 @@ public class StaleCloseReconciler {
                 ExecutionStatus st = row.getStatus();
                 if (st == ExecutionStatus.EXIT_SUBMITTED) {
                     reconcileStuckExit(row, now);
-                } else if (reconcileActivePhantoms && st == ExecutionStatus.ACTIVE) {
+                } else if (reconcileActivePhantoms && assertsOpenPosition(st)) {
                     reconcileActivePhantom(row, now);
-                } else if (reconcileStuckEntries && st == ExecutionStatus.ENTRY_SUBMITTED) {
+                } else if (reconcileStuckEntries && isPendingEntry(st)) {
                     reconcileZombieEntry(row, now);
                 }
             } catch (RuntimeException e) {
@@ -148,10 +163,36 @@ public class StaleCloseReconciler {
         }
         // Drop debounce state for rows no longer in a debounced status in the live set (acted on, gone, …).
         Set<Long> debouncedIds = rows.stream()
-            .filter(r -> r.getStatus() == ExecutionStatus.ACTIVE || r.getStatus() == ExecutionStatus.ENTRY_SUBMITTED)
+            .filter(r -> assertsOpenPosition(r.getStatus()) || isPendingEntry(r.getStatus()))
             .map(TradeExecutionRecord::getId)
             .collect(Collectors.toSet());
         flatConfirmSince.keySet().retainAll(debouncedIds);
+    }
+
+    /**
+     * Statuses that assert the app holds a LIVE position. If IBKR is confirmed flat for the instrument,
+     * the row is a phantom and must be closed (debounced). Covers {@code ACTIVE} plus the two other
+     * "position should be open" states the reconcile loop previously ignored — leaving them stuck and the
+     * instrument blocked: {@code ENTRY_PARTIALLY_FILLED} (a partial fill = a real, smaller position) and
+     * {@code VIRTUAL_EXIT_TRIGGERED} (the app decided to exit but the close hasn't filled; if IBKR is
+     * already flat the position is gone).
+     */
+    private static boolean assertsOpenPosition(ExecutionStatus st) {
+        return st == ExecutionStatus.ACTIVE
+            || st == ExecutionStatus.ENTRY_PARTIALLY_FILLED
+            || st == ExecutionStatus.VIRTUAL_EXIT_TRIGGERED;
+    }
+
+    /**
+     * Statuses whose entry order may never have reached the exchange. If IBKR is flat and the order is not
+     * genuinely working, the row is a zombie that freezes the strategy ({@code SKIPPED_ENTRY_IN_FLIGHT} /
+     * a displayed {@code NONE}). Covers {@code ENTRY_SUBMITTED} plus {@code PENDING_ENTRY_SUBMISSION} — the
+     * pre-acknowledgement state a submit that threw or never got its {@code orderStatus} ack is stuck in,
+     * which the loop previously ignored entirely (the exact "ENTRY became weird / NONE" symptom).
+     */
+    private static boolean isPendingEntry(ExecutionStatus st) {
+        return st == ExecutionStatus.ENTRY_SUBMITTED
+            || st == ExecutionStatus.PENDING_ENTRY_SUBMISSION;
     }
 
     /** One-shot boot replay so a restart that stranded an EXIT_SUBMITTED row unblocks within seconds. */
@@ -181,7 +222,9 @@ public class StaleCloseReconciler {
         log.warn("close-reconcile: closing stuck EXIT_SUBMITTED execution={} instrument={} src={} "
                 + "(IBKR flat → close completed)",
             row.getId(), row.getInstrument(), row.getTriggerSource());
-        markClosed(row, "Reconciled: IBKR confirmed flat — stuck close completed");
+        String reason = "Reconciled: IBKR confirmed flat — stuck close completed";
+        markClosed(row, reason);
+        notifyReconciled(row, ExecutionStatus.EXIT_SUBMITTED, ExecutionStatus.CLOSED, reason);
     }
 
     /**
@@ -193,6 +236,7 @@ public class StaleCloseReconciler {
      * slower and more cautious than the EXIT path.
      */
     private void reconcileActivePhantom(TradeExecutionRecord row, Instant now) {
+        ExecutionStatus from = row.getStatus();
         if (tooFresh(row, now) || !confirmedFlatAndNotWorking(row)) {
             flatConfirmSince.remove(row.getId()); // not (still) a confirmed phantom → reset the debounce
             return;
@@ -200,11 +244,14 @@ public class StaleCloseReconciler {
         if (!debounceElapsed(row, now)) {
             return; // confirmed flat, but not for long enough yet
         }
-        log.warn("close-reconcile: closing ACTIVE phantom execution={} instrument={} src={} entry={} "
+        log.warn("close-reconcile: closing {} phantom execution={} instrument={} src={} entry={} "
                 + "(IBKR confirmed flat for ≥{}s — position gone)",
-            row.getId(), row.getInstrument(), row.getTriggerSource(), row.getNormalizedEntryPrice(),
+            from, row.getId(), row.getInstrument(), row.getTriggerSource(), row.getNormalizedEntryPrice(),
             flatConfirm.toSeconds());
-        markClosed(row, "Reconciled: IBKR confirmed flat — phantom ACTIVE closed (missed close fill / external close)");
+        String reason = "Reconciled: IBKR confirmed flat — phantom " + from
+            + " closed (missed close fill / external close)";
+        markClosed(row, reason);
+        notifyReconciled(row, from, ExecutionStatus.CLOSED, reason);
     }
 
     /**
@@ -216,6 +263,7 @@ public class StaleCloseReconciler {
      * a freshly-submitted entry (briefly {@code PendingSubmit}) is never cancelled.
      */
     private void reconcileZombieEntry(TradeExecutionRecord row, Instant now) {
+        ExecutionStatus from = row.getStatus();
         if (tooFresh(row, now) || !confirmedFlatAndEntryDead(row)) {
             flatConfirmSince.remove(row.getId());
             return;
@@ -223,14 +271,16 @@ public class StaleCloseReconciler {
         if (!debounceElapsed(row, now)) {
             return;
         }
-        log.warn("close-reconcile: cancelling zombie ENTRY_SUBMITTED execution={} instrument={} src={} "
+        log.warn("close-reconcile: cancelling zombie {} execution={} instrument={} src={} "
                 + "(IBKR flat ≥{}s, order never reached the exchange)",
-            row.getId(), row.getInstrument(), row.getTriggerSource(), flatConfirm.toSeconds());
+            from, row.getId(), row.getInstrument(), row.getTriggerSource(), flatConfirm.toSeconds());
         Instant ts = Instant.now();
+        String reason = "Reconciled: IBKR confirmed flat, entry never transmitted/filled — phantom entry cancelled";
         row.setStatus(ExecutionStatus.CANCELLED);
-        row.setStatusReason("Reconciled: IBKR confirmed flat, entry never transmitted/filled — phantom entry cancelled");
+        row.setStatusReason(reason);
         row.setUpdatedAt(ts);
         executionRepository.save(row);
+        notifyReconciled(row, from, ExecutionStatus.CANCELLED, reason);
     }
 
     /** Debounce gate shared by the destructive paths: confirmed reconcilable continuously for {@link #flatConfirm}. */
@@ -241,6 +291,29 @@ public class StaleCloseReconciler {
         }
         flatConfirmSince.remove(row.getId());
         return true;
+    }
+
+    /**
+     * Fire the divergence alarm (R7) so a corrected phantom is surfaced within seconds, not discovered by
+     * losing money. Best-effort and never on the reconciliation hot path's critical line: a notification
+     * failure must never abort a reconcile (the state correction already persisted). Each phantom is
+     * corrected exactly once (it goes terminal), so this is one message per divergence — not spam.
+     */
+    private void notifyReconciled(TradeExecutionRecord row, ExecutionStatus from, ExecutionStatus to, String reason) {
+        if (notificationPort == null) {
+            return;
+        }
+        try {
+            notificationPort.sendExecutionReconciled(new ExecutionReconciledEvent(
+                row.getInstrument(),
+                row.getTriggerSource() == null ? null : row.getTriggerSource().name(),
+                from == null ? null : from.name(),
+                to == null ? null : to.name(),
+                reason,
+                Instant.now()));
+        } catch (RuntimeException e) {
+            log.debug("close-reconcile: divergence alarm not sent for execution {} — {}", row.getId(), e.toString());
+        }
     }
 
     /** Flip a confirmed-flat non-terminal row to CLOSED directly (orderId-collision-proof). */
