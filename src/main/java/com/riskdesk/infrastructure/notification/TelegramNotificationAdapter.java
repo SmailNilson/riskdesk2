@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.notification;
 
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
+import com.riskdesk.domain.notification.event.DailyLossCapTrippedEvent;
 import com.riskdesk.domain.notification.event.ExecutionReconciledEvent;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
@@ -223,6 +224,49 @@ public class TelegramNotificationAdapter implements NotificationPort {
             log.error("Failed to send Telegram reconcile notification for {} — {}",
                     event.instrument(), e.getMessage());
         }
+    }
+
+    @Override
+    public void sendDailyLossCapTripped(DailyLossCapTrippedEvent event) {
+        if (!properties.isEnabled()) {
+            log.debug("Telegram notifications disabled — skipping loss-cap alert");
+            return;
+        }
+        if (properties.getBotToken().isBlank() || properties.getChatId().isBlank()) {
+            log.warn("Telegram bot-token or chat-id not configured — skipping loss-cap notification");
+            return;
+        }
+
+        String message = formatLossCapMessage(event);
+        String url = String.format(TELEGRAM_API, properties.getBotToken());
+
+        try {
+            restTemplate.postForEntity(url, Map.of(
+                    "chat_id", properties.getChatId(),
+                    "text", message,
+                    "parse_mode", "HTML"
+            ), String.class);
+            log.info("Telegram loss-cap alert sent — realizedPnl={} threshold={}",
+                    event.realizedPnl(), event.threshold());
+        } catch (Exception e) {
+            log.error("Failed to send Telegram loss-cap notification — {}", e.getMessage());
+        }
+    }
+
+    private String formatLossCapMessage(DailyLossCapTrippedEvent e) {
+        StringBuilder sb = new StringBuilder();
+        // 🛑 + bold header
+        sb.append("🛑 <b>CAP DE PERTE JOURNALIER ATTEINT — auto-trade STOPPÉ</b>\n\n");
+        sb.append("📉 <b>P&L réalisé (jour, IBKR):</b> ")
+          .append(e.realizedPnl() == null ? "?" : e.realizedPnl().toPlainString()).append(" USD\n");
+        sb.append("🚧 <b>Seuil:</b> -").append(e.threshold() == null ? "?" : e.threshold().toPlainString()).append(" USD\n");
+        if (e.account() != null) {
+            sb.append("🏦 <b>Compte:</b> ").append(e.account()).append("\n");
+        }
+        sb.append("\n⛔️ <i>Nouvelles entrées auto BLOQUÉES (les clôtures restent autorisées) ");
+        sb.append("jusqu'à réarmement manuel.</i>\n");
+        sb.append("⚡️ <i>RiskDesk — Daily Loss Cap</i>");
+        return sb.toString();
     }
 
     private String formatReconciledMessage(ExecutionReconciledEvent e) {

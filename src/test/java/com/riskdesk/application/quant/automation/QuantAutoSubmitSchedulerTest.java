@@ -52,7 +52,7 @@ class QuantAutoSubmitSchedulerTest {
         props.setDelaySeconds(30);
         publisher = new CapturingPublisher();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        scheduler = new QuantAutoSubmitScheduler(repo, manager, props, publisher, clock);
+        scheduler = new QuantAutoSubmitScheduler(repo, manager, props, publisher, clock, null);
     }
 
     @Test

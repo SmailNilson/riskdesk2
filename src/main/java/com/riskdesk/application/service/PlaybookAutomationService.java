@@ -71,6 +71,8 @@ public class PlaybookAutomationService {
     private final ObjectProvider<IbkrMarginPreflightService> marginPreflightProvider;
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
+    /** P4 daily loss cap (optional collaborator). When tripped, a Playbook entry is refused. */
+    private final ObjectProvider<com.riskdesk.application.execution.DailyLossCapGuard> lossCapGuardProvider;
 
     public PlaybookAutomationService(PlaybookService playbookService,
                                      PlaybookAutomationStatePort statePort,
@@ -82,7 +84,8 @@ public class PlaybookAutomationService {
                                      PlaybookAutomationProperties properties,
                                      ObjectProvider<IbkrMarginPreflightService> marginPreflightProvider,
                                      ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                     ObjectProvider<SimpMessagingTemplate> messagingProvider) {
+                                     ObjectProvider<SimpMessagingTemplate> messagingProvider,
+                                     ObjectProvider<com.riskdesk.application.execution.DailyLossCapGuard> lossCapGuardProvider) {
         this.playbookService = playbookService;
         this.statePort = statePort;
         this.decisionRepository = decisionRepository;
@@ -94,6 +97,7 @@ public class PlaybookAutomationService {
         this.marginPreflightProvider = marginPreflightProvider;
         this.marketDataServiceProvider = marketDataServiceProvider;
         this.messagingProvider = messagingProvider;
+        this.lossCapGuardProvider = lossCapGuardProvider;
     }
 
     @EventListener
@@ -308,6 +312,12 @@ public class PlaybookAutomationService {
         if (!ibkrProperties.isEnabled()) {
             return decision.withRouting(PlaybookRoutingOutcome.SKIPPED_IBKR_DISABLED, "IBKR disabled", null);
         }
+        var lossCapGuard = lossCapGuardProvider == null ? null : lossCapGuardProvider.getIfAvailable();
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            // P4 — daily loss cap tripped: no new Playbook entry (Playbook has no broker close to gate).
+            return decision.withRouting(PlaybookRoutingOutcome.SKIPPED_AUTO_OFF,
+                "daily loss cap tripped — new entries halted", null);
+        }
         IbkrMarginPreflightService marginPreflight = marginPreflightProvider.getIfAvailable();
         if (marginPreflight != null) {
             PreflightDecision preflight = marginPreflight.canAffordOrder(
@@ -391,11 +401,19 @@ public class PlaybookAutomationService {
                 persisted.getQuantity(),
                 persisted.getNormalizedEntryPrice()
             ));
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of ENTRY_SUBMITTED waiting on an orderStatus(Filled) callback that
+            // root cause R2 can drop. Mirrors DefaultOrderRouter.submitPersistedEntry.
+            boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
+            Instant entrySubmittedAt = submission.submittedAt() == null ? now : submission.submittedAt();
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("PLAYBOOK submitted: " + submission.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(submission.submittedAt() == null ? now : submission.submittedAt());
+            persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("PLAYBOOK " + (filled ? "filled" : "submitted") + ": " + submission.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(entrySubmittedAt);
+            if (filled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(entrySubmittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             TradeExecutionRecord savedExecution = executionRepository.save(persisted);
             return decision.withRouting(PlaybookRoutingOutcome.ROUTED, null, savedExecution.getId());

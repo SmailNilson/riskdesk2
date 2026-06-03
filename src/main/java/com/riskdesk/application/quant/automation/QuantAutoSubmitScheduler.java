@@ -1,5 +1,6 @@
 package com.riskdesk.application.quant.automation;
 
+import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.service.ExecutionManagerService;
 import com.riskdesk.application.service.SubmitEntryOrderCommand;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -54,17 +55,21 @@ public class QuantAutoSubmitScheduler {
     private final QuantAutoSubmitProperties props;
     private final ApplicationEventPublisher eventPublisher;
     private final Clock clock;
+    /** P4 daily loss cap. Nullable in tests; when tripped, no auto-arm is submitted (manual trades unaffected). */
+    private final DailyLossCapGuard lossCapGuard;
 
     public QuantAutoSubmitScheduler(TradeExecutionRepositoryPort tradeExecutionRepository,
                                     ExecutionManagerService executionManager,
                                     QuantAutoSubmitProperties props,
                                     ApplicationEventPublisher eventPublisher,
-                                    Clock clock) {
+                                    Clock clock,
+                                    DailyLossCapGuard lossCapGuard) {
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.executionManager = executionManager;
         this.props = props;
         this.eventPublisher = eventPublisher;
         this.clock = clock;
+        this.lossCapGuard = lossCapGuard;
     }
 
     @Scheduled(fixedRateString = "${riskdesk.quant.auto-submit.tick-millis:1000}")
@@ -79,6 +84,11 @@ public class QuantAutoSubmitScheduler {
     /** Package-private so tests can drive a single iteration without a real scheduler. */
     void tickInternal() {
         if (!props.isEnabled()) return;
+        // P4 — daily loss cap tripped: hold all auto-submits (no new entries). PENDING arms stay pending and
+        // are handled by their own cancel window; manual trades (not routed here) are unaffected.
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            return;
+        }
 
         List<TradeExecutionRecord> pending = new ArrayList<>();
         for (ExecutionTriggerSource source : AUTO_SUBMIT_SOURCES) {

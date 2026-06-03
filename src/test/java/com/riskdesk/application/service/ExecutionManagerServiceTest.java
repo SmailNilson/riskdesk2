@@ -378,6 +378,55 @@ class ExecutionManagerServiceTest {
         assertThat(submitted.getEntryOrderId()).isEqualTo(44001L);
         assertThat(submitted.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
         assertThat(submitted.getEntrySubmittedAt()).isEqualTo(Instant.parse("2026-03-28T16:03:00Z"));
+        // The broker order id is persisted on ibkrOrderId so onOrderStatus (permId/orderId lookup) can
+        // advance a resting entry to ACTIVE when it later fills — previously null, a latent R2 hole.
+        assertThat(submitted.getIbkrOrderId()).isEqualTo(44001);
+    }
+
+    @Test
+    void submitEntryOrder_brokerFilledSynchronously_marksActive() {
+        // P2 synchronous fill: the broker returns Filled at submit return → the row is ACTIVE immediately,
+        // not ENTRY_SUBMITTED waiting on an orderStatus callback that R2 can drop.
+        ExecutionManagerService service = new ExecutionManagerService(
+            reviewRepository,
+            tradeExecutionRepository,
+            ibkrOrderService,
+            objectMapper,
+            riskProperties,
+            passThroughGate,
+            eventPublisher
+        );
+
+        TradeExecutionRecord execution = new TradeExecutionRecord();
+        execution.setId(902L);
+        execution.setExecutionKey("exec:mentor-review:78");
+        execution.setMentorSignalReviewId(78L);
+        execution.setBrokerAccountId("DU1234567");
+        execution.setInstrument("MNQ");
+        execution.setAction("LONG");
+        execution.setQuantity(2);
+        execution.setNormalizedEntryPrice(new java.math.BigDecimal("18123.50"));
+        execution.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        execution.setUpdatedAt(Instant.parse("2026-03-28T16:00:00Z"));
+
+        when(tradeExecutionRepository.findByIdForUpdate(902L)).thenReturn(Optional.of(execution));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(new BrokerEntryOrderSubmission(
+            44002L,
+            "Filled",
+            "exec:mentor-review:78",
+            Instant.parse("2026-03-28T16:03:00Z")
+        ));
+        when(tradeExecutionRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        TradeExecutionRecord submitted = service.submitEntryOrder(new SubmitEntryOrderCommand(
+            902L,
+            Instant.parse("2026-03-28T16:03:00Z"),
+            "quant-auto"
+        ));
+
+        assertThat(submitted.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(submitted.getEntryFilledAt()).isEqualTo(Instant.parse("2026-03-28T16:03:00Z"));
+        assertThat(submitted.getIbkrOrderId()).isEqualTo(44002);
     }
 
     private MentorSignalReviewRecord eligibleReview(Long id, int revision, String createdAt) throws Exception {

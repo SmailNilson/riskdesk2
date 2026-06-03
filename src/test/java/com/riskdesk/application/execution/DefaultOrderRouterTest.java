@@ -55,7 +55,7 @@ class DefaultOrderRouterTest {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty());
+            Instrument::getTickSize, Optional.empty(), null);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -111,7 +111,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50"), Optional.empty()); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty(), null); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -814,7 +814,7 @@ class DefaultOrderRouterTest {
     @Test
     void skipsWhenNotReady() {
         DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
-            Instrument::getTickSize, Optional.empty());
+            Instrument::getTickSize, Optional.empty(), null);
 
         RoutingResult r = gated.route(openLong());
 
@@ -826,7 +826,20 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff));
+            Instrument::getTickSize, Optional.of(aff), null);
+    }
+
+    @Test
+    void open_lossCapTripped_skipsAutoOff_noBrokerOrder() {
+        DailyLossCapGuard tripped = mock(DailyLossCapGuard.class);
+        when(tripped.blocksNewEntries()).thenReturn(true);
+        DefaultOrderRouter capped = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.empty(), tripped);
+
+        RoutingResult r = capped.route(openLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_AUTO_OFF);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     @Test

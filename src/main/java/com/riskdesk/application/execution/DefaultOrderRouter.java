@@ -58,6 +58,8 @@ public class DefaultOrderRouter implements OrderRouter {
     /** Optional margin pre-flight (D4). Null when no bean is present → the router fails open (no check),
      *  matching the legacy bridge's {@code marginPreflight != null} guard. */
     private final OrderAffordabilityPort affordability;
+    /** P4 daily loss cap. Nullable in test constructors; when present and tripped, new entries are refused. */
+    private final DailyLossCapGuard lossCapGuard;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
@@ -65,7 +67,8 @@ public class DefaultOrderRouter implements OrderRouter {
                               ExecutionReadinessGate readinessGate,
                               ExecutionReconciler reconciler,
                               InstrumentTickProvider tickProvider,
-                              Optional<OrderAffordabilityPort> affordability) {
+                              Optional<OrderAffordabilityPort> affordability,
+                              DailyLossCapGuard lossCapGuard) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -73,6 +76,7 @@ public class DefaultOrderRouter implements OrderRouter {
         this.reconciler = reconciler;
         this.tickProvider = tickProvider;
         this.affordability = affordability == null ? null : affordability.orElse(null);
+        this.lossCapGuard = lossCapGuard;
     }
 
     @Override
@@ -102,6 +106,14 @@ public class DefaultOrderRouter implements OrderRouter {
      * the phantom (or skips an in-flight entry) before opening fresh.
      */
     private RoutingResult routeEntry(TradeIntent intent) {
+        // P4 daily loss cap — halt NEW entries (OPEN and the opening of a REVERSE) once the broker-truth
+        // daily realized loss breached the threshold. Closes/flattens are never gated here, so a live
+        // position stays exitable; a strategy's own CLOSE signal still flattens. Reversals simply don't flip
+        // until the cap re-arms at the next trading day.
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF,
+                "daily loss cap tripped — new entries halted until re-arm");
+        }
         BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
 
         // In-flight / phantom precondition: IBKR confirmed flat but we hold a non-terminal local row.

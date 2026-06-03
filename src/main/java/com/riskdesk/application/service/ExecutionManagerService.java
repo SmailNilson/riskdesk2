@@ -164,11 +164,22 @@ public class ExecutionManagerService {
                 execution.getNormalizedEntryPrice()
             ));
 
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of ENTRY_SUBMITTED. Persist the broker order id on ibkrOrderId too
+            // (every other bridge does): ExecutionFillTrackingService.onOrderStatus locates rows by permId/
+            // orderId, so without it a resting entry that fills via an orderStatus callback could never be
+            // advanced to ACTIVE (it would stay ENTRY_SUBMITTED while the position is live — a latent R2 hole).
+            boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
+            Instant submittedAt = submission.submittedAt() == null ? requestedAt : submission.submittedAt();
             execution.setEntryOrderId(submission.brokerOrderId());
-            execution.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            execution.setStatusReason("IBKR entry order submitted: " + submission.brokerOrderStatus());
-            execution.setEntrySubmittedAt(submission.submittedAt() == null ? requestedAt : submission.submittedAt());
-            execution.setUpdatedAt(submission.submittedAt() == null ? requestedAt : submission.submittedAt());
+            execution.setIbkrOrderId(submission.brokerOrderId() == null ? null : submission.brokerOrderId().intValue());
+            execution.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            execution.setStatusReason("IBKR entry order " + (filled ? "filled" : "submitted") + ": " + submission.brokerOrderStatus());
+            execution.setEntrySubmittedAt(submittedAt);
+            if (filled && execution.getEntryFilledAt() == null) {
+                execution.setEntryFilledAt(submittedAt);
+            }
+            execution.setUpdatedAt(submittedAt);
             execution.setRequestedBy(blankToNull(command.requestedBy()) == null ? execution.getRequestedBy() : blankToNull(command.requestedBy()));
             return tradeExecutionRepository.save(execution);
         } catch (RuntimeException e) {

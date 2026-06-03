@@ -1,6 +1,7 @@
 package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
+import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.domain.execution.RoutingResult;
@@ -118,13 +119,15 @@ public class WtxExecutionBridge {
     private final OrderRouter orderRouter;
     /** Migration kill-switch holder. Nullable in test constructors. */
     private final ExecutionProperties executionProperties;
+    /** P4 daily loss cap. Nullable in test constructors; when tripped, new entries (OPEN/REVERSE) are refused. */
+    private final DailyLossCapGuard lossCapGuard;
 
-    /** Test-only legacy constructor — production code uses the 8-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production code uses the 9-arg variant via Spring autowiring. */
     public WtxExecutionBridge(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, null, null, null, null, null);
     }
 
     /** Test-only — preflight wired, IBKR reconcile disabled. */
@@ -133,7 +136,7 @@ public class WtxExecutionBridge {
                               IbkrProperties ibkrProperties,
                               WtxStrategyProperties wtxProperties,
                               IbkrMarginPreflightService marginPreflight) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight, null, null, null, null);
     }
 
     /** Test-only — preflight + reconcile wired, unified router disabled. */
@@ -144,7 +147,7 @@ public class WtxExecutionBridge {
                               IbkrMarginPreflightService marginPreflight,
                               IbkrPortfolioService ibkrPortfolioService) {
         this(ibkrOrderService, executionRepository, ibkrProperties, wtxProperties, marginPreflight,
-                ibkrPortfolioService, null, null);
+                ibkrPortfolioService, null, null, null);
     }
 
     @Autowired
@@ -155,7 +158,8 @@ public class WtxExecutionBridge {
                               IbkrMarginPreflightService marginPreflight,
                               IbkrPortfolioService ibkrPortfolioService,
                               OrderRouter orderRouter,
-                              ExecutionProperties executionProperties) {
+                              ExecutionProperties executionProperties,
+                              DailyLossCapGuard lossCapGuard) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -164,6 +168,13 @@ public class WtxExecutionBridge {
         this.ibkrPortfolioService = ibkrPortfolioService;
         this.orderRouter = orderRouter;
         this.executionProperties = executionProperties;
+        this.lossCapGuard = lossCapGuard;
+    }
+
+    /** True for actions that OPEN exposure (a plain open or a reversal's new leg) — gated by the loss cap. */
+    private static boolean isEntryAction(WtxAction action) {
+        return action == WtxAction.OPEN_LONG || action == WtxAction.OPEN_SHORT
+                || action == WtxAction.REVERSE_TO_LONG || action == WtxAction.REVERSE_TO_SHORT;
     }
 
     public WtxRoutingResult submit(WtxSignal signal, WtxStrategyState state) {
@@ -191,6 +202,14 @@ public class WtxExecutionBridge {
 
         WtxAction action = signal.suggestedAction();
         if (action == null || action == WtxAction.NONE) return null;
+
+        // P4 — daily loss cap tripped: refuse new entries (OPEN / REVERSE). Closes pass through (a live
+        // position must stay exitable). Covers both the legacy and unified-router paths below.
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries() && isEntryAction(action)) {
+            log.info("WTX [{} {}] {} skipped — daily loss cap tripped, new entries halted",
+                    state.instrument(), state.timeframe(), action);
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_AUTO_OFF);
+        }
 
         Instrument instrument;
         try {
@@ -538,13 +557,23 @@ public class WtxExecutionBridge {
             // orderStatus(Filled) before execDetails would be dropped and the row would never
             // leave ENTRY_SUBMITTED.
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("WTX " + action.name() + " submitted: " + submission.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of waiting on the orderStatus(Filled) callback that R2 can drop.
+            // Mirrors DefaultOrderRouter.submitPersistedEntry. Otherwise ENTRY_SUBMITTED (resting limit).
+            boolean entryFilled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
+            Instant entrySubmittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
+            persisted.setStatus(entryFilled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("WTX " + action.name() + (entryFilled ? " filled: " : " submitted: ")
+                    + submission.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(entrySubmittedAt);
+            if (entryFilled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(entrySubmittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("WTX [{} {}] IBKR open leg submitted — action={} positionQty={} orderAction={} brokerOrderId={}",
-                    state.instrument(), tf, action, positionQty, orderAction, submission.brokerOrderId());
+            log.info("WTX [{} {}] IBKR open leg {} — action={} positionQty={} orderAction={} brokerOrderId={}",
+                    state.instrument(), tf, entryFilled ? "filled" : "submitted", action, positionQty, orderAction,
+                    submission.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (IbkrOrderRejectionException e) {
             // Typed broker exception: map kind → outcome and persist a clean reason. closeLegFired
@@ -762,16 +791,26 @@ public class WtxExecutionBridge {
                     qty,
                     normalizeToTick(price, instrument)
             ));
+            // P2 — synchronous fill: a marketable close usually comes back Filled at submit return. Mark the
+            // row CLOSED NOW rather than EXIT_SUBMITTED — otherwise the orderStatus(Filled) callback, which can
+            // arrive before the close orderId is persisted, is dropped (R2) and the row stays a phantom
+            // EXIT_SUBMITTED. Mirrors DefaultOrderRouter.submitCloseLeg. A resting close stays EXIT_SUBMITTED;
+            // CloseLegResult.ok() either way, so the REVERSE open-leg sequencing is unchanged.
+            boolean closeFilled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setStatus(closeFilled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
             row.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            row.setStatusReason(reasonPrefix + " — IBKR close submitted: " + submission.brokerOrderStatus()
-                    + " (broker order " + submission.brokerOrderId() + ")");
+            row.setStatusReason(reasonPrefix + " — IBKR close " + (closeFilled ? "filled" : "submitted") + ": "
+                    + submission.brokerOrderStatus() + " (broker order " + submission.brokerOrderId() + ")");
             row.setExitSubmittedAt(now);
+            if (closeFilled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("WTX [{} {}] IBKR close leg submitted — orderAction={} qty={} executionId={} brokerOrderId={}",
-                    row.getInstrument(), row.getTimeframe(), orderAction, qty, row.getId(), submission.brokerOrderId());
+            log.info("WTX [{} {}] IBKR close leg {} — orderAction={} qty={} executionId={} brokerOrderId={}",
+                    row.getInstrument(), row.getTimeframe(), closeFilled ? "filled" : "submitted", orderAction, qty,
+                    row.getId(), submission.brokerOrderId());
             return CloseLegResult.ok();
         } catch (IbkrOrderRejectionException e) {
             // Typed broker exception — keep the row non-terminal so the open position stays

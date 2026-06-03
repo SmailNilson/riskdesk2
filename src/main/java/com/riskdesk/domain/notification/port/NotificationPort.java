@@ -1,5 +1,6 @@
 package com.riskdesk.domain.notification.port;
 
+import com.riskdesk.domain.notification.event.DailyLossCapTrippedEvent;
 import com.riskdesk.domain.notification.event.ExecutionReconciledEvent;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
@@ -39,6 +40,15 @@ public interface NotificationPort {
      * R7 safety net — surfacing divergence within seconds instead of discovering it by losing money.
      */
     default void sendExecutionReconciled(ExecutionReconciledEvent event) {
+        // no-op
+    }
+
+    /**
+     * Fire the <b>daily loss-cap alarm</b> when IBKR realized P&L for the trading day breached the
+     * configured threshold and the guard halted new auto-entries. Default no-op; Telegram overrides. This
+     * is the P4 hard-stop net — it surfaces a cutoff that would otherwise be discovered by losing more.
+     */
+    default void sendDailyLossCapTripped(DailyLossCapTrippedEvent event) {
         // no-op
     }
 }
