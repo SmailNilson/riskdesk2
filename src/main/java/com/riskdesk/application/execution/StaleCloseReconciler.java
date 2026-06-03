@@ -3,7 +3,6 @@ package com.riskdesk.application.execution;
 import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
-import com.riskdesk.application.service.ExecutionFillTrackingService;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -38,10 +37,13 @@ import java.util.stream.Collectors;
  *
  * <p><b>How this fixes it, safely.</b> Out-of-band (never on the order-placement hot path), for each
  * stale {@code EXIT_SUBMITTED} row it determines whether the close actually completed using
- * <b>broker truth</b> and, when confirmed, <b>replays the missed callback</b> through the existing
- * {@link ExecutionFillTrackingService#onOrderStatus} — the exact same transition path a live callback
- * would take, so every downstream effect (publish, WTX close-P&L settler, position reconciler) runs
- * identically. It never places a broker order and never changes how strategies submit/close.
+ * <b>broker truth</b> and, when confirmed flat, flips <b>that exact row</b> to {@code CLOSED} directly.
+ * It deliberately does NOT route through the fill-tracker by {@code orderId}: reused/colliding IBKR
+ * orderIds (a known reconnect hazard) make {@code findByIbkrOrderId} ambiguous, so an orderId-keyed
+ * replay resolved to the wrong row (or none) and left the stuck row untouched. The WTX close-P&L settler
+ * still finalizes on its next bar ("no non-terminal row" → finalize) and the active-positions publisher
+ * drops the row from the live list. It never places a broker order and never changes how strategies
+ * submit/close.
  *
  * <p><b>Authoritative signal = position flatness, not the order lookup.</b> Legacy bridges submit the
  * close under the SAME {@code orderRef} (= {@code executionKey}) as the entry, so a by-{@code orderRef}
@@ -70,7 +72,6 @@ public class StaleCloseReconciler {
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrPortfolioService ibkrPortfolioService;
-    private final ExecutionFillTrackingService fillTracking;
     private final ExecutionReadinessGate readinessGate;
     private final IbkrProperties ibkrProperties;
     private final boolean enabled;
@@ -91,7 +92,6 @@ public class StaleCloseReconciler {
     public StaleCloseReconciler(IbkrOrderService ibkrOrderService,
                                     TradeExecutionRepositoryPort executionRepository,
                                     IbkrPortfolioService ibkrPortfolioService,
-                                    ExecutionFillTrackingService fillTracking,
                                     ExecutionReadinessGate readinessGate,
                                     IbkrProperties ibkrProperties,
                                     @Value("${riskdesk.execution.close-reconcile.enabled:true}") boolean enabled,
@@ -101,7 +101,6 @@ public class StaleCloseReconciler {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrPortfolioService = ibkrPortfolioService;
-        this.fillTracking = fillTracking;
         this.readinessGate = readinessGate;
         this.ibkrProperties = ibkrProperties;
         this.enabled = enabled;
@@ -156,19 +155,19 @@ public class StaleCloseReconciler {
         if (tooFresh(row, now)) {
             return; // let the normal fill callback resolve it first
         }
-        if (row.getIbkrOrderId() == null) {
-            return; // no close order id → can't replay the callback safely
-        }
         if (!confirmedFlatAndNotWorking(row)) {
             return;
         }
-        log.warn("close-reconcile: replaying missed Filled for stuck EXIT_SUBMITTED execution={} "
-                + "instrument={} src={} orderId={} (IBKR flat → close completed)",
-            row.getId(), row.getInstrument(), row.getTriggerSource(), row.getIbkrOrderId());
-        // Replay the missed callback through the SAME path a live fill would take. The fill tracker
-        // locates the row by its (now-persisted) close orderId and applies EXIT_SUBMITTED → CLOSED,
-        // publishes, and lets the WTX close-P&L settler finalize on its next bar.
-        fillTracking.onOrderStatus(row.getIbkrOrderId(), "Filled", null, null, null, now);
+        // Flip THIS row directly — do NOT route through fill-tracking by orderId. Reused/colliding IBKR
+        // orderIds (a known reconnect hazard) make findByIbkrOrderId ambiguous, so an orderId-keyed replay
+        // resolved to the wrong row (or none) and left the stuck row untouched. We hold the exact row from
+        // findAllActive, and confirmed-flat means the close completed → close it. The WTX close-P&L settler
+        // finalizes on its next bar ("no non-terminal row" → finalize); the active-positions publisher
+        // drops it from the live list.
+        log.warn("close-reconcile: closing stuck EXIT_SUBMITTED execution={} instrument={} src={} "
+                + "(IBKR flat → close completed)",
+            row.getId(), row.getInstrument(), row.getTriggerSource());
+        markClosed(row, "Reconciled: IBKR confirmed flat — stuck close completed");
     }
 
     /**
@@ -193,9 +192,14 @@ public class StaleCloseReconciler {
                 + "(IBKR confirmed flat for ≥{}s — position gone)",
             row.getId(), row.getInstrument(), row.getTriggerSource(), row.getNormalizedEntryPrice(),
             activeFlatConfirm.toSeconds());
+        markClosed(row, "Reconciled: IBKR confirmed flat — phantom ACTIVE closed (missed close fill / external close)");
+    }
+
+    /** Flip a confirmed-flat non-terminal row to CLOSED directly (orderId-collision-proof). */
+    private void markClosed(TradeExecutionRecord row, String reason) {
         Instant ts = Instant.now();
         row.setStatus(ExecutionStatus.CLOSED);
-        row.setStatusReason("Reconciled: IBKR confirmed flat — phantom ACTIVE closed (missed close fill / external close)");
+        row.setStatusReason(reason);
         if (row.getClosedAt() == null) {
             row.setClosedAt(ts);
         }
