@@ -128,6 +128,22 @@ public record WtxStrategyState(
                 telegramNotificationsEnabled, BigDecimal.ZERO);
     }
 
+    /**
+     * Correct only the open position's entry price + quantity to the broker's actual fill, preserving the
+     * side, trailing state (best favorable price / trailing stop), ATR and pending-close marker. Used by the
+     * position reconciler when the execution row is on the SAME side but carries a different (real) fill than
+     * the optimistic entry {@code applyAction} recorded — so P&L and trailing track execution truth without
+     * restarting the trailing buffer.
+     */
+    public WtxStrategyState withEntryDetails(BigDecimal newEntryPrice, BigDecimal newEntryQty) {
+        return new WtxStrategyState(instrument, timeframe, currentPosition, newEntryPrice, newEntryQty,
+                dayStartEquity, currentEquity, dailyRealizedPnl, maxLossHit, lastCandleTs, Instant.now(),
+                activeProfile, autoExecutionEnabled,
+                entryAtr, bestFavorablePrice, trailingStopPrice,
+                swingBiasFilterEnabled, configuredOrderQty,
+                telegramNotificationsEnabled, pendingClosePnl);
+    }
+
     public WtxStrategyState withFlat(BigDecimal realizedPnlAdd) {
         BigDecimal newRealized = dailyRealizedPnl.add(realizedPnlAdd);
         BigDecimal newEquity = dayStartEquity.add(newRealized);
