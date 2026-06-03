@@ -56,9 +56,12 @@ public class WtxPositionReconciler {
     /**
      * Returns {@code state} re-synced to the execution row's truth, or unchanged when paper, while a close
      * is pending (the settler owns that window), when an entry is in flight, or when already aligned.
-     * {@code currentClose} books a diverging missed-close at best effort.
+     * {@code currentClose} books a diverging missed-close at best effort; {@code barAtr} gives a re-adopted
+     * position an ATR basis (best-effort proxy for the lost original entry ATR) so ATR-exit profiles keep a
+     * protective trailing stop.
      */
-    public WtxStrategyState reconcile(WtxStrategyState state, Instrument instrument, BigDecimal currentClose) {
+    public WtxStrategyState reconcile(WtxStrategyState state, Instrument instrument, BigDecimal currentClose,
+                                      BigDecimal barAtr) {
         if (state == null || !state.autoExecutionEnabled()) {
             return state; // paper timeframe — no broker truth to reconcile against
         }
@@ -112,7 +115,11 @@ public class WtxPositionReconciler {
             corrected = corrected.withFlat(bestEffortRealizedPnl(state, instrument, currentClose));
         }
         if (rowSide != WtxPosition.FLAT) {
-            corrected = corrected.withPosition(rowSide, adoptEntryPrice(row), adoptQty(row));
+            // 4-arg withPosition so the re-adopted position carries an ATR basis. The prior withFlat cleared
+            // entryAtr; without one, an ATR-exit profile's WtxTrailingExitEvaluator returns no-exit and the
+            // re-adopted real position has NO protective trailing stop. barAtr is a best-effort proxy for the
+            // (lost) original entry ATR.
+            corrected = corrected.withPosition(rowSide, adoptEntryPrice(row), adoptQty(row), barAtr);
         }
         return corrected;
     }

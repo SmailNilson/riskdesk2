@@ -133,8 +133,10 @@ public class WtxStrategyService {
 
         // ── 0b. Reconcile the position SIDE against execution-row truth (runs AFTER the close-P&L settle).
         // Self-heals an async divergence (a reverse close that cancelled, a missed fill, a restart, a manual
-        // close); no-op when paper / aligned / a close is still pending (the settler owns that window).
-        state = positionReconciler.reconcile(state, instrument, currentCandle.getClose());
+        // close); no-op when paper / aligned / a close is still pending (the settler owns that window). The
+        // bar ATR gives a re-adopted position an ATR basis so ATR-exit profiles keep a protective trailing.
+        BigDecimal reconcileAtr = AtrCalculator.compute(candles, config.atrLength());
+        state = positionReconciler.reconcile(state, instrument, currentCandle.getClose(), reconcileAtr);
 
         // ── 1. Trailing exit check (profile >= SESSION_ATR) ───────────────────
         if (profile.requiresAtrExits() && state.currentPosition() != WtxPosition.FLAT) {
