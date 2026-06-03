@@ -110,6 +110,14 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
     }
 
     @Override
+    public Optional<TradeExecutionRecord> findByPermId(Long permId) {
+        if (permId == null) {
+            return Optional.empty();
+        }
+        return repository.findByPermId(permId).map(TradeExecutionEntityMapper::toDomain);
+    }
+
+    @Override
     public Optional<TradeExecutionRecord> findByExecutionKey(String executionKey) {
         if (executionKey == null || executionKey.isBlank()) {
             return Optional.empty();

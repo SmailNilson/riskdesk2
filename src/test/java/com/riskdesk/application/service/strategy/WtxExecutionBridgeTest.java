@@ -1441,6 +1441,7 @@ class WtxExecutionBridgeTest {
         @Override public Optional<TradeExecutionRecord> findByMentorSignalReviewId(Long id) { return Optional.empty(); }
         @Override public List<TradeExecutionRecord> findByMentorSignalReviewIds(Collection<Long> ids) { return List.of(); }
         @Override public Optional<TradeExecutionRecord> findByIbkrOrderId(Integer id) { return Optional.empty(); }
+        @Override public Optional<TradeExecutionRecord> findByPermId(Long permId) { return Optional.empty(); }
 
         @Override public Optional<TradeExecutionRecord> findByExecutionKey(String key) {
             return byId.values().stream().filter(r -> key.equals(r.getExecutionKey())).findFirst();

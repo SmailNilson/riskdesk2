@@ -62,6 +62,7 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
 
     @Override
     public synchronized void onExecDetails(int orderId,
+                                           long permId,
                                            String execId,
                                            String orderRef,
                                            BigDecimal cumQty,
@@ -69,9 +70,10 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                                            BigDecimal lastFillPrice,
                                            String side,
                                            Instant time) {
-        Optional<TradeExecutionRecord> found = locate(orderId, orderRef);
+        Optional<TradeExecutionRecord> found = locate(permId, orderId, orderRef);
         if (found.isEmpty()) {
-            log.debug("execDetails ignored — no TradeExecution for orderId={} orderRef={}", orderId, orderRef);
+            log.debug("execDetails ignored — no TradeExecution for permId={} orderId={} orderRef={}",
+                permId, orderId, orderRef);
             return;
         }
         TradeExecutionRecord execution = found.get();
@@ -81,7 +83,7 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
             return;
         }
 
-        boolean dirty = false;
+        boolean dirty = capturePermId(execution, permId);
         if (execution.getIbkrOrderId() == null || execution.getIbkrOrderId() != orderId) {
             execution.setIbkrOrderId(orderId);
             dirty = true;
@@ -118,19 +120,20 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
 
     @Override
     public synchronized void onOrderStatus(int orderId,
+                                           long permId,
                                            String status,
                                            BigDecimal filled,
                                            BigDecimal remaining,
                                            BigDecimal avgFillPrice,
                                            Instant lastFillTime) {
-        Optional<TradeExecutionRecord> found = locate(orderId, null);
+        Optional<TradeExecutionRecord> found = locate(permId, orderId, null);
         if (found.isEmpty()) {
-            log.debug("orderStatus ignored — no TradeExecution for orderId={}", orderId);
+            log.debug("orderStatus ignored — no TradeExecution for permId={} orderId={}", permId, orderId);
             return;
         }
         TradeExecutionRecord execution = found.get();
 
-        boolean dirty = false;
+        boolean dirty = capturePermId(execution, permId);
         if (execution.getIbkrOrderId() == null || execution.getIbkrOrderId() != orderId) {
             execution.setIbkrOrderId(orderId);
             dirty = true;
@@ -222,7 +225,20 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         publish(saved);
     }
 
-    private Optional<TradeExecutionRecord> locate(int orderId, String orderRef) {
+    /**
+     * Locate the execution row for a callback. <b>permId first</b> — it is the durable, never-reused
+     * broker order id, so it is unambiguous; {@code orderId} is session-scoped and REUSED after a gateway
+     * reconnect, so multiple rows can share one and {@code findByIbkrOrderId} would resolve the wrong row.
+     * Falls back to {@code orderId} then {@code orderRef}/{@code executionKey} (for callbacks that arrive
+     * before the id is persisted, or when permId is 0/unknown).
+     */
+    private Optional<TradeExecutionRecord> locate(long permId, int orderId, String orderRef) {
+        if (permId > 0) {
+            Optional<TradeExecutionRecord> byPermId = tradeExecutionRepository.findByPermId(permId);
+            if (byPermId.isPresent()) {
+                return byPermId;
+            }
+        }
         Optional<TradeExecutionRecord> byOrderId = tradeExecutionRepository.findByIbkrOrderId(orderId);
         if (byOrderId.isPresent()) {
             return byOrderId;
@@ -246,6 +262,15 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
             return tradeExecutionRepository.findByExecutionKey(orderRef.substring(0, exitAt));
         }
         return Optional.empty();
+    }
+
+    /** Persist the durable permId the first time we learn it. Returns true if the row changed. */
+    private static boolean capturePermId(TradeExecutionRecord execution, long permId) {
+        if (permId > 0 && (execution.getPermId() == null || execution.getPermId() != permId)) {
+            execution.setPermId(permId);
+            return true;
+        }
+        return false;
     }
 
     private boolean isAcceptedEntryStatus(String status) {

@@ -344,7 +344,7 @@ public class IbGatewayNativeClient {
                                             int clientId,
                                             String whyHeld,
                                             double mktCapPrice) {
-                        dispatchOrderStatus(orderId, status, filled, remaining, avgFillPrice);
+                        dispatchOrderStatus(orderId, permId, status, filled, remaining, avgFillPrice);
                     }
 
                     @Override
@@ -372,6 +372,7 @@ public class IbGatewayNativeClient {
         }
         try {
             int orderId = execution.orderId();
+            long permId = execution.permId();
             String execId = execution.execId();
             String orderRef = execution.orderRef();
             BigDecimal cumQty = execution.cumQty() == null ? null : execution.cumQty().value();
@@ -379,13 +380,14 @@ public class IbGatewayNativeClient {
             BigDecimal lastFillPrice = BigDecimal.valueOf(execution.price());
             String side = execution.side();
             Instant time = parseExecutionTime(execution.time());
-            listener.onExecDetails(orderId, execId, orderRef, cumQty, avgPrice, lastFillPrice, side, time);
+            listener.onExecDetails(orderId, permId, execId, orderRef, cumQty, avgPrice, lastFillPrice, side, time);
         } catch (RuntimeException e) {
             log.warn("execDetails dispatch failed: {}", e.getMessage());
         }
     }
 
     private void dispatchOrderStatus(int orderId,
+                                     long permId,
                                      OrderStatus status,
                                      Decimal filled,
                                      Decimal remaining,
@@ -398,7 +400,7 @@ public class IbGatewayNativeClient {
             BigDecimal filledBd = filled == null ? null : filled.value();
             BigDecimal remainingBd = remaining == null ? null : remaining.value();
             BigDecimal avgPx = BigDecimal.valueOf(avgFillPrice);
-            listener.onOrderStatus(orderId, status.name(), filledBd, remainingBd, avgPx, Instant.now());
+            listener.onOrderStatus(orderId, permId, status.name(), filledBd, remainingBd, avgPx, Instant.now());
         } catch (RuntimeException e) {
             log.warn("orderStatus dispatch failed: {}", e.getMessage());
         }

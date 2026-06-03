@@ -28,7 +28,8 @@ import java.time.Instant;
         @Index(name = "idx_trade_executions_status", columnList = "status"),
         @Index(name = "idx_trade_executions_review_alert_key", columnList = "reviewAlertKey"),
         @Index(name = "idx_trade_executions_created_at", columnList = "createdAt"),
-        @Index(name = "idx_trade_executions_ibkr_order_id", columnList = "ibkrOrderId")
+        @Index(name = "idx_trade_executions_ibkr_order_id", columnList = "ibkrOrderId"),
+        @Index(name = "idx_trade_executions_perm_id", columnList = "permId")
     }
 )
 public class TradeExecutionEntity {
@@ -166,6 +167,11 @@ public class TradeExecutionEntity {
 
     @Column
     private Integer ibkrOrderId;
+
+    /** IBKR permId — durable, never reused (unlike ibkrOrderId). Authoritative reconciliation key.
+     *  Nullable → ddl-auto adds it clean. */
+    @Column
+    private Long permId;
 
     @Column(length = 64)
     private String lastExecId;
@@ -453,6 +459,14 @@ public class TradeExecutionEntity {
 
     public void setIbkrOrderId(Integer ibkrOrderId) {
         this.ibkrOrderId = ibkrOrderId;
+    }
+
+    public Long getPermId() {
+        return permId;
+    }
+
+    public void setPermId(Long permId) {
+        this.permId = permId;
     }
 
     public String getLastExecId() {

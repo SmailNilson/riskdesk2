@@ -63,6 +63,28 @@ class ExecutionFillTrackingServiceTest {
     }
 
     @Test
+    void locatesByPermIdFirstAndCapturesIt() {
+        // permId is durable + unique; orderId is reused after reconnect (collisions). The Filled close
+        // must reconcile the RIGHT row via permId, never findByIbkrOrderId (which would be ambiguous).
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(99L);
+        row.setStatus(com.riskdesk.domain.model.ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        when(repository.findByPermId(555_000_111L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(ORDER_ID, 555_000_111L, "Filled",
+            new BigDecimal("1"), BigDecimal.ZERO, new BigDecimal("72.50"), Instant.parse("2026-06-03T15:30:00Z"));
+
+        verify(repository).findByPermId(555_000_111L);
+        verify(repository, never()).findByIbkrOrderId(any());
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        assertEquals(com.riskdesk.domain.model.ExecutionStatus.CLOSED, captor.getValue().getStatus());
+        assertEquals(Long.valueOf(555_000_111L), captor.getValue().getPermId());
+    }
+
+    @Test
     void execDetailsUpdatesFillFieldsAndPublishesOnce() {
         TradeExecutionRecord stored = baseExecution();
         when(repository.findByIbkrOrderId(ORDER_ID)).thenReturn(Optional.of(stored));
@@ -70,6 +92,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -102,6 +125,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -113,6 +137,7 @@ class ExecutionFillTrackingServiceTest {
         // Replay — same execId.
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -135,6 +160,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -163,6 +189,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF + ":exit",
             new BigDecimal("1"),
@@ -189,6 +216,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF + ":exit:1717350000000",
             new BigDecimal("1"),
@@ -213,6 +241,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Submitted",
             BigDecimal.ZERO,
             BigDecimal.ONE,
@@ -237,6 +266,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Filled",
             new BigDecimal("1"),
             BigDecimal.ZERO,
@@ -265,6 +295,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Filled",
             new BigDecimal("1"),
             BigDecimal.ZERO,
@@ -289,6 +320,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Cancelled",
             BigDecimal.ZERO,
             new BigDecimal("1"),
@@ -313,6 +345,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Cancelled",
             BigDecimal.ZERO,
             new BigDecimal("1"),
@@ -339,6 +372,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onOrderStatus(
             ORDER_ID,
+            0L,
             "Filled",
             new BigDecimal("1"),
             BigDecimal.ZERO,
@@ -357,6 +391,7 @@ class ExecutionFillTrackingServiceTest {
 
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -380,6 +415,7 @@ class ExecutionFillTrackingServiceTest {
         // First partial fill
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_1,
             ORDER_REF,
             new BigDecimal("1"),
@@ -391,6 +427,7 @@ class ExecutionFillTrackingServiceTest {
         // Second fill — different execId, cumulative qty grows
         service.onExecDetails(
             ORDER_ID,
+            0L,
             EXEC_ID_2,
             ORDER_REF,
             new BigDecimal("2"),

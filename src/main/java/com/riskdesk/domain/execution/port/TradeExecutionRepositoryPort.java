@@ -50,6 +50,13 @@ public interface TradeExecutionRepositoryPort {
     Optional<TradeExecutionRecord> findByIbkrOrderId(Integer ibkrOrderId);
 
     /**
+     * Lookup by the IBKR {@code permId} — the DURABLE, never-reused broker order id. Preferred over
+     * {@link #findByIbkrOrderId} for reconciliation: {@code ibkrOrderId} is reused after a gateway
+     * reconnect, so multiple rows can collide on it; {@code permId} is unique for the life of the order.
+     */
+    Optional<TradeExecutionRecord> findByPermId(Long permId);
+
+    /**
      * Slice 3a — IBKR fill tracking.
      * Fallback lookup by {@code orderRef} (which equals the {@code executionKey}) when
      * the IBKR order id has not yet been persisted on the execution row.

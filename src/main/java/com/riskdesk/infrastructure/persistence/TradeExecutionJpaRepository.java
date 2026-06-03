@@ -25,6 +25,8 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
 
     Optional<TradeExecutionEntity> findByIbkrOrderId(Integer ibkrOrderId);
 
+    Optional<TradeExecutionEntity> findByPermId(Long permId);
+
     Optional<TradeExecutionEntity> findByExecutionKey(String executionKey);
 
     /**

@@ -18,7 +18,8 @@ public interface ExecutionFillListener {
     /**
      * Report an individual fill (IBKR {@code execDetails} callback).
      *
-     * @param orderId       TWS orderId of the parent order
+     * @param orderId       TWS orderId of the parent order (session-scoped, reused after reconnect)
+     * @param permId        IBKR permId — durable, never reused; 0 when unknown
      * @param execId        per-fill idempotence key (IBKR {@code execId})
      * @param orderRef      the order reference we set at submission — equals our {@code executionKey}
      * @param cumQty        cumulative filled quantity after this fill
@@ -28,6 +29,7 @@ public interface ExecutionFillListener {
      * @param time          timestamp of the fill (UTC)
      */
     void onExecDetails(int orderId,
+                       long permId,
                        String execId,
                        String orderRef,
                        BigDecimal cumQty,
@@ -39,7 +41,8 @@ public interface ExecutionFillListener {
     /**
      * Report an order status update (IBKR {@code orderStatus} callback).
      *
-     * @param orderId       TWS orderId
+     * @param orderId       TWS orderId (session-scoped, reused after reconnect)
+     * @param permId        IBKR permId — durable, never reused; 0 when unknown
      * @param status        IBKR status name (Submitted, PreSubmitted, PartiallyFilled, Filled, Cancelled, …)
      * @param filled        cumulative filled quantity
      * @param remaining     remaining unfilled quantity
@@ -47,6 +50,7 @@ public interface ExecutionFillListener {
      * @param lastFillTime  best-effort timestamp for this status (UTC)
      */
     void onOrderStatus(int orderId,
+                       long permId,
                        String status,
                        BigDecimal filled,
                        BigDecimal remaining,
