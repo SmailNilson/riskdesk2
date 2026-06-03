@@ -41,8 +41,18 @@ public class QuantSimExecutionProperties {
     /** Default contract quantity per routed order. */
     private int defaultQuantity = 1;
 
+    /**
+     * Force-close all mirrored positions before the CME daily break (no resident
+     * broker stop → never carry a position through the close unmanaged). Driven by
+     * {@code QuantSimSessionCloseScheduler}.
+     */
+    private boolean forceCloseEnabled = true;
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+    public boolean isForceCloseEnabled() { return forceCloseEnabled; }
+    public void setForceCloseEnabled(boolean forceCloseEnabled) { this.forceCloseEnabled = forceCloseEnabled; }
 
     public List<String> getInstruments() { return instruments; }
     public void setInstruments(List<String> instruments) { this.instruments = instruments; }
