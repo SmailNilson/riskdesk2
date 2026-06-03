@@ -391,11 +391,19 @@ public class PlaybookAutomationService {
                 persisted.getQuantity(),
                 persisted.getNormalizedEntryPrice()
             ));
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of ENTRY_SUBMITTED waiting on an orderStatus(Filled) callback that
+            // root cause R2 can drop. Mirrors DefaultOrderRouter.submitPersistedEntry.
+            boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
+            Instant entrySubmittedAt = submission.submittedAt() == null ? now : submission.submittedAt();
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("PLAYBOOK submitted: " + submission.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(submission.submittedAt() == null ? now : submission.submittedAt());
+            persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("PLAYBOOK " + (filled ? "filled" : "submitted") + ": " + submission.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(entrySubmittedAt);
+            if (filled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(entrySubmittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             TradeExecutionRecord savedExecution = executionRepository.save(persisted);
             return decision.withRouting(PlaybookRoutingOutcome.ROUTED, null, savedExecution.getId());
