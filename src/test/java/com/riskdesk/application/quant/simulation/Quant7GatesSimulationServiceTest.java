@@ -1,5 +1,7 @@
 package com.riskdesk.application.quant.simulation;
 
+import com.riskdesk.domain.execution.RoutingOutcome;
+import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.quant.model.Gate;
 import com.riskdesk.domain.quant.model.GateResult;
@@ -209,6 +211,32 @@ class Quant7GatesSimulationServiceTest {
         assertThat(closedRow.closedAt()).isAfter(closedRow.openedAt());
     }
 
+    @Test
+    void routesOpenAndCloseThroughBridgeWhenWired() {
+        RecordingBridge recording = new RecordingBridge();
+        Quant7GatesSimulationService wired = new Quant7GatesSimulationService(
+            emptyProvider(), emptyRepoProvider(), bridgeProvider(recording));
+        wired.resetForTesting();
+
+        // Open LONG → bridge.submitOpen invoked once.
+        wired.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), absorptionHaussiereHighConf());
+        assertThat(recording.opens).hasSize(1);
+        assertThat(recording.opens.get(0).direction()).isEqualTo(Quant7GatesSimulation.Direction.LONG);
+
+        // Drop below SL → paper trade closes → bridge.submitClose invoked once.
+        wired.onSnapshot(Instrument.MNQ, snapshotAt(29687.25 - 30.0), absorptionHaussiereHighConf());
+        assertThat(recording.closes).hasSize(1);
+        assertThat(recording.closes.get(0).status()).isEqualTo(Quant7GatesSimulationStatus.CLOSED_SL);
+    }
+
+    @Test
+    void paperOnlyWhenBridgeProviderEmpty() {
+        // The default service (2-arg ctor) has no bridge — opening must not throw
+        // and produces a paper row with no broker interaction.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), absorptionHaussiereHighConf());
+        assertThat(service.listOpen()).hasSize(1);
+    }
+
     private static QuantSnapshot snapshotAt(double price, String source) {
         Map<Gate, GateResult> gates = new EnumMap<>(Gate.class);
         return new QuantSnapshot(
@@ -247,6 +275,32 @@ class Quant7GatesSimulationServiceTest {
             @Override public Quant7GatesSimulationPublisher getObject(Object... args) { return null; }
             @Override public Quant7GatesSimulationPublisher getIfAvailable() { return null; }
             @Override public Quant7GatesSimulationPublisher getIfUnique() { return null; }
+        };
+    }
+
+    /** Records the simulations routed through the execution bridge. */
+    private static final class RecordingBridge implements Quant7GatesExecutionBridge {
+        final List<Quant7GatesSimulation> opens = new java.util.ArrayList<>();
+        final List<Quant7GatesSimulation> closes = new java.util.ArrayList<>();
+        @Override public RoutingResult submitOpen(Quant7GatesSimulation opened) {
+            opens.add(opened);
+            return RoutingResult.of(RoutingOutcome.ROUTED);
+        }
+        @Override public RoutingResult submitClose(Quant7GatesSimulation closed) {
+            closes.add(closed);
+            return RoutingResult.of(RoutingOutcome.ROUTED);
+        }
+        @Override public RoutingResult flatten(com.riskdesk.domain.model.TradeExecutionRecord row) {
+            return RoutingResult.of(RoutingOutcome.ROUTED);
+        }
+    }
+
+    private static ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider(Quant7GatesExecutionBridge bridge) {
+        return new ObjectProvider<>() {
+            @Override public Quant7GatesExecutionBridge getObject() { return bridge; }
+            @Override public Quant7GatesExecutionBridge getObject(Object... args) { return bridge; }
+            @Override public Quant7GatesExecutionBridge getIfAvailable() { return bridge; }
+            @Override public Quant7GatesExecutionBridge getIfUnique() { return bridge; }
         };
     }
 

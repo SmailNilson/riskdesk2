@@ -1,5 +1,6 @@
 package com.riskdesk.application.quant.simulation;
 
+import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
 import com.riskdesk.domain.quant.pattern.PatternAnalysis;
@@ -71,6 +72,7 @@ public class Quant7GatesSimulationService {
 
     private final ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider;
     private final ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider;
+    private final ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider;
     private final AtomicLong sequence = new AtomicLong(1);
 
     /**
@@ -81,11 +83,24 @@ public class Quant7GatesSimulationService {
      */
     private final Map<Instrument, List<Quant7GatesSimulation>> byInstrument = new EnumMap<>(Instrument.class);
 
+    /**
+     * Backward-compatible constructor (pre Auto-IBKR). Wires the execution bridge
+     * to a no-op provider so unit tests that omit it stay paper-only.
+     */
     public Quant7GatesSimulationService(
             ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
             ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider) {
+        this(publisherProvider, repositoryProvider, new EmptyObjectProvider<>());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public Quant7GatesSimulationService(
+            ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
+            ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider,
+            ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider) {
         this.publisherProvider = publisherProvider;
         this.repositoryProvider = repositoryProvider;
+        this.bridgeProvider = bridgeProvider;
     }
 
     /**
@@ -147,6 +162,7 @@ public class Quant7GatesSimulationService {
                 rows.set(i, closed);
                 publish(closed);
                 persist(closed);
+                routeClose(closed);
             } else {
                 // Refresh mark-to-market view so the frontend P&L stays live —
                 // tag with the CURRENT snapshot's source, not the row's entry
@@ -210,6 +226,7 @@ public class Quant7GatesSimulationService {
             opened.id(), instrument, direction, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
         publish(opened);
         persist(opened);
+        routeOpen(opened);
     }
 
     private Quant7GatesSimulation maybeClose(Quant7GatesSimulation sim,
@@ -295,6 +312,15 @@ public class Quant7GatesSimulationService {
         return false;
     }
 
+    /**
+     * True when an OPEN paper simulation exists for {@code (instrument, direction)}.
+     * Used by {@code QuantSimFlattenReconciler} to tell a still-legitimate mirrored
+     * position (paper sim still open) from an orphan whose paper sim has closed.
+     */
+    public synchronized boolean hasOpenSimulation(Instrument instrument, Quant7GatesSimulation.Direction direction) {
+        return hasOpen(instrument, direction);
+    }
+
     private List<Quant7GatesSimulation> bucket(Instrument instrument) {
         return byInstrument.computeIfAbsent(instrument, k -> new ArrayList<>());
     }
@@ -342,6 +368,53 @@ public class Quant7GatesSimulationService {
         } catch (RuntimeException e) {
             log.warn("quant-sim persist failed id={}: {}", sim.id(), e.toString());
         }
+    }
+
+    /**
+     * Mirrors a freshly-opened paper trade to a live IBKR entry order when the
+     * Auto-IBKR bridge is wired (master flag on). Best-effort: the paper row is
+     * never altered by the routing result — the simulation stays the source of
+     * truth for stats. No-op when the bridge bean is absent (paper-only mode).
+     */
+    private void routeOpen(Quant7GatesSimulation opened) {
+        Quant7GatesExecutionBridge bridge = bridge();
+        if (bridge == null) return;
+        try {
+            RoutingResult r = bridge.submitOpen(opened);
+            if (r.outcome().isFailure()) {
+                log.warn("quant-sim OPEN route failed id={} instr={}: {} {}",
+                    opened.id(), opened.instrument(), r.outcome(), r.message());
+            } else {
+                log.debug("quant-sim OPEN route id={} instr={}: {}", opened.id(), opened.instrument(), r.outcome());
+            }
+        } catch (RuntimeException e) {
+            log.warn("quant-sim OPEN route threw id={} instr={}: {}", opened.id(), opened.instrument(), e.toString());
+        }
+    }
+
+    /**
+     * Flattens the mirrored IBKR position when a paper trade resolves (SL / TP /
+     * flow-AVOID). Best-effort and a no-op in paper-only mode; the bridge itself
+     * no-ops when no mirrored row exists for this instrument.
+     */
+    private void routeClose(Quant7GatesSimulation closed) {
+        Quant7GatesExecutionBridge bridge = bridge();
+        if (bridge == null) return;
+        try {
+            RoutingResult r = bridge.submitClose(closed);
+            if (r.outcome().isFailure()) {
+                log.warn("quant-sim CLOSE route failed id={} instr={}: {} {}",
+                    closed.id(), closed.instrument(), r.outcome(), r.message());
+            } else {
+                log.debug("quant-sim CLOSE route id={} instr={}: {}", closed.id(), closed.instrument(), r.outcome());
+            }
+        } catch (RuntimeException e) {
+            log.warn("quant-sim CLOSE route threw id={} instr={}: {}", closed.id(), closed.instrument(), e.toString());
+        }
+    }
+
+    private Quant7GatesExecutionBridge bridge() {
+        return bridgeProvider == null ? null : bridgeProvider.getIfAvailable();
     }
 
     /**
@@ -435,5 +508,17 @@ public class Quant7GatesSimulationService {
             copy.put(e.getKey(), new ArrayList<>(e.getValue()));
         }
         return copy;
+    }
+
+    /**
+     * Minimal {@link ObjectProvider} reporting "no bean available". Lets the
+     * backward-compatible 2-arg constructor (and tests) run paper-only without
+     * wiring an execution bridge.
+     */
+    private static final class EmptyObjectProvider<T> implements ObjectProvider<T> {
+        @Override public T getObject() { throw new org.springframework.beans.factory.NoSuchBeanDefinitionException("none"); }
+        @Override public T getObject(Object... args) { throw new org.springframework.beans.factory.NoSuchBeanDefinitionException("none"); }
+        @Override public T getIfAvailable() { return null; }
+        @Override public T getIfUnique() { return null; }
     }
 }
