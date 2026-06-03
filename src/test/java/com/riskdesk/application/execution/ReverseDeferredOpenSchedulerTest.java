@@ -28,6 +28,7 @@ class ReverseDeferredOpenSchedulerTest {
     private TradeExecutionRepositoryPort repo;
     private DefaultOrderRouter router;
     private IbkrProperties props;
+    private boolean gateReady = true; // execution readiness gate state
     private ReverseDeferredOpenScheduler scheduler;
 
     @BeforeEach
@@ -36,7 +37,8 @@ class ReverseDeferredOpenSchedulerTest {
         router = mock(DefaultOrderRouter.class);
         props = new IbkrProperties();
         props.setEnabled(true);
-        scheduler = new ReverseDeferredOpenScheduler(repo, router, props);
+        gateReady = true;
+        scheduler = new ReverseDeferredOpenScheduler(repo, router, props, () -> gateReady);
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
     }
 
@@ -140,6 +142,18 @@ class ReverseDeferredOpenSchedulerTest {
     @Test
     void ibkrDisabled_isNoOp() {
         props.setEnabled(false);
+
+        scheduler.submitReadyDeferredOpens();
+
+        verify(repo, never()).findPendingDeferredReverseOpens();
+        verify(router, never()).submitDeferredReverseOpen(any());
+    }
+
+    @Test
+    void bootGateClosed_isNoOp() {
+        // Until the boot gate opens (broker truth readable), deferred opens must NOT be submitted —
+        // bypassing it would risk a startup double-submit / stack for a row whose close reads CLOSED in the DB.
+        gateReady = false;
 
         scheduler.submitReadyDeferredOpens();
 

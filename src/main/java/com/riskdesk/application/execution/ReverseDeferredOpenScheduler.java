@@ -45,19 +45,29 @@ public class ReverseDeferredOpenScheduler {
     private final TradeExecutionRepositoryPort executionRepository;
     private final DefaultOrderRouter orderRouter;
     private final IbkrProperties ibkrProperties;
+    private final ExecutionReadinessGate readinessGate;
 
     public ReverseDeferredOpenScheduler(TradeExecutionRepositoryPort executionRepository,
                                         DefaultOrderRouter orderRouter,
-                                        IbkrProperties ibkrProperties) {
+                                        IbkrProperties ibkrProperties,
+                                        ExecutionReadinessGate readinessGate) {
         this.executionRepository = executionRepository;
         this.orderRouter = orderRouter;
         this.ibkrProperties = ibkrProperties;
+        this.readinessGate = readinessGate;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.execution.reverse-deferred-open.interval-ms:3000}")
     public void submitReadyDeferredOpens() {
         if (!ibkrProperties.isEnabled()) {
             return; // can't submit anything; the deferred rows wait until IBKR is back
+        }
+        if (!readinessGate.isReady()) {
+            // The boot gate is still CLOSED — broker position truth is not readable yet. Submitting a
+            // deferred open now (e.g. for a row whose linked close reads CLOSED in the DB) would bypass the
+            // exact reconciliation the gate exists to guarantee, risking a startup double-submit / stack.
+            // Leave the deferred rows pending until the gate opens.
+            return;
         }
         List<TradeExecutionRecord> deferred = executionRepository.findPendingDeferredReverseOpens();
         for (TradeExecutionRecord open : deferred) {
