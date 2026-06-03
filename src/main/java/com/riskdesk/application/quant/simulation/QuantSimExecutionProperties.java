@@ -33,12 +33,6 @@ public class QuantSimExecutionProperties {
      */
     private List<String> instruments = List.of("MNQ", "MCL");
 
-    /**
-     * Broker account used when creating quant-sim executions. Required when
-     * {@code enabled=true}; the bridge fails fast on startup if blank.
-     */
-    private String brokerAccountId = "";
-
     /** Default contract quantity per routed order. */
     private int defaultQuantity = 1;
 
@@ -78,9 +72,6 @@ public class QuantSimExecutionProperties {
 
     public List<String> getInstruments() { return instruments; }
     public void setInstruments(List<String> instruments) { this.instruments = instruments; }
-
-    public String getBrokerAccountId() { return brokerAccountId; }
-    public void setBrokerAccountId(String brokerAccountId) { this.brokerAccountId = brokerAccountId; }
 
     public int getDefaultQuantity() { return defaultQuantity; }
     public void setDefaultQuantity(int defaultQuantity) { this.defaultQuantity = defaultQuantity; }

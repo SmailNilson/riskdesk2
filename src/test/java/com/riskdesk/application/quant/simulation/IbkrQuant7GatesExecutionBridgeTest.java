@@ -60,7 +60,6 @@ class IbkrQuant7GatesExecutionBridgeTest {
     void setUp() {
         props = new QuantSimExecutionProperties();
         props.setEnabled(true);
-        props.setBrokerAccountId("DU-TEST");
         props.setInstruments(List.of("MNQ", "MCL"));
         props.setDefaultQuantity(1);
         toggle = new QuantSimExecutionState();
@@ -78,26 +77,6 @@ class IbkrQuant7GatesExecutionBridgeTest {
         when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         bridge = new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, AFTERNOON);
-    }
-
-    // ── constructor fail-fast ────────────────────────────────────────────────
-
-    @Test
-    void degradesToInertWhenBrokerAccountBlank() {
-        // A blank account must NOT crash the app (fail-fast would break the deploy
-        // health check) — the bridge builds and stays inert, routing nothing.
-        QuantSimExecutionProperties bad = new QuantSimExecutionProperties();
-        bad.setEnabled(true);
-        bad.setBrokerAccountId("  ");
-        bad.setInstruments(List.of("MNQ", "MCL"));
-        IbkrQuant7GatesExecutionBridge inert =
-            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, bad, toggle, AFTERNOON);
-
-        toggle.setEnabled(Instrument.MNQ, true);
-        RoutingResult r = inert.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
-
-        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_ACCOUNT);
-        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     @Test
@@ -131,10 +110,14 @@ class IbkrQuant7GatesExecutionBridgeTest {
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().action()).isEqualTo("LONG");
         assertThat(req.getValue().quantity()).isEqualTo(1);
+        // Placeholder account — the gateway resolves it to the session managed
+        // account (like WTX-RSI); nothing to configure.
+        assertThat(req.getValue().brokerAccountId()).isEqualTo("quant-sim-default");
 
         ArgumentCaptor<TradeExecutionRecord> saved = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+        assertThat(saved.getValue().getBrokerAccountId()).isEqualTo("quant-sim-default");
         assertThat(saved.getValue().getTriggerSource()).isEqualTo(ExecutionTriggerSource.QUANT_SIM_AUTO);
         assertThat(saved.getValue().getIbkrOrderId()).isEqualTo(777);
     }
