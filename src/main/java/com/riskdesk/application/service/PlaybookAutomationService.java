@@ -71,6 +71,8 @@ public class PlaybookAutomationService {
     private final ObjectProvider<IbkrMarginPreflightService> marginPreflightProvider;
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
     private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
+    /** P4 daily loss cap (optional collaborator). When tripped, a Playbook entry is refused. */
+    private final ObjectProvider<com.riskdesk.application.execution.DailyLossCapGuard> lossCapGuardProvider;
 
     public PlaybookAutomationService(PlaybookService playbookService,
                                      PlaybookAutomationStatePort statePort,
@@ -82,7 +84,8 @@ public class PlaybookAutomationService {
                                      PlaybookAutomationProperties properties,
                                      ObjectProvider<IbkrMarginPreflightService> marginPreflightProvider,
                                      ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                     ObjectProvider<SimpMessagingTemplate> messagingProvider) {
+                                     ObjectProvider<SimpMessagingTemplate> messagingProvider,
+                                     ObjectProvider<com.riskdesk.application.execution.DailyLossCapGuard> lossCapGuardProvider) {
         this.playbookService = playbookService;
         this.statePort = statePort;
         this.decisionRepository = decisionRepository;
@@ -94,6 +97,7 @@ public class PlaybookAutomationService {
         this.marginPreflightProvider = marginPreflightProvider;
         this.marketDataServiceProvider = marketDataServiceProvider;
         this.messagingProvider = messagingProvider;
+        this.lossCapGuardProvider = lossCapGuardProvider;
     }
 
     @EventListener
@@ -307,6 +311,12 @@ public class PlaybookAutomationService {
         }
         if (!ibkrProperties.isEnabled()) {
             return decision.withRouting(PlaybookRoutingOutcome.SKIPPED_IBKR_DISABLED, "IBKR disabled", null);
+        }
+        var lossCapGuard = lossCapGuardProvider == null ? null : lossCapGuardProvider.getIfAvailable();
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            // P4 — daily loss cap tripped: no new Playbook entry (Playbook has no broker close to gate).
+            return decision.withRouting(PlaybookRoutingOutcome.SKIPPED_AUTO_OFF,
+                "daily loss cap tripped — new entries halted", null);
         }
         IbkrMarginPreflightService marginPreflight = marginPreflightProvider.getIfAvailable();
         if (marginPreflight != null) {

@@ -2,6 +2,7 @@ package com.riskdesk.application.service.strategy.wtxrsi;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
@@ -72,13 +73,15 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
     private final OrderRouter orderRouter;
     /** Migration kill-switch holder. Nullable in the test constructor. */
     private final ExecutionProperties executionProperties;
+    /** P4 daily loss cap. Nullable in tests; when tripped, new OPENs are refused (closes aren't). */
+    private final DailyLossCapGuard lossCapGuard;
 
-    /** Test-only legacy constructor — production uses the 5-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production uses the 6-arg variant via Spring autowiring. */
     public IbkrWtxRsiExecutionBridge(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, null, null, null);
     }
 
     @Autowired
@@ -87,12 +90,14 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties,
             OrderRouter orderRouter,
-            ExecutionProperties executionProperties) {
+            ExecutionProperties executionProperties,
+            DailyLossCapGuard lossCapGuard) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.orderRouter = orderRouter;
         this.executionProperties = executionProperties;
+        this.lossCapGuard = lossCapGuard;
     }
 
     private boolean unifiedRouterEnabled() {
@@ -112,6 +117,11 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
         }
         if (plan.entryPrice() == null) {
             return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_NO_PRICE);
+        }
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            // P4 — daily loss cap tripped: no new entries (closes via submitClose stay allowed). Covers both
+            // the legacy and unified-router paths below (the router also gates, harmlessly).
+            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_AUTO_OFF);
         }
 
         // P3 — unified-router migration: when the flag is ON, route the OPEN through the shared OrderRouter

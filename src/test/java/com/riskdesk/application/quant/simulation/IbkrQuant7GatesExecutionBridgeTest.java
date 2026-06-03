@@ -2,6 +2,7 @@ package com.riskdesk.application.quant.simulation;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
@@ -76,7 +77,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         });
         when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        bridge = new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, AFTERNOON);
+        bridge = new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, AFTERNOON, null);
     }
 
     @Test
@@ -84,7 +85,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         // 16:52 ET — inside the [16:50, 17:00) cutoff window.
         Clock preClose = Clock.fixed(Instant.parse("2026-06-03T20:52:00Z"), NY);
         IbkrQuant7GatesExecutionBridge cutoffBridge =
-            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, preClose);
+            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, preClose, null);
         toggle.setEnabled(Instrument.MNQ, true);
         RoutingResult r = cutoffBridge.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_AUTO_OFF);
@@ -137,6 +138,21 @@ class IbkrQuant7GatesExecutionBridgeTest {
         verify(repo).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
         assertThat(saved.getValue().getEntryFilledAt()).isNotNull();
+    }
+
+    @Test
+    void openSkippedWhenLossCapTripped() {
+        // P4 — daily loss cap tripped: no new entry, no broker order (closes stay allowed).
+        DailyLossCapGuard tripped = org.mockito.Mockito.mock(DailyLossCapGuard.class);
+        when(tripped.blocksNewEntries()).thenReturn(true);
+        IbkrQuant7GatesExecutionBridge capped =
+            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, AFTERNOON, tripped);
+        toggle.setEnabled(Instrument.MNQ, true);
+
+        RoutingResult r = capped.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_AUTO_OFF);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     @Test

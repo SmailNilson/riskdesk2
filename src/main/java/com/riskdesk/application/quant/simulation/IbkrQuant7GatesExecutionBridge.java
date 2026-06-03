@@ -2,6 +2,7 @@ package com.riskdesk.application.quant.simulation;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
@@ -59,19 +60,23 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
     private final QuantSimExecutionProperties props;
     private final QuantSimExecutionState toggleState;
     private final Clock clock;
+    /** P4 daily loss cap. Nullable in tests; when present and tripped, new OPENs are refused (closes aren't). */
+    private final DailyLossCapGuard lossCapGuard;
 
     public IbkrQuant7GatesExecutionBridge(IbkrOrderService ibkrOrderService,
                                           TradeExecutionRepositoryPort executionRepository,
                                           IbkrProperties ibkrProperties,
                                           QuantSimExecutionProperties props,
                                           QuantSimExecutionState toggleState,
-                                          Clock clock) {
+                                          Clock clock,
+                                          DailyLossCapGuard lossCapGuard) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.props = props;
         this.toggleState = toggleState;
         this.clock = clock;
+        this.lossCapGuard = lossCapGuard;
     }
 
     @Override
@@ -88,6 +93,10 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
         }
         if (!toggleState.isEnabled(instrument)) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF, "Auto-IBKR toggle OFF for " + instrument.name());
+        }
+        if (lossCapGuard != null && lossCapGuard.blocksNewEntries()) {
+            // P4 — daily loss cap tripped: no new entries (closes/flattens stay allowed via submitClose/flatten).
+            return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF, "daily loss cap tripped — new entries halted");
         }
         if (inPreCloseCutoff()) {
             // No fresh resting DAY entries right before the CME break — they could

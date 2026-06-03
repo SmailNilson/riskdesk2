@@ -113,7 +113,7 @@ class WtxExecutionBridgeTest {
 
     private WtxExecutionBridge unifiedBridge(OrderRouter router, IbkrMarginPreflightService preflight, boolean flagOn) {
         return new WtxExecutionBridge(ibkrOrderService, repo, ibkrProperties, wtxProperties,
-                preflight, null, router, unifiedRouter(flagOn));
+                preflight, null, router, unifiedRouter(flagOn), null);
     }
 
     @Test
@@ -207,9 +207,9 @@ class WtxExecutionBridgeTest {
                 .thenReturn(new BrokerEntryOrderSubmission(2L, "Submitted", "ref", Instant.now()));
         FakeRepo unifiedRepo = new FakeRepo();
         DefaultOrderRouter router = new DefaultOrderRouter(unifiedBroker, unifiedRepo, ibkrProperties,
-                () -> true, new ExecutionReconciler(null), Instrument::getTickSize, Optional.empty());
+                () -> true, new ExecutionReconciler(null), Instrument::getTickSize, Optional.empty(), null);
         new WtxExecutionBridge(unifiedBroker, unifiedRepo, ibkrProperties, wtxProperties,
-                null, null, router, unifiedRouter(true)).submit(signal(action), state, refPrice);
+                null, null, router, unifiedRouter(true), null).submit(signal(action), state, refPrice);
 
         ArgumentCaptor<BrokerEntryOrderRequest> legacyCap = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(legacyBroker).submitEntryOrder(legacyCap.capture());

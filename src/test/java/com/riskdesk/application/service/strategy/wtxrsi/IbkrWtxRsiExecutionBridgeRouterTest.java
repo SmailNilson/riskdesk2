@@ -59,7 +59,7 @@ class IbkrWtxRsiExecutionBridgeRouterTest {
     private IbkrWtxRsiExecutionBridge bridge(boolean flagOn) {
         ExecutionProperties props = new ExecutionProperties();
         props.getUnifiedRouter().setEnabled(flagOn);
-        return new IbkrWtxRsiExecutionBridge(ibkrOrderService, repo, ibkrProperties, router, props);
+        return new IbkrWtxRsiExecutionBridge(ibkrOrderService, repo, ibkrProperties, router, props, null);
     }
 
     @Test
