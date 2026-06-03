@@ -30,9 +30,16 @@ unified core.
 
 It also closes **ACTIVE phantoms** — rows the app believes open but IBKR holds no position for (missed
 close fill / external close) — so the WTX position reconciler resyncs the virtual state to FLAT (fixes the
-"frozen Entry on a flat account" WTX-panel symptom). This path is **debounced**: it only acts after IBKR is
-confirmed flat for the row continuously for `active-phantom-confirm-seconds` (default 120), so a transient
-empty snapshot can never close a real open position. Gated by `reconcile-active-phantoms` (default on).
+"frozen Entry on a flat account" WTX-panel symptom). And it cancels **zombie ENTRY_SUBMITTED** rows whose
+order never reached the exchange (`PendingSubmit` never transmitted — IBKR shows 0 orders — or the order is
+gone) while IBKR is flat: these freeze a reversal strategy (`SKIPPED_ENTRY_IN_FLIGHT` on every signal) and
+keep its virtual state desynced, and `WtxStaleEntryReconciler` won't touch them because it treats
+`PendingSubmit` as live — but a genuinely-working resting limit is `Submitted`/`PreSubmitted`, not
+`PendingSubmit`. Both destructive paths are **debounced** (`confirm-seconds`, default 120): they act only
+after IBKR is confirmed reconcilable for the row continuously across the window, so a transient empty
+snapshot / a freshly-submitted entry is never touched; a genuinely-working `Submitted`/`PreSubmitted`/
+`PartiallyFilled` order is always left alone. Gated by `reconcile-active-phantoms` / `reconcile-stuck-entries`
+(both default on).
 
 ## Quant 7-Gates Simulation → Auto-IBKR mirror (2026-06-03)
 

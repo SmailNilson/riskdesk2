@@ -54,13 +54,13 @@ class StaleCloseReconcilerTest {
     }
 
     private StaleCloseReconciler newReconciler(boolean enabled, long graceSeconds) {
-        return newReconciler(enabled, true, graceSeconds, 0);
+        return newReconciler(enabled, true, true, graceSeconds, 0);
     }
 
     private StaleCloseReconciler newReconciler(boolean enabled, boolean reconcileActive,
-                                               long graceSeconds, long activeConfirmSeconds) {
+                                               boolean reconcileEntries, long graceSeconds, long confirmSeconds) {
         return new StaleCloseReconciler(ibkrOrderService, repo, portfolioService,
-            () -> true, ibkrProperties, enabled, reconcileActive, graceSeconds, activeConfirmSeconds);
+            () -> true, ibkrProperties, enabled, reconcileActive, reconcileEntries, graceSeconds, confirmSeconds);
     }
 
     @Test
@@ -136,7 +136,7 @@ class StaleCloseReconcilerTest {
     @Test
     void closesActivePhantomWhenFlatAndConfirmed() {
         // confirm window 0 → acts on the first confirmed-flat sweep.
-        StaleCloseReconciler r = newReconciler(true, true, 0, 0);
+        StaleCloseReconciler r = newReconciler(true, true, true, 0, 0);
         TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
         when(repo.findAllActive()).thenReturn(List.of(active));
 
@@ -149,7 +149,7 @@ class StaleCloseReconcilerTest {
     @Test
     void debouncesActivePhantomUntilConfirmWindowElapses() {
         // confirm window 120s → the first confirmed-flat sweep only records, never closes.
-        StaleCloseReconciler r = newReconciler(true, true, 0, 120);
+        StaleCloseReconciler r = newReconciler(true, true, true, 0, 120);
         TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
         when(repo.findAllActive()).thenReturn(List.of(active));
 
@@ -161,7 +161,7 @@ class StaleCloseReconcilerTest {
 
     @Test
     void doesNotCloseActivePhantomWhenNotFlat() {
-        StaleCloseReconciler r = newReconciler(true, true, 0, 0);
+        StaleCloseReconciler r = newReconciler(true, true, true, 0, 0);
         TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
         when(repo.findAllActive()).thenReturn(List.of(active));
         when(portfolioService.getPortfolio(any())).thenReturn(snapshotWith(position("U1", "MNQ JUN26", BigDecimal.ONE)));
@@ -173,9 +173,73 @@ class StaleCloseReconcilerTest {
 
     @Test
     void ignoresActiveRowsWhenFeatureOff() {
-        StaleCloseReconciler r = newReconciler(true, false, 0, 0);
+        StaleCloseReconciler r = newReconciler(true, false, true, 0, 0);
         TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
         when(repo.findAllActive()).thenReturn(List.of(active));
+
+        r.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
+    }
+
+    // ── zombie ENTRY_SUBMITTED (debounced) ───────────────────────────────────
+
+    @Test
+    void cancelsZombieEntryWhenFlatAndOrderGone() {
+        // default: findOrder NOT_FOUND, IBKR flat, confirm window 0.
+        TradeExecutionRecord entry = entryRow("MNQ", "wtx-default");
+        when(repo.findAllActive()).thenReturn(List.of(entry));
+
+        reconciler.reconcileStaleCloses();
+
+        verify(repo).save(entry);
+        assertThat(entry.getStatus()).isEqualTo(ExecutionStatus.CANCELLED);
+    }
+
+    @Test
+    void cancelsZombieEntryWhenPendingSubmit() {
+        // PendingSubmit was never transmitted to the exchange → a zombie on a flat account.
+        TradeExecutionRecord entry = entryRow("MNQ", "wtx-default");
+        when(repo.findAllActive()).thenReturn(List.of(entry));
+        when(ibkrOrderService.findOrder(any(), any())).thenReturn(
+            BrokerOrderLookup.found(new BrokerOrderStatusView(7L, "ref", "U1", "PendingSubmit")));
+
+        reconciler.reconcileStaleCloses();
+
+        verify(repo).save(entry);
+        assertThat(entry.getStatus()).isEqualTo(ExecutionStatus.CANCELLED);
+    }
+
+    @Test
+    void leavesGenuinelyWorkingEntry() {
+        // A real resting limit (Submitted) may still fill → never cancel it.
+        TradeExecutionRecord entry = entryRow("MNQ", "wtx-default");
+        when(repo.findAllActive()).thenReturn(List.of(entry));
+        when(ibkrOrderService.findOrder(any(), any())).thenReturn(
+            BrokerOrderLookup.found(new BrokerOrderStatusView(7L, "ref", "U1", "Submitted")));
+
+        reconciler.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void debouncesZombieEntryUntilConfirmWindowElapses() {
+        StaleCloseReconciler r = newReconciler(true, true, true, 0, 120);
+        TradeExecutionRecord entry = entryRow("MNQ", "wtx-default");
+        when(repo.findAllActive()).thenReturn(List.of(entry));
+
+        r.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
+        assertThat(entry.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void ignoresEntriesWhenFeatureOff() {
+        StaleCloseReconciler r = newReconciler(true, true, false, 0, 0);
+        TradeExecutionRecord entry = entryRow("MNQ", "wtx-default");
+        when(repo.findAllActive()).thenReturn(List.of(entry));
 
         r.reconcileStaleCloses();
 
@@ -234,6 +298,18 @@ class StaleCloseReconcilerTest {
         r.setExecutionKey("quant-sim:" + instrument + ":SHORT:1:OPEN");
         r.setBrokerAccountId(account);
         r.setUpdatedAt(Instant.now().minusSeconds(600)); // aged past grace
+        return r;
+    }
+
+    private static TradeExecutionRecord entryRow(String instrument, String account) {
+        TradeExecutionRecord r = new TradeExecutionRecord();
+        r.setId(11L);
+        r.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        r.setIbkrOrderId(777);
+        r.setInstrument(instrument);
+        r.setExecutionKey("wtx:" + instrument + ":5m:1:SHORT");
+        r.setBrokerAccountId(account);
+        r.setEntrySubmittedAt(Instant.now().minusSeconds(600)); // aged past grace
         return r;
     }
 
