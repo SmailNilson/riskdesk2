@@ -20,6 +20,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * Reconciles {@code EXIT_SUBMITTED} execution rows whose close FILLED at the broker but whose
@@ -51,6 +54,13 @@ import java.util.Locale;
  *   <li>anything uncertain (lookup UNAVAILABLE, portfolio unreadable, a position still open) → skip —
  *       it never marks a row CLOSED while a real position could exist.</li>
  * </ul>
+ *
+ * <p><b>ACTIVE phantoms.</b> It also closes rows the app believes {@code ACTIVE} but IBKR holds no
+ * position for (a missed close fill, or an external close) so the WTX position reconciler can resync the
+ * virtual state to FLAT. This path is <b>debounced</b> ({@code active-phantom-confirm-seconds}): it only
+ * acts after IBKR has been confirmed flat for that row continuously across the window, so a transient
+ * empty snapshot can never close a real open position (which would leave it unmanaged). Gated by
+ * {@code reconcile-active-phantoms} (default on).</p>
  */
 @Component
 public class StaleCloseReconciler {
@@ -64,10 +74,19 @@ public class StaleCloseReconciler {
     private final ExecutionReadinessGate readinessGate;
     private final IbkrProperties ibkrProperties;
     private final boolean enabled;
+    private final boolean reconcileActivePhantoms;
     private final Duration grace;
+    private final Duration activeFlatConfirm;
 
     /** One-shot boot replay — fires once as soon as broker truth is readable. */
     private volatile boolean bootReplayDone = false;
+
+    /**
+     * Per-ACTIVE-row "first confirmed flat at" — debounce so a transient empty portfolio snapshot can
+     * never close a real open position (no resident stop, no force-close). An ACTIVE row is only closed
+     * once IBKR has been confirmed flat for it continuously for {@link #activeFlatConfirm}.
+     */
+    private final java.util.Map<Long, Instant> activeFlatSince = new ConcurrentHashMap<>();
 
     public StaleCloseReconciler(IbkrOrderService ibkrOrderService,
                                     TradeExecutionRepositoryPort executionRepository,
@@ -76,7 +95,9 @@ public class StaleCloseReconciler {
                                     ExecutionReadinessGate readinessGate,
                                     IbkrProperties ibkrProperties,
                                     @Value("${riskdesk.execution.close-reconcile.enabled:true}") boolean enabled,
-                                    @Value("${riskdesk.execution.close-reconcile.grace-seconds:90}") long graceSeconds) {
+                                    @Value("${riskdesk.execution.close-reconcile.reconcile-active-phantoms:true}") boolean reconcileActivePhantoms,
+                                    @Value("${riskdesk.execution.close-reconcile.grace-seconds:90}") long graceSeconds,
+                                    @Value("${riskdesk.execution.close-reconcile.active-phantom-confirm-seconds:120}") long activeConfirmSeconds) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrPortfolioService = ibkrPortfolioService;
@@ -84,7 +105,9 @@ public class StaleCloseReconciler {
         this.readinessGate = readinessGate;
         this.ibkrProperties = ibkrProperties;
         this.enabled = enabled;
+        this.reconcileActivePhantoms = reconcileActivePhantoms;
         this.grace = Duration.ofSeconds(Math.max(0, graceSeconds));
+        this.activeFlatConfirm = Duration.ofSeconds(Math.max(0, activeConfirmSeconds));
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.execution.close-reconcile.interval-ms:60000}",
@@ -99,15 +122,23 @@ public class StaleCloseReconciler {
         }
         Instant now = Instant.now();
         for (TradeExecutionRecord row : rows) {
-            if (row.getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
-                continue;
-            }
             try {
-                reconcileOne(row, now);
+                ExecutionStatus st = row.getStatus();
+                if (st == ExecutionStatus.EXIT_SUBMITTED) {
+                    reconcileStuckExit(row, now);
+                } else if (reconcileActivePhantoms && st == ExecutionStatus.ACTIVE) {
+                    reconcileActivePhantom(row, now);
+                }
             } catch (RuntimeException e) {
                 log.debug("close-reconcile: row {} skipped — {}", row.getId(), e.toString());
             }
         }
+        // Drop debounce state for rows that are no longer ACTIVE in the live set (closed, gone, …).
+        Set<Long> activeIds = rows.stream()
+            .filter(r -> r.getStatus() == ExecutionStatus.ACTIVE)
+            .map(TradeExecutionRecord::getId)
+            .collect(Collectors.toSet());
+        activeFlatSince.keySet().retainAll(activeIds);
     }
 
     /** One-shot boot replay so a restart that stranded an EXIT_SUBMITTED row unblocks within seconds. */
@@ -120,42 +151,86 @@ public class StaleCloseReconciler {
         reconcileStaleCloses();
     }
 
-    private void reconcileOne(TradeExecutionRecord row, Instant now) {
-        Instant lastTouched = referenceTimestamp(row);
-        if (lastTouched != null && Duration.between(lastTouched, now).compareTo(grace) < 0) {
-            return; // too fresh — let the normal fill callback resolve it first
+    /** A stuck EXIT_SUBMITTED close whose fill callback was lost → replay it once broker-confirmed flat. */
+    private void reconcileStuckExit(TradeExecutionRecord row, Instant now) {
+        if (tooFresh(row, now)) {
+            return; // let the normal fill callback resolve it first
         }
         if (row.getIbkrOrderId() == null) {
             return; // no close order id → can't replay the callback safely
         }
-        if (row.getExecutionKey() == null || row.getExecutionKey().isBlank()) {
+        if (!confirmedFlatAndNotWorking(row)) {
             return;
         }
+        log.warn("close-reconcile: replaying missed Filled for stuck EXIT_SUBMITTED execution={} "
+                + "instrument={} src={} orderId={} (IBKR flat → close completed)",
+            row.getId(), row.getInstrument(), row.getTriggerSource(), row.getIbkrOrderId());
+        // Replay the missed callback through the SAME path a live fill would take. The fill tracker
+        // locates the row by its (now-persisted) close orderId and applies EXIT_SUBMITTED → CLOSED,
+        // publishes, and lets the WTX close-P&L settler finalize on its next bar.
+        fillTracking.onOrderStatus(row.getIbkrOrderId(), "Filled", null, null, null, now);
+    }
 
-        // Is anything still working under this orderRef (the close resting unfilled)?
+    /**
+     * An ACTIVE row the app believes is open but IBKR holds no position for → a phantom (the close fill
+     * was missed, or the position was closed externally). Closes it so the WTX position reconciler can
+     * resync the virtual state to FLAT. <b>Debounced</b>: only acts after IBKR has been confirmed flat
+     * for this row continuously for {@link #activeFlatConfirm} — closing a real open position on a single
+     * transient empty snapshot would leave it unmanaged (no stop, no force-close), so this is deliberately
+     * slower and more cautious than the EXIT path.
+     */
+    private void reconcileActivePhantom(TradeExecutionRecord row, Instant now) {
+        if (tooFresh(row, now) || !confirmedFlatAndNotWorking(row)) {
+            activeFlatSince.remove(row.getId()); // not (still) a confirmed phantom → reset the debounce
+            return;
+        }
+        Instant since = activeFlatSince.computeIfAbsent(row.getId(), k -> now);
+        if (Duration.between(since, now).compareTo(activeFlatConfirm) < 0) {
+            return; // confirmed flat, but not for long enough yet
+        }
+        activeFlatSince.remove(row.getId());
+        log.warn("close-reconcile: closing ACTIVE phantom execution={} instrument={} src={} entry={} "
+                + "(IBKR confirmed flat for ≥{}s — position gone)",
+            row.getId(), row.getInstrument(), row.getTriggerSource(), row.getNormalizedEntryPrice(),
+            activeFlatConfirm.toSeconds());
+        Instant ts = Instant.now();
+        row.setStatus(ExecutionStatus.CLOSED);
+        row.setStatusReason("Reconciled: IBKR confirmed flat — phantom ACTIVE closed (missed close fill / external close)");
+        if (row.getClosedAt() == null) {
+            row.setClosedAt(ts);
+        }
+        row.setUpdatedAt(ts);
+        executionRepository.save(row);
+    }
+
+    private boolean tooFresh(TradeExecutionRecord row, Instant now) {
+        Instant lastTouched = referenceTimestamp(row);
+        return lastTouched != null && Duration.between(lastTouched, now).compareTo(grace) < 0;
+    }
+
+    /**
+     * True only when, for this row's instrument, IBKR is reachable, no order is still working under the
+     * row's {@code orderRef}, AND the position is confirmed flat. Anything uncertain (lookup UNAVAILABLE,
+     * an order still live, portfolio unreadable, a position still open) returns false — the reconciler
+     * never acts on a guess.
+     */
+    private boolean confirmedFlatAndNotWorking(TradeExecutionRecord row) {
+        if (row.getExecutionKey() == null || row.getExecutionKey().isBlank()) {
+            return false;
+        }
         BrokerOrderLookup lookup;
         try {
             lookup = ibkrOrderService.findOrder(row.getBrokerAccountId(), row.getExecutionKey());
         } catch (RuntimeException e) {
-            return; // can't confirm — leave it
+            return false; // can't confirm — leave it
         }
         if (lookup.isUnavailable()) {
-            return; // never act on an outage
+            return false; // never act on an outage
         }
         if (lookup.isFound() && isLive(lookup.order().status())) {
-            return; // a close (or order) is genuinely still resting at the broker
+            return false; // an order is genuinely still resting at the broker
         }
-
-        // Authoritative: nothing open under the ref AND IBKR confirmed flat → the close completed.
-        if (isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId())) {
-            log.warn("close-reconcile: replaying missed Filled for stuck EXIT_SUBMITTED execution={} "
-                    + "instrument={} src={} orderId={} (IBKR flat → close completed)",
-                row.getId(), row.getInstrument(), row.getTriggerSource(), row.getIbkrOrderId());
-            // Replay the missed callback through the SAME path a live fill would take. The fill tracker
-            // locates the row by its (now-persisted) close orderId and applies EXIT_SUBMITTED → CLOSED,
-            // publishes, and lets the WTX close-P&L settler finalize on its next bar.
-            fillTracking.onOrderStatus(row.getIbkrOrderId(), "Filled", null, null, null, now);
-        }
+        return isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId());
     }
 
     /**
