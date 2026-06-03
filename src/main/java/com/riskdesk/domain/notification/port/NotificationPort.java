@@ -1,5 +1,6 @@
 package com.riskdesk.domain.notification.port;
 
+import com.riskdesk.domain.notification.event.ExecutionReconciledEvent;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
@@ -28,6 +29,16 @@ public interface NotificationPort {
      * adapters can ignore the channel.
      */
     default void sendWtxSignal(WtxSignalDetectedEvent event) {
+        // no-op
+    }
+
+    /**
+     * Fire the <b>divergence alarm</b> when the broker-truth reconciler corrected an execution row to
+     * match a flat broker (a phantom position / stuck order was forced terminal). Default no-op so
+     * non-Telegram adapters ignore the channel; Telegram overrides with a formatted message. This is the
+     * R7 safety net — surfacing divergence within seconds instead of discovering it by losing money.
+     */
+    default void sendExecutionReconciled(ExecutionReconciledEvent event) {
         // no-op
     }
 }

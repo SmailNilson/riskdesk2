@@ -42,6 +42,11 @@ public class TradeExecutionRecord {
     private Instant lastFillTime;
     private String orderStatus;
     private Integer ibkrOrderId;
+    /**
+     * IBKR {@code permId} — the DURABLE, never-reused broker order id (unlike {@code ibkrOrderId}, which
+     * is session-scoped and reused after a gateway reconnect). The authoritative reconciliation key.
+     */
+    private Long permId;
     private String lastExecId;
     /**
      * Slice D — D2 (reverse deferred-open). When non-null on a {@code PENDING_ENTRY_SUBMISSION} row, this
@@ -332,6 +337,14 @@ public class TradeExecutionRecord {
 
     public void setIbkrOrderId(Integer ibkrOrderId) {
         this.ibkrOrderId = ibkrOrderId;
+    }
+
+    public Long getPermId() {
+        return permId;
+    }
+
+    public void setPermId(Long permId) {
+        this.permId = permId;
     }
 
     public String getLastExecId() {

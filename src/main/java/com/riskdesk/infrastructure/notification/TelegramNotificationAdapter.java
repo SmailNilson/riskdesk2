@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.notification;
 
 import com.riskdesk.domain.engine.strategy.wtx.WtxAction;
+import com.riskdesk.domain.notification.event.ExecutionReconciledEvent;
 import com.riskdesk.domain.notification.event.TradeBlockedByStrategyGateEvent;
 import com.riskdesk.domain.notification.event.TradeValidatedEvent;
 import com.riskdesk.domain.notification.event.WtxSignalDetectedEvent;
@@ -194,6 +195,53 @@ public class TelegramNotificationAdapter implements NotificationPort {
             log.error("Failed to send Telegram WTX alert for {} {} — {}",
                     event.instrument(), event.timeframe(), e.getMessage());
         }
+    }
+
+    @Override
+    public void sendExecutionReconciled(ExecutionReconciledEvent event) {
+        if (!properties.isEnabled()) {
+            log.debug("Telegram notifications disabled — skipping reconcile alert for {}", event.instrument());
+            return;
+        }
+        if (properties.getBotToken().isBlank() || properties.getChatId().isBlank()) {
+            log.warn("Telegram bot-token or chat-id not configured — skipping reconcile notification");
+            return;
+        }
+
+        String message = formatReconciledMessage(event);
+        String url = String.format(TELEGRAM_API, properties.getBotToken());
+
+        try {
+            restTemplate.postForEntity(url, Map.of(
+                    "chat_id", properties.getChatId(),
+                    "text", message,
+                    "parse_mode", "HTML"
+            ), String.class);
+            log.info("Telegram reconcile alert sent for {} {}->{} ({})",
+                    event.instrument(), event.fromStatus(), event.toStatus(), event.triggerSource());
+        } catch (Exception e) {
+            log.error("Failed to send Telegram reconcile notification for {} — {}",
+                    event.instrument(), e.getMessage());
+        }
+    }
+
+    private String formatReconciledMessage(ExecutionReconciledEvent e) {
+        StringBuilder sb = new StringBuilder();
+        // 🔧 + bold header
+        sb.append("🔧 <b>RECONCILE — état corrigé pour matcher IBKR</b>\n\n");
+        sb.append("📟 <b>Instrument:</b> ").append(e.instrument())
+          .append(" (").append(instrumentLabel(e.instrument())).append(")\n");
+        sb.append("🔄 <b>Correction:</b> ")
+          .append(e.fromStatus() == null ? "?" : e.fromStatus())
+          .append(" → ").append(e.toStatus() == null ? "?" : e.toStatus()).append("\n");
+        if (e.triggerSource() != null) {
+            sb.append("🧭 <b>Stratégie:</b> ").append(e.triggerSource()).append("\n");
+        }
+        sb.append("🔴 <b>Raison:</b> ").append(escapeHtml(e.reason() == null ? "?" : e.reason())).append("\n");
+
+        sb.append("\n⚠️ <i>Aucun ordre placé — l'app a été réalignée sur un broker à plat.</i>\n");
+        sb.append("⚡️ <i>RiskDesk — Broker Truth Reconciler</i>");
+        return sb.toString();
     }
 
     private String formatWtxMessage(WtxSignalDetectedEvent e) {

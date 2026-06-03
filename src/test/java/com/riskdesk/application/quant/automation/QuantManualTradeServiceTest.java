@@ -181,6 +181,7 @@ class QuantManualTradeServiceTest {
         @Override public Optional<TradeExecutionRecord> findByMentorSignalReviewId(Long id) { return Optional.empty(); }
         @Override public List<TradeExecutionRecord> findByMentorSignalReviewIds(Collection<Long> ids) { return List.of(); }
         @Override public Optional<TradeExecutionRecord> findByIbkrOrderId(Integer id) { return Optional.empty(); }
+        @Override public Optional<TradeExecutionRecord> findByPermId(Long permId) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findByExecutionKey(String key) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findActiveByInstrument(String instrument) { return Optional.empty(); }
         @Override public Optional<TradeExecutionRecord> findActiveByInstrumentAndTriggerSource(String instrument, ExecutionTriggerSource src) { return Optional.empty(); }
