@@ -63,6 +63,14 @@ import java.util.stream.Collectors;
  * acts after IBKR has been confirmed flat for that row continuously across the window, so a transient
  * empty snapshot can never close a real open position (which would leave it unmanaged). Gated by
  * {@code reconcile-active-phantoms} (default on).</p>
+ *
+ * <p><b>Zombie entries.</b> It also cancels {@code ENTRY_SUBMITTED} rows whose order never reached the
+ * exchange — a {@code PendingSubmit} that was never transmitted (gateway disconnected at submit, …) or a
+ * broker order that's simply gone — while IBKR holds no position. These freeze a reversal strategy (every
+ * new signal hits {@code SKIPPED_ENTRY_IN_FLIGHT}) AND keep its virtual state desynced from a flat broker.
+ * It only cancels when the broker order is NOT genuinely working ({@code Submitted}/{@code PreSubmitted}/
+ * {@code PartiallyFilled} are left alone — those are real resting limits that may still fill) and IBKR is
+ * confirmed flat, debounced like the ACTIVE path. Gated by {@code reconcile-stuck-entries} (default on).</p>
  */
 @Component
 public class StaleCloseReconciler {
@@ -76,18 +84,20 @@ public class StaleCloseReconciler {
     private final IbkrProperties ibkrProperties;
     private final boolean enabled;
     private final boolean reconcileActivePhantoms;
+    private final boolean reconcileStuckEntries;
     private final Duration grace;
-    private final Duration activeFlatConfirm;
+    private final Duration flatConfirm;
 
     /** One-shot boot replay — fires once as soon as broker truth is readable. */
     private volatile boolean bootReplayDone = false;
 
     /**
-     * Per-ACTIVE-row "first confirmed flat at" — debounce so a transient empty portfolio snapshot can
-     * never close a real open position (no resident stop, no force-close). An ACTIVE row is only closed
-     * once IBKR has been confirmed flat for it continuously for {@link #activeFlatConfirm}.
+     * Per-row "first confirmed reconcilable at" — debounce for the destructive paths (close an ACTIVE
+     * phantom, cancel a zombie entry), so a transient empty portfolio snapshot can never act on a real
+     * open position / a real resting entry. The row is only acted on once IBKR has been confirmed
+     * reconcilable for it continuously for {@link #flatConfirm}.
      */
-    private final java.util.Map<Long, Instant> activeFlatSince = new ConcurrentHashMap<>();
+    private final java.util.Map<Long, Instant> flatConfirmSince = new ConcurrentHashMap<>();
 
     public StaleCloseReconciler(IbkrOrderService ibkrOrderService,
                                     TradeExecutionRepositoryPort executionRepository,
@@ -96,8 +106,9 @@ public class StaleCloseReconciler {
                                     IbkrProperties ibkrProperties,
                                     @Value("${riskdesk.execution.close-reconcile.enabled:true}") boolean enabled,
                                     @Value("${riskdesk.execution.close-reconcile.reconcile-active-phantoms:true}") boolean reconcileActivePhantoms,
+                                    @Value("${riskdesk.execution.close-reconcile.reconcile-stuck-entries:true}") boolean reconcileStuckEntries,
                                     @Value("${riskdesk.execution.close-reconcile.grace-seconds:90}") long graceSeconds,
-                                    @Value("${riskdesk.execution.close-reconcile.active-phantom-confirm-seconds:120}") long activeConfirmSeconds) {
+                                    @Value("${riskdesk.execution.close-reconcile.confirm-seconds:120}") long confirmSeconds) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrPortfolioService = ibkrPortfolioService;
@@ -105,8 +116,9 @@ public class StaleCloseReconciler {
         this.ibkrProperties = ibkrProperties;
         this.enabled = enabled;
         this.reconcileActivePhantoms = reconcileActivePhantoms;
+        this.reconcileStuckEntries = reconcileStuckEntries;
         this.grace = Duration.ofSeconds(Math.max(0, graceSeconds));
-        this.activeFlatConfirm = Duration.ofSeconds(Math.max(0, activeConfirmSeconds));
+        this.flatConfirm = Duration.ofSeconds(Math.max(0, confirmSeconds));
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.execution.close-reconcile.interval-ms:60000}",
@@ -127,17 +139,19 @@ public class StaleCloseReconciler {
                     reconcileStuckExit(row, now);
                 } else if (reconcileActivePhantoms && st == ExecutionStatus.ACTIVE) {
                     reconcileActivePhantom(row, now);
+                } else if (reconcileStuckEntries && st == ExecutionStatus.ENTRY_SUBMITTED) {
+                    reconcileZombieEntry(row, now);
                 }
             } catch (RuntimeException e) {
                 log.debug("close-reconcile: row {} skipped — {}", row.getId(), e.toString());
             }
         }
-        // Drop debounce state for rows that are no longer ACTIVE in the live set (closed, gone, …).
-        Set<Long> activeIds = rows.stream()
-            .filter(r -> r.getStatus() == ExecutionStatus.ACTIVE)
+        // Drop debounce state for rows no longer in a debounced status in the live set (acted on, gone, …).
+        Set<Long> debouncedIds = rows.stream()
+            .filter(r -> r.getStatus() == ExecutionStatus.ACTIVE || r.getStatus() == ExecutionStatus.ENTRY_SUBMITTED)
             .map(TradeExecutionRecord::getId)
             .collect(Collectors.toSet());
-        activeFlatSince.keySet().retainAll(activeIds);
+        flatConfirmSince.keySet().retainAll(debouncedIds);
     }
 
     /** One-shot boot replay so a restart that stranded an EXIT_SUBMITTED row unblocks within seconds. */
@@ -174,25 +188,59 @@ public class StaleCloseReconciler {
      * An ACTIVE row the app believes is open but IBKR holds no position for → a phantom (the close fill
      * was missed, or the position was closed externally). Closes it so the WTX position reconciler can
      * resync the virtual state to FLAT. <b>Debounced</b>: only acts after IBKR has been confirmed flat
-     * for this row continuously for {@link #activeFlatConfirm} — closing a real open position on a single
+     * for this row continuously for {@link #flatConfirm} — closing a real open position on a single
      * transient empty snapshot would leave it unmanaged (no stop, no force-close), so this is deliberately
      * slower and more cautious than the EXIT path.
      */
     private void reconcileActivePhantom(TradeExecutionRecord row, Instant now) {
         if (tooFresh(row, now) || !confirmedFlatAndNotWorking(row)) {
-            activeFlatSince.remove(row.getId()); // not (still) a confirmed phantom → reset the debounce
+            flatConfirmSince.remove(row.getId()); // not (still) a confirmed phantom → reset the debounce
             return;
         }
-        Instant since = activeFlatSince.computeIfAbsent(row.getId(), k -> now);
-        if (Duration.between(since, now).compareTo(activeFlatConfirm) < 0) {
+        if (!debounceElapsed(row, now)) {
             return; // confirmed flat, but not for long enough yet
         }
-        activeFlatSince.remove(row.getId());
         log.warn("close-reconcile: closing ACTIVE phantom execution={} instrument={} src={} entry={} "
                 + "(IBKR confirmed flat for ≥{}s — position gone)",
             row.getId(), row.getInstrument(), row.getTriggerSource(), row.getNormalizedEntryPrice(),
-            activeFlatConfirm.toSeconds());
+            flatConfirm.toSeconds());
         markClosed(row, "Reconciled: IBKR confirmed flat — phantom ACTIVE closed (missed close fill / external close)");
+    }
+
+    /**
+     * An ENTRY_SUBMITTED row whose order never made it onto the exchange ({@code PendingSubmit} never
+     * transmitted, or the broker order is gone) while IBKR is flat → a zombie entry that freezes a reversal
+     * strategy ({@code SKIPPED_ENTRY_IN_FLIGHT}) and desyncs its virtual state. Cancels it so the strategy
+     * resyncs to FLAT. Leaves a genuinely-working resting limit ({@code Submitted}/{@code PreSubmitted}/
+     * {@code PartiallyFilled}) and a {@code Filled} order untouched. <b>Debounced</b> + grace-protected, so
+     * a freshly-submitted entry (briefly {@code PendingSubmit}) is never cancelled.
+     */
+    private void reconcileZombieEntry(TradeExecutionRecord row, Instant now) {
+        if (tooFresh(row, now) || !confirmedFlatAndEntryDead(row)) {
+            flatConfirmSince.remove(row.getId());
+            return;
+        }
+        if (!debounceElapsed(row, now)) {
+            return;
+        }
+        log.warn("close-reconcile: cancelling zombie ENTRY_SUBMITTED execution={} instrument={} src={} "
+                + "(IBKR flat ≥{}s, order never reached the exchange)",
+            row.getId(), row.getInstrument(), row.getTriggerSource(), flatConfirm.toSeconds());
+        Instant ts = Instant.now();
+        row.setStatus(ExecutionStatus.CANCELLED);
+        row.setStatusReason("Reconciled: IBKR confirmed flat, entry never transmitted/filled — phantom entry cancelled");
+        row.setUpdatedAt(ts);
+        executionRepository.save(row);
+    }
+
+    /** Debounce gate shared by the destructive paths: confirmed reconcilable continuously for {@link #flatConfirm}. */
+    private boolean debounceElapsed(TradeExecutionRecord row, Instant now) {
+        Instant since = flatConfirmSince.computeIfAbsent(row.getId(), k -> now);
+        if (Duration.between(since, now).compareTo(flatConfirm) < 0) {
+            return false;
+        }
+        flatConfirmSince.remove(row.getId());
+        return true;
     }
 
     /** Flip a confirmed-flat non-terminal row to CLOSED directly (orderId-collision-proof). */
@@ -233,6 +281,36 @@ public class StaleCloseReconciler {
         }
         if (lookup.isFound() && isLive(lookup.order().status())) {
             return false; // an order is genuinely still resting at the broker
+        }
+        return isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId());
+    }
+
+    /**
+     * True only when the entry's order is NOT genuinely working at the exchange and IBKR is confirmed
+     * flat — i.e. the entry is a zombie safe to cancel. A {@code Submitted}/{@code PreSubmitted}/
+     * {@code PartiallyFilled} order is a real resting limit (may still fill) → false; a {@code Filled}
+     * order means the entry actually filled (a missed entry-fill, not a zombie) → false; UNAVAILABLE →
+     * false. Only {@code NOT_FOUND} (gone) or a non-working status like {@code PendingSubmit} (never
+     * transmitted) qualifies, and only when the position is confirmed flat.
+     */
+    private boolean confirmedFlatAndEntryDead(TradeExecutionRecord row) {
+        if (row.getExecutionKey() == null || row.getExecutionKey().isBlank()) {
+            return false;
+        }
+        BrokerOrderLookup lookup;
+        try {
+            lookup = ibkrOrderService.findOrder(row.getBrokerAccountId(), row.getExecutionKey());
+        } catch (RuntimeException e) {
+            return false;
+        }
+        if (lookup.isUnavailable()) {
+            return false; // never act on an outage
+        }
+        if (lookup.isFound()) {
+            String status = lookup.order().status();
+            if (isGenuinelyWorking(status) || isFilled(status)) {
+                return false; // a real resting limit, or it actually filled → not a zombie
+            }
         }
         return isInstrumentFlat(row.getInstrument(), row.getBrokerAccountId());
     }
@@ -299,5 +377,21 @@ public class StaleCloseReconciler {
         String s = status.trim().toLowerCase(Locale.ROOT);
         return s.equals("submitted") || s.equals("presubmitted") || s.equals("pendingsubmit")
             || s.equals("apipending") || s.equals("pendingcancel") || s.equals("partiallyfilled");
+    }
+
+    /**
+     * Genuinely working at the exchange — a real resting limit that may still fill. Deliberately EXCLUDES
+     * {@code PendingSubmit} (never transmitted to the exchange) and {@code ApiPending}: those are pending
+     * client-side, not live in the book, so a long-stuck one on a flat account is a zombie, not a resting
+     * entry.
+     */
+    private static boolean isGenuinelyWorking(String status) {
+        if (status == null) return false;
+        String s = status.trim().toLowerCase(Locale.ROOT);
+        return s.equals("submitted") || s.equals("presubmitted") || s.equals("partiallyfilled");
+    }
+
+    private static boolean isFilled(String status) {
+        return status != null && status.trim().equalsIgnoreCase("filled");
     }
 }
