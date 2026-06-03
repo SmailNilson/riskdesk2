@@ -68,9 +68,13 @@ IBKR Market Data (1m) → CandleClosed
 
 **Tables :** `trade_executions`, `wtx_strategy_states`, `wtx_signal_history`.
 
-**Les 5 chemins déjà routés vers IBKR** (`domain/model/ExecutionTriggerSource.java`) :
-`WTX_AUTO` · `WTXRSI_AUTO` · `QUANT_AUTO_ARM` · `PERFECT_SETUP` · `PLAYBOOK_AUTO` (+ `MENTOR_AUTO` dormant).
+**Les 6 chemins déjà routés vers IBKR** (`domain/model/ExecutionTriggerSource.java`) :
+`WTX_AUTO` · `WTXRSI_AUTO` · `QUANT_AUTO_ARM` · `PERFECT_SETUP` · `PLAYBOOK_AUTO` · `QUANT_SIM_AUTO` (+ `MENTOR_AUTO` dormant).
 Ils convergent partiellement (enum `ExecutionStatus`, table `trade_executions`, `IbkrOrderService`, `ExecutionFillTrackingService`) mais **dupliquent** routage, réconciliation, idempotence, sizing, toggles.
+
+> `QUANT_SIM_AUTO` (ajouté 2026-06-03) mirroir la **Quant 7-Gates Simulation** vers IBKR — bridge dédié
+> (`IbkrQuant7GatesExecutionBridge`), entrée Limit only + flatten marketable, OFF par défaut, allowlist
+> `MNQ,MCL`. À migrer vers `OrderRouter` en Phase 2b comme les autres. Spec : [PLAN_QUANT_SIM_AUTO_IBKR.md](PLAN_QUANT_SIM_AUTO_IBKR.md).
 
 ---
 

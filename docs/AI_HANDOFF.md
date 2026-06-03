@@ -2,6 +2,32 @@
 
 Last updated: 2026-06-03
 
+## Quant 7-Gates Simulation → Auto-IBKR mirror (2026-06-03)
+
+The Quant 7-Gates **simulation** harness can now mirror each qualified paper trade to a real IBKR order,
+like WTX / WTX-RSI / Playbook. 6th routed `ExecutionTriggerSource`: `QUANT_SIM_AUTO`. Shipped in 4 PRs
+(#388 core, #389 REST + force-close, #390 frontend, #391 docs). Full spec: `docs/PLAN_QUANT_SIM_AUTO_IBKR.md`.
+
+- **Design from 129 prod trades:** one position per instrument (0 LONG/SHORT overlaps observed), NOT a
+  reversal (next-trade direction ~50/50, ~2–4 min gaps). Full mirror: paper SL/TP/flow-AVOID flatten the
+  broker position. Entry-Limit only, no resident broker stop.
+- **Bridge** `IbkrQuant7GatesExecutionBridge` (`@ConditionalOnProperty riskdesk.quant.sim-exec.enabled`):
+  one entry row per OPEN; CLOSE transitions the existing row to `EXIT_SUBMITTED` (never a new row) and is
+  NOT toggle-gated (a live position is always closable). Flatten side derived from `row.getAction()`, no-op
+  on a direction mismatch. Reconciliation via the shared, source-agnostic `ExecutionFillTrackingService`.
+- **Gates:** hard allowlist `MNQ,MCL` (MGC net-negative −$303, 6E not scanned by `QuantGateScheduler`),
+  per-instrument toggle (`QuantSimExecutionState`, default OFF), master flag, dedupe, one-position-per-
+  instrument, `SKIPPED_ENTRY_IN_FLIGHT` for the same-tick re-entry.
+- **Close safety:** `QuantSimFlattenReconciler` (30 s) re-flattens orphaned positions (paper closed, broker
+  still open) so a transient close failure can't strand a position; `QuantSimSessionCloseScheduler`
+  (16:55–16:59 ET) force-flattens at a **marketable** price (current price crossed by `flatten-cross-ticks`)
+  before the 17:00 CME break; `submitOpen` refuses new arms after 16:50 ET (no broker order-cancel API, so
+  resting DAY entries are bounded + expire at the break).
+- **REST/UI:** `PUT /api/quant/simulations/{instrument}/auto-execution`, `GET …/exec-state`; the panel shows
+  a per-instrument Auto-IBKR toggle (MNQ/MCL) as an *instrument-armed* status (no misleading per-row badge).
+- **Default OFF everywhere** — master flag off ⇒ the bridge bean isn't built. Enabling needs the master flag
+  + `broker-account-id` (fail-fast) + the instrument toggle + the allowlist.
+
 ## D2 re-land — reverse open serialised behind the close FILL (2026-06-03)
 
 The last execution-core slice (D2 was pulled earlier because the WTX state model couldn't absorb its async
