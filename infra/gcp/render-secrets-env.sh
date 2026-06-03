@@ -91,6 +91,16 @@ chmod 700 /etc/riskdesk
     printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(read_secret "${TELEGRAM_BOT_TOKEN_SECRET}")"
     printf 'TELEGRAM_CHAT_ID=%s\n' "$(read_secret "${TELEGRAM_CHAT_ID_SECRET}")"
   fi
+
+  # Quant 7-Gates Auto-IBKR mirror — live broker account (read by the
+  # ${QUANT_SIM_BROKER_ACCOUNT:} placeholder for riskdesk.quant.sim-exec.broker-account-id).
+  # OPTIONAL: when QUANT_SIM_BROKER_ACCOUNT_SECRET is unset we print nothing, so the
+  # mirror stays ENABLED-but-INERT (it routes no orders) and the backend still boots.
+  # Set QUANT_SIM_BROKER_ACCOUNT_SECRET to the GCP secret holding the live "U…"
+  # account to actually arm it (a MNQ/MCL panel toggle is still required per trade).
+  if [[ -n "${QUANT_SIM_BROKER_ACCOUNT_SECRET:-}" ]]; then
+    printf 'QUANT_SIM_BROKER_ACCOUNT=%s\n' "$(read_secret "${QUANT_SIM_BROKER_ACCOUNT_SECRET}")"
+  fi
 } > /etc/riskdesk/runtime.env
 
 {
