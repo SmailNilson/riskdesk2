@@ -1261,6 +1261,14 @@ export const api = {
     get<Quant7GatesSimulationView[]>(`/api/quant/simulations/open`),
   getQuantSimulationStats: () =>
     get<Quant7GatesSimulationStats>(`/api/quant/simulations/stats`),
+
+  // Auto-IBKR mirror toggle (PR2). Master flag + per-instrument allowlist toggle.
+  // Only allowlisted instruments (MNQ, MCL) accept a toggle — the server returns
+  // 400 otherwise.
+  getQuantSimExecState: () =>
+    get<QuantSimExecState>(`/api/quant/simulations/exec-state`),
+  setQuantSimAutoExecution: (instrument: string, enabled: boolean) =>
+    put<QuantSimExecState>(`/api/quant/simulations/${instrument}/auto-execution`, { enabled }),
 };
 
 // ── Quant 7-Gates simulation types ──────────────────────────────────────
@@ -1303,6 +1311,17 @@ export interface Quant7GatesSimulationStats {
   netPoints: number;
   netUsd: number;
   openCount: number;
+}
+
+/**
+ * Master flag + allowlist + per-instrument Auto-IBKR toggle snapshot.
+ * Mirrors com.riskdesk.presentation.quant.Quant7GatesSimulationController.ExecStateResponse.
+ * A live order needs BOTH {@link masterEnabled} and the instrument's toggle on.
+ */
+export interface QuantSimExecState {
+  masterEnabled: boolean;
+  allowlist: string[];
+  toggles: Record<string, boolean>;
 }
 
 // ── Active Positions types ──────────────────────────────────────────────

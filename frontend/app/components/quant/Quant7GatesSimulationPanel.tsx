@@ -2,7 +2,8 @@
 
 import { useMemo } from 'react';
 import { useQuant7GatesSimulations } from '@/app/hooks/useQuant7GatesSimulations';
-import type { Quant7GatesSimulationView } from '@/app/lib/api';
+import { useQuantSimExecState } from '@/app/hooks/useQuantSimExecState';
+import type { Quant7GatesSimulationView, QuantSimExecState } from '@/app/lib/api';
 
 /**
  * Live tracker for the Quant 7-Gates simulation harness.
@@ -18,6 +19,7 @@ import type { Quant7GatesSimulationView } from '@/app/lib/api';
  */
 export default function Quant7GatesSimulationPanel() {
   const { rows, stats, connected } = useQuant7GatesSimulations();
+  const { state: execState, error: execError, busy: execBusy, setEnabled } = useQuantSimExecState();
 
   const { open, closed } = useMemo(() => {
     const o: Quant7GatesSimulationView[] = [];
@@ -59,11 +61,85 @@ export default function Quant7GatesSimulationPanel() {
 
       <StatsStrip stats={stats} openCount={open.length} />
 
+      <AutoIbkrControls state={execState} error={execError} busy={execBusy} onToggle={setEnabled} />
+
       <div className="mt-3 space-y-3">
-        <Section label="Open positions" rows={open} emptyHint="No open trades — waiting for the next qualified setup." />
+        <Section label="Open positions" rows={open}
+          emptyHint="No open trades — waiting for the next qualified setup." />
         <Section label="Recently closed" rows={closed.slice(0, 20)} emptyHint="No closed trades yet." closed />
       </div>
     </section>
+  );
+}
+
+/**
+ * Auto-IBKR mirror controls. One toggle per allowlisted instrument (MNQ, MCL —
+ * the only net-positive instruments; MGC/6E can't route). A live order needs
+ * BOTH the master flag and the instrument toggle, so when the master flag is off
+ * the toggles render disabled with a hint.
+ */
+function AutoIbkrControls({
+  state,
+  error,
+  busy,
+  onToggle,
+}: {
+  state: QuantSimExecState | null;
+  error: string | null;
+  busy: string | null;
+  onToggle: (instrument: string, enabled: boolean) => void;
+}) {
+  if (!state) {
+    return (
+      <div className="mt-2 text-[10px] font-mono text-slate-600">
+        {error ? `Auto-IBKR unavailable: ${error}` : 'Loading Auto-IBKR state…'}
+      </div>
+    );
+  }
+  const masterOff = !state.masterEnabled;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-950/60 p-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Auto-IBKR</span>
+      {masterOff && (
+        <span
+          className="text-[9px] font-mono text-amber-400"
+          title="riskdesk.quant.sim-exec.enabled is false — toggles have no effect until the master flag is on"
+        >
+          master OFF
+        </span>
+      )}
+      {state.allowlist.map(instr => {
+        const on = state.toggles[instr] ?? false;
+        const pending = busy === instr;
+        return (
+          <button
+            key={instr}
+            type="button"
+            disabled={pending}
+            onClick={() => onToggle(instr, !on)}
+            title={masterOff
+              ? `${instr}: armed=${on} (master flag OFF — no live orders)`
+              : `${instr}: ${on ? 'mirroring to IBKR — click to disarm' : 'paper only — click to arm live orders'}`}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition-colors ${
+              pending ? 'opacity-50 cursor-wait ' : ''
+            }${
+              on && !masterOff
+                ? 'border-emerald-600 bg-emerald-950/40 text-emerald-300'
+                : on && masterOff
+                  ? 'border-amber-700 bg-amber-950/30 text-amber-300'
+                  : 'border-slate-700 bg-slate-900/60 text-slate-400'
+            }`}
+          >
+            {instr} {on ? 'ON' : 'OFF'}
+          </button>
+        );
+      })}
+      {error && <span className="text-[9px] font-mono text-rose-400">{error}</span>}
+      <span className="basis-full text-[9px] font-mono text-slate-600">
+        ON arms a live IBKR order for the next qualifying setup on that instrument — it is an arming
+        state, not a per-row position indicator.
+      </span>
+    </div>
   );
 }
 
