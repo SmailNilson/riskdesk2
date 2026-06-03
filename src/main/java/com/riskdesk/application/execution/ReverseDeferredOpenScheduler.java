@@ -74,23 +74,37 @@ public class ReverseDeferredOpenScheduler {
         if (closeRowId == null) {
             return; // the query guarantees non-null, but stay defensive
         }
-        Optional<TradeExecutionRecord> closeRow = executionRepository.findById(closeRowId);
-        if (closeRow.isEmpty()) {
+        TradeExecutionRecord close = executionRepository.findById(closeRowId).orElse(null);
+        if (close == null) {
             return; // can't read the close row to confirm the flatten → wait
         }
-        ExecutionStatus closeStatus = closeRow.get().getStatus();
+        ExecutionStatus closeStatus = close.getStatus();
         if (closeStatus == ExecutionStatus.CLOSED) {
             // Close FILLED → broker flat → safe to open the deferred leg now.
             log.info("reverse deferred-open: close row {} CLOSED — submitting deferred open row {}",
                 closeRowId, open.getId());
             orderRouter.submitDeferredReverseOpen(open);
-        } else if (isCloseDidNotComplete(closeStatus)) {
+            return;
+        }
+        if (isCloseDidNotComplete(closeStatus)) {
             // The close did not fill (revived to ACTIVE by the fill tracker, or terminal without a fill) →
             // the position is still live → opening would STACK on it → cancel the deferred open instead.
             cancel(open, "reverse deferred-open cancelled — close row " + closeRowId + " is " + closeStatus
                 + " (close did not complete); position still live, open not submitted");
+            return;
         }
-        // else EXIT_SUBMITTED / VIRTUAL_EXIT_TRIGGERED (still resting) → wait for the fill; a later tick retries.
+        // EXIT_SUBMITTED / VIRTUAL_EXIT_TRIGGERED — normally still resting → wait. BUT a close that PARTIALLY
+        // filled then cancelled stays EXIT_SUBMITTED (the fill tracker only auto-transitions a ZERO-fill
+        // cancel; the partial case is a separate 3c gap) while its raw orderStatus is a terminal cancel — the
+        // close order is DEAD (partially flattened, NOT flat). Don't wait forever (which would freeze routing
+        // for this signal/timeframe): the position remainder is still live, so cancel the deferred open.
+        if (isTerminalCancelStatus(close.getOrderStatus())) {
+            cancel(open, "reverse deferred-open cancelled — close row " + closeRowId + " stuck " + closeStatus
+                + " with terminal orderStatus '" + close.getOrderStatus() + "' (partial-cancel, close dead);"
+                + " position remainder still live, open not submitted");
+            return;
+        }
+        // genuinely resting → wait for the fill; a later tick retries.
     }
 
     /** Close states that mean the close did NOT complete (the position is, or may still be, live). {@code
@@ -101,6 +115,18 @@ public class ReverseDeferredOpenScheduler {
             || status == ExecutionStatus.CANCELLED
             || status == ExecutionStatus.REJECTED
             || status == ExecutionStatus.FAILED;
+    }
+
+    /** Raw IBKR terminal-cancel order statuses — a close stuck EXIT_SUBMITTED (partial fill) carrying one of
+     *  these is a dead order, not a resting one. */
+    private static boolean isTerminalCancelStatus(String orderStatus) {
+        if (orderStatus == null) {
+            return false;
+        }
+        String s = orderStatus.trim();
+        return s.equalsIgnoreCase("Cancelled")
+            || s.equalsIgnoreCase("ApiCancelled")
+            || s.equalsIgnoreCase("Inactive");
     }
 
     private void cancel(TradeExecutionRecord open, String reason) {

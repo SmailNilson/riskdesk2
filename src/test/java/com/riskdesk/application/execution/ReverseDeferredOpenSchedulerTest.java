@@ -97,6 +97,24 @@ class ReverseDeferredOpenSchedulerTest {
     }
 
     @Test
+    void closeStuckExitSubmittedWithTerminalOrderStatus_cancelsDeferredOpen() {
+        // Partial fill then cancel: the fill tracker leaves the close row EXIT_SUBMITTED (filledQty>0) while
+        // its raw orderStatus is Cancelled. The scheduler must NOT wait forever → cancel the deferred open.
+        TradeExecutionRecord open = deferredOpen(99L);
+        TradeExecutionRecord close = closeRow(ExecutionStatus.EXIT_SUBMITTED);
+        close.setOrderStatus("Cancelled");
+        when(repo.findPendingDeferredReverseOpens()).thenReturn(List.of(open));
+        when(repo.findById(99L)).thenReturn(Optional.of(close));
+
+        scheduler.submitReadyDeferredOpens();
+
+        verify(router, never()).submitDeferredReverseOpen(any());
+        assertThat(open.getStatus()).isEqualTo(ExecutionStatus.CANCELLED);
+        assertThat(open.getDeferredReverseCloseRowId()).isNull();
+        verify(repo).save(open);
+    }
+
+    @Test
     void closeRowMissing_waits() {
         TradeExecutionRecord open = deferredOpen(99L);
         when(repo.findPendingDeferredReverseOpens()).thenReturn(List.of(open));
