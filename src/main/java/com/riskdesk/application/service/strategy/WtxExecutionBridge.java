@@ -538,13 +538,23 @@ public class WtxExecutionBridge {
             // orderStatus(Filled) before execDetails would be dropped and the row would never
             // leave ENTRY_SUBMITTED.
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("WTX " + action.name() + " submitted: " + submission.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(submission.submittedAt() != null ? submission.submittedAt() : Instant.now());
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of waiting on the orderStatus(Filled) callback that R2 can drop.
+            // Mirrors DefaultOrderRouter.submitPersistedEntry. Otherwise ENTRY_SUBMITTED (resting limit).
+            boolean entryFilled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
+            Instant entrySubmittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
+            persisted.setStatus(entryFilled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("WTX " + action.name() + (entryFilled ? " filled: " : " submitted: ")
+                    + submission.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(entrySubmittedAt);
+            if (entryFilled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(entrySubmittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("WTX [{} {}] IBKR open leg submitted — action={} positionQty={} orderAction={} brokerOrderId={}",
-                    state.instrument(), tf, action, positionQty, orderAction, submission.brokerOrderId());
+            log.info("WTX [{} {}] IBKR open leg {} — action={} positionQty={} orderAction={} brokerOrderId={}",
+                    state.instrument(), tf, entryFilled ? "filled" : "submitted", action, positionQty, orderAction,
+                    submission.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (IbkrOrderRejectionException e) {
             // Typed broker exception: map kind → outcome and persist a clean reason. closeLegFired
@@ -762,16 +772,26 @@ public class WtxExecutionBridge {
                     qty,
                     normalizeToTick(price, instrument)
             ));
+            // P2 — synchronous fill: a marketable close usually comes back Filled at submit return. Mark the
+            // row CLOSED NOW rather than EXIT_SUBMITTED — otherwise the orderStatus(Filled) callback, which can
+            // arrive before the close orderId is persisted, is dropped (R2) and the row stays a phantom
+            // EXIT_SUBMITTED. Mirrors DefaultOrderRouter.submitCloseLeg. A resting close stays EXIT_SUBMITTED;
+            // CloseLegResult.ok() either way, so the REVERSE open-leg sequencing is unchanged.
+            boolean closeFilled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setStatus(closeFilled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
             row.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            row.setStatusReason(reasonPrefix + " — IBKR close submitted: " + submission.brokerOrderStatus()
-                    + " (broker order " + submission.brokerOrderId() + ")");
+            row.setStatusReason(reasonPrefix + " — IBKR close " + (closeFilled ? "filled" : "submitted") + ": "
+                    + submission.brokerOrderStatus() + " (broker order " + submission.brokerOrderId() + ")");
             row.setExitSubmittedAt(now);
+            if (closeFilled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("WTX [{} {}] IBKR close leg submitted — orderAction={} qty={} executionId={} brokerOrderId={}",
-                    row.getInstrument(), row.getTimeframe(), orderAction, qty, row.getId(), submission.brokerOrderId());
+            log.info("WTX [{} {}] IBKR close leg {} — orderAction={} qty={} executionId={} brokerOrderId={}",
+                    row.getInstrument(), row.getTimeframe(), closeFilled ? "filled" : "submitted", orderAction, qty,
+                    row.getId(), submission.brokerOrderId());
             return CloseLegResult.ok();
         } catch (IbkrOrderRejectionException e) {
             // Typed broker exception — keep the row non-terminal so the open position stays

@@ -120,17 +120,25 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
                     plan.contracts(),
                     plan.entryPrice()
             ));
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
+            // the row ACTIVE NOW instead of waiting on an orderStatus(Filled) callback that can be dropped
+            // (root cause R2). Mirrors DefaultOrderRouter.submitPersistedEntry. Otherwise ENTRY_SUBMITTED.
+            boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
+            Instant submittedAt = sub.submittedAt() != null ? sub.submittedAt() : Instant.now();
             persisted.setEntryOrderId(sub.brokerOrderId());
             if (sub.brokerOrderId() != null) {
                 persisted.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
             }
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("WTXRSI OPEN submitted: " + sub.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : Instant.now());
+            persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("WTXRSI OPEN " + (filled ? "filled" : "submitted") + ": " + sub.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(submittedAt);
+            if (filled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(submittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("WTX-RSI [{} {}] OPEN submitted — side={} qty={} entry={} brokerOrderId={}",
-                    state.instrument(), state.timeframe(), brokerAction,
+            log.info("WTX-RSI [{} {}] OPEN {} — side={} qty={} entry={} brokerOrderId={}",
+                    state.instrument(), state.timeframe(), filled ? "filled" : "submitted", brokerAction,
                     plan.contracts(), plan.entryPrice(), sub.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (RuntimeException e) {
@@ -206,21 +214,29 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
                     closeAction,
                     qty,
                     exitPrice));
+            // P2 — synchronous fill: a marketable close usually comes back Filled at submit return. Mark the
+            // row CLOSED NOW rather than EXIT_SUBMITTED — otherwise the orderStatus(Filled) callback, which can
+            // arrive before the close orderId is persisted, is dropped (root cause R2) and the row stays a
+            // phantom EXIT_SUBMITTED. Mirrors DefaultOrderRouter.submitCloseLeg. A resting close stays EXIT_SUBMITTED.
+            boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setStatus(filled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
             if (sub.brokerOrderId() != null) {
                 // Fill tracker locates rows by ibkrOrderId — must be on the SAME
                 // row we're transitioning so the fill callback reconciles here.
                 row.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
             }
             row.setStatusReason("WTXRSI " + action.name()
-                    + " — IBKR close submitted: " + sub.brokerOrderStatus()
+                    + " — IBKR close " + (filled ? "filled" : "submitted") + ": " + sub.brokerOrderStatus()
                     + " (broker order " + sub.brokerOrderId() + ")");
             row.setExitSubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : now);
+            if (filled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("WTX-RSI [{} {}] CLOSE submitted — direction={} qty={} executionId={} brokerOrderId={}",
-                    state.instrument(), state.timeframe(), closeAction, qty, row.getId(), sub.brokerOrderId());
+            log.info("WTX-RSI [{} {}] CLOSE {} — direction={} qty={} executionId={} brokerOrderId={}",
+                    state.instrument(), state.timeframe(), filled ? "filled" : "submitted", closeAction, qty, row.getId(), sub.brokerOrderId());
             return WtxRoutingResult.of(WtxRoutingOutcome.ROUTED);
         } catch (RuntimeException e) {
             // Keep the row non-terminal on failure so the open position stays

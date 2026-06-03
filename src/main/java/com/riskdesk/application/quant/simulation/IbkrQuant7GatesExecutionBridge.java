@@ -148,17 +148,26 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
                 dir,
                 qty,
                 entry));
+            // P2 — synchronous fill: when the broker reports the entry already Filled at submit return,
+            // mark the row ACTIVE NOW instead of waiting on an orderStatus(Filled) callback that can be
+            // dropped (root cause R2 — the callback can arrive before the orderId is persisted). Mirrors
+            // DefaultOrderRouter.submitPersistedEntry. Otherwise ENTRY_SUBMITTED (resting limit).
+            boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
+            Instant submittedAt = sub.submittedAt() != null ? sub.submittedAt() : Instant.now();
             persisted.setEntryOrderId(sub.brokerOrderId());
             if (sub.brokerOrderId() != null) {
                 persisted.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
             }
-            persisted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("QUANT-SIM OPEN submitted: " + sub.brokerOrderStatus());
-            persisted.setEntrySubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : Instant.now());
+            persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
+            persisted.setStatusReason("QUANT-SIM OPEN " + (filled ? "filled" : "submitted") + ": " + sub.brokerOrderStatus());
+            persisted.setEntrySubmittedAt(submittedAt);
+            if (filled && persisted.getEntryFilledAt() == null) {
+                persisted.setEntryFilledAt(submittedAt);
+            }
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("QUANT-SIM [{}] OPEN submitted — side={} qty={} entry={} brokerOrderId={} executionId={}",
-                instrument, dir, qty, entry, sub.brokerOrderId(), persisted.getId());
+            log.info("QUANT-SIM [{}] OPEN {} — side={} qty={} entry={} brokerOrderId={} executionId={}",
+                instrument, filled ? "filled" : "submitted", dir, qty, entry, sub.brokerOrderId(), persisted.getId());
             return RoutingResult.tracked(RoutingOutcome.ROUTED, persisted.getId(), sub.brokerOrderId());
         } catch (RuntimeException e) {
             String msg = truncate(e.getMessage(), 200);
@@ -255,17 +264,26 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
                 closeAction,
                 qty,
                 limit));
+            // P2 — synchronous fill: a marketable close (crossed limit) usually comes back Filled at submit
+            // return. Mark the row CLOSED NOW rather than EXIT_SUBMITTED — otherwise the orderStatus(Filled)
+            // callback, which can arrive before the close orderId is persisted, is dropped (root cause R2)
+            // and the row stays a phantom EXIT_SUBMITTED until the reconciler cleans it up. Mirrors
+            // DefaultOrderRouter.submitCloseLeg. A non-Filled (resting) close stays EXIT_SUBMITTED.
+            boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
             Instant now = Instant.now();
-            row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+            row.setStatus(filled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
             if (sub.brokerOrderId() != null) {
                 row.setIbkrOrderId(Math.toIntExact(sub.brokerOrderId()));
             }
-            row.setStatusReason("QUANT-SIM " + reasonTag + " submitted: " + sub.brokerOrderStatus());
+            row.setStatusReason("QUANT-SIM " + reasonTag + " " + (filled ? "filled" : "submitted") + ": " + sub.brokerOrderStatus());
             row.setExitSubmittedAt(sub.submittedAt() != null ? sub.submittedAt() : now);
+            if (filled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
-            log.info("QUANT-SIM [{}] {} submitted — direction={} qty={} executionId={} brokerOrderId={}",
-                row.getInstrument(), reasonTag, closeAction, qty, row.getId(), sub.brokerOrderId());
+            log.info("QUANT-SIM [{}] {} {} — direction={} qty={} executionId={} brokerOrderId={}",
+                row.getInstrument(), reasonTag, filled ? "filled" : "submitted", closeAction, qty, row.getId(), sub.brokerOrderId());
             return RoutingResult.tracked(RoutingOutcome.ROUTED, row.getId(), sub.brokerOrderId());
         } catch (RuntimeException e) {
             // Keep the row non-terminal so the open position stays visible and the

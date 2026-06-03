@@ -271,6 +271,40 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void openLong_brokerFilledSynchronously_marksActiveNotEntrySubmitted() {
+        // P2 synchronous fill: the broker returns Filled at submit return → the row is ACTIVE immediately,
+        // not ENTRY_SUBMITTED waiting on an orderStatus callback that R2 can drop.
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(999L, "Filled", "ref", Instant.now()));
+        WtxStrategyState state = flatState().withAutoExecution(true)
+                .withPosition(WtxPosition.LONG, bd(100), bd(2), bd(1));
+
+        bridge.submit(signal(WtxAction.OPEN_LONG), state, bd(100));
+
+        TradeExecutionRecord row = repo.all().get(0);
+        assertEquals(ExecutionStatus.ACTIVE, row.getStatus());
+        assertNotNull(row.getEntryFilledAt());
+    }
+
+    @Test
+    void closeLong_brokerFilledSynchronously_marksClosedNotPhantomExitSubmitted() {
+        // The R2 killer: a marketable close comes back Filled at submit return → CLOSED now, so the row never
+        // sits a phantom EXIT_SUBMITTED waiting on a callback that can be dropped (close orderId not persisted).
+        when(ibkrOrderService.submitEntryOrder(any()))
+                .thenReturn(new BrokerEntryOrderSubmission(999L, "Filled", "ref", Instant.now()));
+        TradeExecutionRecord open = wtxRow("LONG", 2, ExecutionStatus.ACTIVE);
+        repo.createIfAbsent(open);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));
+
+        TradeExecutionRecord row = repo.all().get(0);
+        assertEquals(ExecutionStatus.CLOSED, row.getStatus());
+        assertNotNull(row.getClosedAt());
+        assertEquals(999, row.getIbkrOrderId());
+    }
+
+    @Test
     void closeLong_alreadyExitSubmitted_skipsDuplicateFlatten() {
         // An exit is already in flight on the open row
         TradeExecutionRecord exiting = wtxRow("LONG", 2, ExecutionStatus.EXIT_SUBMITTED);

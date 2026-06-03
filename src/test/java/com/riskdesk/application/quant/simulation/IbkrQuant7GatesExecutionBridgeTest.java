@@ -123,6 +123,23 @@ class IbkrQuant7GatesExecutionBridgeTest {
     }
 
     @Test
+    void openMarkedActiveWhenBrokerReportsFilledSynchronously() {
+        // P2 synchronous fill: the broker returns Filled at submit return → the row is ACTIVE immediately,
+        // not ENTRY_SUBMITTED waiting on a callback that can be dropped (R2).
+        toggle.setEnabled(Instrument.MNQ, true);
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(777L, "Filled", "ref", Instant.now()));
+
+        RoutingResult r = bridge.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> saved = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(saved.getValue().getEntryFilledAt()).isNotNull();
+    }
+
+    @Test
     void openSkippedWhenIbkrDisabled() {
         when(ibkrProperties.isEnabled()).thenReturn(false);
         toggle.setEnabled(Instrument.MNQ, true);
@@ -208,6 +225,34 @@ class IbkrQuant7GatesExecutionBridgeTest {
         // Flatten a LONG → send SHORT.
         assertThat(req.getValue().action()).isEqualTo("SHORT");
         assertThat(openRow.getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(openRow.getIbkrOrderId()).isEqualTo(888);
+    }
+
+    @Test
+    void closeMarkedClosedWhenBrokerReportsFilledSynchronously() {
+        // P2 synchronous fill — the R2 killer: a marketable close comes back Filled at submit return, so the
+        // row goes terminal CLOSED NOW. Without this it would sit EXIT_SUBMITTED waiting on an orderStatus
+        // callback that can be dropped (close orderId not yet persisted) → a phantom open position.
+        TradeExecutionRecord openRow = new TradeExecutionRecord();
+        openRow.setId(42L);
+        openRow.setStatus(ExecutionStatus.ACTIVE);
+        openRow.setAction("LONG");
+        openRow.setQuantity(1);
+        openRow.setInstrument("MNQ");
+        openRow.setExecutionKey("quant-sim:MNQ:LONG:1:OPEN");
+        openRow.setBrokerAccountId("DU-TEST");
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSource(any(), any(), any()))
+            .thenReturn(Optional.of(openRow));
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Filled", "ref", Instant.now()));
+
+        RoutingResult r = bridge.submitClose(
+            close(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30050.0,
+                Quant7GatesSimulationStatus.CLOSED_TP1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        assertThat(openRow.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        assertThat(openRow.getClosedAt()).isNotNull();
         assertThat(openRow.getIbkrOrderId()).isEqualTo(888);
     }
 
