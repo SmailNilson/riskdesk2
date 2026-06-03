@@ -290,7 +290,8 @@ class Quant7GatesSimulationServiceTest {
             closes.add(closed);
             return RoutingResult.of(RoutingOutcome.ROUTED);
         }
-        @Override public RoutingResult flatten(com.riskdesk.domain.model.TradeExecutionRecord row) {
+        @Override public RoutingResult flatten(com.riskdesk.domain.model.TradeExecutionRecord row,
+                                               java.math.BigDecimal marketPrice) {
             return RoutingResult.of(RoutingOutcome.ROUTED);
         }
     }

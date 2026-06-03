@@ -6,6 +6,7 @@ import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.port.LivePricePort;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -18,6 +19,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.when;
 class QuantSimSessionCloseSchedulerTest {
 
     @Mock TradeExecutionRepositoryPort repo;
+    @Mock LivePricePort livePricePort;
     @Mock Quant7GatesExecutionBridge bridge;
 
     private QuantSimExecutionProperties props;
@@ -42,8 +45,8 @@ class QuantSimSessionCloseSchedulerTest {
         props = new QuantSimExecutionProperties();
         props.setEnabled(true);
         props.setForceCloseEnabled(true);
-        when(bridge.flatten(any())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED));
-        scheduler = new QuantSimSessionCloseScheduler(repo, props, provider(bridge));
+        when(bridge.flatten(any(), any())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED));
+        scheduler = new QuantSimSessionCloseScheduler(repo, props, livePricePort, provider(bridge));
     }
 
     @Test
@@ -55,8 +58,8 @@ class QuantSimSessionCloseSchedulerTest {
 
         scheduler.forceCloseBeforeSessionEnd();
 
-        verify(bridge).flatten(a);
-        verify(bridge).flatten(b);
+        verify(bridge).flatten(eq(a), any());
+        verify(bridge).flatten(eq(b), any());
     }
 
     @Test
@@ -76,7 +79,7 @@ class QuantSimSessionCloseSchedulerTest {
     @Test
     void noOpWhenBridgeUnavailable() {
         QuantSimSessionCloseScheduler noBridge =
-            new QuantSimSessionCloseScheduler(repo, props, provider(null));
+            new QuantSimSessionCloseScheduler(repo, props, livePricePort, provider(null));
         noBridge.forceCloseBeforeSessionEnd();
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
     }

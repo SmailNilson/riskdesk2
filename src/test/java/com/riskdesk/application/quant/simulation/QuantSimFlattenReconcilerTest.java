@@ -6,6 +6,7 @@ import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -34,6 +36,7 @@ class QuantSimFlattenReconcilerTest {
 
     @Mock TradeExecutionRepositoryPort repo;
     @Mock Quant7GatesSimulationService simulationService;
+    @Mock LivePricePort livePricePort;
     @Mock Quant7GatesExecutionBridge bridge;
 
     private QuantSimExecutionProperties props;
@@ -43,8 +46,8 @@ class QuantSimFlattenReconcilerTest {
     void setUp() {
         props = new QuantSimExecutionProperties();
         props.setEnabled(true);
-        when(bridge.flatten(any())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED));
-        reconciler = new QuantSimFlattenReconciler(repo, simulationService, props, provider(bridge));
+        when(bridge.flatten(any(), any())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED));
+        reconciler = new QuantSimFlattenReconciler(repo, simulationService, props, livePricePort, provider(bridge));
     }
 
     @Test
@@ -57,7 +60,7 @@ class QuantSimFlattenReconcilerTest {
 
         reconciler.reconcile();
 
-        verify(bridge).flatten(row);
+        verify(bridge).flatten(eq(row), any());
     }
 
     @Test
@@ -70,7 +73,7 @@ class QuantSimFlattenReconcilerTest {
 
         reconciler.reconcile();
 
-        verify(bridge, never()).flatten(any());
+        verify(bridge, never()).flatten(any(), any());
     }
 
     @Test
@@ -78,13 +81,13 @@ class QuantSimFlattenReconcilerTest {
         props.setEnabled(false);
         reconciler.reconcile();
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
-        verify(bridge, never()).flatten(any());
+        verify(bridge, never()).flatten(any(), any());
     }
 
     @Test
     void noOpWhenBridgeUnavailable() {
         QuantSimFlattenReconciler noBridge =
-            new QuantSimFlattenReconciler(repo, simulationService, props, provider(null));
+            new QuantSimFlattenReconciler(repo, simulationService, props, livePricePort, provider(null));
         noBridge.reconcile();
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
     }

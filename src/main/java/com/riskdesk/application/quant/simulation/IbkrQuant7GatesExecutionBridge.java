@@ -19,7 +19,10 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.Optional;
 
 /**
@@ -40,23 +43,29 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
     private static final String REQUESTED_BY = "quant-sim";
     /** The quant pipeline is a 5m evaluator — scope execution rows to that timeframe. */
     private static final String TIMEFRAME = "5m";
+    private static final ZoneId NY = ZoneId.of("America/New_York");
+    /** CME daily break — the pre-close entry cutoff window ends here. */
+    private static final LocalTime SESSION_RESET = LocalTime.of(17, 0);
 
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
     private final QuantSimExecutionProperties props;
     private final QuantSimExecutionState toggleState;
+    private final Clock clock;
 
     public IbkrQuant7GatesExecutionBridge(IbkrOrderService ibkrOrderService,
                                           TradeExecutionRepositoryPort executionRepository,
                                           IbkrProperties ibkrProperties,
                                           QuantSimExecutionProperties props,
-                                          QuantSimExecutionState toggleState) {
+                                          QuantSimExecutionState toggleState,
+                                          Clock clock) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.props = props;
         this.toggleState = toggleState;
+        this.clock = clock;
         // Fail fast at startup: a live-order bridge without a broker account is a
         // misconfiguration, not a runtime condition to discover on the first signal.
         if (props.getBrokerAccountId() == null || props.getBrokerAccountId().isBlank()) {
@@ -79,6 +88,11 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
         }
         if (!toggleState.isEnabled(instrument)) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF, "Auto-IBKR toggle OFF for " + instrument.name());
+        }
+        if (inPreCloseCutoff()) {
+            // No fresh resting DAY entries right before the CME break — they could
+            // fill in the final minutes and carry a position through the close.
+            return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF, "pre-close entry cutoff");
         }
         int qty = props.getDefaultQuantity();
         if (qty <= 0) {
@@ -188,19 +202,21 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
                 "active " + positionSide + " row does not match closing " + closed.direction() + " sim");
         }
 
-        BigDecimal exitPrice = closed.exitPrice() != null
+        BigDecimal refPrice = closed.exitPrice() != null
             ? normalize(closed.exitPrice(), instrument)
             : row.getNormalizedEntryPrice();
-        return doFlatten(row, exitPrice, "CLOSE (" + closed.status() + ")");
+        return doFlatten(row, refPrice, "CLOSE (" + closed.status() + ")");
     }
 
     @Override
-    public RoutingResult flatten(TradeExecutionRecord row) {
+    public RoutingResult flatten(TradeExecutionRecord row, BigDecimal marketPrice) {
         if (row == null) return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
         if (!ibkrProperties.isEnabled()) return RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED);
-        // Reconciler retry — no live exit price available, fall back to the entry
-        // limit (same fallback the close path already uses).
-        return doFlatten(row, row.getNormalizedEntryPrice(), "reconcile-flatten");
+        // Reconciler / session-close retry — flatten at the current market price
+        // (crossed marketable in doFlatten). Fall back to the entry limit only when
+        // no live price is available.
+        BigDecimal refPrice = marketPrice != null ? marketPrice : row.getNormalizedEntryPrice();
+        return doFlatten(row, refPrice, "reconcile-flatten");
     }
 
     /**
@@ -211,7 +227,7 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
      * IbkrWtxRsiExecutionBridge). The flatten side is derived from the row's own
      * action (the true live position), not from any caller-supplied direction.
      */
-    private RoutingResult doFlatten(TradeExecutionRecord row, BigDecimal exitPrice, String reasonTag) {
+    private RoutingResult doFlatten(TradeExecutionRecord row, BigDecimal refPrice, String reasonTag) {
         if (isTerminal(row.getStatus())) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "row already terminal");
         }
@@ -219,12 +235,16 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
         if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_DUPLICATE, "flatten already in flight on " + row.getInstrument());
         }
-        if (exitPrice == null) {
-            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_PRICE);
-        }
         int qty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : props.getDefaultQuantity();
         // Flatten: send the opposite side of the live position (from the row, not the caller).
         String closeAction = "LONG".equalsIgnoreCase(row.getAction()) ? "SHORT" : "LONG";
+        // Price the close marketable — cross the reference price toward the fill
+        // side so a losing position is actually flattened, not left resting on the
+        // wrong side of the market (Codex P1-C).
+        BigDecimal limit = marketableLimit(refPrice, closeAction, row.getInstrument());
+        if (limit == null) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_PRICE);
+        }
 
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
@@ -234,7 +254,7 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
                 row.getInstrument(),
                 closeAction,
                 qty,
-                exitPrice));
+                limit));
             Instant now = Instant.now();
             row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
             if (sub.brokerOrderId() != null) {
@@ -263,6 +283,37 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
     private static boolean isTerminal(ExecutionStatus s) {
         return s == ExecutionStatus.CLOSED || s == ExecutionStatus.CANCELLED
             || s == ExecutionStatus.REJECTED || s == ExecutionStatus.FAILED;
+    }
+
+    /**
+     * Cross the reference price by {@code flattenCrossTicks} toward the fill side
+     * so the close limit is marketable: a SELL (flatten a LONG) is priced below
+     * the market, a BUY (flatten a SHORT) above. Returns {@code null} when no
+     * reference price is available.
+     */
+    private BigDecimal marketableLimit(BigDecimal refPrice, String closeAction, String instrumentName) {
+        if (refPrice == null) return null;
+        Instrument instr;
+        try {
+            instr = Instrument.valueOf(instrumentName);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            return refPrice; // cannot resolve tick — use the reference price as-is
+        }
+        BigDecimal cross = instr.getTickSize().multiply(BigDecimal.valueOf(Math.max(0, props.getFlattenCrossTicks())));
+        BigDecimal raw = "SHORT".equals(closeAction) ? refPrice.subtract(cross) : refPrice.add(cross);
+        return normalize(raw.doubleValue(), instr);
+    }
+
+    /**
+     * True inside the pre-close cutoff window [noNewEntriesAfter, 17:00 ET): new
+     * entries are refused so no fresh resting DAY order is placed right before the
+     * CME break (Codex P1-D).
+     */
+    private boolean inPreCloseCutoff() {
+        LocalTime cutoff = props.getNoNewEntriesAfter();
+        if (cutoff == null) return false;
+        LocalTime nowEt = LocalTime.now(clock.withZone(NY));
+        return !nowEt.isBefore(cutoff) && nowEt.isBefore(SESSION_RESET);
     }
 
     private static String executionKey(Instrument instrument, String dir, Instant ts) {

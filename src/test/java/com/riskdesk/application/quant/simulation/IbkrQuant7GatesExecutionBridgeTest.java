@@ -22,7 +22,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -50,6 +53,10 @@ class IbkrQuant7GatesExecutionBridgeTest {
     private QuantSimExecutionState toggle;
     private IbkrQuant7GatesExecutionBridge bridge;
 
+    private static final ZoneId NY = ZoneId.of("America/New_York");
+    /** 14:00 ET (EDT) — well outside the [16:50, 17:00) pre-close cutoff window. */
+    private static final Clock AFTERNOON = Clock.fixed(Instant.parse("2026-06-03T18:00:00Z"), NY);
+
     @BeforeEach
     void setUp() {
         props = new QuantSimExecutionProperties();
@@ -71,7 +78,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         });
         when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        bridge = new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle);
+        bridge = new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, AFTERNOON);
     }
 
     // ── constructor fail-fast ────────────────────────────────────────────────
@@ -82,9 +89,22 @@ class IbkrQuant7GatesExecutionBridgeTest {
         bad.setEnabled(true);
         bad.setBrokerAccountId("  ");
         assertThatThrownBy(() ->
-            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, bad, toggle))
+            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, bad, toggle, AFTERNOON))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("broker-account-id");
+    }
+
+    @Test
+    void openSkippedDuringPreCloseCutoff() {
+        // 16:52 ET — inside the [16:50, 17:00) cutoff window.
+        Clock preClose = Clock.fixed(Instant.parse("2026-06-03T20:52:00Z"), NY);
+        IbkrQuant7GatesExecutionBridge cutoffBridge =
+            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, props, toggle, preClose);
+        toggle.setEnabled(Instrument.MNQ, true);
+        RoutingResult r = cutoffBridge.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_AUTO_OFF);
+        assertThat(r.message()).contains("cutoff");
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     // ── submitOpen gates ─────────────────────────────────────────────────────
@@ -257,12 +277,14 @@ class IbkrQuant7GatesExecutionBridgeTest {
         when(ibkrOrderService.submitEntryOrder(any()))
             .thenReturn(new BrokerEntryOrderSubmission(999L, "Submitted", "ref", Instant.now()));
 
-        RoutingResult r = bridge.flatten(orphan);
+        // Market at 30010; flatten a LONG → SELL, crossed 10 ticks (0.25) below = 30007.50.
+        RoutingResult r = bridge.flatten(orphan, new BigDecimal("30010.00"));
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().action()).isEqualTo("SHORT"); // flatten a LONG
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("30007.50"); // marketable, below market
         assertThat(orphan.getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
     }
 
@@ -271,7 +293,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         TradeExecutionRecord closedRow = new TradeExecutionRecord();
         closedRow.setStatus(ExecutionStatus.CLOSED);
         closedRow.setAction("LONG");
-        RoutingResult r = bridge.flatten(closedRow);
+        RoutingResult r = bridge.flatten(closedRow, new BigDecimal("30000.00"));
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
@@ -282,7 +304,7 @@ class IbkrQuant7GatesExecutionBridgeTest {
         TradeExecutionRecord orphan = new TradeExecutionRecord();
         orphan.setStatus(ExecutionStatus.ACTIVE);
         orphan.setAction("LONG");
-        RoutingResult r = bridge.flatten(orphan);
+        RoutingResult r = bridge.flatten(orphan, new BigDecimal("30000.00"));
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_IBKR_DISABLED);
         verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
