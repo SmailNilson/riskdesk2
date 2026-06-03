@@ -2,6 +2,30 @@
 
 Last updated: 2026-06-03
 
+## D2 re-land — reverse open serialised behind the close FILL (2026-06-03)
+
+The last execution-core slice (D2 was pulled earlier because the WTX state model couldn't absorb its async
+transient; that model — close-PnL settler + side reconciler with the defer-while-pending guard — is now
+merged through #385). Re-landed **simpler**, since the fill tracker now owns the cancelled-close revive.
+
+- New nullable `TradeExecutionRecord.deferredReverseCloseRowId` — the PK of the resting close row a deferred
+  REVERSE open waits on. Keyed by the close **row PK** (not the order id), because the fill tracker
+  **detaches the order id** when it revives a cancelled-without-fill close to `ACTIVE`.
+- `DefaultOrderRouter.executeReverse`: when the close leg RESTS (`EXIT_SUBMITTED`), defer the open (persist a
+  PENDING row linked to the close row, return `ROUTED`) instead of firing it on the close ACCEPT. A FILLED
+  (marketable) close, or no close (broker flat), opens inline. `submitEntry` shares `submitPersistedEntry`
+  with the deferred path.
+- `ReverseDeferredOpenScheduler` (offloaded — the fill callback is on the EReader thread): per deferred row,
+  read the linked close ROW by PK — `CLOSED` → submit the open; `ACTIVE`/terminal-without-fill → position
+  still live → cancel the deferred open (no stacking); resting → wait. No revive logic here — the fill
+  tracker owns it.
+
+The D4 affordability gate runs BEFORE the defer (an unaffordable reverse open is `ROUTED_FLATTEN_ONLY`,
+never deferred). Flag still default-OFF → zero live impact. Full suite **2012 green**.
+
+**Next:** flip `riskdesk.execution.unified-router` live for WTX (all prerequisites — D1–D4, the WTX state
+model, D2 — now merged), then migrate the other four strategies onto the router.
+
 ## WTX close-PnL finalized only on a confirmed close (fill-driven) (2026-06-03)
 
 The real-money accounting prerequisite for the WTX position reconciler (#385, held draft). WTX booked
