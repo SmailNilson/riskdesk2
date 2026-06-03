@@ -589,7 +589,7 @@ class DefaultOrderRouterTest {
     void reverse_closeThenOpen_routed() {
         stubActive(priorLong());
         stubBroker("2"); // broker holds LONG 2 (the position the reverse flattens)
-        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // both legs ok
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
 
         RoutingResult r = router.route(reverseToShort());
 
@@ -631,7 +631,7 @@ class DefaultOrderRouterTest {
         stubActive(priorLong());
         stubBroker("2"); // broker holds LONG 2
         when(ibkrOrderService.submitEntryOrder(any()))
-            .thenReturn(submission(900L, "Submitted"))                       // close OK
+            .thenReturn(submission(900L, "Filled"))                          // close fills inline → open inline
             .thenThrow(new IbkrOrderRejectionException(                       // open rejected
                 IbkrOrderRejectionException.Kind.INSUFFICIENT_MARGIN, 201, "margin", "insufficient", null));
 
@@ -647,7 +647,7 @@ class DefaultOrderRouterTest {
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.SHORT));
         stubActive(priorLong());
-        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
 
         RoutingResult r = router.route(openShort());
 
@@ -696,7 +696,7 @@ class DefaultOrderRouterTest {
         // No local row but IBKR holds a directional position (drift) — synthesise a phantom, close it, open.
         when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any())).thenReturn(Optional.empty());
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(new BigDecimal("2"), false));
-        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
 
         RoutingResult r = router.route(reverseToShort());
 
@@ -752,7 +752,7 @@ class DefaultOrderRouterTest {
         prior.setAction("LONG"); // stale local belief
         stubActive(prior);
         stubBroker("-2"); // broker actually holds SHORT 2
-        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
 
         RoutingResult r = router.route(reverseToShort());
 
@@ -881,12 +881,36 @@ class DefaultOrderRouterTest {
             .thenReturn(OrderAffordabilityPort.Affordability.deny("should never be called"));
         stubActive(priorLong());                                        // LONG 2
         stubBroker("2");                                                 // broker LONG 2 → reverse SHORT 2, delta 0
-        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted"));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
 
         RoutingResult r = routerWith(aff).route(reverseToShort());
 
         assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
         verify(ibkrOrderService, times(2)).submitEntryOrder(any());     // close + open both fired
         verify(aff, never()).check(any(), any(), anyInt(), any(), any());      // delta 0 → never pre-checked
+    }
+
+    // ---- D2 — reverse open deferred behind the close FILL --------------------------------------
+
+    @Test
+    void reverse_closeResting_defersOpenBehindCloseFill() {
+        // The close RESTS (EXIT_SUBMITTED, not immediately filled) → the open is held back: persisted as a
+        // deferred PENDING row linked to the close ROW (by PK), NOT submitted now. Only the close reaches IBKR.
+        TradeExecutionRecord prior = priorLong(); // id 7
+        stubActive(prior);
+        stubBroker("2");                                                // broker LONG 2 → reverse SHORT 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Submitted")); // close RESTS
+
+        RoutingResult r = router.route(reverseToShort());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        assertThat(r.message()).contains("deferred");
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any());     // ONLY the close — open is deferred
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).createIfAbsentTracked(cap.capture());              // the deferred open row
+        TradeExecutionRecord deferred = cap.getValue();
+        assertThat(deferred.getStatus()).isEqualTo(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        assertThat(deferred.getExecutionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT");
+        assertThat(deferred.getDeferredReverseCloseRowId()).isEqualTo(prior.getId()); // linked to the close ROW PK
     }
 }

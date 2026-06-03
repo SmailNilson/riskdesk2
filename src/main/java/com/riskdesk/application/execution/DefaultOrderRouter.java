@@ -199,6 +199,7 @@ public class DefaultOrderRouter implements OrderRouter {
         }
 
         boolean closeLegFired = false;
+        TradeExecutionRecord restingCloseRow = null; // D2 — set when the close RESTS: defer the open behind its fill
         if (prior.isPresent()) {
             TradeExecutionRecord priorRow = prior.get();
             ExecutionStatus priorStatus = priorRow.getStatus();
@@ -235,6 +236,11 @@ public class DefaultOrderRouter implements OrderRouter {
                         return close;
                     }
                     closeLegFired = true;
+                    // D2 — submitCloseLeg set priorRow to CLOSED (marketable close filled → broker flat now →
+                    // open inline below) or EXIT_SUBMITTED (close RESTING → defer the open behind its fill).
+                    if (priorRow.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                        restingCloseRow = priorRow;
+                    }
                 } else if (pos.confirmedFlat()) {
                     // Broker already flat (closed outside us / a missed reverse already flattened) — nothing to
                     // close. Void the stale prior row so it can't block, then just open the new leg.
@@ -264,16 +270,15 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.of(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, truncate(aff.denyReason(), 200));
         }
 
-        // KNOWN LIMITATION — fill-ordering race (tracked follow-up): this fires the open leg once the close
-        // leg is ACCEPTED, not once it is FILLED, matching the locked close-then-open design ported from
-        // WtxExecutionBridge. For futures both legs are the same BUY/SELL, so an out-of-order fill (open
-        // before close) can mark the new row ACTIVE while the broker is only flat. The resulting NAKED-exit
-        // outcome is fully prevented downstream — a later CLOSE/FLATTEN voids the phantom when truth is
-        // readable, and skips (SKIPPED_BRIDGE_UNAVAILABLE) when it is not — so no blind reducing order is
-        // ever sent. Eliminating the transient ENTIRELY requires serialising the open behind the close FILL
-        // (fill-driven deferred open). That is the dedicated fill-orchestration slice and an explicit
-        // prerequisite before enabling riskdesk.execution.unified-router for any live strategy — see
-        // docs/PLAN_ORDER_ROUTER_IMPL.md.
+        // D2 — serialise the open behind the close FILL. When a close leg is RESTING (EXIT_SUBMITTED), defer
+        // the open: persist it linked to the close ROW so ReverseDeferredOpenScheduler submits it only once
+        // the close FILLS (broker confirmed flat). This eliminates the open-before-close fill-ordering
+        // transient that, for same-side futures legs, could otherwise mark the new row ACTIVE while the broker
+        // is only momentarily flat. A close that came back already FILLED (marketable), or no close fired
+        // (broker was flat / the prior row was voided), means the broker is flat NOW → open inline.
+        if (restingCloseRow != null) {
+            return deferReverseOpen(intent, restingCloseRow);
+        }
         return submitEntry(intent, closeLegFired);
     }
 
@@ -349,34 +354,40 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already exists",
                 persisted.getId(), persisted.getEntryOrderId());
         }
+        return submitPersistedEntry(persisted, intent.kind().name(), reverseFlattened);
+    }
 
+    /**
+     * Broker-submit an ALREADY-PERSISTED pending entry row and apply the lifecycle transitions — shared by a
+     * fresh {@link #submitEntry} and the fill-deferred reverse open ({@link #submitDeferredReverseOpen}), so
+     * both follow identical idempotence, id-persistence and error mapping. The broker action is read from the
+     * row ({@code getAction()}). {@code kindLabel} ("OPEN"/"REVERSE") flavours status/logs; {@code
+     * reverseFlattened} marks that a reverse close leg already flattened, so a NON-timeout open reject means
+     * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}.
+     */
+    private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel, boolean reverseFlattened) {
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 persisted.getId(),
                 persisted.getExecutionKey(),
                 persisted.getBrokerAccountId(),
                 persisted.getInstrument(),
-                brokerAction(intent),
+                persisted.getAction(),
                 persisted.getQuantity(),
                 persisted.getNormalizedEntryPrice()));
 
-            // BOTH ids must be set: entryOrderId for the audit, ibkrOrderId (Integer) so the fill
-            // tracker can locate this row on the orderStatus/execDetails callbacks.
             Instant submittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
             boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
             persisted.setEntryOrderId(submission.brokerOrderId());
             persisted.setIbkrOrderId(toIbkrOrderId(submission.brokerOrderId()));
-            // A marketable limit can come back Filled as its FIRST accepted status. Activate the row now: the
-            // orderStatus callback may already have been dropped (ibkrOrderId not yet persisted) and
-            // execDetails only updates fill fields, not lifecycle — leaving it ENTRY_SUBMITTED would make a
-            // later CLOSE/FLATTEN skip a LIVE position as entry-in-flight.
             persisted.setStatus(filled ? ExecutionStatus.ACTIVE : ExecutionStatus.ENTRY_SUBMITTED);
-            persisted.setStatusReason("OrderRouter " + intent.kind() + (filled ? " filled: " : " submitted: ")
+            persisted.setStatusReason("OrderRouter " + kindLabel + (filled ? " filled: " : " submitted: ")
                 + submission.brokerOrderStatus());
             persisted.setEntrySubmittedAt(submittedAt);
             if (filled) {
                 persisted.setEntryFilledAt(submittedAt);
             }
+            persisted.setDeferredReverseCloseRowId(null); // submitted now — never re-pick this row as deferred
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
 
@@ -386,47 +397,76 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.tracked(outcome, persisted.getId(), submission.brokerOrderId());
 
         } catch (IbkrOrderRejectionException e) {
-            // Reverse already flattened + a non-timeout open rejection → the broker is FLAT (protected).
-            // Surface ROUTED_FLATTEN_ONLY (the caller re-derives virtual state to FLAT) and terminal-fail
-            // the never-opened leg. A TIMEOUT is different: broker state is unknown, fall through.
             if (reverseFlattened && e.kind() != IbkrOrderRejectionException.Kind.TIMEOUT) {
                 persisted.setStatus(ExecutionStatus.FAILED);
                 persisted.setStatusReason(truncate("OrderRouter REVERSE flattened — open leg not opened ("
                     + e.kind() + "): " + e.getMessage(), 256));
+                persisted.setDeferredReverseCloseRowId(null);
                 persisted.setUpdatedAt(Instant.now());
                 executionRepository.save(persisted);
                 log.warn("OrderRouter REVERSE flattened, open leg rejected ({}) — broker FLAT, protected: {}",
-                    e.kind(), intent.idempotencyKey());
+                    e.kind(), persisted.getExecutionKey());
                 return RoutingResult.tracked(RoutingOutcome.ROUTED_FLATTEN_ONLY,
                     "reversed to flat — open leg not opened (" + e.kind() + ")", persisted.getId(), null);
             }
 
             RoutingOutcome outcome = mapRejection(e);
-            // Keep the row NON-TERMINAL whenever the order is — or may be — live at the broker:
-            // ACK_PENDING (id present, late ack) AND FAILED_TIMEOUT (no id, broker state UNKNOWN). Late
-            // orderStatus/execDetails callbacks (or the stale-entry reconciler) must still resolve it,
-            // and terminal-failing here would allow a retry against an order the broker may already hold.
             persisted.setStatus(outcome.mustTrackExecutionRow()
                 ? ExecutionStatus.ENTRY_SUBMITTED : ExecutionStatus.FAILED);
-            persisted.setStatusReason(truncate("OrderRouter " + intent.kind() + " " + e.kind() + ": " + e.getMessage(), 256));
+            persisted.setStatusReason(truncate("OrderRouter " + kindLabel + " " + e.kind() + ": " + e.getMessage(), 256));
             if (e.brokerOrderId() != null) {
                 persisted.setEntryOrderId(e.brokerOrderId());
                 persisted.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
                 persisted.setEntrySubmittedAt(Instant.now());
             }
+            persisted.setDeferredReverseCloseRowId(null); // submission attempted — no longer a deferred row
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.info("OrderRouter {} {} ({}) — {}", intent.kind(), outcome, e.kind(), intent.idempotencyKey());
+            log.info("OrderRouter {} {} ({}) — {}", kindLabel, outcome, e.kind(), persisted.getExecutionKey());
             return RoutingResult.tracked(outcome, persisted.getId(), e.brokerOrderId());
 
         } catch (RuntimeException e) {
             persisted.setStatus(ExecutionStatus.FAILED);
-            persisted.setStatusReason(truncate("OrderRouter " + intent.kind() + " failed: " + e.getMessage(), 256));
+            persisted.setStatusReason(truncate("OrderRouter " + kindLabel + " failed: " + e.getMessage(), 256));
+            persisted.setDeferredReverseCloseRowId(null);
             persisted.setUpdatedAt(Instant.now());
             executionRepository.save(persisted);
-            log.warn("OrderRouter {} failed for {}: {}", intent.kind(), intent.idempotencyKey(), e.getMessage());
+            log.warn("OrderRouter {} failed for {}: {}", kindLabel, persisted.getExecutionKey(), e.getMessage());
             return RoutingResult.tracked(RoutingOutcome.FAILED, e.getMessage(), persisted.getId(), null);
         }
+    }
+
+    /**
+     * D2 — hold the REVERSE open leg behind the close FILL. Persist the open as a deferred
+     * {@code PENDING_ENTRY_SUBMISSION} row linked to the resting close ROW (by PK); {@code
+     * ReverseDeferredOpenScheduler} submits it once that close row is confirmed flat. Returns {@code ROUTED}
+     * — the reverse is in progress (close routed, open follows on its fill). De-dups on the intent key.
+     */
+    private RoutingResult deferReverseOpen(TradeIntent intent, TradeExecutionRecord closeRow) {
+        TradeExecutionRecord pending = toPendingRecord(intent);
+        pending.setDeferredReverseCloseRowId(closeRow.getId());
+        pending.setStatusReason(truncate("OrderRouter REVERSE — open deferred behind close row "
+            + closeRow.getId() + " fill", 256));
+        CreateOutcome created = executionRepository.createIfAbsentTracked(pending);
+        TradeExecutionRecord row = created.record();
+        if (!created.created()) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                "reverse open already exists for this signal", row.getId(), row.getEntryOrderId());
+        }
+        log.info("OrderRouter REVERSE — open leg deferred behind close row {} (open row {}, key {})",
+            closeRow.getId(), row.getId(), intent.idempotencyKey());
+        return RoutingResult.tracked(RoutingOutcome.ROUTED,
+            "reverse close resting — open deferred behind its fill", row.getId(), null);
+    }
+
+    /**
+     * D2 — submit the deferred REVERSE open leg now that its close has FILLED (broker flat). Called by
+     * {@code ReverseDeferredOpenScheduler} on its scheduler thread (NEVER the broker callback thread).
+     * {@code reverseFlattened=true}: the close already flattened, so a non-timeout reject means the broker
+     * stays flat (protected).
+     */
+    public RoutingResult submitDeferredReverseOpen(TradeExecutionRecord deferredOpenRow) {
+        return submitPersistedEntry(deferredOpenRow, "REVERSE", true);
     }
 
     /** CLOSE — exit this strategy's open row on the intent's side. */
