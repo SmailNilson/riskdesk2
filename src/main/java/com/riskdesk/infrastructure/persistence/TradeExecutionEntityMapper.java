@@ -46,6 +46,7 @@ final class TradeExecutionEntityMapper {
         entity.setOrderStatus(execution.getOrderStatus());
         entity.setIbkrOrderId(execution.getIbkrOrderId());
         entity.setLastExecId(execution.getLastExecId());
+        entity.setDeferredReverseCloseRowId(execution.getDeferredReverseCloseRowId());
         return entity;
     }
 
@@ -87,6 +88,7 @@ final class TradeExecutionEntityMapper {
         execution.setOrderStatus(entity.getOrderStatus());
         execution.setIbkrOrderId(entity.getIbkrOrderId());
         execution.setLastExecId(entity.getLastExecId());
+        execution.setDeferredReverseCloseRowId(entity.getDeferredReverseCloseRowId());
         return execution;
     }
 }

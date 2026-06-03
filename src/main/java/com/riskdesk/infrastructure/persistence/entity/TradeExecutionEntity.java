@@ -170,6 +170,11 @@ public class TradeExecutionEntity {
     @Column(length = 64)
     private String lastExecId;
 
+    /** Slice D — D2: PK of the resting close row a deferred REVERSE open leg waits on (non-null only on a
+     *  PENDING_ENTRY_SUBMISSION deferred-open row). Nullable → ddl-auto adds it clean. */
+    @Column
+    private Long deferredReverseCloseRowId;
+
     public Long getId() {
         return id;
     }
@@ -452,6 +457,14 @@ public class TradeExecutionEntity {
 
     public String getLastExecId() {
         return lastExecId;
+    }
+
+    public Long getDeferredReverseCloseRowId() {
+        return deferredReverseCloseRowId;
+    }
+
+    public void setDeferredReverseCloseRowId(Long deferredReverseCloseRowId) {
+        this.deferredReverseCloseRowId = deferredReverseCloseRowId;
     }
 
     public void setLastExecId(String lastExecId) {

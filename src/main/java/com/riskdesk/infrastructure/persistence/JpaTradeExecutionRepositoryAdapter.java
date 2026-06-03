@@ -117,6 +117,13 @@ public class JpaTradeExecutionRepositoryAdapter implements TradeExecutionReposit
         return repository.findByExecutionKey(executionKey).map(TradeExecutionEntityMapper::toDomain);
     }
 
+    @Override
+    public List<TradeExecutionRecord> findPendingDeferredReverseOpens() {
+        return repository.findPendingDeferredReverseOpensRaw(ExecutionStatus.PENDING_ENTRY_SUBMISSION).stream()
+            .map(TradeExecutionEntityMapper::toDomain)
+            .toList();
+    }
+
     /** Statuses that indicate an execution is no longer doing any work. Mirror
      *  of {@code AutoArmEvaluator.ACTIVE_STATUSES}'s complement — kept here so
      *  the JPA query works without coupling to the domain evaluator. */

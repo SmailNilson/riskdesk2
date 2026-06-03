@@ -119,4 +119,15 @@ public interface TradeExecutionRepositoryPort {
      * and all trigger sources.
      */
     List<TradeExecutionRecord> findAllActive();
+
+    /**
+     * Slice D — D2 (reverse deferred-open). All deferred REVERSE open legs awaiting their close fill: rows
+     * still in {@code PENDING_ENTRY_SUBMISSION} that carry a non-null
+     * {@link TradeExecutionRecord#getDeferredReverseCloseRowId()}. {@code ReverseDeferredOpenScheduler}
+     * polls these and submits each once its linked close row is confirmed flat. The default returns empty
+     * (in-memory fakes never defer); the JPA adapter overrides it with a query.
+     */
+    default List<TradeExecutionRecord> findPendingDeferredReverseOpens() {
+        return List.of();
+    }
 }
