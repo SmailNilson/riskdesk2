@@ -43,6 +43,16 @@ public class TradeExecutionRecord {
     private String orderStatus;
     private Integer ibkrOrderId;
     private String lastExecId;
+    /**
+     * Slice D — D2 (reverse deferred-open). When non-null on a {@code PENDING_ENTRY_SUBMISSION} row, this
+     * row is the OPEN leg of a REVERSE held back behind the close leg's FILL: it is the PRIMARY KEY of the
+     * close row it waits on. {@code ReverseDeferredOpenScheduler} reads that close row's status —
+     * {@code CLOSED} (filled → submit the open) / {@code ACTIVE} (close cancelled without a fill, revived by
+     * the fill tracker → cancel the deferred open) / {@code EXIT_SUBMITTED} (still resting → wait). Keyed by
+     * the row PK, not the close order id, because the fill tracker DETACHES the order id when it revives a
+     * cancelled close. Null on every other row.
+     */
+    private Long deferredReverseCloseRowId;
 
     public Long getId() {
         return id;
@@ -330,5 +340,13 @@ public class TradeExecutionRecord {
 
     public void setLastExecId(String lastExecId) {
         this.lastExecId = lastExecId;
+    }
+
+    public Long getDeferredReverseCloseRowId() {
+        return deferredReverseCloseRowId;
+    }
+
+    public void setDeferredReverseCloseRowId(Long deferredReverseCloseRowId) {
+        this.deferredReverseCloseRowId = deferredReverseCloseRowId;
     }
 }

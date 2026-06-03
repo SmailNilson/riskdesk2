@@ -28,6 +28,15 @@ public interface TradeExecutionJpaRepository extends JpaRepository<TradeExecutio
     Optional<TradeExecutionEntity> findByExecutionKey(String executionKey);
 
     /**
+     * Slice D — D2: deferred REVERSE open legs awaiting their close fill — PENDING rows that carry a
+     * close-row link. Oldest first so a backlog drains in submission order.
+     */
+    @Query("select e from TradeExecutionEntity e " +
+           "where e.status = :pending and e.deferredReverseCloseRowId is not null " +
+           "order by e.createdAt asc")
+    List<TradeExecutionEntity> findPendingDeferredReverseOpensRaw(@Param("pending") ExecutionStatus pending);
+
+    /**
      * PR #303 — return the most recent non-terminal execution for an
      * instrument (regardless of trigger source). Used to gate auto-arm so we
      * never duplicate an active position. Terminal statuses (CLOSED,

@@ -118,6 +118,27 @@ class TradeExecutionRepositoryIntegrationTest {
             .containsExactlyInAnyOrder(201L, 202L);
     }
 
+    @Test
+    void findPendingDeferredReverseOpens_returnsOnlyDeferredRows_andRoundTripsTheLink() {
+        // Slice D — D2. A deferred REVERSE open carries a non-null close-ROW link; a plain PENDING row does
+        // not. The finder must return only the former, and the link column must round-trip through H2.
+        TradeExecutionRecord deferred = execution(301L);
+        deferred.setExecutionKey("exec:deferred-reverse-open:301");
+        deferred.setDeferredReverseCloseRowId(900L);
+        adapter.createIfAbsent(deferred);
+
+        TradeExecutionRecord plainPending = execution(302L); // a normal PENDING row, no deferral link
+        plainPending.setExecutionKey("exec:plain-pending:302");
+        adapter.createIfAbsent(plainPending);
+
+        List<TradeExecutionRecord> found = adapter.findPendingDeferredReverseOpens();
+
+        assertThat(found)
+            .extracting(TradeExecutionRecord::getExecutionKey)
+            .containsExactly("exec:deferred-reverse-open:301");
+        assertThat(found.get(0).getDeferredReverseCloseRowId()).isEqualTo(900L);
+    }
+
     private TradeExecutionRecord execution(Long reviewId) {
         TradeExecutionRecord record = new TradeExecutionRecord();
         record.setExecutionKey("exec:mentor-review:" + reviewId);
