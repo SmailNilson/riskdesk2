@@ -62,7 +62,7 @@ class WtxRsiStrategyServiceTest {
         WtxRsiBiasResolver biasResolver = new WtxRsiBiasResolver(smcSource);
 
         service = new WtxRsiStrategyService(
-                statePort, historyPort, candlePort, properties, bridgeProvider, ws, biasResolver);
+                statePort, historyPort, candlePort, properties, bridgeProvider, ws, biasResolver, null);
 
         fixtureCandles = SyntheticCandlesFixture.mnq5m(800, 42);
         stubCandlePort(fixtureCandles);
@@ -226,7 +226,7 @@ class WtxRsiStrategyServiceTest {
         when(emptyProvider.getIfAvailable()).thenReturn(null);
         WtxRsiStrategyService noBridgeService = new WtxRsiStrategyService(
                 statePort, historyPort, candlePort, properties, emptyProvider, ws,
-                new WtxRsiBiasResolver(new SmcBiasSource(new NoopObjectProvider<>())));
+                new WtxRsiBiasResolver(new SmcBiasSource(new NoopObjectProvider<>())), null);
         // Flip toggle ON directly on state so routing is attempted.
         statePort.save(WtxRsiStrategyState.initial("MNQ", "5m").withAutoExecution(true));
         for (int i = 199; i < fixtureCandles.size(); i++) {

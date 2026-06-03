@@ -68,6 +68,8 @@ public class WtxRsiStrategyService {
     private final ObjectProvider<WtxRsiExecutionBridge> bridgeProvider;
     private final SimpMessagingTemplate ws;
     private final WtxRsiBiasResolver biasResolver;
+    /** P2.2 (R3) — re-syncs the virtual side to execution-row truth each bar. Nullable in tests. */
+    private final WtxRsiPositionReconciler positionReconciler;
 
     /**
      * Per-(instrument, timeframe) monitors serialising the load → reduce → save
@@ -90,7 +92,8 @@ public class WtxRsiStrategyService {
             WtxRsiStrategyProperties properties,
             ObjectProvider<WtxRsiExecutionBridge> bridgeProvider,
             SimpMessagingTemplate ws,
-            WtxRsiBiasResolver biasResolver) {
+            WtxRsiBiasResolver biasResolver,
+            WtxRsiPositionReconciler positionReconciler) {
         this.statePort = statePort;
         this.historyPort = historyPort;
         this.candlePort = candlePort;
@@ -98,6 +101,7 @@ public class WtxRsiStrategyService {
         this.bridgeProvider = bridgeProvider;
         this.ws = ws;
         this.biasResolver = biasResolver;
+        this.positionReconciler = positionReconciler;
     }
 
     @EventListener
@@ -139,6 +143,12 @@ public class WtxRsiStrategyService {
         WtxRsiStrategyState saved;
         synchronized (lockFor(instrumentName, event.timeframe())) {
             WtxRsiStrategyState state = loadOrInit(instrumentName, event.timeframe());
+            // P2.2 (R3) — self-heal the virtual side against execution-row truth (which P1 keeps aligned with
+            // the broker) BEFORE the FSM reduces, so a phantom side can't emit NONE / ENTRY-IN-FLIGHT while
+            // IBKR is flat. No-op for paper (auto off) or when already aligned.
+            if (positionReconciler != null) {
+                state = positionReconciler.reconcile(state, instrument, lastCandle.getClose());
+            }
             WtxRsiTransition.Result result =
                     WtxRsiTransition.reduce(state, lastCandle, candles, signal, bias, config);
             for (WtxRsiDecision decision : result.decisions()) {
