@@ -53,6 +53,13 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
     private final QuantSimExecutionProperties props;
     private final QuantSimExecutionState toggleState;
     private final Clock clock;
+    /**
+     * Whether a broker account is configured. When {@code false} the mirror stays
+     * inert (every route returns {@code SKIPPED_NO_ACCOUNT}) instead of crashing
+     * the whole app at startup — an optional feature must never take the trading
+     * dashboard down for a missing config value.
+     */
+    private final boolean accountConfigured;
 
     public IbkrQuant7GatesExecutionBridge(IbkrOrderService ibkrOrderService,
                                           TradeExecutionRepositoryPort executionRepository,
@@ -66,11 +73,15 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
         this.props = props;
         this.toggleState = toggleState;
         this.clock = clock;
-        // Fail fast at startup: a live-order bridge without a broker account is a
-        // misconfiguration, not a runtime condition to discover on the first signal.
-        if (props.getBrokerAccountId() == null || props.getBrokerAccountId().isBlank()) {
-            throw new IllegalStateException(
-                "riskdesk.quant.sim-exec.broker-account-id is required when riskdesk.quant.sim-exec.enabled=true");
+        this.accountConfigured = props.getBrokerAccountId() != null && !props.getBrokerAccountId().isBlank();
+        // Degrade gracefully — do NOT throw. A blank account when the mirror is
+        // enabled is a misconfiguration, but crashing the entire Spring context
+        // (and the deploy health check) for an optional feature is the wrong
+        // trade-off. Log loudly and stay inert until QUANT_SIM_BROKER_ACCOUNT is set.
+        if (!accountConfigured) {
+            log.error("Quant sim-exec is ENABLED but riskdesk.quant.sim-exec.broker-account-id is blank "
+                + "(set QUANT_SIM_BROKER_ACCOUNT) — the Auto-IBKR mirror is INERT and will route nothing "
+                + "until it is configured.");
         }
     }
 
@@ -82,6 +93,9 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
 
         if (!ibkrProperties.isEnabled()) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED);
+        }
+        if (!accountConfigured) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_ACCOUNT, "broker account not configured");
         }
         if (!props.isAllowed(instrument.name())) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_AUTO_OFF, instrument.name() + " not in sim-exec allowlist");
@@ -181,6 +195,10 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
         if (!ibkrProperties.isEnabled()) {
             return RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED);
         }
+        if (!accountConfigured) {
+            // No account → no OPEN was ever routed → nothing to flatten.
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_ACCOUNT, "broker account not configured");
+        }
 
         Optional<TradeExecutionRecord> openRow = executionRepository
             .findActiveByInstrumentAndTimeframeAndTriggerSource(
@@ -212,6 +230,7 @@ public class IbkrQuant7GatesExecutionBridge implements Quant7GatesExecutionBridg
     public RoutingResult flatten(TradeExecutionRecord row, BigDecimal marketPrice) {
         if (row == null) return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
         if (!ibkrProperties.isEnabled()) return RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED);
+        if (!accountConfigured) return RoutingResult.of(RoutingOutcome.SKIPPED_NO_ACCOUNT, "broker account not configured");
         // Reconciler / session-close retry — flatten at the current market price
         // (crossed marketable in doFlatten). Fall back to the entry limit only when
         // no live price is available.
