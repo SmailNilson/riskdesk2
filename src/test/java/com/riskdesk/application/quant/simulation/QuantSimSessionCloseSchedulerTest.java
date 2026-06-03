@@ -7,7 +7,6 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.port.LivePricePort;
-import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -26,75 +25,68 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests the orphan-flatten safety net (Codex P1-A): an ACTIVE {@code QUANT_SIM_AUTO}
- * row whose paper simulation has closed must be re-flattened; a row whose paper
- * sim is still open must be left alone.
+ * Tests the NY session-close force-flatten: every ACTIVE {@code QUANT_SIM_AUTO}
+ * row is flattened before the CME break, and nothing fires when the feature or
+ * force-close is disabled.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class QuantSimFlattenReconcilerTest {
+class QuantSimSessionCloseSchedulerTest {
 
     @Mock TradeExecutionRepositoryPort repo;
-    @Mock Quant7GatesSimulationService simulationService;
     @Mock LivePricePort livePricePort;
     @Mock Quant7GatesExecutionBridge bridge;
 
     private QuantSimExecutionProperties props;
-    private QuantSimFlattenReconciler reconciler;
+    private QuantSimSessionCloseScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         props = new QuantSimExecutionProperties();
         props.setEnabled(true);
+        props.setForceCloseEnabled(true);
         when(bridge.flatten(any(), any())).thenReturn(RoutingResult.of(RoutingOutcome.ROUTED));
-        reconciler = new QuantSimFlattenReconciler(repo, simulationService, props, livePricePort, provider(bridge));
+        scheduler = new QuantSimSessionCloseScheduler(repo, props, livePricePort, provider(bridge));
     }
 
     @Test
-    void flattensOrphanWhenPaperSimClosed() {
-        TradeExecutionRecord row = activeRow("MNQ", "LONG");
+    void flattensAllActivePositions() {
+        TradeExecutionRecord a = active("MNQ", "LONG");
+        TradeExecutionRecord b = active("MCL", "SHORT");
         when(repo.findByTriggerSourceAndStatus(ExecutionTriggerSource.QUANT_SIM_AUTO, ExecutionStatus.ACTIVE))
-            .thenReturn(List.of(row));
-        when(simulationService.hasOpenSimulation(com.riskdesk.domain.model.Instrument.MNQ,
-            Quant7GatesSimulation.Direction.LONG)).thenReturn(false);
+            .thenReturn(List.of(a, b));
 
-        reconciler.reconcile();
+        scheduler.forceCloseBeforeSessionEnd();
 
-        verify(bridge).flatten(eq(row), any());
+        verify(bridge).flatten(eq(a), any());
+        verify(bridge).flatten(eq(b), any());
     }
 
     @Test
-    void leavesPositionWhenPaperSimStillOpen() {
-        TradeExecutionRecord row = activeRow("MNQ", "LONG");
-        when(repo.findByTriggerSourceAndStatus(ExecutionTriggerSource.QUANT_SIM_AUTO, ExecutionStatus.ACTIVE))
-            .thenReturn(List.of(row));
-        when(simulationService.hasOpenSimulation(com.riskdesk.domain.model.Instrument.MNQ,
-            Quant7GatesSimulation.Direction.LONG)).thenReturn(true);
-
-        reconciler.reconcile();
-
-        verify(bridge, never()).flatten(any(), any());
-    }
-
-    @Test
-    void noOpWhenDisabled() {
+    void noOpWhenFeatureDisabled() {
         props.setEnabled(false);
-        reconciler.reconcile();
+        scheduler.forceCloseBeforeSessionEnd();
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
-        verify(bridge, never()).flatten(any(), any());
+    }
+
+    @Test
+    void noOpWhenForceCloseDisabled() {
+        props.setForceCloseEnabled(false);
+        scheduler.forceCloseBeforeSessionEnd();
+        verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
     }
 
     @Test
     void noOpWhenBridgeUnavailable() {
-        QuantSimFlattenReconciler noBridge =
-            new QuantSimFlattenReconciler(repo, simulationService, props, livePricePort, provider(null));
-        noBridge.reconcile();
+        QuantSimSessionCloseScheduler noBridge =
+            new QuantSimSessionCloseScheduler(repo, props, livePricePort, provider(null));
+        noBridge.forceCloseBeforeSessionEnd();
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
     }
 
-    private static TradeExecutionRecord activeRow(String instrument, String action) {
+    private static TradeExecutionRecord active(String instrument, String action) {
         TradeExecutionRecord r = new TradeExecutionRecord();
-        r.setId(7L);
+        r.setId(1L);
         r.setStatus(ExecutionStatus.ACTIVE);
         r.setInstrument(instrument);
         r.setAction(action);

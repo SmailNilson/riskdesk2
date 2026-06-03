@@ -4,6 +4,8 @@ import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 
+import java.math.BigDecimal;
+
 /**
  * Mirrors the Quant 7-Gates simulation harness to IBKR.
  *
@@ -43,6 +45,9 @@ public interface Quant7GatesExecutionBridge {
      * retry seam used by {@code QuantSimFlattenReconciler} so a single transient
      * close-routing failure can never leave a position open indefinitely.
      * Idempotent — a terminal or already {@code EXIT_SUBMITTED} row is a no-op.
+     *
+     * @param marketPrice current market price used to build a marketable close
+     *                    limit; when {@code null} the row's entry price is used.
      */
-    RoutingResult flatten(TradeExecutionRecord openRow);
+    RoutingResult flatten(TradeExecutionRecord openRow, BigDecimal marketPrice);
 }

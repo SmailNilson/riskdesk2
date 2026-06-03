@@ -166,6 +166,7 @@ Nouveau `QuantSimExecutionProperties` (`@ConfigurationProperties("riskdesk.quant
 | Harnais simulation (à câbler) | `application/quant/simulation/Quant7GatesSimulationService.java` |
 | **Bridge (nouveau)** | `application/quant/simulation/Quant7GatesExecutionBridge.java` (+ `IbkrQuant7GatesExecutionBridge.java`) |
 | **Reconciler flatten (nouveau)** | `application/quant/simulation/QuantSimFlattenReconciler.java` |
+| **Force-close NY (nouveau)** | `application/quant/simulation/QuantSimSessionCloseScheduler.java` |
 | Modèle de référence | `application/service/strategy/wtxrsi/IbkrWtxRsiExecutionBridge.java` |
 | Soumission ordre | `application/service/IbkrOrderService.java` |
 | Résultat de routage générique | `domain/execution/RoutingResult.java`, `RoutingOutcome.java` |

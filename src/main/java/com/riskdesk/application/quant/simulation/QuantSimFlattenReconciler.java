@@ -5,7 +5,10 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
+
+import java.math.BigDecimal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -43,15 +46,18 @@ public class QuantSimFlattenReconciler {
     private final TradeExecutionRepositoryPort executionRepository;
     private final Quant7GatesSimulationService simulationService;
     private final QuantSimExecutionProperties props;
+    private final LivePricePort livePricePort;
     private final ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider;
 
     public QuantSimFlattenReconciler(TradeExecutionRepositoryPort executionRepository,
                                      Quant7GatesSimulationService simulationService,
                                      QuantSimExecutionProperties props,
+                                     LivePricePort livePricePort,
                                      ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider) {
         this.executionRepository = executionRepository;
         this.simulationService = simulationService;
         this.props = props;
+        this.livePricePort = livePricePort;
         this.bridgeProvider = bridgeProvider;
     }
 
@@ -75,11 +81,22 @@ public class QuantSimFlattenReconciler {
                 log.warn("quant-sim orphan detected — flattening executionId={} instrument={} action={} "
                         + "(paper sim closed but broker position still open)",
                     row.getId(), row.getInstrument(), row.getAction());
-                bridge.flatten(row);
+                bridge.flatten(row, currentPrice(instrument));
             } catch (RuntimeException e) {
                 log.warn("quant-sim flatten reconcile failed for executionId={}: {}", row.getId(), e.toString());
                 // Keep going — one bad row must not stop the rest of the batch.
             }
+        }
+    }
+
+    /** Current market price for a marketable close limit, or null when unavailable. */
+    private BigDecimal currentPrice(Instrument instrument) {
+        try {
+            return livePricePort.current(instrument)
+                .map(s -> BigDecimal.valueOf(s.price()))
+                .orElse(null);
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 

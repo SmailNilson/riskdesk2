@@ -2,6 +2,7 @@ package com.riskdesk.application.quant.simulation;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.time.LocalTime;
 import java.util.List;
 
 /**
@@ -41,8 +42,39 @@ public class QuantSimExecutionProperties {
     /** Default contract quantity per routed order. */
     private int defaultQuantity = 1;
 
+    /**
+     * Force-close all mirrored positions before the CME daily break (no resident
+     * broker stop → never carry a position through the close unmanaged). Driven by
+     * {@code QuantSimSessionCloseScheduler}.
+     */
+    private boolean forceCloseEnabled = true;
+
+    /**
+     * No new entry is armed at/after this ET time, up to the 17:00 ET CME break.
+     * Stops fresh resting DAY entries from being placed right before the close,
+     * where they could fill in the final minutes and carry a position through the
+     * break unmanaged (Codex P1-D).
+     */
+    private LocalTime noNewEntriesAfter = LocalTime.of(16, 50);
+
+    /**
+     * Ticks to cross the reference price by when flattening so the close limit is
+     * marketable (a SELL is priced below the market, a BUY above) — otherwise a
+     * limit at the reference price rests unfilled for a losing position (Codex P1-C).
+     */
+    private int flattenCrossTicks = 10;
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+    public boolean isForceCloseEnabled() { return forceCloseEnabled; }
+    public void setForceCloseEnabled(boolean forceCloseEnabled) { this.forceCloseEnabled = forceCloseEnabled; }
+
+    public LocalTime getNoNewEntriesAfter() { return noNewEntriesAfter; }
+    public void setNoNewEntriesAfter(LocalTime noNewEntriesAfter) { this.noNewEntriesAfter = noNewEntriesAfter; }
+
+    public int getFlattenCrossTicks() { return flattenCrossTicks; }
+    public void setFlattenCrossTicks(int flattenCrossTicks) { this.flattenCrossTicks = flattenCrossTicks; }
 
     public List<String> getInstruments() { return instruments; }
     public void setInstruments(List<String> instruments) { this.instruments = instruments; }
