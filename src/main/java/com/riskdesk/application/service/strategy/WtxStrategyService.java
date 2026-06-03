@@ -50,6 +50,7 @@ public class WtxStrategyService {
     private final ObjectProvider<WtxExecutionBridge> executionBridgeProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final WtxClosePnlSettler closePnlSettler;
+    private final WtxPositionReconciler positionReconciler;
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -60,7 +61,8 @@ public class WtxStrategyService {
             WtxStrategyProperties properties,
             ObjectProvider<WtxExecutionBridge> executionBridgeProvider,
             ApplicationEventPublisher eventPublisher,
-            WtxClosePnlSettler closePnlSettler
+            WtxClosePnlSettler closePnlSettler,
+            WtxPositionReconciler positionReconciler
     ) {
         this.statePort = statePort;
         this.historyPort = historyPort;
@@ -71,6 +73,7 @@ public class WtxStrategyService {
         this.executionBridgeProvider = executionBridgeProvider;
         this.eventPublisher = eventPublisher;
         this.closePnlSettler = closePnlSettler;
+        this.positionReconciler = positionReconciler;
     }
 
     private void publishWtxEvent(WtxSignal signal, BigDecimal price) {
@@ -127,6 +130,11 @@ public class WtxStrategyService {
 
         WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
         Candle currentCandle = candles.get(candles.size() - 1);
+
+        // ── 0b. Reconcile the position SIDE against execution-row truth (runs AFTER the close-P&L settle).
+        // Self-heals an async divergence (a reverse close that cancelled, a missed fill, a restart, a manual
+        // close); no-op when paper / aligned / a close is still pending (the settler owns that window).
+        state = positionReconciler.reconcile(state, instrument, currentCandle.getClose());
 
         // ── 1. Trailing exit check (profile >= SESSION_ATR) ───────────────────
         if (profile.requiresAtrExits() && state.currentPosition() != WtxPosition.FLAT) {
