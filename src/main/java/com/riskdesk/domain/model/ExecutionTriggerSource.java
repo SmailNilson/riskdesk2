@@ -41,5 +41,16 @@ public enum ExecutionTriggerSource {
      * order still additionally requires {@code riskdesk.quant.auto-submit.enabled}.
      * No mentor review is involved.
      */
-    PERFECT_SETUP
+    PERFECT_SETUP,
+    /**
+     * Auto-routed execution mirroring the Quant 7-Gates <b>simulation</b> harness
+     * ({@code Quant7GatesSimulationService}) to IBKR. Each qualified paper OPEN
+     * routes one Limit entry order and each paper CLOSE (SL / TP / flow-AVOID)
+     * flattens it — the broker position follows the simulation 1:1.
+     * Gated by {@code riskdesk.quant.sim-exec.enabled} + an instrument allowlist
+     * ({@code riskdesk.quant.sim-exec.instruments}, default {@code MNQ,MCL}) + a
+     * per-instrument panel toggle (default OFF). Entry-Limit only, no resident
+     * broker stop. No mentor review is involved.
+     */
+    QUANT_SIM_AUTO
 }
