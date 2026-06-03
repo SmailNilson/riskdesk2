@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -84,14 +83,21 @@ class IbkrQuant7GatesExecutionBridgeTest {
     // ── constructor fail-fast ────────────────────────────────────────────────
 
     @Test
-    void constructorFailsWhenBrokerAccountBlank() {
+    void degradesToInertWhenBrokerAccountBlank() {
+        // A blank account must NOT crash the app (fail-fast would break the deploy
+        // health check) — the bridge builds and stays inert, routing nothing.
         QuantSimExecutionProperties bad = new QuantSimExecutionProperties();
         bad.setEnabled(true);
         bad.setBrokerAccountId("  ");
-        assertThatThrownBy(() ->
-            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, bad, toggle, AFTERNOON))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("broker-account-id");
+        bad.setInstruments(List.of("MNQ", "MCL"));
+        IbkrQuant7GatesExecutionBridge inert =
+            new IbkrQuant7GatesExecutionBridge(ibkrOrderService, repo, ibkrProperties, bad, toggle, AFTERNOON);
+
+        toggle.setEnabled(Instrument.MNQ, true);
+        RoutingResult r = inert.submitOpen(open(Instrument.MNQ, Quant7GatesSimulation.Direction.LONG, 30000.0));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_ACCOUNT);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
     }
 
     @Test
