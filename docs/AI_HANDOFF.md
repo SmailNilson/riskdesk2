@@ -16,14 +16,17 @@ has no `orderRef` fallback (the TWS callback carries none), and `onExecDetails` 
 
 Fix — `application/execution/StaleCloseReconciler` (additive, NOT on the order-placement hot path):
 a scheduled sweep (60s + boot replay via `ExecutionReadinessGate`, 90s grace) that, for each stale
-`EXIT_SUBMITTED` row, **replays the missed callback** through the existing
-`ExecutionFillTrackingService.onOrderStatus` — the same path a live fill takes, so publish + WTX
-close-P&L settler + position reconciler all run identically. The authoritative "close completed" signal
-is **position flatness** (not the by-`orderRef` status, which is ambiguous when entry+close share the
-key): a live order still working under the ref → skip; else IBKR **confirmed flat** for the instrument →
-replay `Filled` → `CLOSED`; UNAVAILABLE / portfolio-unreadable / a position still open → skip (never marks
-CLOSED while a real position could exist). Flag: `riskdesk.execution.close-reconcile.enabled` (default on).
-Does NOT change how any strategy submits/closes; the deeper permId-keyed fix stays with the unified core.
+`EXIT_SUBMITTED` row confirmed flat, flips **that exact row** to `CLOSED` directly. It does NOT route by
+`orderId` through the fill tracker: reused/colliding IBKR orderIds after reconnect (multiple rows shared
+"broker order 21/29/41") make `findByIbkrOrderId` ambiguous, so an orderId-keyed replay hit the wrong row
+(or none) and left it stuck — observed in prod, where the ACTIVE-phantom path (already a direct flip)
+cleared but the EXIT path didn't. The WTX close-P&L settler still finalizes on its next bar ("no
+non-terminal row" → finalize); the active-positions publisher drops the row. The authoritative "close
+completed" signal is **position flatness**: a live order still working under the ref → skip; else IBKR
+**confirmed flat** → `CLOSED`; UNAVAILABLE / portfolio-unreadable / a position still open → skip (never
+marks CLOSED while a real position could exist). Flag: `riskdesk.execution.close-reconcile.enabled`
+(default on). Does NOT change how any strategy submits/closes; the deeper permId-keyed fix stays with the
+unified core.
 
 It also closes **ACTIVE phantoms** — rows the app believes open but IBKR holds no position for (missed
 close fill / external close) — so the WTX position reconciler resyncs the virtual state to FLAT (fixes the

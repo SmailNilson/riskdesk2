@@ -4,7 +4,6 @@ import com.riskdesk.application.dto.BrokerOrderLookup;
 import com.riskdesk.application.dto.BrokerOrderStatusView;
 import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
 import com.riskdesk.application.dto.IbkrPositionView;
-import com.riskdesk.application.service.ExecutionFillTrackingService;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -23,17 +22,16 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Tests the broker-truth close reconciler: a stuck EXIT_SUBMITTED row whose close FILLED (IBKR flat,
- * nothing working) replays the missed Filled callback; everything uncertain is left untouched.
+ * nothing working) is flipped CLOSED directly; everything uncertain is left untouched. ACTIVE phantoms
+ * are closed too, but debounced.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -42,7 +40,6 @@ class StaleCloseReconcilerTest {
     @Mock IbkrOrderService ibkrOrderService;
     @Mock TradeExecutionRepositoryPort repo;
     @Mock IbkrPortfolioService portfolioService;
-    @Mock ExecutionFillTrackingService fillTracking;
     @Mock IbkrProperties ibkrProperties;
 
     private StaleCloseReconciler reconciler;
@@ -62,18 +59,31 @@ class StaleCloseReconcilerTest {
 
     private StaleCloseReconciler newReconciler(boolean enabled, boolean reconcileActive,
                                                long graceSeconds, long activeConfirmSeconds) {
-        return new StaleCloseReconciler(ibkrOrderService, repo, portfolioService, fillTracking,
+        return new StaleCloseReconciler(ibkrOrderService, repo, portfolioService,
             () -> true, ibkrProperties, enabled, reconcileActive, graceSeconds, activeConfirmSeconds);
     }
 
     @Test
-    void replaysFilledWhenFlatAndNoOpenOrder() {
+    void closesStuckExitDirectlyWhenFlat() {
         TradeExecutionRecord row = exitRow(888, "MNQ", "quant-sim-default", agedSubmit());
         when(repo.findAllActive()).thenReturn(List.of(row));
 
         reconciler.reconcileStaleCloses();
 
-        verify(fillTracking).onOrderStatus(eq(888), eq("Filled"), isNull(), isNull(), isNull(), any());
+        verify(repo).save(row);
+        assertThat(row.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+    }
+
+    @Test
+    void closesStuckExitEvenWithoutOrderId() {
+        // orderId-collision-proof: the flip is on the held row, not a findByIbkrOrderId lookup.
+        TradeExecutionRecord row = exitRow(null, "MNQ", "quant-sim-default", agedSubmit());
+        when(repo.findAllActive()).thenReturn(List.of(row));
+
+        reconciler.reconcileStaleCloses();
+
+        verify(repo).save(row);
+        assertThat(row.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
     }
 
     @Test
@@ -85,7 +95,7 @@ class StaleCloseReconcilerTest {
 
         reconciler.reconcileStaleCloses();
 
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        verify(repo, never()).save(any());
     }
 
     @Test
@@ -96,7 +106,7 @@ class StaleCloseReconcilerTest {
 
         reconciler.reconcileStaleCloses();
 
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        verify(repo, never()).save(any());
     }
 
     @Test
@@ -107,7 +117,7 @@ class StaleCloseReconcilerTest {
 
         reconciler.reconcileStaleCloses();
 
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        verify(repo, never()).save(any());
     }
 
     @Test
@@ -118,7 +128,7 @@ class StaleCloseReconcilerTest {
 
         reconciler.reconcileStaleCloses();
 
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        verify(repo, never()).save(any());
     }
 
     // ── ACTIVE phantom (debounced) ───────────────────────────────────────────
@@ -133,8 +143,7 @@ class StaleCloseReconcilerTest {
         r.reconcileStaleCloses();
 
         verify(repo).save(active);
-        org.assertj.core.api.Assertions.assertThat(active.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        assertThat(active.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
     }
 
     @Test
@@ -147,7 +156,7 @@ class StaleCloseReconcilerTest {
         r.reconcileStaleCloses();
 
         verify(repo, never()).save(any());
-        org.assertj.core.api.Assertions.assertThat(active.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+        assertThat(active.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
     }
 
     @Test
@@ -181,18 +190,7 @@ class StaleCloseReconcilerTest {
 
         graced.reconcileStaleCloses();
 
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
-    }
-
-    @Test
-    void skipsWhenNoCloseOrderId() {
-        TradeExecutionRecord row = exitRow(888, "MNQ", "quant-sim-default", agedSubmit());
-        row.setIbkrOrderId(null);
-        when(repo.findAllActive()).thenReturn(List.of(row));
-
-        reconciler.reconcileStaleCloses();
-
-        verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+        verify(repo, never()).save(any());
     }
 
     @Test
