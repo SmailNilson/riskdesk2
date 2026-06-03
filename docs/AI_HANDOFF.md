@@ -25,6 +25,12 @@ replay `Filled` → `CLOSED`; UNAVAILABLE / portfolio-unreadable / a position st
 CLOSED while a real position could exist). Flag: `riskdesk.execution.close-reconcile.enabled` (default on).
 Does NOT change how any strategy submits/closes; the deeper permId-keyed fix stays with the unified core.
 
+It also closes **ACTIVE phantoms** — rows the app believes open but IBKR holds no position for (missed
+close fill / external close) — so the WTX position reconciler resyncs the virtual state to FLAT (fixes the
+"frozen Entry on a flat account" WTX-panel symptom). This path is **debounced**: it only acts after IBKR is
+confirmed flat for the row continuously for `active-phantom-confirm-seconds` (default 120), so a transient
+empty snapshot can never close a real open position. Gated by `reconcile-active-phantoms` (default on).
+
 ## Quant 7-Gates Simulation → Auto-IBKR mirror (2026-06-03)
 
 The Quant 7-Gates **simulation** harness can now mirror each qualified paper trade to a real IBKR order,

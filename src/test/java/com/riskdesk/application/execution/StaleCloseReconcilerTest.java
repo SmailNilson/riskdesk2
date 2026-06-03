@@ -57,8 +57,13 @@ class StaleCloseReconcilerTest {
     }
 
     private StaleCloseReconciler newReconciler(boolean enabled, long graceSeconds) {
+        return newReconciler(enabled, true, graceSeconds, 0);
+    }
+
+    private StaleCloseReconciler newReconciler(boolean enabled, boolean reconcileActive,
+                                               long graceSeconds, long activeConfirmSeconds) {
         return new StaleCloseReconciler(ibkrOrderService, repo, portfolioService, fillTracking,
-            () -> true, ibkrProperties, enabled, graceSeconds);
+            () -> true, ibkrProperties, enabled, reconcileActive, graceSeconds, activeConfirmSeconds);
     }
 
     @Test
@@ -116,15 +121,56 @@ class StaleCloseReconcilerTest {
         verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
     }
 
+    // ── ACTIVE phantom (debounced) ───────────────────────────────────────────
+
     @Test
-    void ignoresNonExitSubmittedRows() {
-        TradeExecutionRecord active = exitRow(888, "MNQ", "quant-sim-default", agedSubmit());
-        active.setStatus(ExecutionStatus.ACTIVE);
+    void closesActivePhantomWhenFlatAndConfirmed() {
+        // confirm window 0 → acts on the first confirmed-flat sweep.
+        StaleCloseReconciler r = newReconciler(true, true, 0, 0);
+        TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
         when(repo.findAllActive()).thenReturn(List.of(active));
 
-        reconciler.reconcileStaleCloses();
+        r.reconcileStaleCloses();
 
+        verify(repo).save(active);
+        org.assertj.core.api.Assertions.assertThat(active.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
         verify(fillTracking, never()).onOrderStatus(anyInt(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void debouncesActivePhantomUntilConfirmWindowElapses() {
+        // confirm window 120s → the first confirmed-flat sweep only records, never closes.
+        StaleCloseReconciler r = newReconciler(true, true, 0, 120);
+        TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
+        when(repo.findAllActive()).thenReturn(List.of(active));
+
+        r.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
+        org.assertj.core.api.Assertions.assertThat(active.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);
+    }
+
+    @Test
+    void doesNotCloseActivePhantomWhenNotFlat() {
+        StaleCloseReconciler r = newReconciler(true, true, 0, 0);
+        TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
+        when(repo.findAllActive()).thenReturn(List.of(active));
+        when(portfolioService.getPortfolio(any())).thenReturn(snapshotWith(position("U1", "MNQ JUN26", BigDecimal.ONE)));
+
+        r.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void ignoresActiveRowsWhenFeatureOff() {
+        StaleCloseReconciler r = newReconciler(true, false, 0, 0);
+        TradeExecutionRecord active = activeRow("MNQ", "quant-sim-default");
+        when(repo.findAllActive()).thenReturn(List.of(active));
+
+        r.reconcileStaleCloses();
+
+        verify(repo, never()).save(any());
     }
 
     @Test
@@ -178,6 +224,18 @@ class StaleCloseReconcilerTest {
         r.setExecutionKey("quant-sim:" + instrument + ":SHORT:1:OPEN");
         r.setBrokerAccountId(account);
         r.setExitSubmittedAt(submittedAt);
+        return r;
+    }
+
+    private static TradeExecutionRecord activeRow(String instrument, String account) {
+        TradeExecutionRecord r = new TradeExecutionRecord();
+        r.setId(9L);
+        r.setStatus(ExecutionStatus.ACTIVE);
+        r.setIbkrOrderId(555);
+        r.setInstrument(instrument);
+        r.setExecutionKey("quant-sim:" + instrument + ":SHORT:1:OPEN");
+        r.setBrokerAccountId(account);
+        r.setUpdatedAt(Instant.now().minusSeconds(600)); // aged past grace
         return r;
     }
 
