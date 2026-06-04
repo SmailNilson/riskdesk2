@@ -2,6 +2,26 @@
 
 Last updated: 2026-06-04
 
+## Marketable settings — operator-controlled at runtime from the UI (2026-06-04)
+
+The marketable-execution policy (the `marketable-close` / `marketable-reverse-open` toggles + `cross-ticks`)
+is now flippable LIVE from the frontend, like Auto-IBKR — no redeploy. The static `@Value` flags on
+`DefaultOrderRouter` were replaced by a `MarketableSettingsProvider` (domain port) it reads per order.
+
+- **State** — `MarketableExecutionSettings` (domain record: closeEnabled / reverseOpenEnabled / crossTicks,
+  crossTicks clamped ≥ 0). Held by `MarketableExecutionSettingsService` (application, implements the
+  provider): seeds from the `riskdesk.execution.marketable-*` `@Value` defaults, caches, validates
+  (crossTicks 0..1000), persists each change. GLOBAL — one policy for the whole execution core (all
+  strategies), unlike Auto-IBKR which is per-(instrument,timeframe).
+- **Persistence** — singleton row `execution_marketable_settings` (`MarketableSettingsRepositoryPort` →
+  `JpaMarketableSettingsAdapter`). Survives restart; `load()` empty until first save → service uses the
+  config defaults.
+- **REST** — `GET` / `PUT /api/execution/marketable-settings` (`MarketableSettingsController`, partial PUT:
+  null fields keep their value, 400 on out-of-range crossTicks).
+- **Frontend** — compact `MarketableSettingsControl` in the Dashboard header (Exit/Rev toggles + cross-ticks
+  input), polls every 5s, PUTs on change. `api.{getMarketableSettings,updateMarketableSettings}`.
+- The `application.properties` values are now SEED DEFAULTS only; the persisted/operator value wins once set.
+
 ## Marketable exit pricing — reversals/closes no longer rest unfilled (2026-06-04)
 
 A REVERSE placed two legs (close-then-open), and the **close leg inherited the entry's passive limit**
