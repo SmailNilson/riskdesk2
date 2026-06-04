@@ -757,6 +757,14 @@ class DefaultOrderRouterTest {
         assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00"); // close, crossed
         assertThat(req.getAllValues().get(1).action()).isEqualTo("SHORT");
         assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18004.00"); // open, crossed → flip completes
+        // The ACTIVE reverse-open row is tracked at the crossed price actually submitted (NOT the passive
+        // 18000 signal limit) — else ActivePositionView's live P&L would be skewed.
+        ArgumentCaptor<TradeExecutionRecord> saved = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo, atLeastOnce()).save(saved.capture());
+        TradeExecutionRecord openRow = saved.getAllValues().stream()
+            .filter(rec -> "wtx:MNQ:5m:2:REVERSE_SHORT".equals(rec.getExecutionKey()))
+            .reduce((a, b) -> b).orElseThrow();
+        assertThat(openRow.getNormalizedEntryPrice()).isEqualByComparingTo("18004.00");
     }
 
     @Test

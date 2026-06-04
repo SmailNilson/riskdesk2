@@ -426,6 +426,10 @@ public class DefaultOrderRouter implements OrderRouter {
             if (instrument != null) {
                 entryPrice = normalizeToTick(
                     marketableLimit(instrument, persisted.getAction(), persisted.getNormalizedEntryPrice()), instrument);
+                // Track the row at the price we actually SUBMIT (the crossed price), not the passive signal
+                // limit — ActivePositionView derives live P&L from normalizedEntryPrice, so a divergence would
+                // skew points/$ on every marketable reverse-open position until a separate correction.
+                persisted.setNormalizedEntryPrice(entryPrice);
             }
         }
         try {
