@@ -107,4 +107,19 @@ class MarketableExecutionSettingsServiceTest {
         assertThat(svc.current().closeEnabled()).isFalse();
         assertThat(svc.current().crossTicks()).isEqualTo(4);
     }
+
+    @Test
+    void update_duringTransientLoadFailure_doesNotClobberPersisted_andPropagates() {
+        FakeStore store = new FakeStore();
+        store.stored = new MarketableExecutionSettings(false, false, 4); // operator previously persisted
+        store.throwOnLoad = true;                                        // cache empty + load fails on the PUT
+        MarketableExecutionSettingsService svc = service(store);
+
+        // A partial PUT (only closeEnabled) must NOT merge omitted fields from defaults and overwrite the
+        // persisted policy — it propagates (PUT fails → operator retries) and saves nothing.
+        assertThatThrownBy(() -> svc.update(true, null, null)).isInstanceOf(RuntimeException.class);
+        assertThat(store.saves).isEqualTo(0);
+        assertThat(store.stored.reverseOpenEnabled()).isFalse(); // persisted policy intact
+        assertThat(store.stored.crossTicks()).isEqualTo(4);
+    }
 }

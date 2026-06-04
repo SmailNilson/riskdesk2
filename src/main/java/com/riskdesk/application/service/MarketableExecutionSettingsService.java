@@ -37,32 +37,29 @@ public class MarketableExecutionSettingsService implements MarketableSettingsPro
 
     @Override
     public MarketableExecutionSettings current() {
-        MarketableExecutionSettings c = cached;
-        if (c != null) {
-            return c;
-        }
-        // Cache ONLY a successful read: a persisted value, or a confirmed-absent row (→ defaults, the operator
-        // never saved). A transient repository FAILURE must NOT cache the defaults — otherwise a previously
-        // persisted operator setting (e.g. exits disabled) would be ignored until the next PUT/restart even
-        // after the DB recovers. So serve defaults for THIS call but leave the cache empty to retry next time.
+        // READ path: a transient load failure serves the configured defaults WITHOUT caching them (so a later
+        // read retries and a persisted value is picked up once the DB recovers). Best-effort — reads tolerate
+        // a brief defaults window; the WRITE path does NOT (see update()).
         try {
-            MarketableExecutionSettings loaded = store.load().orElse(defaults);
-            cached = loaded;
-            return loaded;
+            return loadIntoCache();
         } catch (RuntimeException e) {
             log.warn("Marketable settings load failed ({}) — serving configured defaults, will retry", e.toString());
             return defaults;
         }
     }
 
-    /** Partial update (null fields keep their current value) → validate → persist → refresh cache. */
+    /** Partial update (null fields keep their current PERSISTED value) → validate → persist → refresh cache. */
     public synchronized MarketableExecutionSettings update(Boolean closeEnabled,
                                                            Boolean reverseOpenEnabled,
                                                            Integer crossTicks) {
         if (crossTicks != null && (crossTicks < 0 || crossTicks > MAX_CROSS_TICKS)) {
             throw new IllegalArgumentException("crossTicks must be between 0 and " + MAX_CROSS_TICKS);
         }
-        MarketableExecutionSettings cur = current();
+        // Merge omitted fields from the AUTHORITATIVE current value (cache, or a successful load) — NEVER from
+        // fallback defaults. If the load fails transiently, loadIntoCache() PROPAGATES, so the PUT fails and the
+        // operator retries, rather than clobbering a persisted policy (e.g. toggling only closeEnabled must not
+        // save reverseOpen=true/cross=10 over a persisted reverseOpen=false/cross=4).
+        MarketableExecutionSettings cur = loadIntoCache();
         MarketableExecutionSettings next = new MarketableExecutionSettings(
             closeEnabled != null ? closeEnabled : cur.closeEnabled(),
             reverseOpenEnabled != null ? reverseOpenEnabled : cur.reverseOpenEnabled(),
@@ -72,5 +69,21 @@ public class MarketableExecutionSettingsService implements MarketableSettingsPro
         log.info("Marketable execution settings updated: close={} reverseOpen={} crossTicks={}",
             next.closeEnabled(), next.reverseOpenEnabled(), next.crossTicks());
         return next;
+    }
+
+    /**
+     * The authoritative current settings: the cache if populated, else a successful load (a persisted value, or
+     * a confirmed-absent row → defaults). Caches a successful load. PROPAGATES a transient load failure so the
+     * write path ({@link #update}) fails instead of composing from fallback defaults; the read path
+     * ({@link #current}) catches it and serves defaults.
+     */
+    private MarketableExecutionSettings loadIntoCache() {
+        MarketableExecutionSettings c = cached;
+        if (c != null) {
+            return c;
+        }
+        MarketableExecutionSettings loaded = store.load().orElse(defaults);
+        cached = loaded;
+        return loaded;
     }
 }
