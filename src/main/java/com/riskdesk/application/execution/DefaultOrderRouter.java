@@ -231,7 +231,16 @@ public class DefaultOrderRouter implements OrderRouter {
         // here against broker truth, but ENFORCED only after the close leg fires below — a margin denial
         // must NEVER abort the close (flattening protects the user); it only skips the open.
         int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
-        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), reverseDeltaQty);
+        // Preflight against the price we will actually SUBMIT: when the reverse open is marketable that is the
+        // crossed live price (higher for a BUY-to-long → more margin), not the passive signal limit — else a
+        // size-increasing reverse could pass preflight cheap then be IBKR-rejected on the crossed order and
+        // surface ROUTED_FLATTEN_ONLY (flat instead of reversed). Falls back to the passive limit when the
+        // reverse-open isn't marketable or no executable-live price exists (same price the submit will use).
+        BigDecimal openRefPrice = marketableReverseOpenEnabled
+            ? marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice())
+            : intent.limitPrice();
+        OrderAffordabilityPort.Affordability aff =
+            checkAffordability(intent, brokerAction(intent), reverseDeltaQty, openRefPrice);
 
         Optional<TradeExecutionRecord> prior = findOpenRow(intent);
         if (prior.isEmpty() && !pos.confirmedFlat()) {
@@ -370,7 +379,8 @@ public class DefaultOrderRouter implements OrderRouter {
      * tracking row for a duplicate / upgrades to a REVERSE, leaving a live position unmanaged.
      */
     private RoutingResult submitOpen(TradeIntent intent) {
-        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), intent.quantity());
+        OrderAffordabilityPort.Affordability aff =
+            checkAffordability(intent, brokerAction(intent), intent.quantity(), intent.limitPrice());
         if (!aff.allowed()) {
             log.info("OrderRouter OPEN declined by margin pre-flight ({}): {}",
                 intent.idempotencyKey(), aff.denyReason());
@@ -383,13 +393,15 @@ public class DefaultOrderRouter implements OrderRouter {
      * Margin pre-flight (D4), fail-open. Returns {@code allow()} when no pre-flight bean is wired or
      * {@code qty <= 0} (a same-size / size-decreasing REVERSE frees margin — nothing to check).
      */
-    private OrderAffordabilityPort.Affordability checkAffordability(TradeIntent intent, String action, int qty) {
+    private OrderAffordabilityPort.Affordability checkAffordability(TradeIntent intent, String action, int qty,
+                                                                    BigDecimal price) {
         if (affordability == null || qty <= 0) {
             return OrderAffordabilityPort.Affordability.allow();
         }
         // Assess against the intent's ACCOUNT (the same account readPositionState reconciles), not the
-        // gateway default — a multi-account gateway must not judge a DU2 order against DU1's funds.
-        return affordability.check(intent.instrument(), action, qty, intent.limitPrice(), intent.brokerAccountId());
+        // gateway default — a multi-account gateway must not judge a DU2 order against DU1's funds. The
+        // reference price is the one the leg will actually submit (crossed for a marketable reverse open).
+        return affordability.check(intent.instrument(), action, qty, price, intent.brokerAccountId());
     }
 
     /**

@@ -583,6 +583,11 @@ class DefaultOrderRouterTest {
             Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
     }
 
+    private TradeIntent reverseToLong() {
+        return TradeIntent.reverse("wtx:MNQ:5m:2:REVERSE_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, 2, new BigDecimal("17000.00"), "DU1");
+    }
+
     private TradeIntent openShort() {
         return TradeIntent.open("wtx:MNQ:5m:2:OPEN_SHORT", ExecutionTriggerSource.WTX_AUTO,
             Instrument.MNQ, "5m", Side.SHORT, 2, new BigDecimal("18000.00"), "DU1");
@@ -784,6 +789,27 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
         assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00"); // close, crossed
         assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18000.00"); // open, passive intent
+    }
+
+    @Test
+    void reverse_open_preflightsAgainstCrossedPrice_notPassiveLimit() {
+        // A size-increasing reverse must preflight margin at the CROSSED price we'll submit, not the passive
+        // signal limit — else a marketable open can pass preflight cheap then be margin-rejected (flat instead
+        // of reversed). Reverse SHORT 1 → LONG 2 (delta 1); open BUY crosses up: 18005.00 + 1.00 = 18006.00.
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
+        DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), 4, true, true);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("-1"); // broker SHORT 1
+        when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
+
+        r.route(reverseToLong());
+
+        ArgumentCaptor<BigDecimal> price = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(aff).check(any(), eq("LONG"), eq(1), price.capture(), any());
+        assertThat(price.getValue()).isEqualByComparingTo("18006.00"); // crossed (18005 + 1.00), NOT passive 17000
     }
 
     @Test

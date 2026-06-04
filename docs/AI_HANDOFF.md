@@ -25,7 +25,10 @@ the flip COMPLETES: previously a flattened-then-unfilled passive open left the u
 when price moved past the entry in the close→open gap. Plain OPENs (fresh entries, nothing flattened) still
 stay passive. Bounded — a price gapped beyond cross-ticks still rests (no runaway chase). Independent toggle
 `riskdesk.execution.marketable-reverse-open.enabled` (default on). `marketableLimit` is now shared by both
-the exit legs and the reverse open; enable-gating lives at each call site.
+the exit legs and the reverse open; enable-gating lives at each call site. The reverse margin preflight runs
+against the crossed price too (not the passive limit), so a size-increasing reverse can't pass preflight
+cheap then get IBKR-rejected on the crossed order (→ ROUTED_FLATTEN_ONLY, flat instead of reversed). The
+ACTIVE reverse-open row is persisted at the crossed price so live P&L isn't skewed.
 
 The price comes from the existing `LivePricePort` (`MarketDataService.currentPrice` → the compliant
 `IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
