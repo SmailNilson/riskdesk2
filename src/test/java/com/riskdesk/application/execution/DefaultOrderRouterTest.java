@@ -834,6 +834,36 @@ class DefaultOrderRouterTest {
     }
 
     @Test
+    void reverse_open_inline_submitsThePreflightedPrice_evenIfLivePriceTicksAfter() {
+        // The inline reverse-open must submit the EXACT price the margin preflight checked — one live read,
+        // carried — so a price ticking up between reads can't slip a higher crossed order past margin.
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
+        LivePricePort jumpy = mock(LivePricePort.class);
+        when(jumpy.current(any()))
+            .thenReturn(Optional.of(new LivePriceSnapshot(18005.0, Instant.now(), "LIVE_PUSH")))  // read 1: close leg
+            .thenReturn(Optional.of(new LivePriceSnapshot(18100.0, Instant.now(), "LIVE_PUSH")))  // read 2: open preflight
+            .thenReturn(Optional.of(new LivePriceSnapshot(18200.0, Instant.now(), "LIVE_PUSH"))); // would be a 2nd open read
+        DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.of(aff), null, jumpy, 4, true, true);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("-1"); // broker SHORT 1 → reverse to LONG 2 is size-increasing (delta 1); open BUY crosses up
+        when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
+
+        r.route(reverseToLong());
+
+        // Open preflight used read 2 (18100 + 1.00 = 18101); the inline submit reuses THAT exact price —
+        // not a third read (18200) — so preflight price == submit price.
+        ArgumentCaptor<BigDecimal> affPrice = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(aff).check(any(), eq("LONG"), eq(1), affPrice.capture(), any());
+        assertThat(affPrice.getValue()).isEqualByComparingTo("18101.00");
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18101.00"); // submit == preflight (carried)
+    }
+
+    @Test
     void close_marketableDisabled_usesPassiveIntentLimit() {
         // Kill-switch OFF → even with a live price, the exit rests at the passive intent limit.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,

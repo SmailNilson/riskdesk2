@@ -310,9 +310,15 @@ public class DefaultOrderRouter implements OrderRouter {
         // FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A pure
         // reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
         int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
-        BigDecimal openRefPrice = (marketableReverseOpenEnabled && closeLegFired)
-            ? marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice())
-            : intent.limitPrice();
+        // Compute the marketable open price ONCE (normalized): the preflight AND the inline submit both use this
+        // exact value (carried via submitEntry), so the order sent to IBKR is the one that passed margin — no
+        // second live read that could tick higher and fail margin. null when the open will be passive (no close
+        // fired / toggle off); the deferred path (close resting) re-prices at its own submit time instead.
+        BigDecimal marketableOpenPrice = (marketableReverseOpenEnabled && closeLegFired)
+            ? normalizeToTick(marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice()),
+                intent.instrument())
+            : null;
+        BigDecimal openRefPrice = marketableOpenPrice != null ? marketableOpenPrice : intent.limitPrice();
         OrderAffordabilityPort.Affordability aff =
             checkAffordability(intent, brokerAction(intent), reverseDeltaQty, openRefPrice);
         if (!aff.allowed()) {
@@ -336,7 +342,7 @@ public class DefaultOrderRouter implements OrderRouter {
         if (restingCloseRow != null) {
             return deferReverseOpen(intent, restingCloseRow);
         }
-        return submitEntry(intent, closeLegFired);
+        return submitEntry(intent, closeLegFired, marketableOpenPrice); // inline: reuse the preflighted price
     }
 
     /** Phantom ACTIVE row for a live IBKR position the close leg of a REVERSE will flatten. */
@@ -383,7 +389,7 @@ public class DefaultOrderRouter implements OrderRouter {
                 intent.idempotencyKey(), aff.denyReason());
             return RoutingResult.of(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, truncate(aff.denyReason(), 200));
         }
-        return submitEntry(intent, false);
+        return submitEntry(intent, false, null); // plain OPEN — passive, no carried marketable price
     }
 
     /**
@@ -407,14 +413,14 @@ public class DefaultOrderRouter implements OrderRouter {
      * already flattened the broker, so a subsequent NON-timeout open rejection means the broker is FLAT
      * (protected) → {@code ROUTED_FLATTEN_ONLY}, not a plain failure.
      */
-    private RoutingResult submitEntry(TradeIntent intent, boolean reverseFlattened) {
+    private RoutingResult submitEntry(TradeIntent intent, boolean reverseFlattened, BigDecimal marketableOverride) {
         CreateOutcome createResult = executionRepository.createIfAbsentTracked(toPendingRecord(intent));
         TradeExecutionRecord persisted = createResult.record();
         if (!createResult.created()) {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already exists",
                 persisted.getId(), persisted.getEntryOrderId());
         }
-        return submitPersistedEntry(persisted, intent.kind().name(), reverseFlattened);
+        return submitPersistedEntry(persisted, intent.kind().name(), reverseFlattened, marketableOverride);
     }
 
     /**
@@ -423,21 +429,28 @@ public class DefaultOrderRouter implements OrderRouter {
      * both follow identical idempotence, id-persistence and error mapping. The broker action is read from the
      * row ({@code getAction()}). {@code kindLabel} ("OPEN"/"REVERSE") flavours status/logs; {@code
      * reverseFlattened} marks that a reverse close leg already flattened, so a NON-timeout open reject means
-     * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}.
+     * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}. {@code marketableOverride} (non-null only
+     * for an INLINE reverse open) is the exact, already-normalized price the margin preflight checked — reused
+     * verbatim so the submitted order matches what passed margin.
      */
-    private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel, boolean reverseFlattened) {
+    private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel,
+                                               boolean reverseFlattened, BigDecimal marketableOverride) {
         // The OPEN leg of a REVERSE that already flattened is priced MARKETABLE (crossed) when enabled, so the
-        // flip completes instead of resting at the passive entry while price moves away (re-priced off the live
-        // price at submit time — inline or fill-deferred). Plain OPENs (reverseFlattened=false) stay passive.
+        // flip completes instead of resting at the passive entry while price moves away. INLINE: reuse the EXACT
+        // price the margin preflight checked (marketableOverride, already normalized) — a single live read,
+        // carried, so the submitted order can't drift above what passed margin between two reads. DEFERRED
+        // (override null, submitted later by the scheduler): re-price off the CURRENT live price (the price
+        // legitimately moved while the close filled). Plain OPENs stay passive. The row is tracked at the
+        // submitted price (ActivePositionView derives live P&L from normalizedEntryPrice).
         BigDecimal entryPrice = persisted.getNormalizedEntryPrice();
-        if (reverseFlattened && marketableReverseOpenEnabled) {
+        if (marketableOverride != null) {
+            entryPrice = marketableOverride;
+            persisted.setNormalizedEntryPrice(entryPrice);
+        } else if (reverseFlattened && marketableReverseOpenEnabled) {
             Instrument instrument = parseInstrument(persisted.getInstrument());
             if (instrument != null) {
                 entryPrice = normalizeToTick(
                     marketableLimit(instrument, persisted.getAction(), persisted.getNormalizedEntryPrice()), instrument);
-                // Track the row at the price we actually SUBMIT (the crossed price), not the passive signal
-                // limit — ActivePositionView derives live P&L from normalizedEntryPrice, so a divergence would
-                // skew points/$ on every marketable reverse-open position until a separate correction.
                 persisted.setNormalizedEntryPrice(entryPrice);
             }
         }
@@ -541,7 +554,8 @@ public class DefaultOrderRouter implements OrderRouter {
      * stays flat (protected).
      */
     public RoutingResult submitDeferredReverseOpen(TradeExecutionRecord deferredOpenRow) {
-        return submitPersistedEntry(deferredOpenRow, "REVERSE", true);
+        // Deferred: submitted later than the preflight, so re-price off the CURRENT live price (override null).
+        return submitPersistedEntry(deferredOpenRow, "REVERSE", true, null);
     }
 
     /** CLOSE — exit this strategy's open row on the intent's side. */

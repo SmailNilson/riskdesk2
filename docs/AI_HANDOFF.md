@@ -29,8 +29,10 @@ the exit legs and the reverse open; enable-gating lives at each call site. The r
 against the price the open will ACTUALLY submit — the crossed price only when a close fired
 (`closeLegFired`), the passive limit when the broker was already flat / the prior row was voided — so it
 neither lets a size-increasing reverse pass cheap then get IBKR-rejected on the crossed order
-(→ ROUTED_FLATTEN_ONLY), nor falsely denies a flat-reversal open the passive submit could afford. The
-ACTIVE reverse-open row is persisted at the crossed price so live P&L isn't skewed.
+(→ ROUTED_FLATTEN_ONLY), nor falsely denies a flat-reversal open the passive submit could afford. The inline reverse-open
+submits the EXACT preflighted price (the marketable price is computed once in `executeReverse` and carried
+into the submit — not a second live read that could tick higher); the deferred open re-prices at its own
+submit time. The ACTIVE reverse-open row is persisted at the crossed price so live P&L isn't skewed.
 
 The price comes from the existing `LivePricePort` (`MarketDataService.currentPrice` → the compliant
 `IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
