@@ -251,6 +251,14 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
   const ts = new Date(sig.signalTs);
   const timeStr = `${ts.getHours().toString().padStart(2, '0')}:${ts.getMinutes().toString().padStart(2, '0')}`;
   const status = executionStatus(sig.routingOutcome);
+  // The stamped price is an entry for opens/reverses but an exit for close rows
+  // (max-loss, force-close, trailing). Label it accurately so the history isn't misread.
+  const priceLabel =
+    sig.actionTaken === 'CLOSE_LONG' || sig.actionTaken === 'CLOSE_SHORT' || sig.actionTaken === 'CLOSE_ALL'
+      ? 'exit'
+      : sig.actionTaken === 'NONE'
+        ? 'price'
+        : 'entry';
   return (
     <div className="border border-zinc-800/60 rounded p-2 space-y-1">
       <div className="flex items-center gap-1.5 flex-wrap">
@@ -259,7 +267,7 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
         <span className="text-[10px] text-zinc-600 ml-auto">{timeStr}</span>
       </div>
       <div className="flex items-center gap-2 text-[10px]">
-        <span className="text-zinc-500">entry</span>
+        <span className="text-zinc-500">{priceLabel}</span>
         <span className="font-mono text-zinc-200">{sig.price != null ? sig.price.toFixed(2) : '—'}</span>
         {status && (
           <span className={`ml-auto font-semibold ${status.style}`}>{status.label}</span>
