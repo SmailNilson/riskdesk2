@@ -12,17 +12,21 @@ import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.model.LivePriceSnapshot;
+import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The single entry point through which every strategy submits to IBKR. Owns the shared mechanics —
@@ -49,6 +53,17 @@ public class DefaultOrderRouter implements OrderRouter {
      *  back to the row by its base executionKey (see {@code ExecutionFillTrackingService.locate}). */
     public static final String EXIT_ORDER_REF_SUFFIX = ":exit";
 
+    /** Price sources accepted as an EXECUTABLE LIVE reference for marketable exit crossing — a streaming
+     *  push or a fresh instant provider fetch. A {@code FALLBACK_DB} candle close or an ambiguous {@code
+     *  CACHE} value is NOT executable: crossing it yields a falsely-"marketable" limit that can rest unfilled
+     *  (the very bug this fixes), so such a price falls back to the passive intent limit. */
+    private static final Set<String> LIVE_PRICE_SOURCES = Set.of("LIVE_PUSH", "LIVE_PROVIDER");
+
+    /** Max age of a live price still treated as the current market for crossing; older → passive fallback.
+     *  Tracks {@code MarketDataService}'s fresh-cache horizon (15s) with a small margin, so an outage that
+     *  leaves only a stale price degrades to the passive limit (the pre-marketable baseline). */
+    private static final long MARKETABLE_MAX_PRICE_AGE_SECONDS = 20L;
+
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
     private final IbkrProperties ibkrProperties;
@@ -60,6 +75,22 @@ public class DefaultOrderRouter implements OrderRouter {
     private final OrderAffordabilityPort affordability;
     /** P4 daily loss cap. Nullable in test constructors; when present and tripped, new entries are refused. */
     private final DailyLossCapGuard lossCapGuard;
+    /** Internal live-price source for marketable EXIT pricing — the AGENTS.md-compliant {@code IBKR Gateway
+     *  -> PostgreSQL -> services} feed (with live-vs-DB provenance), NOT a direct broker read. A reducing leg
+     *  crosses this price so it fills immediately like a market order, the limit capping slippage. Only exits
+     *  use it; entries stay passive. Same source the Quant force-close uses ({@code QuantSimFlattenReconciler}). */
+    private final LivePricePort livePricePort;
+    /** Ticks crossed through the touch on an exit leg (SELL: bid − N·tick, BUY: ask + N·tick). This is the
+     *  worst-case slippage CAP, not the expected fill — IBKR fills at the best price, usually the touch.
+     *  Mirrors the proven Quant force-close convention ({@code riskdesk.quant.sim-exec.flatten-cross-ticks},
+     *  default 10) — see {@code IbkrQuant7GatesExecutionBridge#marketableLimit}. */
+    private final int marketableCrossTicks;
+    /** Kill-switch: when false, exit legs revert to the passive intent limit price (legacy behaviour). */
+    private final boolean marketableCloseEnabled;
+    /** When true, the OPEN leg of a REVERSE that ACTUALLY flattened is also priced marketable (crossed) so the
+     *  flip completes instead of leaving the user flat when price moved past the passive entry. Plain OPENs
+     *  (fresh entries, nothing flattened) always stay passive. Independent toggle. */
+    private final boolean marketableReverseOpenEnabled;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
@@ -68,7 +99,11 @@ public class DefaultOrderRouter implements OrderRouter {
                               ExecutionReconciler reconciler,
                               InstrumentTickProvider tickProvider,
                               Optional<OrderAffordabilityPort> affordability,
-                              DailyLossCapGuard lossCapGuard) {
+                              DailyLossCapGuard lossCapGuard,
+                              LivePricePort livePricePort,
+                              @Value("${riskdesk.execution.marketable-close.cross-ticks:10}") int marketableCrossTicks,
+                              @Value("${riskdesk.execution.marketable-close.enabled:true}") boolean marketableCloseEnabled,
+                              @Value("${riskdesk.execution.marketable-reverse-open.enabled:true}") boolean marketableReverseOpenEnabled) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -77,6 +112,10 @@ public class DefaultOrderRouter implements OrderRouter {
         this.tickProvider = tickProvider;
         this.affordability = affordability == null ? null : affordability.orElse(null);
         this.lossCapGuard = lossCapGuard;
+        this.livePricePort = livePricePort;
+        this.marketableCrossTicks = Math.max(0, marketableCrossTicks);
+        this.marketableCloseEnabled = marketableCloseEnabled;
+        this.marketableReverseOpenEnabled = marketableReverseOpenEnabled;
     }
 
     @Override
@@ -186,14 +225,6 @@ public class DefaultOrderRouter implements OrderRouter {
                 "broker position truth unavailable — reverse skipped to avoid a blind close + stacked open");
         }
 
-        // D4 — affordability of the open leg, sized by the NET margin delta this reverse creates:
-        // (new size − the live position it flattens). A same-size / smaller reverse frees margin
-        // (delta <= 0 → skipped); a size-increasing reverse pre-checks only the extra contracts. Computed
-        // here against broker truth, but ENFORCED only after the close leg fires below — a margin denial
-        // must NEVER abort the close (flattening protects the user); it only skips the open.
-        int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
-        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), reverseDeltaQty);
-
         Optional<TradeExecutionRecord> prior = findOpenRow(intent);
         if (prior.isEmpty() && !pos.confirmedFlat()) {
             // No local row but the broker is NOT flat — there is a live position we must flatten first.
@@ -267,9 +298,29 @@ public class DefaultOrderRouter implements OrderRouter {
             }
         }
 
-        // D4 — open-leg affordability gate. A denial NEVER undoes the close that already fired: the user
-        // ends up FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A
-        // pure reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
+        // D4 — affordability of the open leg, sized by the NET margin delta this reverse creates (new size −
+        // the live position it flattened; delta <= 0 frees margin → skipped). Priced at what the open will
+        // ACTUALLY submit: the crossed marketable price ONLY when a close fired (closeLegFired → the open is
+        // marketable); otherwise the passive intent limit (broker was flat / prior voided → submitEntry(false)
+        // submits passive). Gating the crossed price on closeLegFired keeps the estimate consistent with the
+        // submit — using it unconditionally would falsely DENY a flat-reversal open the passive submit could
+        // afford. Computed against the same broker-truth pos.
+        //
+        // Open-leg affordability gate. A denial NEVER undoes the close that already fired: the user ends up
+        // FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A pure
+        // reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
+        int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
+        // Compute the marketable open price ONCE (normalized): the preflight AND the inline submit both use this
+        // exact value (carried via submitEntry), so the order sent to IBKR is the one that passed margin — no
+        // second live read that could tick higher and fail margin. null when the open will be passive (no close
+        // fired / toggle off); the deferred path (close resting) re-prices at its own submit time instead.
+        BigDecimal marketableOpenPrice = (marketableReverseOpenEnabled && closeLegFired)
+            ? normalizeToTick(marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice()),
+                intent.instrument())
+            : null;
+        BigDecimal openRefPrice = marketableOpenPrice != null ? marketableOpenPrice : intent.limitPrice();
+        OrderAffordabilityPort.Affordability aff =
+            checkAffordability(intent, brokerAction(intent), reverseDeltaQty, openRefPrice);
         if (!aff.allowed()) {
             if (closeLegFired) {
                 log.warn("OrderRouter REVERSE flattened, open leg skipped — insufficient margin ({}): {}",
@@ -291,7 +342,7 @@ public class DefaultOrderRouter implements OrderRouter {
         if (restingCloseRow != null) {
             return deferReverseOpen(intent, restingCloseRow);
         }
-        return submitEntry(intent, closeLegFired);
+        return submitEntry(intent, closeLegFired, marketableOpenPrice); // inline: reuse the preflighted price
     }
 
     /** Phantom ACTIVE row for a live IBKR position the close leg of a REVERSE will flatten. */
@@ -331,26 +382,29 @@ public class DefaultOrderRouter implements OrderRouter {
      * tracking row for a duplicate / upgrades to a REVERSE, leaving a live position unmanaged.
      */
     private RoutingResult submitOpen(TradeIntent intent) {
-        OrderAffordabilityPort.Affordability aff = checkAffordability(intent, brokerAction(intent), intent.quantity());
+        OrderAffordabilityPort.Affordability aff =
+            checkAffordability(intent, brokerAction(intent), intent.quantity(), intent.limitPrice());
         if (!aff.allowed()) {
             log.info("OrderRouter OPEN declined by margin pre-flight ({}): {}",
                 intent.idempotencyKey(), aff.denyReason());
             return RoutingResult.of(RoutingOutcome.SKIPPED_INSUFFICIENT_MARGIN, truncate(aff.denyReason(), 200));
         }
-        return submitEntry(intent, false);
+        return submitEntry(intent, false, null); // plain OPEN — passive, no carried marketable price
     }
 
     /**
      * Margin pre-flight (D4), fail-open. Returns {@code allow()} when no pre-flight bean is wired or
      * {@code qty <= 0} (a same-size / size-decreasing REVERSE frees margin — nothing to check).
      */
-    private OrderAffordabilityPort.Affordability checkAffordability(TradeIntent intent, String action, int qty) {
+    private OrderAffordabilityPort.Affordability checkAffordability(TradeIntent intent, String action, int qty,
+                                                                    BigDecimal price) {
         if (affordability == null || qty <= 0) {
             return OrderAffordabilityPort.Affordability.allow();
         }
         // Assess against the intent's ACCOUNT (the same account readPositionState reconciles), not the
-        // gateway default — a multi-account gateway must not judge a DU2 order against DU1's funds.
-        return affordability.check(intent.instrument(), action, qty, intent.limitPrice(), intent.brokerAccountId());
+        // gateway default — a multi-account gateway must not judge a DU2 order against DU1's funds. The
+        // reference price is the one the leg will actually submit (crossed for a marketable reverse open).
+        return affordability.check(intent.instrument(), action, qty, price, intent.brokerAccountId());
     }
 
     /**
@@ -359,14 +413,14 @@ public class DefaultOrderRouter implements OrderRouter {
      * already flattened the broker, so a subsequent NON-timeout open rejection means the broker is FLAT
      * (protected) → {@code ROUTED_FLATTEN_ONLY}, not a plain failure.
      */
-    private RoutingResult submitEntry(TradeIntent intent, boolean reverseFlattened) {
+    private RoutingResult submitEntry(TradeIntent intent, boolean reverseFlattened, BigDecimal marketableOverride) {
         CreateOutcome createResult = executionRepository.createIfAbsentTracked(toPendingRecord(intent));
         TradeExecutionRecord persisted = createResult.record();
         if (!createResult.created()) {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "execution already exists",
                 persisted.getId(), persisted.getEntryOrderId());
         }
-        return submitPersistedEntry(persisted, intent.kind().name(), reverseFlattened);
+        return submitPersistedEntry(persisted, intent.kind().name(), reverseFlattened, marketableOverride);
     }
 
     /**
@@ -375,9 +429,31 @@ public class DefaultOrderRouter implements OrderRouter {
      * both follow identical idempotence, id-persistence and error mapping. The broker action is read from the
      * row ({@code getAction()}). {@code kindLabel} ("OPEN"/"REVERSE") flavours status/logs; {@code
      * reverseFlattened} marks that a reverse close leg already flattened, so a NON-timeout open reject means
-     * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}.
+     * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}. {@code marketableOverride} (non-null only
+     * for an INLINE reverse open) is the exact, already-normalized price the margin preflight checked — reused
+     * verbatim so the submitted order matches what passed margin.
      */
-    private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel, boolean reverseFlattened) {
+    private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel,
+                                               boolean reverseFlattened, BigDecimal marketableOverride) {
+        // The OPEN leg of a REVERSE that already flattened is priced MARKETABLE (crossed) when enabled, so the
+        // flip completes instead of resting at the passive entry while price moves away. INLINE: reuse the EXACT
+        // price the margin preflight checked (marketableOverride, already normalized) — a single live read,
+        // carried, so the submitted order can't drift above what passed margin between two reads. DEFERRED
+        // (override null, submitted later by the scheduler): re-price off the CURRENT live price (the price
+        // legitimately moved while the close filled). Plain OPENs stay passive. The row is tracked at the
+        // submitted price (ActivePositionView derives live P&L from normalizedEntryPrice).
+        BigDecimal entryPrice = persisted.getNormalizedEntryPrice();
+        if (marketableOverride != null) {
+            entryPrice = marketableOverride;
+            persisted.setNormalizedEntryPrice(entryPrice);
+        } else if (reverseFlattened && marketableReverseOpenEnabled) {
+            Instrument instrument = parseInstrument(persisted.getInstrument());
+            if (instrument != null) {
+                entryPrice = normalizeToTick(
+                    marketableLimit(instrument, persisted.getAction(), persisted.getNormalizedEntryPrice()), instrument);
+                persisted.setNormalizedEntryPrice(entryPrice);
+            }
+        }
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 persisted.getId(),
@@ -386,7 +462,7 @@ public class DefaultOrderRouter implements OrderRouter {
                 persisted.getInstrument(),
                 persisted.getAction(),
                 persisted.getQuantity(),
-                persisted.getNormalizedEntryPrice()));
+                entryPrice));
 
             Instant submittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
             boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
@@ -478,7 +554,8 @@ public class DefaultOrderRouter implements OrderRouter {
      * stays flat (protected).
      */
     public RoutingResult submitDeferredReverseOpen(TradeExecutionRecord deferredOpenRow) {
-        return submitPersistedEntry(deferredOpenRow, "REVERSE", true);
+        // Deferred: submitted later than the preflight, so re-price off the CURRENT live price (override null).
+        return submitPersistedEntry(deferredOpenRow, "REVERSE", true, null);
     }
 
     /** CLOSE — exit this strategy's open row on the intent's side. */
@@ -577,15 +654,20 @@ public class DefaultOrderRouter implements OrderRouter {
 
     /**
      * Submit a close/exit leg on an existing row, mutating it to {@code EXIT_SUBMITTED}. Reuses
-     * {@code ibkrOrderService.submitEntryOrder} with the opposite action. A close is NEVER terminal-failed
-     * on a reject: the position is still open, so the row stays as-is for the next bar to retry.
+     * {@code ibkrOrderService.submitEntryOrder} with the opposite action. Shared by REVERSE-close, CLOSE and
+     * FLATTEN — so all three price the exit as a MARKETABLE LIMIT ({@link #marketableLimit}) instead of
+     * the passive intent limit: a reducing leg is risk-reduction and must fill, so it crosses the market
+     * (capped by a slippage buffer) rather than rest unfilled and leave the user holding an unwanted
+     * position. A close is NEVER terminal-failed on a reject: the position is still open, so the row stays
+     * as-is for the next bar to retry.
      */
     private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
                                          int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator) {
+        BigDecimal closePrice = marketableCloseEnabled ? marketableLimit(instrument, closeAction, price) : price;
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 row.getId(), exitOrderRef(row.getExecutionKey(), exitDiscriminator), row.getBrokerAccountId(),
-                row.getInstrument(), closeAction, qty, normalizeToTick(price, instrument)));
+                row.getInstrument(), closeAction, qty, normalizeToTick(closePrice, instrument)));
             Instant now = Instant.now();
             // A close can come back Filled as its FIRST accepted status (marketable). Mark the row CLOSED
             // now: the orderStatus callback may already have been dropped (close orderId not yet persisted)
@@ -597,6 +679,13 @@ public class DefaultOrderRouter implements OrderRouter {
             row.setStatusReason(reasonPrefix + " — IBKR close " + (filled ? "filled" : "submitted") + ": "
                 + sub.brokerOrderStatus());
             row.setExitSubmittedAt(now);
+            // Stamp closedAt on a synchronous fill: we mark CLOSED here, so the later orderStatus(Filled)
+            // callback (if it arrives) skips its closedAt transition — the row is no longer EXIT_SUBMITTED.
+            // Without this, a synchronously-filled close has a null close timestamp (TradeExecutionView /
+            // close-time ordering). Mirrors the WTX close path and Quant doFlatten.
+            if (filled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
             RoutingOutcome outcome = "PendingSubmit".equalsIgnoreCase(sub.brokerOrderStatus())
@@ -622,6 +711,70 @@ public class DefaultOrderRouter implements OrderRouter {
             log.warn("OrderRouter close leg {} ({}) for execution {}", outcome, e.kind(), row.getId());
             return RoutingResult.tracked(outcome, row.getId(), e.brokerOrderId());
         }
+    }
+
+    /**
+     * Marketable-limit price for a leg that must fill NOW — a reducing exit (close / flatten / reverse-close)
+     * or the open leg of a reverse that already flattened. A LIMIT priced THROUGH the market so it fills like a
+     * market order, while the limit caps worst-case slippage (safer than a raw MKT on thin micro-futures books,
+     * and keeps the deliberately limit-only broker path). Crosses the internal live price ({@link LivePricePort}
+     * — the compliant {@code IBKR Gateway -> PostgreSQL -> services} feed, NOT a direct broker read) by {@code
+     * marketableCrossTicks · minTick}: {@code action} "SHORT" = SELL → {@code price − cross}; "LONG" = BUY →
+     * {@code price + cross}. Mirrors the proven Quant force-close ({@code
+     * IbkrQuant7GatesExecutionBridge#marketableLimit}). Enable-gating is the CALLER's job
+     * ({@code marketableCloseEnabled} for exits, {@code marketableReverseOpenEnabled} for the reverse open).
+     *
+     * <p>The compliant path exposes a single reconciled live price (not a separate bid/ask), so we cross it by
+     * {@code cross-ticks} (default 10, sized to clear a normal spread) rather than sitting on a touch. Falls
+     * back to {@code fallback} (the caller's intent limit = legacy passive behaviour) when no live-price port is
+     * wired, no executable-live price is available, or the lookup throws — strictly no worse than before. A leg
+     * that still doesn't fill stays a retryable LIMIT (re-priced next bar), never worse than the passive limit.</p>
+     */
+    private BigDecimal marketableLimit(Instrument instrument, String action, BigDecimal fallback) {
+        if (livePricePort == null) {
+            return fallback;
+        }
+        Optional<LivePriceSnapshot> snapshot;
+        try {
+            snapshot = livePricePort.current(instrument);
+        } catch (RuntimeException e) {
+            // A price hiccup must NEVER break the leg — degrade to the passive limit (today's behaviour).
+            log.warn("OrderRouter marketable leg: live-price lookup for {} failed ({}) — passive limit {}",
+                instrument, e.toString(), fallback);
+            return fallback;
+        }
+        // Only a GENUINELY-LIVE, FRESH price is an executable reference. A DB-fallback candle close (or any
+        // stale/cached value, e.g. during a live-feed outage) must NOT be crossed — a stale price yields a
+        // falsely-"marketable" limit that can rest unfilled. Treat it exactly like no price → passive limit
+        // (the pre-marketable baseline, never worse than before).
+        if (snapshot.isEmpty() || !isExecutableLive(snapshot.get())) {
+            log.warn("OrderRouter marketable leg: no executable-live price for {} ({}) — passive limit {} (may rest)",
+                instrument, snapshot.map(s -> s.source() + "@" + s.timestamp()).orElse("none"), fallback);
+            return fallback;
+        }
+        BigDecimal reference = BigDecimal.valueOf(snapshot.get().price());
+        if (reference.signum() <= 0) {
+            return fallback;
+        }
+        BigDecimal cross = tickProvider.minTick(instrument).multiply(BigDecimal.valueOf(marketableCrossTicks));
+        boolean sell = "SHORT".equals(action); // SELL crosses down (reduce a long / open a short); BUY crosses up
+        BigDecimal marketable = sell ? reference.subtract(cross) : reference.add(cross);
+        // placeLimitOrder rejects a non-positive limit; guard against a degenerate price.
+        return marketable.signum() > 0 ? marketable : fallback;
+    }
+
+    /**
+     * A price is an executable reference for crossing only when it is GENUINELY LIVE (a streaming push or a
+     * fresh instant provider fetch — not a {@code FALLBACK_DB} candle close or an ambiguous {@code CACHE}
+     * value) AND recent ({@link #MARKETABLE_MAX_PRICE_AGE_SECONDS}). Mirrors the live-source notion the Quant
+     * G6 gate uses; stale / fallback prices are treated as no price (→ passive limit).
+     */
+    private static boolean isExecutableLive(LivePriceSnapshot snap) {
+        if (snap.source() == null || !LIVE_PRICE_SOURCES.contains(snap.source())) {
+            return false;
+        }
+        return snap.timestamp() != null
+            && snap.timestamp().isAfter(Instant.now().minusSeconds(MARKETABLE_MAX_PRICE_AGE_SECONDS));
     }
 
     /**
@@ -744,6 +897,15 @@ public class DefaultOrderRouter implements OrderRouter {
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {
         return brokerOrderId == null ? null : brokerOrderId.intValue();
+    }
+
+    /** Resolve the persisted instrument name to the enum, or null when unparseable (→ skip marketable pricing). */
+    private static Instrument parseInstrument(String name) {
+        try {
+            return name == null ? null : Instrument.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /** Round an order price to the instrument's tick. Prefers the broker's runtime minTick

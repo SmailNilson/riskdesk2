@@ -1,6 +1,52 @@
 # AI Handoff
 
-Last updated: 2026-06-03
+Last updated: 2026-06-04
+
+## Marketable exit pricing — reversals/closes no longer rest unfilled (2026-06-04)
+
+A REVERSE placed two legs (close-then-open), and the **close leg inherited the entry's passive limit**
+(`intent.limitPrice()`). If the market moved away the close rested unfilled, the open was deferred
+indefinitely behind it (`ReverseDeferredOpenScheduler` waits for the close FILL), and the user stayed
+stuck holding the position the signal said to exit. Same latent bug for `CLOSE`/`FLATTEN` — all three route
+through `DefaultOrderRouter.submitCloseLeg`.
+
+Fix — every **reducing** leg is now priced as a **marketable LIMIT** (`submitCloseLeg` →
+`marketableCloseLimit`): the internal live price is crossed by `cross-ticks·minTick` — SELL (reduce a long)
+at `price − cross`, BUY (reduce a short) at `price + cross`. It fills immediately like a market order, but
+stays a LIMIT (the deliberately limit-only broker path) so the cross caps worst-case slippage — safer than a
+raw MKT on thin micro books. **Entries stay passive** by design: the asymmetry is the point — exiting is
+risk-reduction (must fill), entering is opportunity (may rest; if it doesn't fill you're simply flat). With a
+marketable close the reverse close usually fills synchronously → the open submits inline, so the
+deferred-open path becomes a rare fallback, not the norm.
+
+**Reverse-open refinement** — the OPEN leg of a reverse that *actually flattened* (`reverseFlattened`) is
+ALSO priced marketable (same cross + live-source gating, re-priced off the live price at submit time), so
+the flip COMPLETES: previously a flattened-then-unfilled passive open left the user FLAT instead of reversed
+when price moved past the entry in the close→open gap. Plain OPENs (fresh entries, nothing flattened) still
+stay passive. Bounded — a price gapped beyond cross-ticks still rests (no runaway chase). Independent toggle
+`riskdesk.execution.marketable-reverse-open.enabled` (default on). `marketableLimit` is now shared by both
+the exit legs and the reverse open; enable-gating lives at each call site. The reverse margin preflight runs
+against the price the open will ACTUALLY submit — the crossed price only when a close fired
+(`closeLegFired`), the passive limit when the broker was already flat / the prior row was voided — so it
+neither lets a size-increasing reverse pass cheap then get IBKR-rejected on the crossed order
+(→ ROUTED_FLATTEN_ONLY), nor falsely denies a flat-reversal open the passive submit could afford. The inline reverse-open
+submits the EXACT preflighted price (the marketable price is computed once in `executeReverse` and carried
+into the submit — not a second live read that could tick higher); the deferred open re-prices at its own
+submit time. The ACTIVE reverse-open row is persisted at the crossed price so live P&L isn't skewed.
+
+The price comes from the existing `LivePricePort` (`MarketDataService.currentPrice` → the compliant
+`IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
+force-close uses**, NOT a direct broker read (AGENTS.md market-data rule). The compliant path exposes a
+single reconciled price, not a bid/ask, so it crosses that price by `cross-ticks` rather than sitting on a
+touch — exactly `IbkrQuant7GatesExecutionBridge.marketableLimit`. Only a **genuinely-live, fresh** price is
+crossed (source `LIVE_PUSH`/`LIVE_PROVIDER` and < 20s old); a `FALLBACK_DB` candle close or a stale value
+during a feed outage is treated as no price — crossing a stale price would yield a falsely-"marketable"
+limit that can rest unfilled. The router degrades to the passive intent limit (legacy behaviour, no worse
+than before) when the feature is off, no executable-live price is available, or the lookup throws — a price
+hiccup never breaks a close; a still-unfilled close stays a retryable LIMIT.
+Config `riskdesk.execution.marketable-close.{enabled:true, cross-ticks:10}` (`cross-ticks` mirrors
+`riskdesk.quant.sim-exec.flatten-cross-ticks`, also 10). No execution state-machine change (still
+`EXIT_SUBMITTED`/`CLOSED`); the broker adapter is untouched (still `OrderType.LMT`).
 
 ## Stuck EXIT_SUBMITTED reconciliation — broker-truth replay (2026-06-03)
 
