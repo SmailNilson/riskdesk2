@@ -1839,6 +1839,8 @@ export interface WtxSignalView {
   routingOutcome: WtxRoutingOutcome | null;
   /** Human-readable error reason attached to a FAILED_* or SKIPPED_INSUFFICIENT_MARGIN outcome. Null otherwise. */
   routingErrorMessage: string | null;
+  /** Candle-close price at signal detection — the ENTRY/reference price. Null for rows pre-dating this field. */
+  price: number | null;
 }
 
 export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {

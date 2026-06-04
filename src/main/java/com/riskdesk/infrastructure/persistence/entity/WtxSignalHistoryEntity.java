@@ -63,6 +63,10 @@ public class WtxSignalHistoryEntity {
     @Column(length = 300)
     private String routingErrorMessage;
 
+    /** Candle-close price at signal detection (the UI's ENTRY price). Nullable for rows pre-dating this column. */
+    @Column(precision = 20, scale = 6)
+    private BigDecimal price;
+
     @Column(nullable = false)
     private Instant signalTs;
 
@@ -105,6 +109,9 @@ public class WtxSignalHistoryEntity {
 
     public String getRoutingErrorMessage() { return routingErrorMessage; }
     public void setRoutingErrorMessage(String routingErrorMessage) { this.routingErrorMessage = routingErrorMessage; }
+
+    public BigDecimal getPrice() { return price; }
+    public void setPrice(BigDecimal price) { this.price = price; }
 
     public Instant getSignalTs() { return signalTs; }
     public void setSignalTs(Instant signalTs) { this.signalTs = signalTs; }

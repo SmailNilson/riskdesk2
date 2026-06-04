@@ -30,24 +30,36 @@ public record WtxSignal(
          * upstream to fit the {@code wtx_signal_history.routingErrorMessage} column
          * (300 chars).
          */
-        String routingErrorMessage
+        String routingErrorMessage,
+        /**
+         * Candle-close price at signal detection — the entry/reference price surfaced
+         * in the UI. Null for signals persisted before this field existed.
+         */
+        BigDecimal price
 ) {
     public WtxSignal withEnrichment(WtxEnrichmentSnapshot enrichment) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage);
+                routingOutcome, routingErrorMessage, price);
     }
 
     public WtxSignal withAction(WtxAction action) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, action, enrichment, signalTs,
-                routingOutcome, routingErrorMessage);
+                routingOutcome, routingErrorMessage, price);
     }
 
     public WtxSignal withRoutingOutcome(WtxRoutingOutcome routingOutcome) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage);
+                routingOutcome, routingErrorMessage, price);
+    }
+
+    /** Stamps the candle-close price at signal detection (the UI's ENTRY price). */
+    public WtxSignal withPrice(BigDecimal price) {
+        return new WtxSignal(instrument, timeframe, signalType, direction,
+                wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
+                routingOutcome, routingErrorMessage, price);
     }
 
     /**
@@ -61,6 +73,6 @@ public record WtxSignal(
         }
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                result.outcome(), result.errorMessage());
+                result.outcome(), result.errorMessage(), price);
     }
 }
