@@ -91,4 +91,20 @@ class MarketableExecutionSettingsServiceTest {
         store.throwOnLoad = true;
         assertThat(service(store).current().crossTicks()).isEqualTo(10); // defaults, no crash
     }
+
+    @Test
+    void current_transientLoadFailure_doesNotCacheDefaults_servesPersistedOnRecovery() {
+        FakeStore store = new FakeStore();
+        store.stored = new MarketableExecutionSettings(false, false, 4); // operator previously disabled exits
+        store.throwOnLoad = true;                                        // first load fails transiently
+        MarketableExecutionSettingsService svc = service(store);
+
+        assertThat(svc.current().closeEnabled()).isTrue();  // serves defaults (no crash) — must NOT cache them
+
+        store.throwOnLoad = false;                          // DB recovers
+
+        // The next read re-loads and serves the PERSISTED operator setting — proving defaults weren't cached.
+        assertThat(svc.current().closeEnabled()).isFalse();
+        assertThat(svc.current().crossTicks()).isEqualTo(4);
+    }
 }

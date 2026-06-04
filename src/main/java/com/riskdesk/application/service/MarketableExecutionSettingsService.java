@@ -38,11 +38,21 @@ public class MarketableExecutionSettingsService implements MarketableSettingsPro
     @Override
     public MarketableExecutionSettings current() {
         MarketableExecutionSettings c = cached;
-        if (c == null) {
-            c = loadOrDefault(); // lazy: persisted value if the operator ever saved, else the config defaults
-            cached = c;
+        if (c != null) {
+            return c;
         }
-        return c;
+        // Cache ONLY a successful read: a persisted value, or a confirmed-absent row (→ defaults, the operator
+        // never saved). A transient repository FAILURE must NOT cache the defaults — otherwise a previously
+        // persisted operator setting (e.g. exits disabled) would be ignored until the next PUT/restart even
+        // after the DB recovers. So serve defaults for THIS call but leave the cache empty to retry next time.
+        try {
+            MarketableExecutionSettings loaded = store.load().orElse(defaults);
+            cached = loaded;
+            return loaded;
+        } catch (RuntimeException e) {
+            log.warn("Marketable settings load failed ({}) — serving configured defaults, will retry", e.toString());
+            return defaults;
+        }
     }
 
     /** Partial update (null fields keep their current value) → validate → persist → refresh cache. */
@@ -62,14 +72,5 @@ public class MarketableExecutionSettingsService implements MarketableSettingsPro
         log.info("Marketable execution settings updated: close={} reverseOpen={} crossTicks={}",
             next.closeEnabled(), next.reverseOpenEnabled(), next.crossTicks());
         return next;
-    }
-
-    private MarketableExecutionSettings loadOrDefault() {
-        try {
-            return store.load().orElse(defaults);
-        } catch (RuntimeException e) {
-            log.warn("Marketable settings load failed ({}) — using configured defaults", e.toString());
-            return defaults;
-        }
     }
 }
