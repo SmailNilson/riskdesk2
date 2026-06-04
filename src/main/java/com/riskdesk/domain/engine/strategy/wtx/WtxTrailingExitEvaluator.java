@@ -55,14 +55,28 @@ public final class WtxTrailingExitEvaluator {
         if (state.trailingStopPrice() != null) {
             return state.trailingStopPrice();
         }
-        BigDecimal atr = state.entryAtr();
-        if (atr == null || atr.signum() <= 0) {
+        BigDecimal slDistance = slDistance(config, state.entryAtr());
+        if (slDistance == null) {
             return null;
         }
-        BigDecimal slDistance = atr.multiply(config.slAtrMult());
         return state.currentPosition() == WtxPosition.LONG
                 ? state.entryPrice().subtract(slDistance)
                 : state.entryPrice().add(slDistance);
+    }
+
+    /**
+     * Initial protective-stop distance: a fixed {@code slPoints} when configured ({@code > 0}),
+     * otherwise the dynamic {@code slAtrMult * ATR}. Null when neither is available (no ATR and
+     * no fixed point stop) — the caller then has no usable initial stop yet.
+     */
+    private static BigDecimal slDistance(WtxConfig config, BigDecimal atr) {
+        if (config.slPoints() != null && config.slPoints().signum() > 0) {
+            return config.slPoints();
+        }
+        if (atr != null && atr.signum() > 0) {
+            return atr.multiply(config.slAtrMult());
+        }
+        return null;
     }
 
     /**
@@ -77,14 +91,28 @@ public final class WtxTrailingExitEvaluator {
             return Decision.noExit(null, null);
         }
         BigDecimal atr = state.entryAtr();
-        if (atr == null || atr.signum() <= 0) {
+        BigDecimal entry = state.entryPrice();
+
+        // Initial stop: fixed points (slPoints>0) or dynamic ATR. Activation + trail follow the mode.
+        BigDecimal slDistance = slDistance(config, atr);
+        BigDecimal trailDistance;
+        BigDecimal activationDistance;
+        if (config.usesPointTrailing(state.instrument())) {
+            trailDistance = config.trailingPoints();
+            activationDistance = config.trailingActivationPoints();
+        } else {
+            // ATR mode needs a valid ATR for both the trail width and the activation gate.
+            if (atr == null || atr.signum() <= 0) {
+                return Decision.noExit(state.bestFavorablePrice(), state.trailingStopPrice());
+            }
+            trailDistance = atr.multiply(config.trailingAtrMult());
+            activationDistance = atr.multiply(config.slAtrMult()).multiply(config.trailingActivationR());
+        }
+        // No usable distances yet (e.g. POINTS mode with a dynamic SL but ATR not available).
+        if (slDistance == null || trailDistance == null || activationDistance == null
+                || trailDistance.signum() < 0 || activationDistance.signum() < 0) {
             return Decision.noExit(state.bestFavorablePrice(), state.trailingStopPrice());
         }
-
-        BigDecimal entry = state.entryPrice();
-        BigDecimal slDistance = atr.multiply(config.slAtrMult());
-        BigDecimal trailDistance = atr.multiply(config.trailingAtrMult());
-        BigDecimal activationDistance = slDistance.multiply(config.trailingActivationR());
 
         boolean isLong = state.currentPosition() == WtxPosition.LONG;
 

@@ -255,6 +255,13 @@ public class WtxStrategyService {
                 }
             }
 
+            // Tag the close kind so the UI distinguishes a reverse from a TP/SL/force exit.
+            if (filterRewroteToClose) {
+                signal = signal.withExitType(WtxExitType.SWING_BIAS);
+            } else if (signal.suggestedAction() == WtxAction.REVERSE_TO_LONG
+                    || signal.suggestedAction() == WtxAction.REVERSE_TO_SHORT) {
+                signal = signal.withExitType(WtxExitType.REVERSE);
+            }
             signal = signal.withPrice(currentCandle.getClose());
             historyPort.save(signal);
             ws.convertAndSend("/topic/wtx-signals", toWsPayload(signal, state));
@@ -275,7 +282,7 @@ public class WtxStrategyService {
                 WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                         ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
                 WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
-                        "MAX_LOSS_HALT", event.timestamp());
+                        "MAX_LOSS_HALT", WtxExitType.MAX_LOSS, event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
                 WtxRoutingResult haltRouting =
                         routeToExecution(haltSignal, state, currentCandle.getClose());
@@ -323,7 +330,7 @@ public class WtxStrategyService {
                             WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                                     ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
                             WtxSignal forceCloseSignal = buildCloseSignal(state, timeframe, closeAction,
-                                    "FORCE_CLOSE:" + reason, java.time.Instant.now());
+                                    "FORCE_CLOSE:" + reason, WtxExitType.FORCE_CLOSE, java.time.Instant.now());
                             // Route to IBKR with the pre-close state so the open quantity is preserved.
                             WtxRoutingResult fcRouting =
                                     routeToExecution(forceCloseSignal, state, exitPrice);
@@ -474,7 +481,7 @@ public class WtxStrategyService {
                                        WtxTrailingExitEvaluator.Decision exit, CandleClosed event,
                                        WtxProfile profile) {
         WtxSignal exitSignal = buildCloseSignal(state, event.timeframe(), exit.exitAction(),
-                exit.reason().name(), event.timestamp());
+                exit.reason().name(), WtxExitType.fromExitReason(exit.reason()), event.timestamp());
         // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
         // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)
         WtxRoutingResult routing = routeToExecution(exitSignal, state, exit.exitPrice());
@@ -494,7 +501,7 @@ public class WtxStrategyService {
     }
 
     private WtxSignal buildCloseSignal(WtxStrategyState state, String timeframe, WtxAction action,
-                                       String reason, java.time.Instant ts) {
+                                       String reason, WtxExitType exitType, java.time.Instant ts) {
         boolean wasLong = state.currentPosition() == WtxPosition.LONG;
         return new WtxSignal(
                 state.instrument(),
@@ -508,7 +515,8 @@ public class WtxStrategyService {
                 ts,
                 null,
                 null,
-                null
+                null,
+                exitType
         );
     }
 
@@ -601,6 +609,9 @@ public class WtxStrategyService {
         payload.put("routingOutcome", signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         payload.put("routingErrorMessage", signal.routingErrorMessage());
         payload.put("price", signal.price());
+        // Mirror toSignalView() — without this the live-streamed close arrives with no exitType and the
+        // panel's first-wins de-dup keeps it over the REST copy, so the TP/SL badge never renders live.
+        payload.put("exitType", signal.exitType() != null ? signal.exitType().name() : null);
         return payload;
     }
 

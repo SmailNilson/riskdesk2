@@ -44,6 +44,7 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         e.setRoutingOutcome(signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         e.setRoutingErrorMessage(signal.routingErrorMessage());
         e.setPrice(signal.price());
+        e.setExitType(signal.exitType() != null ? signal.exitType().name() : null);
         e.setSignalTs(signal.signalTs());
         e.setCreatedAt(Instant.now());
         repository.save(e);
@@ -92,7 +93,8 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 e.getSignalTs(),
                 parseRoutingOutcome(e.getRoutingOutcome()),
                 e.getRoutingErrorMessage(),
-                e.getPrice()
+                e.getPrice(),
+                parseExitType(e.getExitType())
         );
     }
 
@@ -100,6 +102,15 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         if (raw == null || raw.isBlank()) return null;
         try {
             return WtxRoutingOutcome.valueOf(raw);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
+    }
+
+    private com.riskdesk.domain.engine.strategy.wtx.WtxExitType parseExitType(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            return com.riskdesk.domain.engine.strategy.wtx.WtxExitType.valueOf(raw);
         } catch (IllegalArgumentException ex) {
             return null;
         }
