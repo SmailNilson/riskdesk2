@@ -225,23 +225,6 @@ public class DefaultOrderRouter implements OrderRouter {
                 "broker position truth unavailable — reverse skipped to avoid a blind close + stacked open");
         }
 
-        // D4 — affordability of the open leg, sized by the NET margin delta this reverse creates:
-        // (new size − the live position it flattens). A same-size / smaller reverse frees margin
-        // (delta <= 0 → skipped); a size-increasing reverse pre-checks only the extra contracts. Computed
-        // here against broker truth, but ENFORCED only after the close leg fires below — a margin denial
-        // must NEVER abort the close (flattening protects the user); it only skips the open.
-        int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
-        // Preflight against the price we will actually SUBMIT: when the reverse open is marketable that is the
-        // crossed live price (higher for a BUY-to-long → more margin), not the passive signal limit — else a
-        // size-increasing reverse could pass preflight cheap then be IBKR-rejected on the crossed order and
-        // surface ROUTED_FLATTEN_ONLY (flat instead of reversed). Falls back to the passive limit when the
-        // reverse-open isn't marketable or no executable-live price exists (same price the submit will use).
-        BigDecimal openRefPrice = marketableReverseOpenEnabled
-            ? marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice())
-            : intent.limitPrice();
-        OrderAffordabilityPort.Affordability aff =
-            checkAffordability(intent, brokerAction(intent), reverseDeltaQty, openRefPrice);
-
         Optional<TradeExecutionRecord> prior = findOpenRow(intent);
         if (prior.isEmpty() && !pos.confirmedFlat()) {
             // No local row but the broker is NOT flat — there is a live position we must flatten first.
@@ -315,9 +298,23 @@ public class DefaultOrderRouter implements OrderRouter {
             }
         }
 
-        // D4 — open-leg affordability gate. A denial NEVER undoes the close that already fired: the user
-        // ends up FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A
-        // pure reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
+        // D4 — affordability of the open leg, sized by the NET margin delta this reverse creates (new size −
+        // the live position it flattened; delta <= 0 frees margin → skipped). Priced at what the open will
+        // ACTUALLY submit: the crossed marketable price ONLY when a close fired (closeLegFired → the open is
+        // marketable); otherwise the passive intent limit (broker was flat / prior voided → submitEntry(false)
+        // submits passive). Gating the crossed price on closeLegFired keeps the estimate consistent with the
+        // submit — using it unconditionally would falsely DENY a flat-reversal open the passive submit could
+        // afford. Computed against the same broker-truth pos.
+        //
+        // Open-leg affordability gate. A denial NEVER undoes the close that already fired: the user ends up
+        // FLAT (protected) → ROUTED_FLATTEN_ONLY (caller corrects its virtual state to flat). A pure
+        // reverse-to-open with nothing flattened (broker was flat, prior voided) is declined outright.
+        int reverseDeltaQty = Math.max(0, intent.quantity() - pos.net().abs().intValue());
+        BigDecimal openRefPrice = (marketableReverseOpenEnabled && closeLegFired)
+            ? marketableLimit(intent.instrument(), brokerAction(intent), intent.limitPrice())
+            : intent.limitPrice();
+        OrderAffordabilityPort.Affordability aff =
+            checkAffordability(intent, brokerAction(intent), reverseDeltaQty, openRefPrice);
         if (!aff.allowed()) {
             if (closeLegFired) {
                 log.warn("OrderRouter REVERSE flattened, open leg skipped — insufficient margin ({}): {}",

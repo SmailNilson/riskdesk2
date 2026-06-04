@@ -813,6 +813,27 @@ class DefaultOrderRouterTest {
     }
 
     @Test
+    void reverse_flatBroker_preflightsAtPassivePrice_notCrossed() {
+        // Reverse reconciled while IBKR is FLAT: NO close fires → the open submits PASSIVE, so the preflight
+        // must use the passive intent limit, not the crossed price (else it could falsely deny an affordable
+        // open). marketable-reverse-open is ON, but closeLegFired stays false → passive estimate.
+        OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
+        when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
+        DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), 4, true, true);
+        when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, true)); // flat
+        when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
+
+        r.route(reverseToLong());
+
+        ArgumentCaptor<BigDecimal> price = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(aff).check(any(), eq("LONG"), eq(2), price.capture(), any()); // delta = full qty (broker flat)
+        assertThat(price.getValue()).isEqualByComparingTo("17000.00"); // passive intent (flat → open passive), NOT crossed
+        verify(ibkrOrderService, times(1)).submitEntryOrder(any()); // open only, no close fired
+    }
+
+    @Test
     void close_marketableDisabled_usesPassiveIntentLimit() {
         // Kill-switch OFF → even with a live price, the exit rests at the passive intent limit.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
