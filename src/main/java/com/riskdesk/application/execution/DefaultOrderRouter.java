@@ -7,12 +7,13 @@ import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
 import com.riskdesk.domain.execution.port.InstrumentTickProvider;
-import com.riskdesk.domain.execution.port.MarketQuoteProvider;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.model.LivePriceSnapshot;
+import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
@@ -62,10 +63,11 @@ public class DefaultOrderRouter implements OrderRouter {
     private final OrderAffordabilityPort affordability;
     /** P4 daily loss cap. Nullable in test constructors; when present and tripped, new entries are refused. */
     private final DailyLossCapGuard lossCapGuard;
-    /** Live top-of-book source for marketable EXIT pricing — a reducing leg is priced THROUGH the market so
-     *  it fills immediately like a market order, with the limit capping slippage. Only exits use it; entries
-     *  stay passive by design. */
-    private final MarketQuoteProvider quoteProvider;
+    /** Internal live-price source for marketable EXIT pricing — the AGENTS.md-compliant {@code IBKR Gateway
+     *  -> PostgreSQL -> services} feed (with live-vs-DB provenance), NOT a direct broker read. A reducing leg
+     *  crosses this price so it fills immediately like a market order, the limit capping slippage. Only exits
+     *  use it; entries stay passive. Same source the Quant force-close uses ({@code QuantSimFlattenReconciler}). */
+    private final LivePricePort livePricePort;
     /** Ticks crossed through the touch on an exit leg (SELL: bid − N·tick, BUY: ask + N·tick). This is the
      *  worst-case slippage CAP, not the expected fill — IBKR fills at the best price, usually the touch.
      *  Mirrors the proven Quant force-close convention ({@code riskdesk.quant.sim-exec.flatten-cross-ticks},
@@ -82,7 +84,7 @@ public class DefaultOrderRouter implements OrderRouter {
                               InstrumentTickProvider tickProvider,
                               Optional<OrderAffordabilityPort> affordability,
                               DailyLossCapGuard lossCapGuard,
-                              MarketQuoteProvider quoteProvider,
+                              LivePricePort livePricePort,
                               @Value("${riskdesk.execution.marketable-close.cross-ticks:10}") int marketableCrossTicks,
                               @Value("${riskdesk.execution.marketable-close.enabled:true}") boolean marketableCloseEnabled) {
         this.ibkrOrderService = ibkrOrderService;
@@ -93,7 +95,7 @@ public class DefaultOrderRouter implements OrderRouter {
         this.tickProvider = tickProvider;
         this.affordability = affordability == null ? null : affordability.orElse(null);
         this.lossCapGuard = lossCapGuard;
-        this.quoteProvider = quoteProvider;
+        this.livePricePort = livePricePort;
         this.marketableCrossTicks = Math.max(0, marketableCrossTicks);
         this.marketableCloseEnabled = marketableCloseEnabled;
     }
@@ -649,55 +651,48 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     /**
-     * Marketable-limit price for a reducing (exit) leg — a LIMIT priced THROUGH the current top of book so it
-     * fills immediately like a market order, while the limit caps worst-case slippage (safer than a raw MKT
-     * on thin micro-futures books, and keeps the deliberately limit-only broker path). {@code closeAction}
-     * "SHORT" = SELL to reduce a long → price at {@code bid − offset}; "LONG" = BUY to reduce a short → price
-     * at {@code ask + offset}, where {@code offset = marketableCrossTicks · minTick}. Falls back to {@code
-     * fallback} (the caller's intent limit = legacy passive behaviour) when the feature is off, no quote
-     * provider is wired, or no live quote is available — strictly no worse than before.
+     * Marketable-limit price for a reducing (exit) leg — a LIMIT priced THROUGH the market so it fills
+     * immediately like a market order, while the limit caps worst-case slippage (safer than a raw MKT on thin
+     * micro-futures books, and keeps the deliberately limit-only broker path). Crosses the internal live price
+     * ({@link LivePricePort} — the compliant {@code IBKR Gateway -> PostgreSQL -> services} feed, NOT a direct
+     * broker read) by {@code marketableCrossTicks · minTick}: {@code closeAction} "SHORT" = SELL to reduce a
+     * long → {@code price − cross}; "LONG" = BUY to reduce a short → {@code price + cross}. Mirrors the proven
+     * Quant force-close ({@code IbkrQuant7GatesExecutionBridge#marketableLimit}).
+     *
+     * <p>The compliant path exposes a single reconciled live price (not a separate bid/ask), so we cross it by
+     * {@code cross-ticks} (default 10, sized to clear a normal spread) rather than sitting on a touch. Falls
+     * back to {@code fallback} (the caller's intent limit = legacy passive behaviour) when the feature is off,
+     * no live-price port is wired, no live price is available, or the lookup throws — strictly no worse than
+     * before. A close that still doesn't fill stays a retryable LIMIT (re-priced next bar), so it never rests
+     * worse than the old passive limit.</p>
      */
     private BigDecimal marketableCloseLimit(Instrument instrument, String closeAction, BigDecimal fallback) {
-        if (!marketableCloseEnabled || quoteProvider == null) {
+        if (!marketableCloseEnabled || livePricePort == null) {
             return fallback;
         }
-        Optional<MarketQuoteProvider.Quote> quote;
+        Optional<LivePriceSnapshot> snapshot;
         try {
-            quote = quoteProvider.currentQuote(instrument);
+            snapshot = livePricePort.current(instrument);
         } catch (RuntimeException e) {
-            // A quote hiccup must NEVER break a close — degrade to the passive limit (today's behaviour).
-            log.warn("OrderRouter close leg: quote lookup for {} failed ({}) — passive limit {}",
+            // A price hiccup must NEVER break a close — degrade to the passive limit (today's behaviour).
+            log.warn("OrderRouter close leg: live-price lookup for {} failed ({}) — passive limit {}",
                 instrument, e.toString(), fallback);
             return fallback;
         }
-        if (quote.isEmpty()) {
-            log.warn("OrderRouter close leg: no live quote for {} — passive limit {} (exit may rest unfilled)",
+        if (snapshot.isEmpty()) {
+            log.warn("OrderRouter close leg: no live price for {} — passive limit {} (exit may rest unfilled)",
                 instrument, fallback);
             return fallback;
         }
-        MarketQuoteProvider.Quote q = quote.get();
-        boolean sell = "SHORT".equals(closeAction); // reducing a long = SELL; reducing a short = BUY
-        BigDecimal reference = sell ? firstPositive(q.bid(), q.last()) : firstPositive(q.ask(), q.last());
-        if (reference == null) {
-            log.warn("OrderRouter close leg: quote for {} missing a usable {} — passive limit {}",
-                instrument, sell ? "bid" : "ask", fallback);
+        BigDecimal reference = BigDecimal.valueOf(snapshot.get().price());
+        if (reference.signum() <= 0) {
             return fallback;
         }
-        BigDecimal offset = tickProvider.minTick(instrument).multiply(BigDecimal.valueOf(marketableCrossTicks));
-        BigDecimal marketable = sell ? reference.subtract(offset) : reference.add(offset);
-        // placeLimitOrder rejects a non-positive limit; guard against a degenerate quote.
+        BigDecimal cross = tickProvider.minTick(instrument).multiply(BigDecimal.valueOf(marketableCrossTicks));
+        boolean sell = "SHORT".equals(closeAction); // reducing a long = SELL; reducing a short = BUY
+        BigDecimal marketable = sell ? reference.subtract(cross) : reference.add(cross);
+        // placeLimitOrder rejects a non-positive limit; guard against a degenerate price.
         return marketable.signum() > 0 ? marketable : fallback;
-    }
-
-    /** First strictly-positive value of the two, or null when neither qualifies. */
-    private static BigDecimal firstPositive(BigDecimal a, BigDecimal b) {
-        if (a != null && a.signum() > 0) {
-            return a;
-        }
-        if (b != null && b.signum() > 0) {
-            return b;
-        }
-        return null;
     }
 
     /**

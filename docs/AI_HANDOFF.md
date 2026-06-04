@@ -10,22 +10,25 @@ indefinitely behind it (`ReverseDeferredOpenScheduler` waits for the close FILL)
 stuck holding the position the signal said to exit. Same latent bug for `CLOSE`/`FLATTEN` — all three route
 through `DefaultOrderRouter.submitCloseLeg`.
 
-Fix — every **reducing** leg is now priced as a **marketable LIMIT** crossed THROUGH the live top of book
-(`submitCloseLeg` → `marketableCloseLimit`): SELL (reduce a long) at `bid − N·tick`, BUY (reduce a short) at
-`ask + N·tick`. It fills immediately like a market order, but stays a LIMIT (the deliberately limit-only
-broker path) so the cross caps worst-case slippage — safer than a raw MKT on thin micro books. **Entries
-stay passive** by design: the asymmetry is the point — exiting is risk-reduction (must fill), entering is
-opportunity (may rest; if it doesn't fill you're simply flat). With a marketable close the reverse close
-usually fills synchronously → the open submits inline, so the deferred-open path becomes a rare fallback,
-not the norm.
+Fix — every **reducing** leg is now priced as a **marketable LIMIT** (`submitCloseLeg` →
+`marketableCloseLimit`): the internal live price is crossed by `cross-ticks·minTick` — SELL (reduce a long)
+at `price − cross`, BUY (reduce a short) at `price + cross`. It fills immediately like a market order, but
+stays a LIMIT (the deliberately limit-only broker path) so the cross caps worst-case slippage — safer than a
+raw MKT on thin micro books. **Entries stay passive** by design: the asymmetry is the point — exiting is
+risk-reduction (must fill), entering is opportunity (may rest; if it doesn't fill you're simply flat). With a
+marketable close the reverse close usually fills synchronously → the open submits inline, so the
+deferred-open path becomes a rare fallback, not the norm.
 
-New domain port `domain/execution/port/MarketQuoteProvider` (+ infra `IbkrMarketQuoteProvider`:
-streaming-then-snapshot quote, mirrors `IbGatewayFxQuoteProvider`). The router degrades to the passive
-intent limit (legacy behaviour, no worse than before) when the feature is off, no live quote is available,
-or the quote lookup throws — a quote hiccup never breaks a close. Config
-`riskdesk.execution.marketable-close.{enabled:true, cross-ticks:10}`; `cross-ticks` mirrors the proven Quant
-force-close convention (`riskdesk.quant.sim-exec.flatten-cross-ticks`, also 10). No execution state-machine
-change (still `EXIT_SUBMITTED`/`CLOSED`); the broker adapter is untouched (still `OrderType.LMT`).
+The price comes from the existing `LivePricePort` (`MarketDataService.currentPrice` → the compliant
+`IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
+force-close uses**, NOT a direct broker read (AGENTS.md market-data rule). The compliant path exposes a
+single reconciled price, not a bid/ask, so it crosses that price by `cross-ticks` rather than sitting on a
+touch — exactly `IbkrQuant7GatesExecutionBridge.marketableLimit`. The router degrades to the passive intent
+limit (legacy behaviour, no worse than before) when the feature is off, no live price is available, or the
+lookup throws — a price hiccup never breaks a close; a still-unfilled close stays a retryable LIMIT.
+Config `riskdesk.execution.marketable-close.{enabled:true, cross-ticks:10}` (`cross-ticks` mirrors
+`riskdesk.quant.sim-exec.flatten-cross-ticks`, also 10). No execution state-machine change (still
+`EXIT_SUBMITTED`/`CLOSED`); the broker adapter is untouched (still `OrderType.LMT`).
 
 ## Stuck EXIT_SUBMITTED reconciliation — broker-truth replay (2026-06-03)
 
