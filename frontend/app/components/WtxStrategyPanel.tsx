@@ -33,12 +33,37 @@ function DirectionChip({ dir }: { dir: 'FLAT' | 'LONG' | 'SHORT' }) {
 }
 
 function SignalChip({ type }: { type: WtxSignalView['signalType'] }) {
-  const style = type.startsWith('COMPRA')
+  const isLong = type.startsWith('COMPRA');
+  const style = isLong
     ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
     : 'bg-red-950/70 text-red-300 border-red-800/60';
+  // COMPRA → LONG, VENTA → SHORT — keep the _1 suffix that flags the secondary signal variant.
+  const label = type.replace('COMPRA', 'LONG').replace('VENTA', 'SHORT');
   return (
-    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{type}</span>
+    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{label}</span>
   );
+}
+
+/**
+ * Plain-language execution status derived from the IBKR routing outcome — answers
+ * "executed or pending?" at a glance, alongside the detailed {@link RoutingChip}.
+ * Returns null when no routing was attempted (informational signal, action NONE).
+ */
+function executionStatus(outcome: WtxRoutingOutcome | null): { label: string; style: string } | null {
+  if (!outcome) return null;
+  switch (outcome) {
+    case 'ROUTED':
+    case 'ROUTED_FLATTEN_ONLY':
+      return { label: 'EXÉCUTÉ', style: 'text-emerald-300' };
+    case 'ACK_PENDING':
+      return { label: 'PENDING', style: 'text-cyan-300' };
+    case 'FAILED':
+    case 'FAILED_TIMEOUT':
+    case 'FAILED_BROKER_REJECT':
+      return { label: 'ÉCHEC', style: 'text-red-300' };
+    default:
+      return { label: 'NON EXÉCUTÉ', style: 'text-amber-300' };
+  }
 }
 
 function RoutingChip({ outcome, errorMessage }: { outcome: WtxRoutingOutcome | null; errorMessage?: string | null }) {
@@ -221,12 +246,20 @@ function EnrichmentSection({ e }: { e: WtxEnrichmentView }) {
 function SignalCard({ sig }: { sig: WtxSignalView }) {
   const ts = new Date(sig.signalTs);
   const timeStr = `${ts.getHours().toString().padStart(2, '0')}:${ts.getMinutes().toString().padStart(2, '0')}`;
+  const status = executionStatus(sig.routingOutcome);
   return (
     <div className="border border-zinc-800/60 rounded p-2 space-y-1">
       <div className="flex items-center gap-1.5 flex-wrap">
         <SignalChip type={sig.signalType} />
         <span className="text-[10px] text-zinc-400">{sig.instrument} {sig.timeframe}</span>
         <span className="text-[10px] text-zinc-600 ml-auto">{timeStr}</span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className="text-zinc-500">entry</span>
+        <span className="font-mono text-zinc-200">{sig.price != null ? sig.price.toFixed(2) : '—'}</span>
+        {status && (
+          <span className={`ml-auto font-semibold ${status.style}`}>{status.label}</span>
+        )}
       </div>
       <div className="flex items-center gap-2 text-[10px]">
         <span className="text-zinc-500">wt1</span>

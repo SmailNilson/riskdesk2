@@ -43,6 +43,7 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         e.setEnrichmentJson(serializeEnrichment(signal.enrichment()));
         e.setRoutingOutcome(signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         e.setRoutingErrorMessage(signal.routingErrorMessage());
+        e.setPrice(signal.price());
         e.setSignalTs(signal.signalTs());
         e.setCreatedAt(Instant.now());
         repository.save(e);
@@ -90,7 +91,8 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 enrichment != null ? enrichment : WtxEnrichmentSnapshot.empty(),
                 e.getSignalTs(),
                 parseRoutingOutcome(e.getRoutingOutcome()),
-                e.getRoutingErrorMessage()
+                e.getRoutingErrorMessage(),
+                e.getPrice()
         );
     }
 

@@ -255,6 +255,7 @@ public class WtxStrategyService {
                 }
             }
 
+            signal = signal.withPrice(currentCandle.getClose());
             historyPort.save(signal);
             ws.convertAndSend("/topic/wtx-signals", toWsPayload(signal, state));
             publishWtxEvent(signal, currentCandle.getClose());
@@ -291,6 +292,7 @@ public class WtxStrategyService {
                 } else {
                     state = closePosition(state, instrument, currentCandle.getClose());
                 }
+                haltSignal = haltSignal.withPrice(currentCandle.getClose());
                 historyPort.save(haltSignal);
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(haltSignal, state));
                 publishWtxEvent(haltSignal, currentCandle.getClose());
@@ -330,6 +332,7 @@ public class WtxStrategyService {
                             WtxStrategyState closed = skippedEntryInFlight(fcRouting)
                                     ? state
                                     : closePosition(state, instrument, exitPrice);
+                            forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
                             historyPort.save(forceCloseSignal);
                             statePort.save(closed);
                             ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
@@ -481,6 +484,7 @@ public class WtxStrategyService {
         WtxStrategyState closed = skippedEntryInFlight(routing)
                 ? state
                 : closePosition(state, instrument, exit.exitPrice());
+        exitSignal = exitSignal.withPrice(exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
         publishWtxEvent(exitSignal, exit.exitPrice());
@@ -502,6 +506,7 @@ public class WtxStrategyService {
                 action,
                 WtxEnrichmentSnapshot.empty().withFilters(null, null, reason),
                 ts,
+                null,
                 null,
                 null
         );
@@ -595,6 +600,7 @@ public class WtxStrategyService {
         payload.put("signalTs", signal.signalTs().toString());
         payload.put("routingOutcome", signal.routingOutcome() != null ? signal.routingOutcome().name() : null);
         payload.put("routingErrorMessage", signal.routingErrorMessage());
+        payload.put("price", signal.price());
         return payload;
     }
 

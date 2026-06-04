@@ -423,7 +423,7 @@ class TelegramNotificationAdapterTest {
                 canTrade, action,
                 WtxEnrichmentSnapshot.empty(),
                 Instant.parse("2026-05-19T19:00:00Z"),
-                null, null
+                null, null, null
             );
             return WtxSignalDetectedEvent.from(signal, new BigDecimal("24390.25"));
         }
