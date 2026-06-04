@@ -671,9 +671,15 @@ class DefaultOrderRouterTest {
             Instrument::getTickSize, Optional.empty(), null, port, crossTicks, true);
     }
 
-    /** Fixed internal live price (LIVE_PUSH provenance). */
+    /** Fixed internal live price (fresh LIVE_PUSH provenance). */
     private static LivePricePort livePrice(String price) {
-        return instr -> Optional.of(new LivePriceSnapshot(Double.parseDouble(price), Instant.now(), "LIVE_PUSH"));
+        return livePriceWith(price, "LIVE_PUSH", 0);
+    }
+
+    /** Internal live price with explicit provenance + age (seconds) for source/freshness gating tests. */
+    private static LivePricePort livePriceWith(String price, String source, long ageSeconds) {
+        return instr -> Optional.of(new LivePriceSnapshot(
+            Double.parseDouble(price), Instant.now().minusSeconds(ageSeconds), source));
     }
 
     private TradeIntent closeShort() {
@@ -784,6 +790,54 @@ class DefaultOrderRouterTest {
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService).submitEntryOrder(req.capture());
         assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // intent limit — no crash
+    }
+
+    @Test
+    void closeLeg_dbFallbackSource_fallsBackToPassiveIntentLimit() {
+        // A DB-fallback candle close is NOT an executable live reference — must not be crossed.
+        DefaultOrderRouter r = pricedRouter(livePriceWith("17000.00", "FALLBACK_DB", 0), 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(893L, "Submitted", "k", Instant.now()));
+
+        r.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // passive intent, NOT 17000 − cross
+    }
+
+    @Test
+    void closeLeg_staleLivePrice_fallsBackToPassiveIntentLimit() {
+        // A live-sourced but stale price (feed outage) is treated like no price → passive limit.
+        DefaultOrderRouter r = pricedRouter(livePriceWith("18000.00", "LIVE_PUSH", 120), 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(894L, "Submitted", "k", Instant.now()));
+
+        r.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // stale → passive intent
+    }
+
+    @Test
+    void close_liveProviderSource_pricesMarketable() {
+        // LIVE_PROVIDER (fresh instant fetch) is also an executable live reference → crossed.
+        DefaultOrderRouter r = pricedRouter(livePriceWith("18000.00", "LIVE_PROVIDER", 0), 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(895L, "Submitted", "k", Instant.now()));
+
+        r.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("17999.00"); // 18000.00 − 1.00, crossed
     }
 
     @Test

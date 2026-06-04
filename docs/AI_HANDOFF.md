@@ -23,9 +23,12 @@ The price comes from the existing `LivePricePort` (`MarketDataService.currentPri
 `IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
 force-close uses**, NOT a direct broker read (AGENTS.md market-data rule). The compliant path exposes a
 single reconciled price, not a bid/ask, so it crosses that price by `cross-ticks` rather than sitting on a
-touch — exactly `IbkrQuant7GatesExecutionBridge.marketableLimit`. The router degrades to the passive intent
-limit (legacy behaviour, no worse than before) when the feature is off, no live price is available, or the
-lookup throws — a price hiccup never breaks a close; a still-unfilled close stays a retryable LIMIT.
+touch — exactly `IbkrQuant7GatesExecutionBridge.marketableLimit`. Only a **genuinely-live, fresh** price is
+crossed (source `LIVE_PUSH`/`LIVE_PROVIDER` and < 20s old); a `FALLBACK_DB` candle close or a stale value
+during a feed outage is treated as no price — crossing a stale price would yield a falsely-"marketable"
+limit that can rest unfilled. The router degrades to the passive intent limit (legacy behaviour, no worse
+than before) when the feature is off, no executable-live price is available, or the lookup throws — a price
+hiccup never breaks a close; a still-unfilled close stays a retryable LIMIT.
 Config `riskdesk.execution.marketable-close.{enabled:true, cross-ticks:10}` (`cross-ticks` mirrors
 `riskdesk.quant.sim-exec.flatten-cross-ticks`, also 10). No execution state-machine change (still
 `EXIT_SUBMITTED`/`CLOSED`); the broker adapter is untouched (still `OrderType.LMT`).

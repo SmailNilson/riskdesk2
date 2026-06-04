@@ -26,6 +26,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The single entry point through which every strategy submits to IBKR. Owns the shared mechanics —
@@ -51,6 +52,17 @@ public class DefaultOrderRouter implements OrderRouter {
      *  placeLimitOrder's orderRef idempotency lookup. The fill tracker strips it to map a close callback
      *  back to the row by its base executionKey (see {@code ExecutionFillTrackingService.locate}). */
     public static final String EXIT_ORDER_REF_SUFFIX = ":exit";
+
+    /** Price sources accepted as an EXECUTABLE LIVE reference for marketable exit crossing — a streaming
+     *  push or a fresh instant provider fetch. A {@code FALLBACK_DB} candle close or an ambiguous {@code
+     *  CACHE} value is NOT executable: crossing it yields a falsely-"marketable" limit that can rest unfilled
+     *  (the very bug this fixes), so such a price falls back to the passive intent limit. */
+    private static final Set<String> LIVE_PRICE_SOURCES = Set.of("LIVE_PUSH", "LIVE_PROVIDER");
+
+    /** Max age of a live price still treated as the current market for crossing; older → passive fallback.
+     *  Tracks {@code MarketDataService}'s fresh-cache horizon (15s) with a small margin, so an outage that
+     *  leaves only a stale price degrades to the passive limit (the pre-marketable baseline). */
+    private static final long MARKETABLE_MAX_PRICE_AGE_SECONDS = 20L;
 
     private final IbkrOrderService ibkrOrderService;
     private final TradeExecutionRepositoryPort executionRepository;
@@ -679,9 +691,13 @@ public class DefaultOrderRouter implements OrderRouter {
                 instrument, e.toString(), fallback);
             return fallback;
         }
-        if (snapshot.isEmpty()) {
-            log.warn("OrderRouter close leg: no live price for {} — passive limit {} (exit may rest unfilled)",
-                instrument, fallback);
+        // Only a GENUINELY-LIVE, FRESH price is an executable reference. A DB-fallback candle close (or any
+        // stale/cached value, e.g. during a live-feed outage) must NOT be crossed — a stale price yields a
+        // falsely-"marketable" limit that can rest unfilled. Treat it exactly like no price → passive limit
+        // (the pre-marketable baseline, never worse than before).
+        if (snapshot.isEmpty() || !isExecutableLive(snapshot.get())) {
+            log.warn("OrderRouter close leg: no executable-live price for {} ({}) — passive limit {} (exit may rest)",
+                instrument, snapshot.map(s -> s.source() + "@" + s.timestamp()).orElse("none"), fallback);
             return fallback;
         }
         BigDecimal reference = BigDecimal.valueOf(snapshot.get().price());
@@ -693,6 +709,20 @@ public class DefaultOrderRouter implements OrderRouter {
         BigDecimal marketable = sell ? reference.subtract(cross) : reference.add(cross);
         // placeLimitOrder rejects a non-positive limit; guard against a degenerate price.
         return marketable.signum() > 0 ? marketable : fallback;
+    }
+
+    /**
+     * A price is an executable reference for crossing only when it is GENUINELY LIVE (a streaming push or a
+     * fresh instant provider fetch — not a {@code FALLBACK_DB} candle close or an ambiguous {@code CACHE}
+     * value) AND recent ({@link #MARKETABLE_MAX_PRICE_AGE_SECONDS}). Mirrors the live-source notion the Quant
+     * G6 gate uses; stale / fallback prices are treated as no price (→ passive limit).
+     */
+    private static boolean isExecutableLive(LivePriceSnapshot snap) {
+        if (snap.source() == null || !LIVE_PRICE_SOURCES.contains(snap.source())) {
+            return false;
+        }
+        return snap.timestamp() != null
+            && snap.timestamp().isAfter(Instant.now().minusSeconds(MARKETABLE_MAX_PRICE_AGE_SECONDS));
     }
 
     /**
