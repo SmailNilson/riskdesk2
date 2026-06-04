@@ -656,6 +656,13 @@ public class DefaultOrderRouter implements OrderRouter {
             row.setStatusReason(reasonPrefix + " — IBKR close " + (filled ? "filled" : "submitted") + ": "
                 + sub.brokerOrderStatus());
             row.setExitSubmittedAt(now);
+            // Stamp closedAt on a synchronous fill: we mark CLOSED here, so the later orderStatus(Filled)
+            // callback (if it arrives) skips its closedAt transition — the row is no longer EXIT_SUBMITTED.
+            // Without this, a synchronously-filled close has a null close timestamp (TradeExecutionView /
+            // close-time ordering). Mirrors the WTX close path and Quant doFlatten.
+            if (filled && row.getClosedAt() == null) {
+                row.setClosedAt(now);
+            }
             row.setUpdatedAt(now);
             executionRepository.save(row);
             RoutingOutcome outcome = "PendingSubmit".equalsIgnoreCase(sub.brokerOrderStatus())

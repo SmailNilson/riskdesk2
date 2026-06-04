@@ -380,6 +380,9 @@ class DefaultOrderRouterTest {
         ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
         verify(repo).save(cap.capture());
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        // A synchronous close fill must stamp closedAt here — the later orderStatus(Filled) callback skips
+        // it (row no longer EXIT_SUBMITTED), so otherwise the closed row has a null close timestamp.
+        assertThat(cap.getValue().getClosedAt()).isNotNull();
     }
 
     @Test
