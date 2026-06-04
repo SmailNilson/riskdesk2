@@ -19,6 +19,14 @@ risk-reduction (must fill), entering is opportunity (may rest; if it doesn't fil
 marketable close the reverse close usually fills synchronously → the open submits inline, so the
 deferred-open path becomes a rare fallback, not the norm.
 
+**Reverse-open refinement** — the OPEN leg of a reverse that *actually flattened* (`reverseFlattened`) is
+ALSO priced marketable (same cross + live-source gating, re-priced off the live price at submit time), so
+the flip COMPLETES: previously a flattened-then-unfilled passive open left the user FLAT instead of reversed
+when price moved past the entry in the close→open gap. Plain OPENs (fresh entries, nothing flattened) still
+stay passive. Bounded — a price gapped beyond cross-ticks still rests (no runaway chase). Independent toggle
+`riskdesk.execution.marketable-reverse-open.enabled` (default on). `marketableLimit` is now shared by both
+the exit legs and the reverse open; enable-gating lives at each call site.
+
 The price comes from the existing `LivePricePort` (`MarketDataService.currentPrice` → the compliant
 `IBKR Gateway → PostgreSQL → services` feed, carrying live-vs-DB provenance) — **the same source the Quant
 force-close uses**, NOT a direct broker read (AGENTS.md market-data rule). The compliant path exposes a

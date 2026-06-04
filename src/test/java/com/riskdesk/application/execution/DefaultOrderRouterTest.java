@@ -61,7 +61,7 @@ class DefaultOrderRouterTest {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true);
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true, true);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -117,7 +117,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, 10, true); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, 10, true, true); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -667,8 +667,12 @@ class DefaultOrderRouterTest {
     // resting unfilled; the limit caps slippage. Entries stay passive. Same source as the Quant force-close.
 
     private DefaultOrderRouter pricedRouter(LivePricePort port, int crossTicks) {
+        return pricedRouter(port, crossTicks, true);
+    }
+
+    private DefaultOrderRouter pricedRouter(LivePricePort port, int crossTicks, boolean reverseOpenMarketable) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, port, crossTicks, true);
+            Instrument::getTickSize, Optional.empty(), null, port, crossTicks, true, reverseOpenMarketable);
     }
 
     /** Fixed internal live price (fresh LIVE_PUSH provenance). */
@@ -737,10 +741,11 @@ class DefaultOrderRouterTest {
     }
 
     @Test
-    void reverse_closeLegMarketable_openLegStaysPassive() {
-        // The asymmetry: the reverse CLOSE leg crosses the live price (price − cross) while the OPEN leg
-        // keeps the strategy's passive entry limit. Broker long 2, reverse to short.
-        DefaultOrderRouter r = pricedRouter(livePrice("18005.00"), 4);
+    void reverse_bothLegsMarketable_whenReverseOpenEnabled() {
+        // Reverse-open marketable ON (default): BOTH legs cross the live price so the flip completes.
+        // Reverse long→short: close = SELL (reduce long), open = SELL (open short) → both price − cross
+        // = 18005.00 − 1.00 = 18004.00.
+        DefaultOrderRouter r = pricedRouter(livePrice("18005.00"), 4); // reverse-open enabled (default)
         stubActive(priorLong());
         stubBroker("2");
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
@@ -749,19 +754,32 @@ class DefaultOrderRouterTest {
 
         ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
         verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
-        // Leg 1 = close, marketable crossing down: 18005.00 − 1.00 = 18004.00.
-        assertThat(req.getAllValues().get(0).action()).isEqualTo("SHORT");
-        assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00");
-        // Leg 2 = open, passive at the strategy's intent limit 18000.00 — entries are NOT marketable.
+        assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00"); // close, crossed
         assertThat(req.getAllValues().get(1).action()).isEqualTo("SHORT");
-        assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18000.00");
+        assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18004.00"); // open, crossed → flip completes
+    }
+
+    @Test
+    void reverse_openStaysPassive_whenReverseOpenDisabled() {
+        // Reverse-open marketable OFF: the close still crosses, but the open keeps the passive intent limit.
+        DefaultOrderRouter r = pricedRouter(livePrice("18005.00"), 4, false); // reverse-open disabled
+        stubActive(priorLong());
+        stubBroker("2");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
+
+        r.route(reverseToShort());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00"); // close, crossed
+        assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18000.00"); // open, passive intent
     }
 
     @Test
     void close_marketableDisabled_usesPassiveIntentLimit() {
         // Kill-switch OFF → even with a live price, the exit rests at the passive intent limit.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), 4, false);
+            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), 4, false, true);
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("1");
         when(ibkrOrderService.submitEntryOrder(any()))
@@ -999,7 +1017,7 @@ class DefaultOrderRouterTest {
     @Test
     void skipsWhenNotReady() {
         DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true);
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true, true);
 
         RoutingResult r = gated.route(openLong());
 
@@ -1011,7 +1029,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, 10, true);
+            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, 10, true, true);
     }
 
     @Test
@@ -1019,7 +1037,7 @@ class DefaultOrderRouterTest {
         DailyLossCapGuard tripped = mock(DailyLossCapGuard.class);
         when(tripped.blocksNewEntries()).thenReturn(true);
         DefaultOrderRouter capped = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, 10, true);
+            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, 10, true, true);
 
         RoutingResult r = capped.route(openLong());
 

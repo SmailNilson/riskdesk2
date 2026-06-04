@@ -208,7 +208,7 @@ class WtxExecutionBridgeTest {
         FakeRepo unifiedRepo = new FakeRepo();
         DefaultOrderRouter router = new DefaultOrderRouter(unifiedBroker, unifiedRepo, ibkrProperties,
                 () -> true, new ExecutionReconciler(null), Instrument::getTickSize, Optional.empty(), null,
-                instr -> Optional.empty(), 10, true);
+                instr -> Optional.empty(), 10, true, true);
         new WtxExecutionBridge(unifiedBroker, unifiedRepo, ibkrProperties, wtxProperties,
                 null, null, router, unifiedRouter(true), null).submit(signal(action), state, refPrice);
 

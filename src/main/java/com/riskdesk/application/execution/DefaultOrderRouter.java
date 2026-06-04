@@ -87,6 +87,10 @@ public class DefaultOrderRouter implements OrderRouter {
     private final int marketableCrossTicks;
     /** Kill-switch: when false, exit legs revert to the passive intent limit price (legacy behaviour). */
     private final boolean marketableCloseEnabled;
+    /** When true, the OPEN leg of a REVERSE that ACTUALLY flattened is also priced marketable (crossed) so the
+     *  flip completes instead of leaving the user flat when price moved past the passive entry. Plain OPENs
+     *  (fresh entries, nothing flattened) always stay passive. Independent toggle. */
+    private final boolean marketableReverseOpenEnabled;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
@@ -98,7 +102,8 @@ public class DefaultOrderRouter implements OrderRouter {
                               DailyLossCapGuard lossCapGuard,
                               LivePricePort livePricePort,
                               @Value("${riskdesk.execution.marketable-close.cross-ticks:10}") int marketableCrossTicks,
-                              @Value("${riskdesk.execution.marketable-close.enabled:true}") boolean marketableCloseEnabled) {
+                              @Value("${riskdesk.execution.marketable-close.enabled:true}") boolean marketableCloseEnabled,
+                              @Value("${riskdesk.execution.marketable-reverse-open.enabled:true}") boolean marketableReverseOpenEnabled) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -110,6 +115,7 @@ public class DefaultOrderRouter implements OrderRouter {
         this.livePricePort = livePricePort;
         this.marketableCrossTicks = Math.max(0, marketableCrossTicks);
         this.marketableCloseEnabled = marketableCloseEnabled;
+        this.marketableReverseOpenEnabled = marketableReverseOpenEnabled;
     }
 
     @Override
@@ -411,6 +417,17 @@ public class DefaultOrderRouter implements OrderRouter {
      * the broker is FLAT (protected) → {@code ROUTED_FLATTEN_ONLY}.
      */
     private RoutingResult submitPersistedEntry(TradeExecutionRecord persisted, String kindLabel, boolean reverseFlattened) {
+        // The OPEN leg of a REVERSE that already flattened is priced MARKETABLE (crossed) when enabled, so the
+        // flip completes instead of resting at the passive entry while price moves away (re-priced off the live
+        // price at submit time — inline or fill-deferred). Plain OPENs (reverseFlattened=false) stay passive.
+        BigDecimal entryPrice = persisted.getNormalizedEntryPrice();
+        if (reverseFlattened && marketableReverseOpenEnabled) {
+            Instrument instrument = parseInstrument(persisted.getInstrument());
+            if (instrument != null) {
+                entryPrice = normalizeToTick(
+                    marketableLimit(instrument, persisted.getAction(), persisted.getNormalizedEntryPrice()), instrument);
+            }
+        }
         try {
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 persisted.getId(),
@@ -419,7 +436,7 @@ public class DefaultOrderRouter implements OrderRouter {
                 persisted.getInstrument(),
                 persisted.getAction(),
                 persisted.getQuantity(),
-                persisted.getNormalizedEntryPrice()));
+                entryPrice));
 
             Instant submittedAt = submission.submittedAt() != null ? submission.submittedAt() : Instant.now();
             boolean filled = "Filled".equalsIgnoreCase(submission.brokerOrderStatus());
@@ -611,7 +628,7 @@ public class DefaultOrderRouter implements OrderRouter {
     /**
      * Submit a close/exit leg on an existing row, mutating it to {@code EXIT_SUBMITTED}. Reuses
      * {@code ibkrOrderService.submitEntryOrder} with the opposite action. Shared by REVERSE-close, CLOSE and
-     * FLATTEN — so all three price the exit as a MARKETABLE LIMIT ({@link #marketableCloseLimit}) instead of
+     * FLATTEN — so all three price the exit as a MARKETABLE LIMIT ({@link #marketableLimit}) instead of
      * the passive intent limit: a reducing leg is risk-reduction and must fill, so it crosses the market
      * (capped by a slippage buffer) rather than rest unfilled and leave the user holding an unwanted
      * position. A close is NEVER terminal-failed on a reject: the position is still open, so the row stays
@@ -619,7 +636,7 @@ public class DefaultOrderRouter implements OrderRouter {
      */
     private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
                                          int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator) {
-        BigDecimal closePrice = marketableCloseLimit(instrument, closeAction, price);
+        BigDecimal closePrice = marketableCloseEnabled ? marketableLimit(instrument, closeAction, price) : price;
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 row.getId(), exitOrderRef(row.getExecutionKey(), exitDiscriminator), row.getBrokerAccountId(),
@@ -663,31 +680,32 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     /**
-     * Marketable-limit price for a reducing (exit) leg — a LIMIT priced THROUGH the market so it fills
-     * immediately like a market order, while the limit caps worst-case slippage (safer than a raw MKT on thin
-     * micro-futures books, and keeps the deliberately limit-only broker path). Crosses the internal live price
-     * ({@link LivePricePort} — the compliant {@code IBKR Gateway -> PostgreSQL -> services} feed, NOT a direct
-     * broker read) by {@code marketableCrossTicks · minTick}: {@code closeAction} "SHORT" = SELL to reduce a
-     * long → {@code price − cross}; "LONG" = BUY to reduce a short → {@code price + cross}. Mirrors the proven
-     * Quant force-close ({@code IbkrQuant7GatesExecutionBridge#marketableLimit}).
+     * Marketable-limit price for a leg that must fill NOW — a reducing exit (close / flatten / reverse-close)
+     * or the open leg of a reverse that already flattened. A LIMIT priced THROUGH the market so it fills like a
+     * market order, while the limit caps worst-case slippage (safer than a raw MKT on thin micro-futures books,
+     * and keeps the deliberately limit-only broker path). Crosses the internal live price ({@link LivePricePort}
+     * — the compliant {@code IBKR Gateway -> PostgreSQL -> services} feed, NOT a direct broker read) by {@code
+     * marketableCrossTicks · minTick}: {@code action} "SHORT" = SELL → {@code price − cross}; "LONG" = BUY →
+     * {@code price + cross}. Mirrors the proven Quant force-close ({@code
+     * IbkrQuant7GatesExecutionBridge#marketableLimit}). Enable-gating is the CALLER's job
+     * ({@code marketableCloseEnabled} for exits, {@code marketableReverseOpenEnabled} for the reverse open).
      *
      * <p>The compliant path exposes a single reconciled live price (not a separate bid/ask), so we cross it by
      * {@code cross-ticks} (default 10, sized to clear a normal spread) rather than sitting on a touch. Falls
-     * back to {@code fallback} (the caller's intent limit = legacy passive behaviour) when the feature is off,
-     * no live-price port is wired, no live price is available, or the lookup throws — strictly no worse than
-     * before. A close that still doesn't fill stays a retryable LIMIT (re-priced next bar), so it never rests
-     * worse than the old passive limit.</p>
+     * back to {@code fallback} (the caller's intent limit = legacy passive behaviour) when no live-price port is
+     * wired, no executable-live price is available, or the lookup throws — strictly no worse than before. A leg
+     * that still doesn't fill stays a retryable LIMIT (re-priced next bar), never worse than the passive limit.</p>
      */
-    private BigDecimal marketableCloseLimit(Instrument instrument, String closeAction, BigDecimal fallback) {
-        if (!marketableCloseEnabled || livePricePort == null) {
+    private BigDecimal marketableLimit(Instrument instrument, String action, BigDecimal fallback) {
+        if (livePricePort == null) {
             return fallback;
         }
         Optional<LivePriceSnapshot> snapshot;
         try {
             snapshot = livePricePort.current(instrument);
         } catch (RuntimeException e) {
-            // A price hiccup must NEVER break a close — degrade to the passive limit (today's behaviour).
-            log.warn("OrderRouter close leg: live-price lookup for {} failed ({}) — passive limit {}",
+            // A price hiccup must NEVER break the leg — degrade to the passive limit (today's behaviour).
+            log.warn("OrderRouter marketable leg: live-price lookup for {} failed ({}) — passive limit {}",
                 instrument, e.toString(), fallback);
             return fallback;
         }
@@ -696,7 +714,7 @@ public class DefaultOrderRouter implements OrderRouter {
         // falsely-"marketable" limit that can rest unfilled. Treat it exactly like no price → passive limit
         // (the pre-marketable baseline, never worse than before).
         if (snapshot.isEmpty() || !isExecutableLive(snapshot.get())) {
-            log.warn("OrderRouter close leg: no executable-live price for {} ({}) — passive limit {} (exit may rest)",
+            log.warn("OrderRouter marketable leg: no executable-live price for {} ({}) — passive limit {} (may rest)",
                 instrument, snapshot.map(s -> s.source() + "@" + s.timestamp()).orElse("none"), fallback);
             return fallback;
         }
@@ -705,7 +723,7 @@ public class DefaultOrderRouter implements OrderRouter {
             return fallback;
         }
         BigDecimal cross = tickProvider.minTick(instrument).multiply(BigDecimal.valueOf(marketableCrossTicks));
-        boolean sell = "SHORT".equals(closeAction); // reducing a long = SELL; reducing a short = BUY
+        boolean sell = "SHORT".equals(action); // SELL crosses down (reduce a long / open a short); BUY crosses up
         BigDecimal marketable = sell ? reference.subtract(cross) : reference.add(cross);
         // placeLimitOrder rejects a non-positive limit; guard against a degenerate price.
         return marketable.signum() > 0 ? marketable : fallback;
@@ -845,6 +863,15 @@ public class DefaultOrderRouter implements OrderRouter {
 
     private static Integer toIbkrOrderId(Long brokerOrderId) {
         return brokerOrderId == null ? null : brokerOrderId.intValue();
+    }
+
+    /** Resolve the persisted instrument name to the enum, or null when unparseable (→ skip marketable pricing). */
+    private static Instrument parseInstrument(String name) {
+        try {
+            return name == null ? null : Instrument.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /** Round an order price to the instrument's tick. Prefers the broker's runtime minTick
