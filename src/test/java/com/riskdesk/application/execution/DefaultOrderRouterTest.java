@@ -5,8 +5,10 @@ import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.domain.execution.IntentKind;
 import com.riskdesk.domain.execution.RoutingOutcome;
+import com.riskdesk.domain.execution.MarketableExecutionSettings;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.domain.execution.port.MarketableSettingsProvider;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import com.riskdesk.domain.model.ExecutionStatus;
@@ -56,12 +58,17 @@ class DefaultOrderRouterTest {
      *  (legacy behaviour), so pre-existing assertions are unaffected. */
     private static final LivePricePort NO_PRICE = instr -> Optional.empty();
 
+    /** Fixed marketable-settings provider for the router constructor in tests. */
+    private static MarketableSettingsProvider settings(boolean closeEnabled, boolean reverseOpenEnabled, int crossTicks) {
+        return () -> new MarketableExecutionSettings(closeEnabled, reverseOpenEnabled, crossTicks);
+    }
+
     @BeforeEach
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true, true);
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10));
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -117,7 +124,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, 10, true, true); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, settings(true, true, 10)); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -680,7 +687,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter pricedRouter(LivePricePort port, int crossTicks, boolean reverseOpenMarketable) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, port, crossTicks, true, reverseOpenMarketable);
+            Instrument::getTickSize, Optional.empty(), null, port, settings(true, reverseOpenMarketable, crossTicks));
     }
 
     /** Fixed internal live price (fresh LIVE_PUSH provenance). */
@@ -799,7 +806,7 @@ class DefaultOrderRouterTest {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
         when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), 4, true, true);
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4));
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("-1"); // broker SHORT 1
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
@@ -820,7 +827,7 @@ class DefaultOrderRouterTest {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
         when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), 4, true, true);
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4));
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, true)); // flat
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
@@ -845,7 +852,7 @@ class DefaultOrderRouterTest {
             .thenReturn(Optional.of(new LivePriceSnapshot(18100.0, Instant.now(), "LIVE_PUSH")))  // read 2: open preflight
             .thenReturn(Optional.of(new LivePriceSnapshot(18200.0, Instant.now(), "LIVE_PUSH"))); // would be a 2nd open read
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, jumpy, 4, true, true);
+            Instrument::getTickSize, Optional.of(aff), null, jumpy, settings(true, true, 4));
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("-1"); // broker SHORT 1 → reverse to LONG 2 is size-increasing (delta 1); open BUY crosses up
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
@@ -867,7 +874,7 @@ class DefaultOrderRouterTest {
     void close_marketableDisabled_usesPassiveIntentLimit() {
         // Kill-switch OFF → even with a live price, the exit rests at the passive intent limit.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), 4, false, true);
+            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), settings(false, true, 4));
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("1");
         when(ibkrOrderService.submitEntryOrder(any()))
@@ -1105,7 +1112,7 @@ class DefaultOrderRouterTest {
     @Test
     void skipsWhenNotReady() {
         DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, 10, true, true);
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10));
 
         RoutingResult r = gated.route(openLong());
 
@@ -1117,7 +1124,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, 10, true, true);
+            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, settings(true, true, 10));
     }
 
     @Test
@@ -1125,7 +1132,7 @@ class DefaultOrderRouterTest {
         DailyLossCapGuard tripped = mock(DailyLossCapGuard.class);
         when(tripped.blocksNewEntries()).thenReturn(true);
         DefaultOrderRouter capped = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, 10, true, true);
+            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, settings(true, true, 10));
 
         RoutingResult r = capped.route(openLong());
 

@@ -1122,6 +1122,23 @@ export const api = {
     return (await response.json()) as PlaybookAutomationDecisionView[];
   },
 
+  // ── Marketable execution settings (GLOBAL, operator-controlled like Auto-IBKR) ────
+  getMarketableSettings: async () => {
+    const response = await fetch(`${BASE}/api/execution/marketable-settings`, { cache: 'no-store' });
+    if (!response.ok) return null;
+    return (await response.json()) as MarketableSettingsView;
+  },
+
+  updateMarketableSettings: async (request: MarketableSettingsUpdateRequest) => {
+    const response = await fetch(`${BASE}/api/execution/marketable-settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as MarketableSettingsView;
+  },
+
   // ── Strategy engine (new probabilistic engine — read-only) ────────
   getStrategyDecision: (instrument: string, timeframe: string) =>
     get<StrategyDecisionView>(`/api/strategy/${instrument}/${timeframe}`),
@@ -1525,6 +1542,18 @@ export interface FinalVerdict {
   agentVerdicts: AgentVerdictView[];
   warnings: string[];
   eligibility: string;
+}
+
+export interface MarketableSettingsView {
+  closeEnabled: boolean;
+  reverseOpenEnabled: boolean;
+  crossTicks: number;
+}
+
+export interface MarketableSettingsUpdateRequest {
+  closeEnabled?: boolean;
+  reverseOpenEnabled?: boolean;
+  crossTicks?: number;
 }
 
 export interface PlaybookAutomationView {

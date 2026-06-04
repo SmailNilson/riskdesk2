@@ -13,6 +13,7 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignalType;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
+import com.riskdesk.domain.execution.MarketableExecutionSettings;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
@@ -208,7 +209,7 @@ class WtxExecutionBridgeTest {
         FakeRepo unifiedRepo = new FakeRepo();
         DefaultOrderRouter router = new DefaultOrderRouter(unifiedBroker, unifiedRepo, ibkrProperties,
                 () -> true, new ExecutionReconciler(null), Instrument::getTickSize, Optional.empty(), null,
-                instr -> Optional.empty(), 10, true, true);
+                instr -> Optional.empty(), () -> new MarketableExecutionSettings(true, true, 10));
         new WtxExecutionBridge(unifiedBroker, unifiedRepo, ibkrProperties, wtxProperties,
                 null, null, router, unifiedRouter(true), null).submit(signal(action), state, refPrice);
 

@@ -27,6 +27,7 @@ import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
 import WtxStrategyPanel from './WtxStrategyPanel';
 import WtxRsiStrategyPanel from './WtxRsiStrategyPanel';
+import MarketableSettingsControl from './MarketableSettingsControl';
 import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -187,6 +188,9 @@ export default function Dashboard() {
           >
             {purging ? '⟳ Purging…' : purgeMsg ?? `🗑 Purge ${instrument}`}
           </button>
+
+          {/* Marketable execution policy (global, operator-controlled) */}
+          <MarketableSettingsControl />
 
           {/* Theme toggle */}
           <button
