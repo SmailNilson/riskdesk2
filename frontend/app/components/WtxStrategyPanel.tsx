@@ -45,16 +45,20 @@ function SignalChip({ type }: { type: WtxSignalView['signalType'] }) {
 }
 
 /**
- * Plain-language execution status derived from the IBKR routing outcome — answers
- * "executed or pending?" at a glance, alongside the detailed {@link RoutingChip}.
+ * Plain-language routing status derived from the IBKR routing outcome — answers
+ * "routed or pending?" at a glance, alongside the detailed {@link RoutingChip}.
  * Returns null when no routing was attempted (informational signal, action NONE).
+ *
+ * Note: `ROUTED` means the broker ACCEPTED the order, not that it filled — the
+ * order may still be resting (ENTRY_SUBMITTED). Fill status is not derivable from
+ * the routing outcome, so we label it "SOUMIS" (submitted) rather than "EXÉCUTÉ".
  */
 function executionStatus(outcome: WtxRoutingOutcome | null): { label: string; style: string } | null {
   if (!outcome) return null;
   switch (outcome) {
     case 'ROUTED':
     case 'ROUTED_FLATTEN_ONLY':
-      return { label: 'EXÉCUTÉ', style: 'text-emerald-300' };
+      return { label: 'SOUMIS', style: 'text-emerald-300' };
     case 'ACK_PENDING':
       return { label: 'PENDING', style: 'text-cyan-300' };
     case 'FAILED':
