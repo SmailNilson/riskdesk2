@@ -7,6 +7,7 @@ import com.riskdesk.domain.execution.IntentKind;
 import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
+import com.riskdesk.domain.execution.port.MarketQuoteProvider;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import com.riskdesk.domain.model.ExecutionStatus;
@@ -50,12 +51,16 @@ class DefaultOrderRouterTest {
     private IbkrProperties props;
     private DefaultOrderRouter router;
 
+    /** Default test quote provider: no live quote → exit legs fall back to the passive intent limit
+     *  (legacy behaviour), so pre-existing assertions are unaffected. */
+    private static final MarketQuoteProvider NO_QUOTE = instr -> Optional.empty();
+
     @BeforeEach
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null);
+            Instrument::getTickSize, Optional.empty(), null, NO_QUOTE, 10, true);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -111,7 +116,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50"), Optional.empty(), null); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_QUOTE, 10, true); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -655,6 +660,131 @@ class DefaultOrderRouterTest {
         verify(ibkrOrderService, times(2)).submitEntryOrder(any()); // close opposite + open short
     }
 
+    // ---- Marketable-limit EXIT pricing ---------------------------------------------------------
+    // A reducing leg (REVERSE-close, CLOSE, FLATTEN) is priced THROUGH the market so it fills like a
+    // market order instead of resting unfilled; the limit caps slippage. Entries stay passive.
+
+    private DefaultOrderRouter quotingRouter(MarketQuoteProvider qp, int offsetTicks) {
+        return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.empty(), null, qp, offsetTicks, true);
+    }
+
+    /** Fixed top-of-book quote provider (last = null). */
+    private static MarketQuoteProvider quote(String bid, String ask) {
+        return instr -> Optional.of(new MarketQuoteProvider.Quote(
+            bid == null ? null : new BigDecimal(bid), ask == null ? null : new BigDecimal(ask), null));
+    }
+
+    private TradeIntent closeShort() {
+        return TradeIntent.close("wtx:MNQ:5m:2:CLOSE_SHORT", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.SHORT, 1, new BigDecimal("17990.00"), "DU1");
+    }
+
+    @Test
+    void close_long_pricesMarketableThroughBid() {
+        // Reduce a long = SELL → cross the BID: limit = bid − offset (4 ticks · 0.25 = 1.00).
+        DefaultOrderRouter r = quotingRouter(quote("17999.50", "17999.75"), 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
+        stubBroker("2"); // broker long 2
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(888L, "Submitted", "k", Instant.now()));
+
+        r.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT");
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("17998.50"); // bid 17999.50 − 1.00, NOT intent 18010
+    }
+
+    @Test
+    void close_short_pricesMarketableThroughAsk() {
+        // Reduce a short = BUY → lift the ASK: limit = ask + offset (4 · 0.25 = 1.00).
+        DefaultOrderRouter r = quotingRouter(quote("18000.00", "18000.25"), 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("-1"); // broker short 1
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(889L, "Submitted", "k", Instant.now()));
+
+        r.route(closeShort());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("LONG");
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18001.25"); // ask 18000.25 + 1.00
+    }
+
+    @Test
+    void closeLeg_noLiveQuote_fallsBackToPassiveIntentLimit() {
+        // Default router (NO_QUOTE) → no live quote → exit rests at the passive intent limit (legacy).
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(890L, "Submitted", "k", Instant.now()));
+
+        router.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // intent limit, unchanged
+    }
+
+    @Test
+    void reverse_closeLegMarketable_openLegStaysPassive() {
+        // The asymmetry: the reverse CLOSE leg crosses the market (bid − offset) while the OPEN leg keeps
+        // the strategy's passive entry limit. Broker long 2, reverse to short.
+        DefaultOrderRouter r = quotingRouter(quote("18005.00", "18005.25"), 4);
+        stubActive(priorLong());
+        stubBroker("2");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled")); // close fills → open inline
+
+        r.route(reverseToShort());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService, times(2)).submitEntryOrder(req.capture());
+        // Leg 1 = close, marketable through the bid: 18005.00 − 1.00 = 18004.00.
+        assertThat(req.getAllValues().get(0).action()).isEqualTo("SHORT");
+        assertThat(req.getAllValues().get(0).limitPrice()).isEqualByComparingTo("18004.00");
+        // Leg 2 = open, passive at the strategy's intent limit 18000.00 — entries are NOT marketable.
+        assertThat(req.getAllValues().get(1).action()).isEqualTo("SHORT");
+        assertThat(req.getAllValues().get(1).limitPrice()).isEqualByComparingTo("18000.00");
+    }
+
+    @Test
+    void close_marketableDisabled_usesPassiveIntentLimit() {
+        // Kill-switch OFF → even with a live quote, the exit rests at the passive intent limit.
+        DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
+            Instrument::getTickSize, Optional.empty(), null, quote("17999.50", "17999.75"), 4, false);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(891L, "Submitted", "k", Instant.now()));
+
+        r.route(closeLong());
+
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // disabled → intent limit
+    }
+
+    @Test
+    void closeLeg_quoteLookupThrows_fallsBackToPassiveIntentLimit_noCrash() {
+        // A quote hiccup must NEVER break a close — degrade to the passive intent limit, still route.
+        MarketQuoteProvider boom = instr -> { throw new RuntimeException("ib gateway hiccup"); };
+        DefaultOrderRouter r = quotingRouter(boom, 4);
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(892L, "Submitted", "k", Instant.now()));
+
+        RoutingResult res = r.route(closeLong());
+
+        assertThat(res.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().limitPrice()).isEqualByComparingTo("18010.00"); // intent limit — no crash
+    }
+
     @Test
     void entry_reconciledSkip_returnsOutcome() {
         // reconcile says the broker is already on the wanted side → skip, no submit.
@@ -814,7 +944,7 @@ class DefaultOrderRouterTest {
     @Test
     void skipsWhenNotReady() {
         DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
-            Instrument::getTickSize, Optional.empty(), null);
+            Instrument::getTickSize, Optional.empty(), null, NO_QUOTE, 10, true);
 
         RoutingResult r = gated.route(openLong());
 
@@ -826,7 +956,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null);
+            Instrument::getTickSize, Optional.of(aff), null, NO_QUOTE, 10, true);
     }
 
     @Test
@@ -834,7 +964,7 @@ class DefaultOrderRouterTest {
         DailyLossCapGuard tripped = mock(DailyLossCapGuard.class);
         when(tripped.blocksNewEntries()).thenReturn(true);
         DefaultOrderRouter capped = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), tripped);
+            Instrument::getTickSize, Optional.empty(), tripped, NO_QUOTE, 10, true);
 
         RoutingResult r = capped.route(openLong());
 

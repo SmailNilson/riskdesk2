@@ -7,6 +7,7 @@ import com.riskdesk.domain.execution.RoutingOutcome;
 import com.riskdesk.domain.execution.RoutingResult;
 import com.riskdesk.domain.execution.TradeIntent;
 import com.riskdesk.domain.execution.port.InstrumentTickProvider;
+import com.riskdesk.domain.execution.port.MarketQuoteProvider;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.Instrument;
@@ -17,6 +18,7 @@ import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -60,6 +62,17 @@ public class DefaultOrderRouter implements OrderRouter {
     private final OrderAffordabilityPort affordability;
     /** P4 daily loss cap. Nullable in test constructors; when present and tripped, new entries are refused. */
     private final DailyLossCapGuard lossCapGuard;
+    /** Live top-of-book source for marketable EXIT pricing — a reducing leg is priced THROUGH the market so
+     *  it fills immediately like a market order, with the limit capping slippage. Only exits use it; entries
+     *  stay passive by design. */
+    private final MarketQuoteProvider quoteProvider;
+    /** Ticks crossed through the touch on an exit leg (SELL: bid − N·tick, BUY: ask + N·tick). This is the
+     *  worst-case slippage CAP, not the expected fill — IBKR fills at the best price, usually the touch.
+     *  Mirrors the proven Quant force-close convention ({@code riskdesk.quant.sim-exec.flatten-cross-ticks},
+     *  default 10) — see {@code IbkrQuant7GatesExecutionBridge#marketableLimit}. */
+    private final int marketableCrossTicks;
+    /** Kill-switch: when false, exit legs revert to the passive intent limit price (legacy behaviour). */
+    private final boolean marketableCloseEnabled;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
@@ -68,7 +81,10 @@ public class DefaultOrderRouter implements OrderRouter {
                               ExecutionReconciler reconciler,
                               InstrumentTickProvider tickProvider,
                               Optional<OrderAffordabilityPort> affordability,
-                              DailyLossCapGuard lossCapGuard) {
+                              DailyLossCapGuard lossCapGuard,
+                              MarketQuoteProvider quoteProvider,
+                              @Value("${riskdesk.execution.marketable-close.cross-ticks:10}") int marketableCrossTicks,
+                              @Value("${riskdesk.execution.marketable-close.enabled:true}") boolean marketableCloseEnabled) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -77,6 +93,9 @@ public class DefaultOrderRouter implements OrderRouter {
         this.tickProvider = tickProvider;
         this.affordability = affordability == null ? null : affordability.orElse(null);
         this.lossCapGuard = lossCapGuard;
+        this.quoteProvider = quoteProvider;
+        this.marketableCrossTicks = Math.max(0, marketableCrossTicks);
+        this.marketableCloseEnabled = marketableCloseEnabled;
     }
 
     @Override
@@ -577,15 +596,20 @@ public class DefaultOrderRouter implements OrderRouter {
 
     /**
      * Submit a close/exit leg on an existing row, mutating it to {@code EXIT_SUBMITTED}. Reuses
-     * {@code ibkrOrderService.submitEntryOrder} with the opposite action. A close is NEVER terminal-failed
-     * on a reject: the position is still open, so the row stays as-is for the next bar to retry.
+     * {@code ibkrOrderService.submitEntryOrder} with the opposite action. Shared by REVERSE-close, CLOSE and
+     * FLATTEN — so all three price the exit as a MARKETABLE LIMIT ({@link #marketableCloseLimit}) instead of
+     * the passive intent limit: a reducing leg is risk-reduction and must fill, so it crosses the market
+     * (capped by a slippage buffer) rather than rest unfilled and leave the user holding an unwanted
+     * position. A close is NEVER terminal-failed on a reject: the position is still open, so the row stays
+     * as-is for the next bar to retry.
      */
     private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
                                          int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator) {
+        BigDecimal closePrice = marketableCloseLimit(instrument, closeAction, price);
         try {
             BrokerEntryOrderSubmission sub = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
                 row.getId(), exitOrderRef(row.getExecutionKey(), exitDiscriminator), row.getBrokerAccountId(),
-                row.getInstrument(), closeAction, qty, normalizeToTick(price, instrument)));
+                row.getInstrument(), closeAction, qty, normalizeToTick(closePrice, instrument)));
             Instant now = Instant.now();
             // A close can come back Filled as its FIRST accepted status (marketable). Mark the row CLOSED
             // now: the orderStatus callback may already have been dropped (close orderId not yet persisted)
@@ -622,6 +646,58 @@ public class DefaultOrderRouter implements OrderRouter {
             log.warn("OrderRouter close leg {} ({}) for execution {}", outcome, e.kind(), row.getId());
             return RoutingResult.tracked(outcome, row.getId(), e.brokerOrderId());
         }
+    }
+
+    /**
+     * Marketable-limit price for a reducing (exit) leg — a LIMIT priced THROUGH the current top of book so it
+     * fills immediately like a market order, while the limit caps worst-case slippage (safer than a raw MKT
+     * on thin micro-futures books, and keeps the deliberately limit-only broker path). {@code closeAction}
+     * "SHORT" = SELL to reduce a long → price at {@code bid − offset}; "LONG" = BUY to reduce a short → price
+     * at {@code ask + offset}, where {@code offset = marketableCrossTicks · minTick}. Falls back to {@code
+     * fallback} (the caller's intent limit = legacy passive behaviour) when the feature is off, no quote
+     * provider is wired, or no live quote is available — strictly no worse than before.
+     */
+    private BigDecimal marketableCloseLimit(Instrument instrument, String closeAction, BigDecimal fallback) {
+        if (!marketableCloseEnabled || quoteProvider == null) {
+            return fallback;
+        }
+        Optional<MarketQuoteProvider.Quote> quote;
+        try {
+            quote = quoteProvider.currentQuote(instrument);
+        } catch (RuntimeException e) {
+            // A quote hiccup must NEVER break a close — degrade to the passive limit (today's behaviour).
+            log.warn("OrderRouter close leg: quote lookup for {} failed ({}) — passive limit {}",
+                instrument, e.toString(), fallback);
+            return fallback;
+        }
+        if (quote.isEmpty()) {
+            log.warn("OrderRouter close leg: no live quote for {} — passive limit {} (exit may rest unfilled)",
+                instrument, fallback);
+            return fallback;
+        }
+        MarketQuoteProvider.Quote q = quote.get();
+        boolean sell = "SHORT".equals(closeAction); // reducing a long = SELL; reducing a short = BUY
+        BigDecimal reference = sell ? firstPositive(q.bid(), q.last()) : firstPositive(q.ask(), q.last());
+        if (reference == null) {
+            log.warn("OrderRouter close leg: quote for {} missing a usable {} — passive limit {}",
+                instrument, sell ? "bid" : "ask", fallback);
+            return fallback;
+        }
+        BigDecimal offset = tickProvider.minTick(instrument).multiply(BigDecimal.valueOf(marketableCrossTicks));
+        BigDecimal marketable = sell ? reference.subtract(offset) : reference.add(offset);
+        // placeLimitOrder rejects a non-positive limit; guard against a degenerate quote.
+        return marketable.signum() > 0 ? marketable : fallback;
+    }
+
+    /** First strictly-positive value of the two, or null when neither qualifies. */
+    private static BigDecimal firstPositive(BigDecimal a, BigDecimal b) {
+        if (a != null && a.signum() > 0) {
+            return a;
+        }
+        if (b != null && b.signum() > 0) {
+            return b;
+        }
+        return null;
     }
 
     /**

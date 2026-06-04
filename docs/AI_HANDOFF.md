@@ -1,6 +1,31 @@
 # AI Handoff
 
-Last updated: 2026-06-03
+Last updated: 2026-06-04
+
+## Marketable exit pricing — reversals/closes no longer rest unfilled (2026-06-04)
+
+A REVERSE placed two legs (close-then-open), and the **close leg inherited the entry's passive limit**
+(`intent.limitPrice()`). If the market moved away the close rested unfilled, the open was deferred
+indefinitely behind it (`ReverseDeferredOpenScheduler` waits for the close FILL), and the user stayed
+stuck holding the position the signal said to exit. Same latent bug for `CLOSE`/`FLATTEN` — all three route
+through `DefaultOrderRouter.submitCloseLeg`.
+
+Fix — every **reducing** leg is now priced as a **marketable LIMIT** crossed THROUGH the live top of book
+(`submitCloseLeg` → `marketableCloseLimit`): SELL (reduce a long) at `bid − N·tick`, BUY (reduce a short) at
+`ask + N·tick`. It fills immediately like a market order, but stays a LIMIT (the deliberately limit-only
+broker path) so the cross caps worst-case slippage — safer than a raw MKT on thin micro books. **Entries
+stay passive** by design: the asymmetry is the point — exiting is risk-reduction (must fill), entering is
+opportunity (may rest; if it doesn't fill you're simply flat). With a marketable close the reverse close
+usually fills synchronously → the open submits inline, so the deferred-open path becomes a rare fallback,
+not the norm.
+
+New domain port `domain/execution/port/MarketQuoteProvider` (+ infra `IbkrMarketQuoteProvider`:
+streaming-then-snapshot quote, mirrors `IbGatewayFxQuoteProvider`). The router degrades to the passive
+intent limit (legacy behaviour, no worse than before) when the feature is off, no live quote is available,
+or the quote lookup throws — a quote hiccup never breaks a close. Config
+`riskdesk.execution.marketable-close.{enabled:true, cross-ticks:10}`; `cross-ticks` mirrors the proven Quant
+force-close convention (`riskdesk.quant.sim-exec.flatten-cross-ticks`, also 10). No execution state-machine
+change (still `EXIT_SUBMITTED`/`CLOSED`); the broker adapter is untouched (still `OrderType.LMT`).
 
 ## Stuck EXIT_SUBMITTED reconciliation — broker-truth replay (2026-06-03)
 
