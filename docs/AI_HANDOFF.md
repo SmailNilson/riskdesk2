@@ -1,6 +1,32 @@
 # AI Handoff
 
-Last updated: 2026-06-04
+Last updated: 2026-06-05
+
+## WTX close dead-lock — a stuck EXIT_SUBMITTED on a still-open position now self-heals (2026-06-05)
+
+A marketable close usually fills synchronously, but it can still **gap out of the book** (priced
+`cross-ticks` through the live price, the market jumps past it) or have its ack/fill callback dropped —
+leaving the WTX row stuck in `EXIT_SUBMITTED` while **IBKR still holds the position**. The old
+`WtxExecutionBridge.handleClose` then returned `SKIPPED_DUPLICATE` for *every* later CLOSE (the
+"flatten already in flight" guard), and the entry-path reconcile returned `SKIPPED_DUPLICATE` for every
+same-side OPEN ("IBKR already short/long"). The position could be **neither exited nor reversed** and bled
+— visible in the UI as rows stuck on **"NON EXÉCUTÉ / DUPLICATE"**, unaffected by the marketable toggle
+(the skip happens *before* any order is priced). `StaleCloseReconciler` did not help: it only finalizes an
+`EXIT_SUBMITTED` row when IBKR is **flat**; a still-open stuck close was its blind spot.
+
+Fix — `handleClose` now consults broker truth on an `EXIT_SUBMITTED` row (`stuckCloseNeedsRetry`): once the
+close has been submitted past a grace window **and** IBKR confirms the position is still open on that row's
+side, it **re-fires a fresh marketable close** (a new per-bar exit ref — exactly what `submitCloseLeg` was
+built to retry) instead of skipping. Conservative by construction — it keeps the duplicate-skip when broker
+truth is unavailable, the position is confirmed flat (the `StaleCloseReconciler` owns that case), IBKR holds
+the opposite side, or the close is still within grace (a genuinely in-flight marketable close is never
+double-submitted). Grace = `riskdesk.wtx.stale-close-retry-seconds` (default 45; `0` disables → legacy skip).
+
+- **Scope** — `WtxExecutionBridge` (legacy path) only. The REVERSE close-leg is intentionally untouched (it
+  opens the opposite leg instead of re-firing the close — locked by `exitSubmittedPriorButIbkrStillHolds_…`).
+- **Known parallel gap (follow-up)** — `IbkrWtxRsiExecutionBridge.submitClose` has the identical guard but no
+  portfolio read; the same safe fix needs `IbkrPortfolioService` wired in first. `DefaultOrderRouter`
+  (unified path, default OFF) shares the guard too.
 
 ## Marketable settings — operator-controlled at runtime from the UI (2026-06-04)
 

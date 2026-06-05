@@ -37,6 +37,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -708,10 +709,30 @@ public class WtxExecutionBridge {
         TradeExecutionRecord row = open.get();
         // Guard against a second flatten while the first close is still in flight. The fill
         // tracker reconciles EXIT_SUBMITTED -> CLOSED once the broker confirms the fill.
+        //
+        // BUT a marketable close that gapped out of the book (or whose ack / fill callback was lost)
+        // can leave the row stuck in EXIT_SUBMITTED while IBKR STILL holds the position. The old
+        // unconditional skip then DEAD-LOCKED the instrument: every later CLOSE returned
+        // SKIPPED_DUPLICATE here and every same-side OPEN returned SKIPPED_DUPLICATE from the reconcile,
+        // so the position could be neither exited nor reversed and bled unbounded — surfaced in the UI
+        // as a row stuck on "NON EXÉCUTÉ / DUPLICATE", and the marketable toggle made no difference
+        // because the skip happens BEFORE any order is priced. {@link #stuckCloseNeedsRetry} only returns
+        // true once the close has been EXIT_SUBMITTED past the retry grace AND broker truth confirms the
+        // position is still open on this row's side — in which case we fall through and re-fire a FRESH
+        // marketable flatten (a per-bar exit ref, exactly what submitCloseLeg was built to retry). Within
+        // the grace, or when broker truth is unavailable / confirmed flat, we keep the duplicate-skip so a
+        // genuinely in-flight close is never double-submitted. (Flat-but-stuck rows are finalized to CLOSED
+        // out-of-band by StaleCloseReconciler.)
         if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
-            log.info("WTX [{} {}] close requested ({}) but execution {} is already EXIT_SUBMITTED — "
-                    + "skipping duplicate flatten", state.instrument(), tf, action, row.getId());
-            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
+            if (!stuckCloseNeedsRetry(row, readIbkrPositionState(instrument))) {
+                log.info("WTX [{} {}] close requested ({}) but execution {} is already EXIT_SUBMITTED — "
+                        + "skipping duplicate flatten", state.instrument(), tf, action, row.getId());
+                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
+            }
+            log.warn("WTX [{} {}] close {} — prior flatten stuck (execution {} EXIT_SUBMITTED past grace, "
+                    + "IBKR still holds the position) — re-firing a fresh marketable close to break the dead-lock",
+                    state.instrument(), tf, action, row.getId());
+            // fall through to submit a fresh close leg on this same row
         }
         // IBKR truth: a confirmed-flat broker means flattening now would be a NAKED order that
         // OPENS an unintended position. How we resolve depends on our own row's status:
@@ -1195,6 +1216,51 @@ public class WtxExecutionBridge {
         static ReconcileOutcome skip(WtxRoutingResult result) {
             return new ReconcileOutcome(null, result);
         }
+    }
+
+    /**
+     * True when an {@code EXIT_SUBMITTED} close is STUCK and must be re-fired rather than skipped as a
+     * duplicate flatten: it has been non-terminal for longer than the retry grace AND IBKR still holds a
+     * live position on this row's side, so the flatten clearly never completed (a marketable close that
+     * gapped out and died, or a lost ack / fill). Re-firing a fresh marketable close is the only way to
+     * flatten — otherwise the instrument dead-locks (every later CLOSE skips here as a duplicate, every
+     * same-side OPEN skips in the reconcile as a duplicate) and the position bleeds.
+     *
+     * <p>Deliberately conservative — returns {@code false} when:
+     * <ul>
+     *   <li>broker truth is unavailable ({@code net == null}) — never re-fire on a guess;</li>
+     *   <li>IBKR is flat, or holds the OPPOSITE side — the close completed (the flat-but-stuck row is
+     *       finalized to CLOSED by {@code StaleCloseReconciler}), or this is a deeper divergence the
+     *       entry-path reconcile owns; flattening here could open an unintended position;</li>
+     *   <li>still within the grace window — a genuinely in-flight marketable close fills in seconds, so a
+     *       fresh close must NOT be double-submitted on top of it.</li>
+     * </ul>
+     * Grace is {@code riskdesk.wtx.stale-close-retry-seconds} (0 disables the retry → legacy skip-only).
+     */
+    private boolean stuckCloseNeedsRetry(TradeExecutionRecord row, IbkrPositionState ibkr) {
+        if (row.getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
+            return false;
+        }
+        BigDecimal net = ibkr.net();
+        if (net == null || net.signum() == 0) {
+            return false; // unknown or flat → not a re-fire case
+        }
+        // Only re-fire when IBKR still holds the SAME side this row tracks: flattening a short is a BUY,
+        // so it must never run while IBKR is (somehow) long, which would stack rather than flatten.
+        boolean rowIsLong = "LONG".equalsIgnoreCase(row.getAction());
+        boolean stillHoldsSameSide = rowIsLong ? net.signum() > 0 : net.signum() < 0;
+        if (!stillHoldsSameSide) {
+            return false;
+        }
+        int graceSeconds = wtxProperties.getStaleCloseRetrySeconds();
+        if (graceSeconds <= 0) {
+            return false; // retry disabled
+        }
+        Instant since = row.getExitSubmittedAt() != null ? row.getExitSubmittedAt() : row.getUpdatedAt();
+        if (since == null) {
+            return false;
+        }
+        return Duration.between(since, Instant.now()).getSeconds() >= graceSeconds;
     }
 
     /**
