@@ -247,6 +247,26 @@ function EnrichmentSection({ e }: { e: WtxEnrichmentView }) {
   );
 }
 
+/**
+ * Badge identifying how a position closed — distinguishes a profit-taking trailing exit (TP)
+ * or a stop-loss from a plain reverse, plus force-close / max-loss / swing-bias exits.
+ * Null on OPEN / NONE rows (no exit type).
+ */
+function ExitTypeChip({ type }: { type: NonNullable<WtxSignalView['exitType']> }) {
+  const meta: Record<NonNullable<WtxSignalView['exitType']>, { label: string; style: string }> = {
+    TRAILING_TP: { label: 'TP (ATR)',  style: 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' },
+    STOP_LOSS:   { label: 'SL',        style: 'bg-red-950/70 text-red-300 border-red-800/60' },
+    REVERSE:     { label: 'REVERSE',   style: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
+    FORCE_CLOSE: { label: 'FORCE',     style: 'bg-amber-950/70 text-amber-300 border-amber-800/60' },
+    MAX_LOSS:    { label: 'MAX-LOSS',  style: 'bg-rose-950/70 text-rose-300 border-rose-800/60' },
+    SWING_BIAS:  { label: 'BIAS',      style: 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60' },
+  };
+  const { label, style } = meta[type];
+  return (
+    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{label}</span>
+  );
+}
+
 function SignalCard({ sig }: { sig: WtxSignalView }) {
   const ts = new Date(sig.signalTs);
   const timeStr = `${ts.getHours().toString().padStart(2, '0')}:${ts.getMinutes().toString().padStart(2, '0')}`;
@@ -278,6 +298,7 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
         <span className="font-mono text-zinc-200">{sig.wt1Value.toFixed(2)}</span>
         <span className="text-zinc-500">action</span>
         <span className="text-zinc-300">{sig.actionTaken.replace(/_/g, ' ')}</span>
+        {sig.exitType && <ExitTypeChip type={sig.exitType} />}
         <span className="ml-auto flex items-center gap-1.5">
           <RoutingChip outcome={sig.routingOutcome} errorMessage={sig.routingErrorMessage} />
           {!sig.canTrade && (

@@ -35,31 +35,44 @@ public record WtxSignal(
          * Candle-close price at signal detection — the entry/reference price surfaced
          * in the UI. Null for signals persisted before this field existed.
          */
-        BigDecimal price
+        BigDecimal price,
+        /**
+         * Why an open position was closed (TRAILING_TP / STOP_LOSS / REVERSE / FORCE_CLOSE /
+         * MAX_LOSS / SWING_BIAS). Null on OPEN / NONE signals and on rows persisted before
+         * this field existed.
+         */
+        WtxExitType exitType
 ) {
     public WtxSignal withEnrichment(WtxEnrichmentSnapshot enrichment) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price);
+                routingOutcome, routingErrorMessage, price, exitType);
     }
 
     public WtxSignal withAction(WtxAction action) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, action, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price);
+                routingOutcome, routingErrorMessage, price, exitType);
     }
 
     public WtxSignal withRoutingOutcome(WtxRoutingOutcome routingOutcome) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price);
+                routingOutcome, routingErrorMessage, price, exitType);
     }
 
     /** Stamps the candle-close price at signal detection (the UI's ENTRY price). */
     public WtxSignal withPrice(BigDecimal price) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price);
+                routingOutcome, routingErrorMessage, price, exitType);
+    }
+
+    /** Tags the close reason (TP / SL / REVERSE / …) so the UI can distinguish exit kinds. */
+    public WtxSignal withExitType(WtxExitType exitType) {
+        return new WtxSignal(instrument, timeframe, signalType, direction,
+                wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
+                routingOutcome, routingErrorMessage, price, exitType);
     }
 
     /**
@@ -73,6 +86,6 @@ public record WtxSignal(
         }
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                result.outcome(), result.errorMessage(), price);
+                result.outcome(), result.errorMessage(), price, exitType);
     }
 }

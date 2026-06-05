@@ -120,6 +120,7 @@ public final class WtxBarEvaluator {
                 candleTs,
                 null,
                 null,
+                null,
                 null
         ));
     }

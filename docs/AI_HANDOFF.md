@@ -28,6 +28,28 @@ double-submitted). Grace = `riskdesk.wtx.stale-close-retry-seconds` (default 45;
   portfolio read; the same safe fix needs `IbkrPortfolioService` wired in first. `DefaultOrderRouter`
   (unified path, default OFF) shares the guard too.
 
+## WTX exits — point trailing + exit-type marker + 17:00 ET daily reset (2026-06-05)
+
+Three coupled changes to the WTX (legacy WaveTrend) strategy, driven by a backtest of 116 MNQ 5m
+trades (1–4 Jun): the reverse-only exit surrendered ~8.5× its realized profit as give-back, and the
+existing SESSION_ATR trailing was mis-calibrated (arm 0.5R ≈ +15pt too early, trail 2.0×ATR ≈ 44pt too wide).
+
+- **Point-based trailing (`WtxTrailingMode.POINTS`, now the live default).** `WtxConfig` gains
+  `trailingMode` + `trailingActivationPoints` (30) + `trailingPoints` (15) + `slPoints` (0). In POINTS
+  mode the arm/trail distances are fixed points (beat ATR-scaling, which widens the trail on big momentum
+  legs). The initial stop is independent: `slPoints>0` → fixed point stop, else dynamic `slAtrMult*ATR`
+  (`slAtrMult` lowered 1.4 → 1.3 ≈ ATR×1.3 ≈ 30pt). `WtxTrailingExitEvaluator.evaluate`/`currentStop`
+  branch on mode via a shared `slDistance(...)` helper. Legacy ATR mode preserved (`WtxConfig.defaults()`
+  still ATR, so existing tests are bit-for-bit). Keys: `riskdesk.wtx.trailing-mode|trailing-activation-points|trailing-points|sl-points|sl-atr-mult`.
+- **Exit-type marker (`WtxExitType`).** Dedicated field on `WtxSignal` + `wtx_signal_history.exit_type`
+  column + controller DTO + a colored UI badge in `WtxStrategyPanel`, so a close is identifiable as
+  TRAILING_TP / STOP_LOSS / REVERSE / FORCE_CLOSE / MAX_LOSS / SWING_BIAS (was buried in the overloaded
+  `structureReason`). `buildCloseSignal` takes the type; the normal path tags REVERSE / SWING_BIAS.
+- **17:00 ET daily reset (`WtxDailyResetScheduler`).** The `maxLossHit` latch was cleared only by the
+  first new-day candle (`isNewTradingDay`) — so a stuck "blocked on a new day" state could persist on feed
+  lag / restart. A cron (`0 0 17 * * *`, zone America/New_York) now rebaselines equity + clears the latch
+  for every state, gated by `riskdesk.wtx.daily-reset-enabled` (default true). Position/entry carry over.
+
 ## Marketable settings — operator-controlled at runtime from the UI (2026-06-04)
 
 The marketable-execution policy (the `marketable-close` / `marketable-reverse-open` toggles + `cross-ticks`)

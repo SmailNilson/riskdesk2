@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.config;
 
 import com.riskdesk.domain.engine.strategy.wtx.WtxConfig;
+import com.riskdesk.domain.engine.strategy.wtx.WtxTrailingMode;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.math.BigDecimal;
@@ -32,10 +33,26 @@ public class WtxStrategyProperties {
 
     // ATR trailing exits — Pine "Session + ATR Risk" profile
     private int atrLength = 14;
-    private BigDecimal slAtrMult = BigDecimal.valueOf(1.4);
+    // slAtrMult 1.3 ≈ ATR×1.3 (~30pt at MNQ 5m) — backtest-tuned dynamic stop (was 1.4).
+    private BigDecimal slAtrMult = BigDecimal.valueOf(1.3);
     private BigDecimal tpAtrMult = BigDecimal.valueOf(2.1);
     private BigDecimal trailingAtrMult = BigDecimal.valueOf(2.0);
     private BigDecimal trailingActivationR = BigDecimal.valueOf(0.5);
+
+    // Point-based trailing exits (default). arm +30 / trail 15 beat ATR-scaled arm/trail in
+    // backtests because ATR-scaling widens the trail on big momentum legs (surrendering profit).
+    // slPoints 0 → dynamic slAtrMult*ATR stop; set >0 for a fixed point stop (e.g. 30).
+    private WtxTrailingMode trailingMode = WtxTrailingMode.POINTS;
+    private BigDecimal trailingActivationPoints = BigDecimal.valueOf(30);
+    private BigDecimal trailingPoints = BigDecimal.valueOf(15);
+    private BigDecimal slPoints = BigDecimal.ZERO;
+    // 30/15 are MNQ-scale; MCL/MGC/E6 have very different point scales (a +30 move ~never arms), so they
+    // stay on instrument-relative ATR trailing. Empty list = apply POINTS to every instrument.
+    private List<String> trailingPointsInstruments = List.of("MNQ");
+
+    // Clear the daily max-loss latch + rebaseline equity at the 17:00 ET CME day boundary,
+    // even if no fresh candle has been processed yet (WtxDailyResetScheduler).
+    private boolean dailyResetEnabled = true;
 
     // HTF bias — Pine "HTF" profile
     private String htfTimeframe = "1h";
@@ -96,7 +113,9 @@ public class WtxStrategyProperties {
                 forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
                 atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
                 htfTimeframe, htfFastLen, htfSlowLen,
-                structureLookback, sweepBufferAtr
+                structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints,
+                dailyResetEnabled, trailingPointsInstruments
         );
     }
 
@@ -174,6 +193,24 @@ public class WtxStrategyProperties {
 
     public BigDecimal getTrailingActivationR() { return trailingActivationR; }
     public void setTrailingActivationR(BigDecimal trailingActivationR) { this.trailingActivationR = trailingActivationR; }
+
+    public WtxTrailingMode getTrailingMode() { return trailingMode; }
+    public void setTrailingMode(WtxTrailingMode trailingMode) { this.trailingMode = trailingMode; }
+
+    public BigDecimal getTrailingActivationPoints() { return trailingActivationPoints; }
+    public void setTrailingActivationPoints(BigDecimal trailingActivationPoints) { this.trailingActivationPoints = trailingActivationPoints; }
+
+    public BigDecimal getTrailingPoints() { return trailingPoints; }
+    public void setTrailingPoints(BigDecimal trailingPoints) { this.trailingPoints = trailingPoints; }
+
+    public BigDecimal getSlPoints() { return slPoints; }
+    public void setSlPoints(BigDecimal slPoints) { this.slPoints = slPoints; }
+
+    public List<String> getTrailingPointsInstruments() { return trailingPointsInstruments; }
+    public void setTrailingPointsInstruments(List<String> trailingPointsInstruments) { this.trailingPointsInstruments = trailingPointsInstruments; }
+
+    public boolean isDailyResetEnabled() { return dailyResetEnabled; }
+    public void setDailyResetEnabled(boolean dailyResetEnabled) { this.dailyResetEnabled = dailyResetEnabled; }
 
     public String getHtfTimeframe() { return htfTimeframe; }
     public void setHtfTimeframe(String htfTimeframe) { this.htfTimeframe = htfTimeframe; }
