@@ -1841,6 +1841,8 @@ export interface WtxSignalView {
   routingErrorMessage: string | null;
   /** Candle-close price at signal detection — the ENTRY/reference price. Null for rows pre-dating this field. */
   price: number | null;
+  /** Why an open position closed — distinguishes a TP/SL from a plain reverse. Null on opens / pre-existing rows. */
+  exitType: 'REVERSE' | 'TRAILING_TP' | 'STOP_LOSS' | 'FORCE_CLOSE' | 'MAX_LOSS' | 'SWING_BIAS' | null;
 }
 
 export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {

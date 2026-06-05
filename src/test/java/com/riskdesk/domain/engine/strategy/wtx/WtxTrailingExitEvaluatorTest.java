@@ -16,6 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class WtxTrailingExitEvaluatorTest {
 
     private static final WtxConfig CONFIG = WtxConfig.defaults();
+    // POINTS mode: arm +30 / trail 15; slPoints=0 → dynamic slAtrMult*ATR stop.
+    private static final WtxConfig POINTS = WtxConfig.defaults().withTrailing(
+            WtxTrailingMode.POINTS, BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.ZERO);
+    // POINTS mode with a fixed 30-point stop (slPoints overrides ATR).
+    private static final WtxConfig POINTS_FIXED_SL = WtxConfig.defaults().withTrailing(
+            WtxTrailingMode.POINTS, BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.valueOf(30));
 
     @Test
     void flatPosition_returnsNoExit() {
@@ -115,6 +121,80 @@ class WtxTrailingExitEvaluatorTest {
                 .withTrailing(BigDecimal.valueOf(101.5), BigDecimal.valueOf(99.5));
         assertEquals(0, BigDecimal.valueOf(99.5).compareTo(
                 WtxTrailingExitEvaluator.currentStop(state, CONFIG)));
+    }
+
+    // ── POINTS mode ──────────────────────────────────────────────────────────
+
+    @Test
+    void points_long_initialStop_usesDynamicAtrWhenSlPointsZero() {
+        // POINTS mode, slPoints=0 → dynamic SL = slAtrMult(defaults 1.4)*ATR = 1.4*10 = 14 → stop 29986
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30005, 29985, 29990); // low pierces 29986, favorable < 30 (disarmed)
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, POINTS);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason());
+        assertEquals(0, BigDecimal.valueOf(29986).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void points_long_trailArmsAt30pts_trails15pts() {
+        // high 30040 >= entry+30 arms; trail = 30040 - 15 = 30025; low 30028 stays above → no exit
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30040, 30028, 30035);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, POINTS);
+        assertFalse(d.shouldExit());
+        assertEquals(0, BigDecimal.valueOf(30025).compareTo(d.updatedTrailingStopPrice()));
+    }
+
+    @Test
+    void points_long_trailingStopHit_isTakeProfit() {
+        // Armed at MFE 30040 (trail 30025); a later bar retraces to 30020 → trailing take-profit exit.
+        WtxStrategyState s = openLong(30000, 10)
+                .withTrailing(BigDecimal.valueOf(30040), BigDecimal.valueOf(30025));
+        Candle c = candle(30030, 30032, 30020, 30022);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, POINTS);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.TRAILING_STOP, d.reason());
+        // TRAILING_STOP maps to a take-profit exit type.
+        assertEquals(WtxExitType.TRAILING_TP,
+                WtxExitType.fromExitReason(d.reason()));
+    }
+
+    @Test
+    void points_fixedSlPoints_overridesAtr() {
+        // slPoints=30 fixed → stop 29970 regardless of the (small) ATR.
+        WtxStrategyState s = openLong(30000, 5);
+        Candle c = candle(30000, 30005, 29969, 29975);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, POINTS_FIXED_SL);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason());
+        assertEquals(0, BigDecimal.valueOf(29970).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void points_fixedSlPoints_worksWithoutAtr() {
+        // POINTS + fixed slPoints needs no ATR — the stop is still computed and enforced.
+        WtxStrategyState s = WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
+                .withPosition(WtxPosition.LONG, BigDecimal.valueOf(30000), BigDecimal.valueOf(1)); // null ATR
+        assertEquals(0, BigDecimal.valueOf(29970).compareTo(
+                WtxTrailingExitEvaluator.currentStop(s, POINTS_FIXED_SL)));
+        Candle c = candle(30000, 30005, 29969, 29975);
+        assertTrue(WtxTrailingExitEvaluator.evaluate(s, c, POINTS_FIXED_SL).shouldExit());
+    }
+
+    @Test
+    void points_scopedToMnqOnly_otherInstrumentsUseAtrTrail() {
+        // POINTS config scoped to MNQ only (production default). An MCL position must fall back to ATR:
+        // trail = trailingAtrMult*ATR = 2.0*1 = 2.0 (not the 15-point trail), so MFE 101.5 → trail 99.5.
+        WtxConfig pointsMnqOnly = WtxConfig.defaults()
+                .withTrailing(WtxTrailingMode.POINTS, BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.ZERO)
+                .withPointTrailingInstruments(java.util.List.of("MNQ"));
+        WtxStrategyState mcl = openLong(100.0, 1.0); // helper uses instrument "MCL"
+        Candle c = candle(100, 101.5, 100.3, 101.0);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(mcl, c, pointsMnqOnly);
+        assertFalse(d.shouldExit());
+        // ATR trail (2.0) not the point trail (15) → 101.5 - 2.0 = 99.5
+        assertEquals(0, BigDecimal.valueOf(99.5).compareTo(d.updatedTrailingStopPrice()));
     }
 
     private static WtxStrategyState openLong(double entry, double atr) {

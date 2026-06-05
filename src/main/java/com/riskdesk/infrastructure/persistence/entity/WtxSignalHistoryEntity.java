@@ -67,6 +67,10 @@ public class WtxSignalHistoryEntity {
     @Column(precision = 20, scale = 6)
     private BigDecimal price;
 
+    /** Why an open position closed (TRAILING_TP / STOP_LOSS / REVERSE / FORCE_CLOSE / MAX_LOSS / SWING_BIAS). Null on opens. */
+    @Column(length = 20)
+    private String exitType;
+
     @Column(nullable = false)
     private Instant signalTs;
 
@@ -112,6 +116,9 @@ public class WtxSignalHistoryEntity {
 
     public BigDecimal getPrice() { return price; }
     public void setPrice(BigDecimal price) { this.price = price; }
+
+    public String getExitType() { return exitType; }
+    public void setExitType(String exitType) { this.exitType = exitType; }
 
     public Instant getSignalTs() { return signalTs; }
     public void setSignalTs(Instant signalTs) { this.signalTs = signalTs; }
