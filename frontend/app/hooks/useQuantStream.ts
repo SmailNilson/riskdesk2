@@ -109,7 +109,7 @@ interface ProviderProps {
 
 /**
  * Mounts ONE STOMP client for the whole dashboard. Consumers
- * (`QuantGatePanel`, `QuantSetupNotification`, …) call {@link useQuantStream}
+ * (`OrderFlowPanel`, `QuantSetupNotification`, …) call {@link useQuantStream}
  * which reads the shared state from context. Without this provider, hosting
  * two panels would open two SockJS connections per session and double the
  * broker's quant traffic — see PR #297 review feedback (P2).
@@ -269,8 +269,8 @@ function extractPattern(payload: QuantWsPayload): PatternView | null {
     confidence: p.confidence,
     action: p.action,
     // PR #310 — present from backends that emit the LONG mirror. Consumers
-    // can read it directly; if absent (older backend), patternActionFor() in
-    // QuantGatePanel falls back to flipping `action` (TRADE↔AVOID).
+    // can read it directly; older backends omit it (the SHORT→LONG flip is
+    // applied downstream by whichever consumer renders the pattern action).
     longAction: p.longAction,
   };
 }

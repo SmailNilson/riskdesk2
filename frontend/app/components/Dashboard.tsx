@@ -9,9 +9,7 @@ import Chart from './Chart';
 import DxyPanel from './DxyPanel';
 import IndicatorPanel from './IndicatorPanel';
 import StrategyPanel from './StrategyPanel';
-import QuantGatePanel from './quant/QuantGatePanel';
 import Quant7GatesSimulationPanel from './quant/Quant7GatesSimulationPanel';
-import SetupRecommendationPanel from './quant/SetupRecommendationPanel';
 import QuantSetupNotification from './quant/QuantSetupNotification';
 import { QuantStreamProvider } from '@/app/hooks/useQuantStream';
 import { QUANT_INSTRUMENTS } from './quant/types';
@@ -305,8 +303,6 @@ export default function Dashboard() {
             liveSignals={wtxRsiSignals}
             liveState={wtxRsiStates[`${instrument}:10m`] ?? null}
           />
-          <SetupRecommendationPanel />
-          <QuantGatePanel />
           <Quant7GatesSimulationPanel />
           <StrategyPanel instrument={instrument} timeframe={timeframe} />
           <ExternalSetupPanel />
