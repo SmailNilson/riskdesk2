@@ -31,6 +31,26 @@ when a tick arrives; `/api/order-flow/status` now exposes `totalTicksReceived`, 
 `tickSystemError`, and per-instrument `lastTickError`. The real fix is an IBKR market-data entitlement,
 not application code.
 
+## Quant UI trim — "Setup Recommendations" feature removed, "Quant 7-Gates" live panel removed (2026-06-05)
+
+Two overlapping quant panels were removed from the dashboard:
+
+- **Setup Recommendations** (the scalp/day-trading template engine — `SetupOrchestrationService`,
+  `domain/quant/setup/**`, `application/quant/setup/**`, `infrastructure/quant/setup/**`,
+  `SetupController` + `/api/quant/setups/*`, the `/topic/quant/setup-recommendation/{instr}` WS
+  topic, `SetupRecommendationPanel.tsx` + `useSetupStream.ts`, and their tests) was **fully
+  deleted** (frontend + backend). Its only upstream hook — `QuantGateService` calling
+  `setupOrchestrationProvider.onSnapshot(...)` — was unwired (the `ObjectProvider` removed from the
+  constructor; the convenience constructor now passes two empty providers, not three). The
+  now-orphaned `setup_recommendations` table is left in place (harmless under `ddl-auto=update`).
+  Design doc `docs/analysis/SCALPING_DAYTRADING_FUSION.md` is marked **REMOVED** for reference.
+- **Quant 7-Gates (live panel)** — `QuantGatePanel.tsx` and its three exclusive helpers
+  (`QuantAdvisorBadge`, `QuantNarrationPanel`, `QuantManualTradeModal`) were deleted. This removes
+  the UI for manual BUY/SELL, "Ask AI", and the auto-arm FIRE/CANCEL controls; the backing REST
+  endpoints and the 60 s scan are **kept** because the **Quant 7-Gates Simulation** panel, the
+  auto-arm pipeline, `OrderFlowPanel`, and `QuantSetupNotification` all still depend on the scan +
+  `useQuantStream`. The Simulation panel (`Quant7GatesSimulationPanel`) remains the live quant view.
+
 ## WTX close dead-lock — a stuck EXIT_SUBMITTED on a still-open position now self-heals (2026-06-05)
 
 A marketable close usually fills synchronously, but it can still **gap out of the book** (priced
@@ -866,11 +886,12 @@ MNQ, MGC and MCL.
 - `infrastructure/quant/QuantConfiguration` — exposes `GateEvaluator` as a Spring bean (kept out of the domain so it stays framework-free)
 - `presentation/quant/QuantGateController` — `GET /api/quant/snapshot/{instr}` + `GET /api/quant/history/{instr}?hours=N`
 
-**Frontend:** `frontend/app/components/quant/QuantGatePanel.tsx` is mounted in
-the AI Trade Desk zone, subscribes to `/topic/quant/snapshot/{instr}` via the
-new `useQuantStream` hook, and renders the 7 gates with ✅/❌ + reason. A
-`QuantSetupNotification` component fires a one-shot WebAudio cue and a
-toast when the backend confirms a 7/7 setup.
+**Frontend:** `QuantGatePanel.tsx` (the live 7-gates panel) was **removed**
+2026-06-05 — see the changelog entry at the top of this doc. The `useQuantStream`
+hook (subscribing to `/topic/quant/snapshot/{instr}`) lives on, now consumed by
+`OrderFlowPanel` and `QuantSetupNotification`; the latter still fires a one-shot
+WebAudio cue and a toast when the backend confirms a 7/7 setup. Historical
+description of the removed panel: it rendered the 7 gates with ✅/❌ + reason.
 
 **State persistence:** `QuantState` lives in the `quant_state` table (PK =
 instrument). The history lists (delta, dist_only, accu_only, abs_bull_scans)

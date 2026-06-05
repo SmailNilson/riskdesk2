@@ -1,5 +1,12 @@
 # Fusion scalping + day trading sur RiskDesk2 — Analyse fonctionnelle, matrice de décision et plan d'implémentation
 
+> **⚠️ REMOVED (2026-06-05).** The "Setup Recommendations" feature specified here
+> (`SetupOrchestrationService`, `domain/quant/setup/**`, `SetupRecommendationPanel`,
+> `/api/quant/setups/*`, the `setup-recommendation` WS topic) was **deleted** from the
+> codebase — frontend + backend. This document is kept for historical reference only; the
+> classes and endpoints it describes no longer exist. See the 2026-06-05 entry in
+> `docs/AI_HANDOFF.md`.
+
 > **Auteur :** Claude Code (Sonnet 4.6) — analyse purement fonctionnelle, lecture seule.  
 > **Date :** 2026-05-01  
 > **Base :** branche `claude/gallant-ramanujan-295913`, inventaire confirmé par grep/glob sur chaque composant cité.

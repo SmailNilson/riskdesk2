@@ -145,7 +145,7 @@ State management uses React hooks only (no Redux/Zustand). Key files:
 - `frontend/app/hooks/useWebSocket.ts` — STOMP/SockJS client, subscribes to `/topic/{prices,alerts,rollover}` (Mentor topic/poll removed)
 - `frontend/app/hooks/useRollover.ts` — polls rollover status every 5 min
 - `frontend/app/components/Chart.tsx` — TradingView `lightweight-charts` with SMC overlays (order blocks, liquidity, structure breaks); wrapped in `React.memo`
-- `frontend/app/components/{OrderFlowPanel,IndicatorPanel,quant/QuantGatePanel}.tsx` — heavy panels, wrapped in `React.memo` to avoid re-render on every parent tick
+- `frontend/app/components/{OrderFlowPanel,IndicatorPanel}.tsx` — heavy panels, wrapped in `React.memo` to avoid re-render on every parent tick
 
 Styling: Tailwind CSS with dark (default) / light theme toggle. `output: 'standalone'` in `next.config.mjs` for Docker.
 
