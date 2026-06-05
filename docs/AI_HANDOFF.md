@@ -2,6 +2,32 @@
 
 Last updated: 2026-06-05
 
+## WTX-RSI close dead-lock — stuck EXIT_SUBMITTED on a still-open position now self-heals (2026-06-05)
+
+Mirrors the WTX fix (PR #409) into `IbkrWtxRsiExecutionBridge.submitClose`, closing the "known parallel
+gap" that PR called out. A marketable close can **gap out of the book** (priced `cross-ticks` through the
+live price) or drop its ack/fill callback, leaving the WTX-RSI row stuck in `EXIT_SUBMITTED` while **IBKR
+still holds the position**. The old guard then returned `SKIPPED_DUPLICATE` for every later CLOSE, and the
+entry reconcile returned `SKIPPED_DUPLICATE` for every same-side OPEN — the position could be **neither
+exited nor reversed** and bled (UI rows stuck on **"NON EXÉCUTÉ / DUPLICATE"**). `StaleCloseReconciler`
+only finalizes a stuck row when IBKR is **flat**, so a still-open stuck close was its blind spot.
+
+Fix — `submitClose` now consults broker truth on an `EXIT_SUBMITTED` row (`stuckCloseNeedsRetry`): once the
+close is past the grace window **and** IBKR confirms the position is still open on that row's side, it
+**re-fires a fresh marketable close** (new per-bar exit ref keyed on `lastCandleTs`) instead of skipping.
+Conservative — keeps the duplicate-skip when broker truth is unavailable, the position is confirmed flat,
+IBKR holds the opposite side, or still within grace. Grace = `riskdesk.wtxrsi.stale-close-retry-seconds`
+(default 45; `0` disables → legacy skip).
+
+- **Extra wiring vs WTX** — `IbkrWtxRsiExecutionBridge` had no `IbkrPortfolioService`, so it (plus
+  `WtxRsiStrategyProperties` for the grace) is now an `@Autowired` constructor dep. The position-read
+  helpers (`readIbkrPositionState` / `effectiveBrokerAccountId` / `ibkrSymbol` / `matchesSymbol`) are
+  mirrored from `WtxExecutionBridge`, scoped to `WTXRSI_AUTO` and the `"wtxrsi-default"` account
+  placeholder (→ null = let the gateway pick).
+- **Scope** — legacy `submitClose` path only. The unified-router path (`DefaultOrderRouter`, default OFF)
+  already shares the WTX guard. Tests: `IbkrWtxRsiExecutionBridgeTest` (re-fire on stuck+open, skip within
+  grace, skip when flat, skip when retry disabled).
+
 ## WTX exits — point trailing + exit-type marker + 17:00 ET daily reset (2026-06-05)
 
 Three coupled changes to the WTX (legacy WaveTrend) strategy, driven by a backtest of 116 MNQ 5m

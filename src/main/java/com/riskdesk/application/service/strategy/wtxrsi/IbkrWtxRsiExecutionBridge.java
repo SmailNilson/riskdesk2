@@ -2,10 +2,13 @@ package com.riskdesk.application.service.strategy.wtxrsi;
 
 import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.dto.BrokerEntryOrderSubmission;
+import com.riskdesk.application.dto.IbkrPortfolioSnapshot;
+import com.riskdesk.application.dto.IbkrPositionView;
 import com.riskdesk.application.execution.DailyLossCapGuard;
 import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.application.execution.OrderRouter;
 import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.application.service.IbkrPortfolioService;
 import com.riskdesk.application.service.strategy.WtxIntentTranslator;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingOutcome;
 import com.riskdesk.domain.engine.strategy.wtx.WtxRoutingResult;
@@ -23,6 +26,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.infrastructure.config.ExecutionProperties;
+import com.riskdesk.infrastructure.config.WtxRsiStrategyProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +37,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -75,13 +80,45 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
     private final ExecutionProperties executionProperties;
     /** P4 daily loss cap. Nullable in tests; when tripped, new OPENs are refused (closes aren't). */
     private final DailyLossCapGuard lossCapGuard;
+    /**
+     * Live IBKR portfolio reader. Nullable: when absent the bridge skips the stuck-close broker-truth
+     * check (legacy skip-only behaviour). When present, a close stuck in {@code EXIT_SUBMITTED} past the
+     * grace window is re-fired only if IBKR confirms the position is still open on that row's side — the
+     * dead-lock fix mirrored from {@link com.riskdesk.application.service.strategy.WtxExecutionBridge}.
+     */
+    private final IbkrPortfolioService ibkrPortfolioService;
+    /** Strategy config — supplies the stuck-close retry grace. Nullable in the legacy test constructor. */
+    private final WtxRsiStrategyProperties wtxRsiProperties;
 
-    /** Test-only legacy constructor — production uses the 6-arg variant via Spring autowiring. */
+    /** Test-only legacy constructor — production uses the 8-arg variant via Spring autowiring. */
     public IbkrWtxRsiExecutionBridge(
             IbkrOrderService ibkrOrderService,
             TradeExecutionRepositoryPort executionRepository,
             IbkrProperties ibkrProperties) {
-        this(ibkrOrderService, executionRepository, ibkrProperties, null, null, null);
+        this(ibkrOrderService, executionRepository, ibkrProperties, null, null, null, null, null);
+    }
+
+    /** Test-only — IBKR portfolio reconcile + grace properties wired, unified router disabled. */
+    public IbkrWtxRsiExecutionBridge(
+            IbkrOrderService ibkrOrderService,
+            TradeExecutionRepositoryPort executionRepository,
+            IbkrProperties ibkrProperties,
+            IbkrPortfolioService ibkrPortfolioService,
+            WtxRsiStrategyProperties wtxRsiProperties) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, null, null, null,
+                ibkrPortfolioService, wtxRsiProperties);
+    }
+
+    /** Test-only — unified-router path; portfolio reconcile + grace properties absent. */
+    public IbkrWtxRsiExecutionBridge(
+            IbkrOrderService ibkrOrderService,
+            TradeExecutionRepositoryPort executionRepository,
+            IbkrProperties ibkrProperties,
+            OrderRouter orderRouter,
+            ExecutionProperties executionProperties,
+            DailyLossCapGuard lossCapGuard) {
+        this(ibkrOrderService, executionRepository, ibkrProperties, orderRouter, executionProperties,
+                lossCapGuard, null, null);
     }
 
     @Autowired
@@ -91,13 +128,17 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
             IbkrProperties ibkrProperties,
             OrderRouter orderRouter,
             ExecutionProperties executionProperties,
-            DailyLossCapGuard lossCapGuard) {
+            DailyLossCapGuard lossCapGuard,
+            IbkrPortfolioService ibkrPortfolioService,
+            WtxRsiStrategyProperties wtxRsiProperties) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
         this.orderRouter = orderRouter;
         this.executionProperties = executionProperties;
         this.lossCapGuard = lossCapGuard;
+        this.ibkrPortfolioService = ibkrPortfolioService;
+        this.wtxRsiProperties = wtxRsiProperties;
     }
 
     private boolean unifiedRouterEnabled() {
@@ -232,11 +273,30 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
         // ExecutionFillTrackingService reconciles EXIT_SUBMITTED → CLOSED on the
         // broker fill callback, so a duplicate submit would race the reconciler
         // and could leave a phantom row behind.
+        //
+        // BUT a marketable close that gapped out of the book (or whose ack / fill callback was lost) can
+        // leave the row stuck in EXIT_SUBMITTED while IBKR STILL holds the position. The old unconditional
+        // skip then DEAD-LOCKED the instrument: every later CLOSE returned SKIPPED_DUPLICATE here and every
+        // same-side OPEN returned SKIPPED_DUPLICATE from the entry reconcile, so the position could be
+        // neither exited nor reversed and bled unbounded — surfaced in the UI as a row stuck on
+        // "NON EXÉCUTÉ / DUPLICATE", and the marketable toggle made no difference because the skip happens
+        // BEFORE any order is priced. {@link #stuckCloseNeedsRetry} only returns true once the close has
+        // been EXIT_SUBMITTED past the retry grace AND broker truth confirms the position is still open on
+        // this row's side — in which case we fall through and re-fire a FRESH marketable flatten (a per-bar
+        // exit ref keyed on lastCandleTs). Within the grace, or when broker truth is unavailable / confirmed
+        // flat, we keep the duplicate-skip so a genuinely in-flight close is never double-submitted.
+        // (StaleCloseReconciler owns the flat-but-stuck case.)
         if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
-            log.info("WTX-RSI [{} {}] CLOSE requested ({}) but row {} is already EXIT_SUBMITTED — "
-                    + "skipping duplicate flatten",
+            if (!stuckCloseNeedsRetry(row, readIbkrPositionState(state.instrument()))) {
+                log.info("WTX-RSI [{} {}] CLOSE requested ({}) but row {} is already EXIT_SUBMITTED — "
+                        + "skipping duplicate flatten",
+                        state.instrument(), state.timeframe(), action, row.getId());
+                return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
+            }
+            log.warn("WTX-RSI [{} {}] CLOSE {} — prior flatten stuck (row {} EXIT_SUBMITTED past grace, "
+                    + "IBKR still holds the position) — re-firing a fresh marketable close to break the dead-lock",
                     state.instrument(), state.timeframe(), action, row.getId());
-            return WtxRoutingResult.of(WtxRoutingOutcome.SKIPPED_DUPLICATE);
+            // fall through to submit a fresh close leg on this same row
         }
 
         int qty = row.getQuantity() != null && row.getQuantity() > 0
@@ -303,6 +363,126 @@ public class IbkrWtxRsiExecutionBridge implements WtxRsiExecutionBridge {
                     state.instrument(), state.timeframe(), row.getId(), msg, e);
             return WtxRoutingResult.of(WtxRoutingOutcome.FAILED, msg);
         }
+    }
+
+    /**
+     * True when an {@code EXIT_SUBMITTED} close is STUCK and must be re-fired rather than skipped as a
+     * duplicate flatten: it has been non-terminal for longer than the retry grace AND IBKR still holds a
+     * live position on this row's side, so the flatten clearly never completed (a marketable close that
+     * gapped out and died, or a lost ack / fill). Re-firing a fresh marketable close is the only way to
+     * flatten — otherwise the instrument dead-locks (every later CLOSE skips here as a duplicate, every
+     * same-side OPEN skips in the entry reconcile as a duplicate) and the position bleeds. Mirrors
+     * {@code WtxExecutionBridge.stuckCloseNeedsRetry}.
+     *
+     * <p>Deliberately conservative — returns {@code false} when:
+     * <ul>
+     *   <li>broker truth is unavailable ({@code net == null}) — never re-fire on a guess;</li>
+     *   <li>IBKR is flat, or holds the OPPOSITE side — the close completed (the flat-but-stuck row is
+     *       finalized to CLOSED by {@code StaleCloseReconciler}), or this is a deeper divergence the
+     *       entry-path reconcile owns; flattening here could open an unintended position;</li>
+     *   <li>still within the grace window — a genuinely in-flight marketable close fills in seconds, so a
+     *       fresh close must NOT be double-submitted on top of it.</li>
+     * </ul>
+     * Grace is {@code riskdesk.wtxrsi.stale-close-retry-seconds} (0 disables the retry → legacy skip-only).
+     */
+    private boolean stuckCloseNeedsRetry(TradeExecutionRecord row, IbkrPositionState ibkr) {
+        if (row.getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
+            return false;
+        }
+        BigDecimal net = ibkr.net();
+        if (net == null || net.signum() == 0) {
+            return false; // unknown or flat → not a re-fire case
+        }
+        // Only re-fire when IBKR still holds the SAME side this row tracks: flattening a short is a BUY,
+        // so it must never run while IBKR is (somehow) long, which would stack rather than flatten.
+        boolean rowIsLong = "LONG".equalsIgnoreCase(row.getAction());
+        boolean stillHoldsSameSide = rowIsLong ? net.signum() > 0 : net.signum() < 0;
+        if (!stillHoldsSameSide) {
+            return false;
+        }
+        int graceSeconds = wtxRsiProperties != null ? wtxRsiProperties.getStaleCloseRetrySeconds() : 0;
+        if (graceSeconds <= 0) {
+            return false; // retry disabled (or properties not wired)
+        }
+        Instant since = row.getExitSubmittedAt() != null ? row.getExitSubmittedAt() : row.getUpdatedAt();
+        if (since == null) {
+            return false;
+        }
+        return Duration.between(since, Instant.now()).getSeconds() >= graceSeconds;
+    }
+
+    /**
+     * IBKR live position for an instrument symbol, read from a SINGLE portfolio snapshot. Mirrors
+     * {@code WtxExecutionBridge.readIbkrPositionState}, scoped to the wtxrsi {@code "wtxrsi-default"}
+     * account placeholder. {@code net} is {@code null} when the portfolio service is not wired or the
+     * snapshot is unavailable ("unknown — fall back to legacy skip-only"); {@code confirmedFlat} is true
+     * only on a connected snapshot with no matching nonzero leg (stricter than {@code net == 0}, so
+     * offsetting rollover/calendar legs that net to zero are NOT treated as flat).
+     */
+    private record IbkrPositionState(BigDecimal net, boolean confirmedFlat) {}
+
+    private IbkrPositionState readIbkrPositionState(String instrument) {
+        if (ibkrPortfolioService == null) return new IbkrPositionState(null, false);
+        // Scope the read to the same account the bridge submits on (null for the "wtxrsi-default"
+        // placeholder → the gateway's default managed account), so reconcile and submission agree.
+        String accountId = effectiveBrokerAccountId();
+        IbkrPortfolioSnapshot snapshot;
+        try {
+            snapshot = ibkrPortfolioService.getPortfolio(accountId);
+        } catch (RuntimeException e) {
+            log.debug("WTX-RSI reconcile: portfolio snapshot unavailable for {} (account={}) — {}",
+                    instrument, accountId, e.getMessage());
+            return new IbkrPositionState(null, false);
+        }
+        if (snapshot == null || !snapshot.connected() || snapshot.positions() == null) {
+            return new IbkrPositionState(null, false);
+        }
+        String symbol = ibkrSymbol(instrument);
+        if (symbol == null) return new IbkrPositionState(null, false);
+        BigDecimal total = BigDecimal.ZERO;
+        boolean anyNonzeroLeg = false;
+        for (IbkrPositionView pos : snapshot.positions()) {
+            if (pos == null || pos.position() == null) continue;
+            // Second-line account filter: some gateways return positions across every attached account
+            // even when getPortfolio is given a specific id. No-op when no account is configured.
+            if (accountId != null && pos.accountId() != null && !accountId.equals(pos.accountId())) {
+                continue;
+            }
+            if (matchesSymbol(pos.contractDesc(), symbol)) {
+                total = total.add(pos.position());
+                if (pos.position().signum() != 0) anyNonzeroLeg = true;
+            }
+        }
+        // Confirmed flat = connected snapshot with NO nonzero matching leg. Offsetting legs that net to
+        // zero (anyNonzeroLeg && total == 0) are LIVE positions, hence not flat.
+        return new IbkrPositionState(total, !anyNonzeroLeg);
+    }
+
+    /**
+     * The broker account id reconcile scopes to — {@code null} for the {@code "wtxrsi-default"} placeholder
+     * ("let the gateway pick the default managed account"), so the position read and the order submission
+     * stay on the same account. wtxrsi has no configurable per-strategy account, so this is always the
+     * placeholder → null; kept as a method to mirror {@code WtxExecutionBridge} and as a single choke point
+     * if a real account is ever added.
+     */
+    private String effectiveBrokerAccountId() {
+        return null;
+    }
+
+    /** IBKR ticker for an instrument symbol. Differs for E6 (IBKR symbol "6E"). */
+    private static String ibkrSymbol(String instrument) {
+        if (instrument == null) return null;
+        return "E6".equals(instrument) ? "6E" : instrument;
+    }
+
+    /**
+     * Matches an IBKR {@code contractDesc} (the gateway's localSymbol, e.g. "MNQH6", "6EM6") against an
+     * instrument symbol by leading-symbol prefix — the cheapest reliable match across native + client
+     * portal gateways. Mirrors {@code WtxExecutionBridge.matchesSymbol}.
+     */
+    private static boolean matchesSymbol(String contractDesc, String symbol) {
+        if (contractDesc == null || symbol == null) return false;
+        return contractDesc.toUpperCase().trim().startsWith(symbol);
     }
 
     /**
