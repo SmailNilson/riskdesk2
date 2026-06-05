@@ -320,6 +320,95 @@ class WtxExecutionBridgeTest {
     }
 
     @Test
+    void closeShort_stuckExitSubmitted_ibkrStillHolds_refiresFreshMarketableClose() {
+        // The dead-lock fix: a prior marketable close gapped out / lost its fill callback, so the row is
+        // stuck EXIT_SUBMITTED while IBKR STILL holds the short. Without a retry every later CLOSE returned
+        // SKIPPED_DUPLICATE and every same-side OPEN returned SKIPPED_DUPLICATE from the reconcile — the
+        // position could be neither exited nor reversed and bled (the "NON EXÉCUTÉ / DUPLICATE" rows). Once
+        // the close is past the grace AND IBKR confirms the position is still open, re-fire a fresh flatten.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(-2))); // IBKR still SHORT 2
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord stuck = wtxRow("SHORT", 2, ExecutionStatus.EXIT_SUBMITTED);
+        stuck.setExitSubmittedAt(Instant.now().minusSeconds(120)); // past the 45s default grace
+        repo.createIfAbsent(stuck);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_SHORT), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.ROUTED, result.outcome(), "stuck close must be re-fired, not skipped");
+        // A fresh flatten is submitted — a BUY ("LONG") to cover the short, at the close quantity.
+        verify(ibkrOrderService, times(1)).submitEntryOrder(argThat(r ->
+                "LONG".equals(r.action()) && r.quantity() == 2));
+        assertEquals(ExecutionStatus.EXIT_SUBMITTED, repo.byId(stuck.getId()).getStatus(),
+                "the re-fired close leaves the row non-terminal until its own fill reconciles");
+    }
+
+    @Test
+    void closeShort_freshExitSubmitted_ibkrStillHolds_skipsDuplicateWithinGrace() {
+        // Within the grace window the marketable close is genuinely in flight (fills in seconds) — a fresh
+        // close must NOT be double-submitted on top of it, even though IBKR still shows the position.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(-2)));
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord fresh = wtxRow("SHORT", 2, ExecutionStatus.EXIT_SUBMITTED);
+        fresh.setExitSubmittedAt(Instant.now()); // just submitted — inside the grace
+        repo.createIfAbsent(fresh);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_SHORT), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void closeShort_stuckExitSubmitted_ibkrFlat_skipsNoNakedRefire() {
+        // EXIT_SUBMITTED but IBKR is flat → the close already completed (a lost fill callback). We must NOT
+        // re-fire a naked flatten; the flat-but-stuck row is finalized to CLOSED out-of-band by the
+        // StaleCloseReconciler. Stays a duplicate-skip here.
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("UNRELATED", bd(3))); // no MCL leg → flat
+        WtxExecutionBridge bridgeWithReconcile = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, wtxProperties, null, portfolio);
+
+        TradeExecutionRecord stuck = wtxRow("SHORT", 2, ExecutionStatus.EXIT_SUBMITTED);
+        stuck.setExitSubmittedAt(Instant.now().minusSeconds(120));
+        repo.createIfAbsent(stuck);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeWithReconcile.submit(signal(WtxAction.CLOSE_SHORT), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void closeShort_stuckExitSubmitted_retryDisabled_skipsDuplicate() {
+        // Kill-switch: riskdesk.wtx.stale-close-retry-seconds = 0 restores the legacy skip-only behaviour.
+        WtxStrategyProperties noRetry = new WtxStrategyProperties();
+        noRetry.setStaleCloseRetrySeconds(0);
+        IbkrPortfolioService portfolio = mock(IbkrPortfolioService.class);
+        when(portfolio.getPortfolio(any())).thenReturn(snapshotWith("MCLM6", bd(-2)));
+        WtxExecutionBridge bridgeNoRetry = new WtxExecutionBridge(
+                ibkrOrderService, repo, ibkrProperties, noRetry, null, portfolio);
+
+        TradeExecutionRecord stuck = wtxRow("SHORT", 2, ExecutionStatus.EXIT_SUBMITTED);
+        stuck.setExitSubmittedAt(Instant.now().minusSeconds(600));
+        repo.createIfAbsent(stuck);
+
+        WtxStrategyState state = flatState().withAutoExecution(true);
+        WtxRoutingResult result = bridgeNoRetry.submit(signal(WtxAction.CLOSE_SHORT), state, bd(105));
+
+        assertEquals(WtxRoutingOutcome.SKIPPED_DUPLICATE, result.outcome());
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
     void closeLong_noOpenRow_skipsSubmissionEntirely() {
         WtxStrategyState state = flatState().withAutoExecution(true);
         bridge.submit(signal(WtxAction.CLOSE_LONG), state, bd(105));

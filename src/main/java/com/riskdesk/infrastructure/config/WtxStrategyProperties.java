@@ -67,6 +67,18 @@ public class WtxStrategyProperties {
     private String brokerAccountId = "wtx-default";
 
     /**
+     * Grace (seconds) before a close stuck in {@code EXIT_SUBMITTED} — while IBKR still holds the
+     * position — is retried with a fresh marketable order instead of being skipped as a duplicate
+     * flatten. A marketable close fills in seconds; one still non-terminal past this window with the
+     * position still open is stuck (a gapped-out/dead order, or a lost ack/fill) and would otherwise
+     * dead-lock the instrument — every later CLOSE skips as a duplicate and every same-side OPEN skips
+     * as a reconcile duplicate, so the position can be neither exited nor reversed and bleeds. Set to 0
+     * to disable the retry (legacy skip-only behaviour). Kept above a few seconds so a genuinely
+     * in-flight marketable close is never double-submitted.
+     */
+    private int staleCloseRetrySeconds = 45;
+
+    /**
      * Pre-flight margin check policy. PORTFOLIO_HEURISTIC (default) uses the existing
      * portfolio snapshot cache (no extra IBKR call, zero latency). OFF disables the check
      * (legacy behavior — IBKR rejects with code 201 if margin is insufficient). WHATIF
@@ -217,6 +229,9 @@ public class WtxStrategyProperties {
 
     public String getBrokerAccountId() { return brokerAccountId; }
     public void setBrokerAccountId(String brokerAccountId) { this.brokerAccountId = brokerAccountId; }
+
+    public int getStaleCloseRetrySeconds() { return staleCloseRetrySeconds; }
+    public void setStaleCloseRetrySeconds(int staleCloseRetrySeconds) { this.staleCloseRetrySeconds = staleCloseRetrySeconds; }
 
     public PreflightMode getPreflightMode() { return preflightMode; }
     public void setPreflightMode(PreflightMode preflightMode) { this.preflightMode = preflightMode; }
