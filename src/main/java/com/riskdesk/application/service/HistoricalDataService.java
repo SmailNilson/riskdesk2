@@ -50,7 +50,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(HistoricalDataService.class);
 
-    private static final List<String> TIMEFRAMES       = List.of("5m", "10m", "1h", "4h", "1d");
+    private static final List<String> TIMEFRAMES       = List.of("1m", "5m", "10m", "1h", "4h", "1d");
     private static final int          DEFAULT_CANDLES_PER_PAIR = 500;
     private static final int          GAP_FILL_BUFFER  = 100;
 
@@ -60,6 +60,9 @@ public class HistoricalDataService implements ApplicationRunner {
 
     @Value("${riskdesk.market-data.historical.enabled:false}")
     private boolean enabled;
+
+    @Value("${riskdesk.market-data.historical.backfill-days-1m:30}")
+    private int backfillDays1m;
 
     @Value("${riskdesk.market-data.historical.backfill-days-5m:30}")
     private int backfillDays5m;
@@ -326,6 +329,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private int candlesTargetFor(String timeframe) {
         return switch (timeframe) {
+            case "1m"  -> minutesToCandles(backfillDays1m, 1);
             case "5m"  -> minutesToCandles(backfillDays5m, 5);
             case "10m" -> minutesToCandles(backfillDays10m, 10);
             case "30m" -> minutesToCandles(backfillDays30m, 30);
@@ -343,6 +347,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private long timeframeSeconds(String timeframe) {
         return switch (timeframe) {
+            case "1m"  -> 60L;
             case "5m"  -> 5L * 60;
             case "10m" -> 10L * 60;
             case "30m" -> 30L * 60;

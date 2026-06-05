@@ -2,6 +2,35 @@
 
 Last updated: 2026-06-05
 
+## 1-minute candles wired (backtests + order-flow) + tick-by-tick failure now diagnosable (2026-06-05)
+
+**Problem.** Backtests were silently empty: `WtxRsiBacktestService` loads only `"1m"` from PostgreSQL
+and resamples upward (`CandleResampler` only coarsens, never refines), but **nothing populated 1m** —
+neither the historical backfill (`HistoricalDataService.TIMEFRAMES` was `5m,10m,1h,4h,1d`) nor the live
+accumulator (`MarketDataService.TIMEFRAMES`). 15m was missing for the same reason.
+
+**Slice 1 — historical 1m backfill.** Added `1m` to `IbGatewayHistoricalProvider` (`supports`,
+`supportsDeepBackfill`, `chunkQueryFor` → 1-DAY chunks of `BarSize._1_min`, `queryFor`, `maxContractWalk`)
+and to `HistoricalDataService.TIMEFRAMES` + `candlesTargetFor`. Front-month 1m now **throttles** (it walks
+day-by-day over ~30 requests, unlike coarse TFs); `MAX_BACKFILL_CHUNKS` 32→45. Depth = new
+`riskdesk.market-data.historical.backfill-days-1m=30`. NB: the deep seed runs once (empty table); afterwards
+gap-fill is forward-only — same rolling-window caveat as 5m/10m.
+
+**Slice 2 — live 1m.** Added `1m` to `MarketDataService.TIMEFRAMES` (fed by the 5s `reqRealTimeBars` push,
+so bars are well-formed). Verified safe: all six `CandleClosed` listeners filter by timeframe, so `1m`
+closes create no alert/scan fan-out.
+
+**Slice 3 — real ticks were already wired; the blocker is IBKR delivery, not code.** `TickByTickClient`
+(dedicated socket, Lee-Ready `classifyTrade`) is activated by `OrderFlowOrchestrator.ensureTickByTickSubscriptions`
+(@Scheduled) and wired via `MarketDataConfig`. Prod `/api/order-flow/status` shows all 4 instruments
+`tickSubscribed:true` but `totalTicksReceived:0` → IBKR sends nothing (entitlement / competing session).
+The CLAUDE.md note "reqTickByTickData NOT wired" refers to `IbGatewayNativeClient`; the separate
+`TickByTickClient` does it. **Added diagnostics** so this stops failing silently: `TickByTickClient` now
+captures the last IBKR error per instrument (codes 354 / 10089 / 10197 / 10167 / 1100 with hints), cleared
+when a tick arrives; `/api/order-flow/status` now exposes `totalTicksReceived`, `tickConnectionUp`,
+`tickSystemError`, and per-instrument `lastTickError`. The real fix is an IBKR market-data entitlement,
+not application code.
+
 ## WTX close dead-lock — a stuck EXIT_SUBMITTED on a still-open position now self-heals (2026-06-05)
 
 A marketable close usually fills synchronously, but it can still **gap out of the book** (priced

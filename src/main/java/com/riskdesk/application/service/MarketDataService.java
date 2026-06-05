@@ -48,6 +48,7 @@ public class MarketDataService implements StreamingPriceListener {
     private static final long PUSH_DEBOUNCE_MS = 100L;
 
     private static final Map<String, Long> TIMEFRAMES = Map.of(
+        "1m",  1L,
         "5m",  5L,
         "10m", 10L,
         "30m", 30L,

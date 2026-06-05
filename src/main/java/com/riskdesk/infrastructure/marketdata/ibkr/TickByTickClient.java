@@ -62,6 +62,16 @@ public class TickByTickClient {
     private final ConcurrentHashMap<Integer, Long> lastTickTime = new ConcurrentHashMap<>();
     private final AtomicLong totalTicksReceived = new AtomicLong(0);
 
+    /**
+     * Last IBKR error surfaced per instrument (entitlement / competing-session / connectivity).
+     * Populated in {@link TickEWrapper#error(int, long, int, String, String)} and cleared the
+     * moment a real tick arrives, so {@code /api/order-flow/status} explains WHY a subscribed
+     * instrument is delivering zero ticks instead of failing silently.
+     */
+    private final ConcurrentHashMap<Instrument, String> lastErrorByInstrument = new ConcurrentHashMap<>();
+    /** Last connection-level error (id == -1), e.g. data-farm or auth failures. */
+    private volatile String lastSystemError;
+
     // Fix 5: Watchdog scheduler
     private ScheduledExecutorService watchdog;
 
@@ -208,6 +218,37 @@ public class TickByTickClient {
         return totalTicksReceived.get();
     }
 
+    /** Last actionable IBKR error for an instrument's tick stream, or null when healthy. */
+    public String lastError(Instrument instrument) {
+        return lastErrorByInstrument.get(instrument);
+    }
+
+    /** Last connection-level error (id == -1), or null. */
+    public String lastSystemError() {
+        return lastSystemError;
+    }
+
+    /** Codes IBKR sends as connection/status notices — not real subscription failures. */
+    private static boolean isInformationalCode(int code) {
+        return switch (code) {
+            case 2104, 2106, 2108, 2107, 2158, 1101, 1102 -> true;
+            default -> false;
+        };
+    }
+
+    /** Human-readable hint for the tick-by-tick failure codes that explain a 0-tick stream. */
+    private static String formatTickError(int code, String msg) {
+        String hint = switch (code) {
+            case 354   -> "market data not subscribed — IBKR entitlement missing";
+            case 10089 -> "tick-by-tick requires additional market-data subscription";
+            case 10197 -> "no data during a competing live session (TWS/another app holds the line)";
+            case 10167 -> "delayed data substituted — real-time tick-by-tick not entitled";
+            case 1100  -> "connectivity to IBKR lost";
+            default    -> null;
+        };
+        return "code " + code + (hint != null ? " (" + hint + ")" : "") + ": " + msg;
+    }
+
     // -------------------------------------------------------------------------
     // Fix 5: Watchdog — detect silent stream death and resubscribe
     // -------------------------------------------------------------------------
@@ -292,6 +333,12 @@ public class TickByTickClient {
                 SubscriptionInfo info = activeSubscriptions.get(reqId);
                 String instrument = info != null ? info.instrument().name() : "UNKNOWN";
 
+                // A tick proves data is flowing — clear any stale error for this instrument.
+                if (info != null) {
+                    lastErrorByInstrument.remove(info.instrument());
+                    lastSystemError = null;
+                }
+
                 // Get bid/ask from main connection for Lee-Ready classification
                 double bid = 0;
                 double ask = 0;
@@ -356,6 +403,17 @@ public class TickByTickClient {
 
         @Override
         public void error(int id, long errorTime, int errorCode, String errorMsg, String advancedOrderRejectJson) {
+            // Capture actionable failures so /api/order-flow/status can explain a 0-tick stream
+            // (entitlement, competing session, connectivity) instead of failing silently.
+            if (!isInformationalCode(errorCode)) {
+                String detail = formatTickError(errorCode, errorMsg);
+                SubscriptionInfo info = activeSubscriptions.get(id);
+                if (info != null) {
+                    lastErrorByInstrument.put(info.instrument(), detail);
+                } else if (id == -1) {
+                    lastSystemError = detail;
+                }
+            }
             // Log ALL errors — especially the critical ones
             switch (errorCode) {
                 case 2104, 2106, 2158, 2108, 2107 -> { /* noisy info */ }
