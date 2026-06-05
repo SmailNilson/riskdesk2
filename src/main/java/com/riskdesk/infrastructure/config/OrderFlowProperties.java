@@ -54,18 +54,67 @@ public class OrderFlowProperties {
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
         private boolean enabled = true;
-        private List<String> instruments = List.of("MNQ", "MCL", "MGC", "E6");
+        /**
+         * Instruments that actually open a tick-by-tick line. Trimmed to the two traded
+         * instruments (MNQ, MCL) to reduce concurrent IBKR market-data pressure — 4 AllLast
+         * lines on one tick clientId is a frequent cause of {@code totalTicksReceived:0}
+         * (354/10089 entitlement, 10197 competing session). This is a pressure reduction,
+         * not a provable cap fix; confirm via {@code /api/order-flow/status}.
+         */
+        private List<String> instruments = List.of("MNQ", "MCL");
+        /**
+         * Instruments intentionally NOT subscribed to a tick line (delta panels stay blank,
+         * reported as {@code DEGRADED_NOT_SUBSCRIBED} rather than a misleading CLV estimate).
+         */
+        private List<String> degradedInstruments = List.of("MGC", "E6");
+        /**
+         * Max staleness (seconds) for the last-known-good BBO cache used to classify ticks
+         * when no live quote is available. Larger than the price stream's 30s bid/ask nulling
+         * so a slightly-stale-but-valid BBO classifies before the tick-rule fallback (L1).
+         */
+        private int bboMaxStalenessSeconds = 90;
+        /**
+         * When no fresh BBO/quote is available, classify ticks by trade-to-trade direction
+         * (uptick=BUY / downtick=SELL) instead of dropping them as UNCLASSIFIED (L2).
+         * Such windows are stamped {@code REAL_TICKS_TICKRULE} (0.5 confidence), never REAL.
+         */
+        private boolean tickRuleFallbackEnabled = true;
+        /**
+         * Minimum fraction of quote-classified (Lee-Ready) volume for a window to keep the
+         * {@code REAL_TICKS} (1.0) source; below it the window is {@code REAL_TICKS_TICKRULE} (L2).
+         */
+        private double realTicksMinQuoteFraction = 0.5;
+        /** Shared per-instrument resubscribe rate cap across all watchdog loops (L3). */
+        private int maxResubscribesPerMinute = 2;
+        /**
+         * When false (default once the orchestrator delta-freshness watchdog owns recovery),
+         * the internal 60s tick watchdog only raises an alarm and does NOT cancel/resubscribe —
+         * a single owner of resubscription prevents reqId churn that IBKR throttles (L3).
+         */
+        private boolean internalWatchdogResubscribes = false;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public List<String> getInstruments() { return instruments; }
         public void setInstruments(List<String> instruments) { this.instruments = instruments; }
+        public List<String> getDegradedInstruments() { return degradedInstruments; }
+        public void setDegradedInstruments(List<String> degradedInstruments) { this.degradedInstruments = degradedInstruments; }
+        public int getBboMaxStalenessSeconds() { return bboMaxStalenessSeconds; }
+        public void setBboMaxStalenessSeconds(int v) { this.bboMaxStalenessSeconds = v; }
+        public boolean isTickRuleFallbackEnabled() { return tickRuleFallbackEnabled; }
+        public void setTickRuleFallbackEnabled(boolean v) { this.tickRuleFallbackEnabled = v; }
+        public double getRealTicksMinQuoteFraction() { return realTicksMinQuoteFraction; }
+        public void setRealTicksMinQuoteFraction(double v) { this.realTicksMinQuoteFraction = v; }
+        public int getMaxResubscribesPerMinute() { return maxResubscribesPerMinute; }
+        public void setMaxResubscribesPerMinute(int v) { this.maxResubscribesPerMinute = v; }
+        public boolean isInternalWatchdogResubscribes() { return internalWatchdogResubscribes; }
+        public void setInternalWatchdogResubscribes(boolean v) { this.internalWatchdogResubscribes = v; }
     }
 
     /** Market depth subscription (reqMarketDepth). */
     public static class Depth {
         private boolean enabled = true;
-        private List<String> instruments = List.of("MNQ", "MCL", "MGC");
+        private List<String> instruments = List.of("MNQ", "MCL");
         private int numRows = 10;
         private double wallThresholdMultiplier = 5.0;
 
@@ -220,6 +269,13 @@ public class OrderFlowProperties {
         private long checkIntervalMs = 15_000;
         /** Depth is considered frozen when its last real update is older than this. */
         private int depthStalenessSeconds = 20;
+        /**
+         * Delta (tick) feed is considered frozen when its last <b>classified</b> tick is older
+         * than this. Drives {@code checkDeltaFreshness} (L3) — the tick equivalent of the depth
+         * watchdog, keyed on classified-tick yield (not raw arrival) so a 100%-UNCLASSIFIED but
+         * alive stream is detected and resubscribed.
+         */
+        private int deltaStalenessSeconds = 45;
         /** Don't evaluate an instrument until this long after its (re)subscription — avoids churn. */
         private int graceSeconds = 45;
         /** Consecutive stale evictions before escalating to an error log (re-subscribe not recovering). */
@@ -231,6 +287,8 @@ public class OrderFlowProperties {
         public void setCheckIntervalMs(long v) { this.checkIntervalMs = v; }
         public int getDepthStalenessSeconds() { return depthStalenessSeconds; }
         public void setDepthStalenessSeconds(int v) { this.depthStalenessSeconds = v; }
+        public int getDeltaStalenessSeconds() { return deltaStalenessSeconds; }
+        public void setDeltaStalenessSeconds(int v) { this.deltaStalenessSeconds = v; }
         public int getGraceSeconds() { return graceSeconds; }
         public void setGraceSeconds(int v) { this.graceSeconds = v; }
         public int getMaxStrikes() { return maxStrikes; }

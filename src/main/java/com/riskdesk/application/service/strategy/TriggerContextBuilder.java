@@ -102,8 +102,12 @@ public class TriggerContextBuilder {
     private Optional<TickAggregation> lookupRealTicks(Instrument instrument) {
         if (tickDataPort == null) return Optional.empty();
         try {
+            // Accept both quote-classified (REAL_TICKS) and tick-rule (REAL_TICKS_TICKRULE)
+            // windows — both carry real volume. fromRealTicks() downgrades the tick-rule one to
+            // CLV-grade confidence so a less-reliable direction never reads as REAL.
             return tickDataPort.currentAggregation(instrument)
-                .filter(agg -> TickAggregation.SOURCE_REAL_TICKS.equals(agg.source()))
+                .filter(agg -> TickAggregation.SOURCE_REAL_TICKS.equals(agg.source())
+                            || TickAggregation.SOURCE_REAL_TICKS_TICKRULE.equals(agg.source()))
                 .filter(TriggerContextBuilder::hasUsableVolume);
         } catch (RuntimeException e) {
             // The port is infra; a transient hiccup must never sink the strategy
@@ -137,8 +141,12 @@ public class TriggerContextBuilder {
             .setScale(4, RoundingMode.HALF_UP);
         BigDecimal cumulative = BigDecimal.valueOf(agg.cumulativeDelta());
         DeltaSignature signature = classifyFromTicks(agg);
-        return new TriggerContext(signature, buyRatio, cumulative, dom, reaction,
-            TickDataQuality.REAL_TICKS);
+        // Only quote-classified windows earn full REAL_TICKS confidence; a tick-rule window is
+        // real volume with a less-reliable direction, so it is treated as CLV_ESTIMATED (0.5).
+        TickDataQuality quality = TickAggregation.SOURCE_REAL_TICKS.equals(agg.source())
+            ? TickDataQuality.REAL_TICKS
+            : TickDataQuality.CLV_ESTIMATED;
+        return new TriggerContext(signature, buyRatio, cumulative, dom, reaction, quality);
     }
 
     private TriggerContext fromSnapshot(IndicatorSnapshot snapshot, ReactionPattern reaction,

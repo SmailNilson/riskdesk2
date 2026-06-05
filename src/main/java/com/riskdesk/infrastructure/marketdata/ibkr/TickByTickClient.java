@@ -10,11 +10,14 @@ import com.ib.client.EReaderSignal;
 import com.ib.client.TickAttribLast;
 import com.ib.client.TickType;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -42,6 +45,7 @@ public class TickByTickClient {
     private static final long WATCHDOG_INTERVAL_MS = 30_000; // check every 30s
 
     private final IbkrProperties properties;
+    private final OrderFlowProperties orderFlowProperties;
     private volatile IbkrTickDataAdapter tickDataAdapter;
     private volatile IbGatewayNativeClient nativeClient;
 
@@ -72,13 +76,20 @@ public class TickByTickClient {
     /** Last connection-level error (id == -1), e.g. data-farm or auth failures. */
     private volatile String lastSystemError;
 
+    /**
+     * Per-instrument resubscribe timestamps for the shared rate limiter — bounds cancel/
+     * reqTickByTickData churn across ALL watchdog loops (IBKR throttles rapid reqId churn).
+     */
+    private final ConcurrentHashMap<Instrument, Deque<Long>> resubTimes = new ConcurrentHashMap<>();
+
     // Fix 5: Watchdog scheduler
     private ScheduledExecutorService watchdog;
 
     private record SubscriptionInfo(Instrument instrument, Contract contract) {}
 
-    public TickByTickClient(IbkrProperties properties) {
+    public TickByTickClient(IbkrProperties properties, OrderFlowProperties orderFlowProperties) {
         this.properties = properties;
+        this.orderFlowProperties = orderFlowProperties;
     }
 
     public void setTickDataAdapter(IbkrTickDataAdapter adapter) {
@@ -276,14 +287,42 @@ public class TickByTickClient {
         if (!isConnected()) return;
 
         long now = System.currentTimeMillis();
+        boolean ownResub = orderFlowProperties.getTickByTick().isInternalWatchdogResubscribes();
         activeSubscriptions.forEach((reqId, info) -> {
             Long last = lastTickTime.get(reqId);
             if (last != null && (now - last) > STREAM_DEAD_THRESHOLD_MS) {
-                log.warn("TickByTickClient: STREAM DEAD reqId={} {} — no tick for {}s. Resubscribing with new reqId.",
-                         reqId, info.instrument(), (now - last) / 1000);
-                resubscribe(reqId, info);
+                long silentSec = (now - last) / 1000;
+                // Single-owner resubscription: by default the orchestrator delta-freshness watchdog
+                // (keyed on CLASSIFIED-tick yield, not raw arrival) owns recovery, so this internal
+                // watchdog only raises an alarm and does NOT churn reqIds. Flip
+                // internal-watchdog-resubscribes=true to restore the old self-healer.
+                if (ownResub && allowResubscribe(info.instrument())) {
+                    log.warn("TickByTickClient: STREAM DEAD reqId={} {} — no raw tick for {}s. Resubscribing with new reqId.",
+                             reqId, info.instrument(), silentSec);
+                    resubscribe(reqId, info);
+                } else {
+                    log.warn("TickByTickClient: STREAM SILENT reqId={} {} — no raw tick for {}s (alarm-only; orchestrator owns resubscribe)",
+                             reqId, info.instrument(), silentSec);
+                }
             }
         });
+    }
+
+    /**
+     * Shared per-instrument resubscribe rate limiter. Bounds cancel/reqTickByTickData churn across
+     * the internal stream watchdog, the orchestrator delta-freshness watchdog and connection-health
+     * eviction — IBKR throttles rapid reqId churn. Records the attempt when it returns {@code true}.
+     */
+    public boolean allowResubscribe(Instrument instrument) {
+        long now = System.currentTimeMillis();
+        int max = Math.max(1, orderFlowProperties.getTickByTick().getMaxResubscribesPerMinute());
+        Deque<Long> times = resubTimes.computeIfAbsent(instrument, k -> new ArrayDeque<>());
+        synchronized (times) {
+            while (!times.isEmpty() && now - times.peekFirst() > 60_000L) times.pollFirst();
+            if (times.size() >= max) return false;
+            times.addLast(now);
+            return true;
+        }
     }
 
     private void resubscribe(int oldReqId, SubscriptionInfo info) {
@@ -339,29 +378,34 @@ public class TickByTickClient {
                     lastSystemError = null;
                 }
 
-                // Get bid/ask from main connection for Lee-Ready classification
+                // Bid/ask for Lee-Ready classification — prefer the real BBO (live or last-known-good
+                // within the configured staleness), then the dedicated quote subscription. We no longer
+                // synthesize a mid from the last trade (it mis-anchors classification and is freshness-
+                // unguarded); when no BBO is available bid=ask=0 and the adapter falls back to the
+                // trade-to-trade tick rule (L2) instead of dropping the tick as UNCLASSIFIED.
                 double bid = 0;
                 double ask = 0;
                 if (info != null) {
                     IbGatewayNativeClient nc = nativeClient;
                     if (nc != null) {
-                        // Try streaming quote first
-                        var quote = nc.latestStreamingQuote(info.contract());
-                        if (quote.isPresent()) {
-                            IbGatewayNativeClient.NativeMarketQuote q = quote.get();
+                        // 1) Real BBO from the price subscription (futures have no quote subscription).
+                        var bbo = nc.latestStreamingBbo(info.contract(),
+                                orderFlowProperties.getTickByTick().getBboMaxStalenessSeconds());
+                        if (bbo.isPresent()) {
+                            IbGatewayNativeClient.NativeMarketQuote q = bbo.get();
                             bid = q.bid() != null ? q.bid().doubleValue() : 0;
                             ask = q.ask() != null ? q.ask().doubleValue() : 0;
                         }
-                        // Fallback: try streaming price (which may have bid/ask cached)
+                        // 2) Dedicated quote subscription, if one exists (e.g. FX).
                         if (bid <= 0 || ask <= 0) {
-                            var priceOpt = nc.latestStreamingPrice(info.contract());
-                            if (priceOpt.isPresent()) {
-                                // No bid/ask from price subscription — use price as mid estimate
-                                double mid = priceOpt.get().doubleValue();
-                                if (bid <= 0) bid = mid - info.instrument().getTickSize().doubleValue();
-                                if (ask <= 0) ask = mid + info.instrument().getTickSize().doubleValue();
+                            var quote = nc.latestStreamingQuote(info.contract());
+                            if (quote.isPresent()) {
+                                IbGatewayNativeClient.NativeMarketQuote q = quote.get();
+                                if (bid <= 0) bid = q.bid() != null ? q.bid().doubleValue() : 0;
+                                if (ask <= 0) ask = q.ask() != null ? q.ask().doubleValue() : 0;
                             }
                         }
+                        // 3) else bid=ask=0 → classifyTrade returns UNCLASSIFIED → tick-rule fallback.
                     }
 
                     TickByTickAggregator.TickClassification classification =

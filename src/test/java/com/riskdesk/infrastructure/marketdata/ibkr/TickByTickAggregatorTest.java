@@ -213,4 +213,73 @@ class TickByTickAggregatorTest {
         // Trend on identical delta should be FLAT (no change vs previous)
         assertEquals("FLAT", s2.deltaTrend());
     }
+
+    // ── L2: tick-rule provenance stamping ───────────────────────────────────
+
+    @Test
+    void backCompatOnTickDefaultsToQuoteClassifiedRealTicks() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(100.0, 10, BUY, now);            // 4-arg overload → tickRule=false
+        assertEquals(TickAggregation.SOURCE_REAL_TICKS, agg.snapshot().source());
+    }
+
+    @Test
+    void allTickRuleVolumeStampsTickRuleSource() {
+        var agg = new TickByTickAggregator(Instrument.MNQ); // default min-quote-fraction 0.5
+        var now = Instant.now();
+        agg.onTick(100.0, 10, BUY, true, now);
+        agg.onTick(101.0, 10, BUY, true, now.plusSeconds(1));
+        var s = agg.snapshot();
+        assertEquals(TickAggregation.SOURCE_REAL_TICKS_TICKRULE, s.source());
+        assertEquals(20, s.buyVolume(), "volume is still real even when tick-rule classified");
+    }
+
+    @Test
+    void majorityQuoteVolumeStampsRealTicks() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(100.0, 60, BUY, false, now);                 // quote-classified
+        agg.onTick(101.0, 40, SELL, true, now.plusSeconds(1));  // tick-rule
+        // quote fraction = 60/100 = 0.6 ≥ 0.5 → REAL_TICKS
+        assertEquals(TickAggregation.SOURCE_REAL_TICKS, agg.snapshot().source());
+    }
+
+    @Test
+    void minorityQuoteVolumeStampsTickRule() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(100.0, 40, BUY, false, now);                 // quote-classified
+        agg.onTick(101.0, 60, SELL, true, now.plusSeconds(1));  // tick-rule
+        // quote fraction = 40/100 = 0.4 < 0.5 → REAL_TICKS_TICKRULE
+        assertEquals(TickAggregation.SOURCE_REAL_TICKS_TICKRULE, agg.snapshot().source());
+    }
+
+    @Test
+    void quoteFractionAtThresholdStaysRealTicks() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(100.0, 50, BUY, false, now);                 // quote-classified
+        agg.onTick(101.0, 50, SELL, true, now.plusSeconds(1));  // tick-rule
+        // quote fraction = 0.5 == threshold → REAL_TICKS (≥ is inclusive)
+        assertEquals(TickAggregation.SOURCE_REAL_TICKS, agg.snapshot().source());
+    }
+
+    @Test
+    void snapshotReadOnly_doesNotMutateTrendState() {
+        // snapshotReadOnly() is called off the scheduler thread (status endpoint); it must NOT
+        // touch previousCumulativeDelta or it would race + corrupt the scheduler's deltaTrend.
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = Instant.now();
+        agg.onTick(27000.0, 100, BUY, now.minusSeconds(2));
+        agg.onTick(27001.0, 50, SELL, now.minusSeconds(1));
+
+        var s1 = agg.snapshot();          // establishes trend baseline
+        agg.snapshotReadOnly();           // must be a no-op for trend state
+        agg.snapshotReadOnly();
+        var s2 = agg.snapshot();
+
+        assertEquals(s1.delta(), s2.delta(), "delta unchanged when no new ticks");
+        assertEquals("FLAT", s2.deltaTrend(), "read-only snapshots must not shift the trend baseline");
+    }
 }

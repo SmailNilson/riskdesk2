@@ -191,7 +191,7 @@ public final class GateEvaluator {
 
     static GateResult evaluateG3(Double delta, List<Double> deltaHistory) {
         if (delta == null) {
-            return GateResult.fail("Δ=None");
+            return GateResult.abstain("Δ=ABSTAIN (feed down)");
         }
         boolean ok = delta < G3_DELTA_THRESHOLD;
         String trendStr = formatDeltaTrend(deltaHistory);
@@ -201,7 +201,7 @@ public final class GateEvaluator {
 
     static GateResult evaluateG4(Double buyPct) {
         if (buyPct == null) {
-            return GateResult.fail("buy%=None");
+            return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
         boolean ok = buyPct < G4_BUY_PCT_LIMIT;
         return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));
@@ -269,7 +269,7 @@ public final class GateEvaluator {
     /** L3 — Δ &gt; +100 with optional ascending-trend bonus. */
     static GateResult evaluateL3(Double delta, List<Double> deltaHistory) {
         if (delta == null) {
-            return GateResult.fail("Δ=None");
+            return GateResult.abstain("Δ=ABSTAIN (feed down)");
         }
         boolean ok = delta > L3_DELTA_THRESHOLD;
         String trendStr = formatDeltaTrend(deltaHistory);
@@ -280,7 +280,7 @@ public final class GateEvaluator {
     /** L4 — buy% &gt; 52, mirror of G4. */
     static GateResult evaluateL4(Double buyPct) {
         if (buyPct == null) {
-            return GateResult.fail("buy%=None");
+            return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
         boolean ok = buyPct > L4_BUY_PCT_LIMIT;
         return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));

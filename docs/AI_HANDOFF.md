@@ -2,6 +2,47 @@
 
 Last updated: 2026-06-05
 
+## Order-flow "delta" staleness — robust layered fix (L0–L5) (2026-06-05)
+
+**Problem.** The order-flow delta intermittently froze / showed `STALE` ("delta disparue des fois").
+Root cause was **classification starvation**, NOT IBKR request overload: futures never open a streaming
+**QUOTE** subscription (only `ensureStreamingPriceSubscription`), so `latestStreamingQuote()` is always
+empty and ticks were classified against a freshness-unguarded synthesized mid. `StreamingPriceSubscription`
+nulls bid/ask after 30s (`SESSION_GAP_SECONDS`), so in a quiet market `classifyTrade(0,0)` returned
+`UNCLASSIFIED` and `TickByTickAggregator.onTick` **dropped the tick** — `totalTicksReceived` climbed while
+`buyVol+sellVol` stayed 0 and `lastTickError` was null (failed invisibly). The PR-356 publish gate then
+suppressed the emit, the frontend froze the last value, and the Quant 7-gates hard-failed G3/G4/L3/L4 to
+null (sim-exec silently degraded).
+
+**Fix — 6 layers, all additive + flag/config-gated, reversible:**
+- **L0** Cut tick-by-tick + depth to `MNQ,MCL` (`riskdesk.order-flow.{tick-by-tick,depth}.instruments`);
+  `MGC,E6` are `tick-by-tick.degraded-instruments` → reported `DEGRADED_NOT_SUBSCRIBED`. Pressure
+  reduction, not a cap fix — confirm via `/api/order-flow/status`.
+- **L1** `IbGatewayNativeClient.latestStreamingBbo(contract, maxStaleness)` exposes the real BBO already
+  captured by the price subscription (zero new IBKR lines) with a last-known-good cache
+  (`bbo-max-staleness-seconds=90`, larger than the 30s nulling). `TickByTickClient` resolves bid/ask as
+  BBO → quote → `0` (the synthesized-mid mis-anchor is gone).
+- **L2** Tick-rule fallback: when Lee-Ready is UNCLASSIFIED, classify by trade-to-trade direction
+  (uptick=BUY/downtick=SELL) in `IbkrTickDataAdapter.classifyByTickRule`; such windows are stamped
+  `TickAggregation.SOURCE_REAL_TICKS_TICKRULE` (when quote-classified fraction < `real-ticks-min-quote-fraction=0.5`).
+  Strict consumers treat it as CLV-grade (0.5): `TriggerContextBuilder` maps it to `CLV_ESTIMATED`,
+  `AgentContext.hasRealTicks()` stays exact-`REAL_TICKS`. Gated `tick-rule-fallback-enabled=true`.
+- **L3** `OrderFlowOrchestrator.checkDeltaFreshness` (15s) keys on **classified-tick yield**
+  (`IbkrTickDataAdapter.lastClassifiedAt`, a new `TickDataPort` default method), closing the 60–300s dead
+  zone. Single owner of resubscription: `TickByTickClient.allowResubscribe` is a shared per-instrument
+  rate cap (`max-resubscribes-per-minute=2`) consulted by all three loops; the internal 60s watchdog is
+  alarm-only unless `internal-watchdog-resubscribes=true`.
+- **L4** `publishOrderFlowMetrics` emits a server-authoritative **heartbeat** on quiet/empty/dead windows:
+  `serverStale`, `feedHealth` (REAL_TICKS / REAL_TICKS_TICKRULE / STARVED / DEGRADED_NOT_SUBSCRIBED), and
+  `dataTimestamp = lastGenuineWindowEnd` (never `now`, never a fabricated delta). Frontend prefers
+  `serverStale` over the 120s client age.
+- **L5** `GateResult.abstain(...)` (new 3rd record component, backward-compatible 2-arg ctor); G3/G4/L3/L4
+  abstain (not directional-fail) when the delta feed is down; `QuantSnapshot.deltaAvailable()` surfaces it.
+
+Validation: `mvn test` (2131 green, incl. `HexagonalArchitectureTest`), frontend `lint` + `build`.
+Fast rollback = config: restore instrument lists + `tick-rule-fallback-enabled=false` +
+`freshness.enabled=false` + `internal-watchdog-resubscribes=true`.
+
 ## 1-minute candles wired (backtests + order-flow) + tick-by-tick failure now diagnosable (2026-06-05)
 
 **Problem.** Backtests were silently empty: `WtxRsiBacktestService` loads only `"1m"` from PostgreSQL

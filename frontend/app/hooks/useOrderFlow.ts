@@ -20,6 +20,11 @@ export interface OrderFlowMetrics {
   source: string;
   // ISO timestamp of the last real tick in the window — drives the STALE badge.
   dataTimestamp?: string;
+  // Server-authoritative staleness flag (L4). When present the client prefers it over the
+  // age-based heuristic, so a frozen feed flags immediately without masking.
+  serverStale?: boolean;
+  // Feed health: REAL_TICKS | REAL_TICKS_TICKRULE | STARVED | DEGRADED_NOT_SUBSCRIBED.
+  feedHealth?: string;
 }
 
 export interface DepthMetrics {

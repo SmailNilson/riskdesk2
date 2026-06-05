@@ -196,6 +196,33 @@ Do not:
 - create separate mentor reviews for alerts that fire simultaneously for the same trading signal
 - move transition detection logic out of the domain layer
 
+### Order-Flow Delta Provenance Rule
+
+Tick classification is **provenance-tagged**. `TickAggregation.source` is one of:
+
+- `REAL_TICKS` — quote-classified (Lee-Ready) against a real BBO; full confidence (1.0).
+- `REAL_TICKS_TICKRULE` — real trade volume, but ≥ `(1 − real-ticks-min-quote-fraction)` of the
+  window was classified by the **trade-to-trade tick rule** (uptick=BUY/downtick=SELL) because no
+  fresh BBO/quote was available. The volume is real; the *direction* is less reliable, so strict
+  consumers MUST treat it as `CLV_ESTIMATED`-grade (0.5) — `TriggerContextBuilder` maps it down and
+  `AgentContext.hasRealTicks()` matches `REAL_TICKS` **exactly**.
+- `CLV_ESTIMATED` — estimated from candle close-location value (no real ticks).
+
+Rules for agents:
+
+- Do **not** promote `REAL_TICKS_TICKRULE` to full `REAL_TICKS` confidence anywhere downstream.
+- Keep the quote-fraction threshold (`real-ticks-min-quote-fraction`) the single knob that decides
+  the stamp — don't add per-consumer reclassification.
+- The tick rule lives in `IbkrTickDataAdapter.classifyByTickRule` (infra); the Lee-Ready
+  `classifyTrade` stays unchanged. Never drop a sized, positive-price tick as UNCLASSIFIED when a
+  tick-rule direction is available and `tick-rule-fallback-enabled` is on.
+- Staleness is **server-authoritative**: `/topic/order-flow` carries `serverStale` + `feedHealth`;
+  a quiet/dead window emits a heartbeat whose `dataTimestamp` is the last genuine window end, never
+  `now`, and never a fabricated delta.
+- Resubscription has a **single owner** (the orchestrator delta-freshness watchdog) gated by a
+  shared per-instrument rate cap (`TickByTickClient.allowResubscribe`). Don't add a third loop that
+  cancels/re-subscribes without consulting that cap.
+
 ### Perfect Setup Confluence Rule
 
 The Perfect Setup detector fuses individual order-flow signals into one ARMED

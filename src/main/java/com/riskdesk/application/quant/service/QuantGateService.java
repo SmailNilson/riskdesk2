@@ -6,6 +6,7 @@ import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.application.quant.automation.QuantAutoArmService;
 import com.riskdesk.domain.quant.engine.GateEvaluator;
+import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.quant.model.DeltaSnapshot;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
 import com.riskdesk.domain.quant.model.MarketSnapshot;
@@ -429,12 +430,20 @@ public class QuantGateService {
             ? (int) Math.max(0, Duration.between(cyc.startedAt(), now).toMinutes())
             : null;
 
+        // The high-stakes 7-gate auto-arm trusts only full-confidence, quote-classified delta. A
+        // REAL_TICKS_TICKRULE window carries real volume but a less-reliable (tick-rule) direction —
+        // the strategy path weights it at 0.5 (CLV-grade). To stay consistent (and honor the
+        // SOURCE_REAL_TICKS_TICKRULE "never as REAL" contract), we drop it here so the delta gates
+        // (G3/G4/L3/L4) ABSTAIN rather than scoring a degraded direction at full weight.
+        Optional<DeltaSnapshot> trustedDelta = delta
+            .filter(d -> TickAggregation.SOURCE_REAL_TICKS.equals(d.source()));
+
         return new MarketSnapshot.Builder()
             .now(now)
             .price(price.map(p -> (Double) p.price()).orElse(null))
             .priceSource(price.map(LivePriceSnapshot::source).orElse(""))
-            .delta(delta.map(d -> (Double) d.delta()).orElse(null))
-            .buyPct(delta.map(DeltaSnapshot::buyRatioPct).orElse(null))
+            .delta(trustedDelta.map(d -> (Double) d.delta()).orElse(null))
+            .buyPct(trustedDelta.map(DeltaSnapshot::buyRatioPct).orElse(null))
             .absFresh(absFresh)
             .absBull8(bull8)
             .absBear8(bear8)

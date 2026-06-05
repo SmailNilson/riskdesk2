@@ -142,6 +142,21 @@ public record QuantSnapshot(
             sr.blocks(), sr.warnings(), sr.scoreModifier(), sr.shortBlocked());
     }
 
+    /**
+     * {@code false} when a delta gate (G3/G4/L3/L4) abstained because the tick/delta feed was
+     * unavailable — so a low score reflects a feed outage, not a directional read. Lets narration,
+     * the advisor and {@code /api/quant} status distinguish "feed down → cannot confirm" from a
+     * genuine miss. Derived from the gate verdicts (no new persisted state).
+     */
+    public boolean deltaAvailable() {
+        GateResult g3 = gates.get(Gate.G3_DELTA_NEG);
+        GateResult g4 = gates.get(Gate.G4_BUY_PCT_LOW);
+        GateResult l3 = gates.get(Gate.L3_DELTA_POS);
+        GateResult l4 = gates.get(Gate.L4_BUY_PCT_HIGH);
+        return !((g3 != null && g3.abstain()) || (g4 != null && g4.abstain())
+              || (l3 != null && l3.abstain()) || (l4 != null && l4.abstain()));
+    }
+
     public boolean isShortSetup7_7() {
         return score >= FULL_SETUP_SCORE;
     }

@@ -14,9 +14,16 @@ public class TickByTickAggregator {
 
     private static final long DEFAULT_WINDOW_SECONDS = 300; // 5 minutes
     private static final double DELTA_TREND_THRESHOLD = 0.05; // 5% change to be non-flat
+    /** Default min quote-classified fraction for a window to keep the REAL_TICKS source. */
+    private static final double DEFAULT_MIN_QUOTE_FRACTION = 0.5;
 
     private final Instrument instrument;
     private final long windowSeconds;
+    /**
+     * Minimum fraction of quote-classified (Lee-Ready) volume for a window to be stamped
+     * {@code REAL_TICKS}; below it the window is {@code REAL_TICKS_TICKRULE} (see L2).
+     */
+    private final double minQuoteFraction;
     private final ConcurrentLinkedDeque<ClassifiedTick> ticks = new ConcurrentLinkedDeque<>();
 
     // For divergence detection: track price direction over the window
@@ -25,22 +32,41 @@ public class TickByTickAggregator {
     private volatile long previousCumulativeDelta = 0;
 
     public TickByTickAggregator(Instrument instrument) {
-        this(instrument, DEFAULT_WINDOW_SECONDS);
+        this(instrument, DEFAULT_WINDOW_SECONDS, DEFAULT_MIN_QUOTE_FRACTION);
     }
 
     public TickByTickAggregator(Instrument instrument, long windowSeconds) {
+        this(instrument, windowSeconds, DEFAULT_MIN_QUOTE_FRACTION);
+    }
+
+    /** Custom min-quote-fraction (default window). */
+    public TickByTickAggregator(Instrument instrument, double minQuoteFraction) {
+        this(instrument, DEFAULT_WINDOW_SECONDS, minQuoteFraction);
+    }
+
+    public TickByTickAggregator(Instrument instrument, long windowSeconds, double minQuoteFraction) {
         this.instrument = instrument;
         this.windowSeconds = windowSeconds;
+        this.minQuoteFraction = minQuoteFraction;
     }
 
     /**
-     * Record a classified trade tick. Called from the IBKR EReader thread.
+     * Record a quote-classified (Lee-Ready) trade tick. Called from the IBKR EReader thread.
      */
     public void onTick(double price, long size, TickClassification classification, Instant timestamp) {
+        onTick(price, size, classification, false, timestamp);
+    }
+
+    /**
+     * Record a classified trade tick. {@code tickRule=true} marks a trade classified by the
+     * trade-to-trade tick rule (no fresh BBO/quote) rather than Lee-Ready — used to stamp the
+     * window's source as {@code REAL_TICKS_TICKRULE} when tick-rule volume dominates (L2).
+     */
+    public void onTick(double price, long size, TickClassification classification, boolean tickRule, Instant timestamp) {
         if (classification == TickClassification.UNCLASSIFIED) {
             return; // Skip unclassified ticks
         }
-        ClassifiedTick tick = new ClassifiedTick(price, size, classification, timestamp);
+        ClassifiedTick tick = new ClassifiedTick(price, size, classification, tickRule, timestamp);
         ticks.addLast(tick);
 
         lastPrice = price;
@@ -64,6 +90,18 @@ public class TickByTickAggregator {
     }
 
     /**
+     * Full-window snapshot that does NOT mutate {@code previousCumulativeDelta} — safe to call from
+     * a non-scheduler thread (e.g. the {@code /api/order-flow/status} request thread) without racing
+     * the 5s scheduler's deltaTrend computation. Unlike {@link #snapshot()}, the trend reported here
+     * is informational only.
+     */
+    public TickAggregation snapshotReadOnly() {
+        Instant now = Instant.now();
+        evictExpired(now);
+        return aggregateSince(null, now, false);
+    }
+
+    /**
      * Get an aggregation snapshot over only the last {@code windowSeconds} of ticks.
      * Used for short-window detectors (e.g. absorption needs a tight window to detect
      * transient events; the default 5 min snapshot dilutes them).
@@ -84,6 +122,7 @@ public class TickByTickAggregator {
     private TickAggregation aggregateSince(Instant cutoff, Instant now, boolean updateTrendState) {
         long buyVol = 0;
         long sellVol = 0;
+        long quoteClassifiedVol = 0; // volume classified by Lee-Ready (not the tick rule)
         double firstPrice = Double.NaN;
         double latestPrice = Double.NaN;
         double highPrice = Double.NaN;
@@ -109,6 +148,9 @@ public class TickByTickAggregator {
             } else if (tick.classification() == TickClassification.SELL) {
                 sellVol += tick.size();
             }
+            if (!tick.tickRule()) {
+                quoteClassifiedVol += tick.size();
+            }
         }
 
         if (windowStart == null) {
@@ -124,6 +166,14 @@ public class TickByTickAggregator {
 
         double totalVol = buyVol + sellVol;
         double buyRatio = totalVol > 0 ? (buyVol * 100.0 / totalVol) : 50.0;
+
+        // Source provenance: REAL_TICKS when quote-classified (Lee-Ready) volume dominates,
+        // else REAL_TICKS_TICKRULE (the volume is real but direction was largely tick-rule
+        // inferred because no fresh BBO/quote was available — reduced-confidence for consumers).
+        double quoteFraction = totalVol > 0 ? (quoteClassifiedVol / totalVol) : 1.0;
+        String source = quoteFraction >= minQuoteFraction
+            ? TickAggregation.SOURCE_REAL_TICKS
+            : TickAggregation.SOURCE_REAL_TICKS_TICKRULE;
 
         String deltaTrend;
         if (previousCumulativeDelta == 0 || Math.abs(delta - previousCumulativeDelta) < Math.abs(previousCumulativeDelta * DELTA_TREND_THRESHOLD)) {
@@ -157,7 +207,7 @@ public class TickByTickAggregator {
         return new TickAggregation(instrument, buyVol, sellVol, delta, cumulativeDelta,
             Math.round(buyRatio * 10.0) / 10.0,
             deltaTrend, divergenceDetected, divergenceType,
-            windowStart, windowEnd, TickAggregation.SOURCE_REAL_TICKS,
+            windowStart, windowEnd, source,
             highPrice, lowPrice,
             firstPrice, latestPrice);
     }
@@ -192,6 +242,7 @@ public class TickByTickAggregator {
         UNCLASSIFIED
     }
 
-    /** A classified trade tick. */
-    record ClassifiedTick(double price, long size, TickClassification classification, Instant timestamp) {}
+    /** A classified trade tick. {@code tickRule} = classified by the tick rule, not Lee-Ready. */
+    record ClassifiedTick(double price, long size, TickClassification classification,
+                          boolean tickRule, Instant timestamp) {}
 }

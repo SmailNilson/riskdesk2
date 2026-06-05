@@ -81,13 +81,15 @@ function ageSeconds(iso?: string): number | null {
   return Math.max(0, (Date.now() - then) / 1000);
 }
 
-function StaleBadge({ ageSec }: { ageSec: number }) {
+function StaleBadge({ ageSec }: { ageSec: number | null }) {
+  // age unknown (never any data yet) or 0 → don't render a contradictory "0s"; just flag STALE.
+  const hasAge = ageSec != null && ageSec > 0;
   return (
     <span
       className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-900/60 text-red-300 animate-pulse"
-      title={`No fresh data for ${Math.round(ageSec)}s — feed may be frozen`}
+      title={hasAge ? `No fresh data for ${Math.round(ageSec)}s — feed may be frozen` : 'No fresh data — feed may be frozen'}
     >
-      STALE {Math.round(ageSec)}s
+      {hasAge ? `STALE ${Math.round(ageSec)}s` : 'STALE'}
     </span>
   );
 }
@@ -100,9 +102,35 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
   const totalVolume = metrics.buyVolume + metrics.sellVolume;
   const buyPct = totalVolume > 0 ? (metrics.buyVolume / totalVolume) * 100 : 50;
   const sellPct = 100 - buyPct;
-  const isRealTicks = metrics.source === 'REAL_TICKS';
+  // Feed health (server-provided, L4) takes precedence over the raw source string.
+  const health = metrics.feedHealth ?? metrics.source;
+  const isReal = health === 'REAL_TICKS';
+  const isTickRule = health === 'REAL_TICKS_TICKRULE';
+  const isStarved = health === 'STARVED';
+  const isOff = health === 'DEGRADED_NOT_SUBSCRIBED';
+  const sourceLabel = isReal ? 'REAL' : isTickRule ? 'TICK' : isStarved ? 'DEAD' : isOff ? 'OFF' : 'CLV';
+  const sourceClass = isReal
+    ? 'bg-emerald-900/60 text-emerald-400'
+    : isTickRule
+      ? 'bg-amber-900/60 text-amber-400'
+      : isStarved
+        ? 'bg-red-900/60 text-red-300'
+        : isOff
+          ? 'bg-zinc-700/60 text-zinc-400'
+          : 'bg-yellow-900/60 text-yellow-400';
+  const sourceTitle = isReal
+    ? 'Quote-classified real ticks (Lee-Ready)'
+    : isTickRule
+      ? 'Real ticks, tick-rule classified (no fresh quote) — reduced confidence'
+      : isStarved
+        ? 'Subscribed but no ticks flowing (feed starved/dead)'
+        : isOff
+          ? 'Not subscribed by design (pressure reduction)'
+          : 'Estimated from candle close-location value';
   const age = ageSeconds(metrics.dataTimestamp);
-  const stale = age != null && age > DELTA_STALE_SEC;
+  const ageStale = age != null && age > DELTA_STALE_SEC;
+  // Prefer the server's authoritative staleness flag; fall back to client age (old backend).
+  const stale = metrics.serverStale ?? ageStale;
 
   return (
     <div className="flex flex-col gap-1 p-2 rounded bg-zinc-800/60">
@@ -112,11 +140,9 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
           <span className={metrics.delta >= 0 ? 'text-emerald-400' : 'text-red-400'}>
             {metrics.delta >= 0 ? '+' : ''}{metrics.delta.toLocaleString()}
           </span>
-          {stale && <StaleBadge ageSec={age} />}
-          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-            isRealTicks ? 'bg-emerald-900/60 text-emerald-400' : 'bg-yellow-900/60 text-yellow-400'
-          }`}>
-            {isRealTicks ? 'REAL' : 'CLV'}
+          {stale && !isOff && <StaleBadge ageSec={age} />}
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${sourceClass}`} title={sourceTitle}>
+            {sourceLabel}
           </span>
         </div>
       </div>
