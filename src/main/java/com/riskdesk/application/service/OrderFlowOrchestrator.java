@@ -1080,6 +1080,13 @@ public class OrderFlowOrchestrator {
         status.put("depthSubscribedCount", subscribedDepth.size());
         status.put("tickLogBufferSize", tickLogService.getBufferSize());
         status.put("totalTicksLogged", tickLogService.getTotalTicksLogged());
+        // Raw count straight off the tick socket — distinguishes "ticks arrive but aren't logged"
+        // from "IBKR sends nothing". A 0 here with tickByTickSubscribed=true points at entitlement.
+        status.put("totalTicksReceived", tickByTickClient.getTotalTicksReceived());
+        status.put("tickConnectionUp", tickByTickClient.isConnected());
+        if (tickByTickClient.lastSystemError() != null) {
+            status.put("tickSystemError", tickByTickClient.lastSystemError());
+        }
 
         Map<String, Map<String, Object>> instrumentStatus = new LinkedHashMap<>();
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
@@ -1093,6 +1100,11 @@ public class OrderFlowOrchestrator {
             perInst.put("source", source);
             perInst.put("tickSubscribed", subscribedTickByTick.contains(instrument));
             perInst.put("depthSubscribed", subscribedDepth.contains(instrument));
+            // Why a subscribed instrument is still on CLV: the last IBKR error for its tick stream.
+            String tickError = tickByTickClient.lastError(instrument);
+            if (tickError != null) {
+                perInst.put("lastTickError", tickError);
+            }
             instrumentStatus.put(instrument.name(), perInst);
         }
         status.put("instruments", instrumentStatus);

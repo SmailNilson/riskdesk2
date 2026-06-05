@@ -31,7 +31,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     private static final Logger log = LoggerFactory.getLogger(IbGatewayHistoricalProvider.class);
     private static final DateTimeFormatter IB_DATE = DateTimeFormatter.BASIC_ISO_DATE;
     private static final DateTimeFormatter IB_DATE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd HH:mm:ss");
-    private static final int MAX_BACKFILL_CHUNKS = 32;
+    // 1-min deep backfill walks day-by-day, so a 30-day target needs ~30 chunks; keep headroom.
+    private static final int MAX_BACKFILL_CHUNKS = 45;
     /** Max expired contracts to walk backward through for deep backfill. */
     private static final int MAX_CONTRACT_WALK = 24;
     /** Pause between IBKR historical requests to respect pacing limits (~60 req/10 min). */
@@ -116,7 +117,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             return false;
         }
         return switch (timeframe) {
-            case "5m", "10m", "1h", "4h", "1d" -> true;
+            case "1m", "5m", "10m", "1h", "4h", "1d" -> true;
             default -> false;
         };
     }
@@ -137,8 +138,11 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         String currentMonth = normalizeMonth(contract.lastTradeDateOrContractMonth());
         int contractsUsed = 1;
 
-        // Phase 1: fetch from current (front-month) contract — no throttle (few chunks)
-        fetchChunksFromContract(instrument, timeframe, targetCount, contract, currentMonth, merged, false);
+        // Phase 1: fetch from current (front-month) contract. Coarse timeframes need only a
+        // few chunks (no throttle), but 1-min walks day-by-day over many requests even within
+        // the front month, so it must throttle to stay under IBKR pacing limits.
+        boolean frontMonthThrottle = "1m".equals(timeframe);
+        fetchChunksFromContract(instrument, timeframe, targetCount, contract, currentMonth, merged, frontMonthThrottle);
 
         // Phase 2: walk backward through expired contracts — throttled (many requests)
         int maxWalk = maxContractWalk(instrument, timeframe);
@@ -280,6 +284,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
      */
     private int maxContractWalk(Instrument instrument, String timeframe) {
         int baseDays = switch (timeframe) {
+            case "1m"  -> 30;
             case "5m"  -> 30;
             case "10m" -> 90;
             case "30m" -> 180;
@@ -378,6 +383,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
     private HistoricalQuery queryFor(String timeframe, int count) {
         return switch (timeframe) {
+            case "1m" -> daysQuery(count, 1, BarSize._1_min);
             case "5m" -> daysQuery(count, 5, BarSize._5_mins);
             case "10m" -> daysQuery(count, 10, BarSize._10_mins);
             case "1h" -> daysQuery(count, 60, BarSize._1_hour);
@@ -389,13 +395,16 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
     private boolean supportsDeepBackfill(String timeframe) {
         return switch (timeframe) {
-            case "5m", "10m", "30m", "1h", "4h" -> true;
+            case "1m", "5m", "10m", "30m", "1h", "4h" -> true;
             default -> false;
         };
     }
 
     private HistoricalQuery chunkQueryFor(String timeframe) {
         return switch (timeframe) {
+            // 1-min: 1-DAY chunks keep each request well within IBKR's historical-data
+            // duration cap for 1-min bars; the backward walk pages day-by-day with pacing.
+            case "1m"  -> new HistoricalQuery(1, DurationUnit.DAY, BarSize._1_min);
             case "5m"  -> new HistoricalQuery(5, DurationUnit.DAY, BarSize._5_mins);
             case "10m" -> new HistoricalQuery(10, DurationUnit.DAY, BarSize._10_mins);
             case "30m" -> new HistoricalQuery(20, DurationUnit.DAY, BarSize._30_mins);
