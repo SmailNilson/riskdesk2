@@ -9,7 +9,7 @@ import { useQuantStream } from '@/app/hooks/useQuantStream';
  * browser does not need to fetch an external sound file.
  *
  * Reads from the shared {@code QuantStreamProvider} — one STOMP client is
- * shared across this notification and {@code QuantGatePanel} (PR #297 P2 fix).
+ * shared across all quant-stream consumers (PR #297 P2 fix).
  */
 export default function QuantSetupNotification() {
   const { latestSignal, ack } = useQuantStream();

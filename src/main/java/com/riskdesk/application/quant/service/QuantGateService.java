@@ -5,7 +5,6 @@ import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.application.quant.automation.QuantAutoArmService;
-import com.riskdesk.application.quant.setup.SetupOrchestrationService;
 import com.riskdesk.domain.quant.engine.GateEvaluator;
 import com.riskdesk.domain.quant.model.DeltaSnapshot;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
@@ -73,7 +72,6 @@ public class QuantGateService {
     private final StrategyPort strategyPort;
     private final StructuralFilterEvaluator structuralEvaluator;
     private final org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider;
-    private final org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider;
     private final org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
@@ -133,7 +131,7 @@ public class QuantGateService {
         this(absorptionPort, distributionPort, cyclePort, deltaPort, livePricePort,
             statePort, notificationPort, historyStore, narrationService, sessionMemoryService,
             advisorService, evaluator, indicatorsPort, strategyPort, structuralEvaluator,
-            new EmptyObjectProvider<>(), new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
+            new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -153,7 +151,6 @@ public class QuantGateService {
                             StrategyPort strategyPort,
                             StructuralFilterEvaluator structuralEvaluator,
                             org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider,
-                            org.springframework.beans.factory.ObjectProvider<SetupOrchestrationService> setupOrchestrationProvider,
                             org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
@@ -171,7 +168,6 @@ public class QuantGateService {
         this.strategyPort = strategyPort;
         this.structuralEvaluator = structuralEvaluator;
         this.autoArmServiceProvider = autoArmServiceProvider;
-        this.setupOrchestrationProvider = setupOrchestrationProvider;
         this.simulationServiceProvider = simulationServiceProvider;
     }
 
@@ -312,18 +308,6 @@ public class QuantGateService {
             }
         } catch (RuntimeException e) {
             log.warn("auto-arm onSnapshot failed instrument={}: {}", instrument, e.toString());
-        }
-
-        // Setup orchestration pipeline (scalp/day-trading fusion — PR follows analysis doc).
-        // ObjectProvider pattern: no-op when SetupOrchestrationService bean is absent or
-        // when riskdesk.setup.enabled=false. Failures never break the scan return contract.
-        try {
-            SetupOrchestrationService setupSvc = setupOrchestrationProvider.getIfAvailable();
-            if (setupSvc != null) {
-                setupSvc.onSnapshot(instrument, result);
-            }
-        } catch (RuntimeException e) {
-            log.warn("setup-orchestration onSnapshot failed instrument={}: {}", instrument, e.toString());
         }
 
         logScan(instrument, result);
