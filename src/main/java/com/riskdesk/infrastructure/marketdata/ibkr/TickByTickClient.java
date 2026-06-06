@@ -209,6 +209,10 @@ public class TickByTickClient {
         activeSubscriptions.put(reqId, new SubscriptionInfo(instrument, contract));
         lastTickTime.put(reqId, System.currentTimeMillis()); // initial timestamp
 
+        // Fresh subscription (resubscribe / contract rollover): clear the tick-rule reference price
+        // so the first trade on this (possibly new) contract isn't classified against a stale price.
+        tickDataAdapter.resetTickRuleState(instrument);
+
         client.reqTickByTickData(reqId, contract, "AllLast", 0, false);
         log.info("TickByTickClient: SUBSCRIBE reqId={} {} conId={} lastTradeDate={}",
                  reqId, instrument, contract.conid(), contract.lastTradeDateOrContractMonth());

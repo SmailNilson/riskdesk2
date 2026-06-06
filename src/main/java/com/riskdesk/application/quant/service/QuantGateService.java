@@ -56,6 +56,8 @@ public class QuantGateService {
     private static final Duration DIST_WINDOW = Duration.ofMinutes(10);
     private static final Duration CYC_WINDOW  = Duration.ofMinutes(10);
     private static final int      ABS_SCORE_8 = 8;
+    /** Max age of a delta window the gates will trust — older = treat as feed-down (abstain). */
+    private static final Duration DELTA_MAX_AGE = Duration.ofSeconds(60);
 
     private final AbsorptionPort absorptionPort;
     private final DistributionPort distributionPort;
@@ -430,13 +432,17 @@ public class QuantGateService {
             ? (int) Math.max(0, Duration.between(cyc.startedAt(), now).toMinutes())
             : null;
 
-        // The high-stakes 7-gate auto-arm trusts only full-confidence, quote-classified delta. A
-        // REAL_TICKS_TICKRULE window carries real volume but a less-reliable (tick-rule) direction —
-        // the strategy path weights it at 0.5 (CLV-grade). To stay consistent (and honor the
-        // SOURCE_REAL_TICKS_TICKRULE "never as REAL" contract), we drop it here so the delta gates
-        // (G3/G4/L3/L4) ABSTAIN rather than scoring a degraded direction at full weight.
+        // The high-stakes 7-gate auto-arm trusts only full-confidence, quote-classified delta that
+        // is also FRESH. (1) A REAL_TICKS_TICKRULE window carries real volume but a less-reliable
+        // (tick-rule) direction — the strategy path weights it at 0.5 (CLV-grade), so we drop it
+        // here. (2) A frozen feed keeps old quote-classified ticks lingering in the 5-min window, so
+        // the snapshot stays REAL_TICKS with a non-null delta even when no new tick has printed for
+        // minutes; without the freshness gate the gates would score a stale book and auto-arm could
+        // fire on a dead feed. Both cases make the delta gates (G3/G4/L3/L4) ABSTAIN instead.
         Optional<DeltaSnapshot> trustedDelta = delta
-            .filter(d -> TickAggregation.SOURCE_REAL_TICKS.equals(d.source()));
+            .filter(d -> TickAggregation.SOURCE_REAL_TICKS.equals(d.source()))
+            .filter(d -> d.windowEnd() == null
+                || !d.windowEnd().isBefore(now.minus(DELTA_MAX_AGE)));
 
         return new MarketSnapshot.Builder()
             .now(now)

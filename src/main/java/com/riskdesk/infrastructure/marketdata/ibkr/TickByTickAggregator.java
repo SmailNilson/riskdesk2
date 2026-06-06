@@ -90,15 +90,16 @@ public class TickByTickAggregator {
     }
 
     /**
-     * Full-window snapshot that does NOT mutate {@code previousCumulativeDelta} — safe to call from
-     * a non-scheduler thread (e.g. the {@code /api/order-flow/status} request thread) without racing
-     * the 5s scheduler's deltaTrend computation. Unlike {@link #snapshot()}, the trend reported here
-     * is informational only.
+     * Full-window snapshot that mutates NOTHING — safe to call from a non-scheduler thread (e.g. the
+     * {@code /api/order-flow/status} request thread) without racing the 5s scheduler. Unlike
+     * {@link #snapshot()} it neither updates {@code previousCumulativeDelta} nor calls
+     * {@code evictExpired} (which does a non-atomic peekFirst/pollFirst on the shared deque and could
+     * race the scheduler into dropping a still-fresh tick). Instead it filters out expired ticks via
+     * a cutoff, leaving the deque untouched. The trend reported here is informational only.
      */
     public TickAggregation snapshotReadOnly() {
         Instant now = Instant.now();
-        evictExpired(now);
-        return aggregateSince(null, now, false);
+        return aggregateSince(now.minusSeconds(windowSeconds), now, false);
     }
 
     /**

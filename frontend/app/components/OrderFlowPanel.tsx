@@ -108,13 +108,15 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
   const isTickRule = health === 'REAL_TICKS_TICKRULE';
   const isStarved = health === 'STARVED';
   const isOff = health === 'DEGRADED_NOT_SUBSCRIBED';
-  const sourceLabel = isReal ? 'REAL' : isTickRule ? 'TICK' : isStarved ? 'DEAD' : isOff ? 'OFF' : 'CLV';
+  // STARVED = no fresh ticks (could be a quiet market OR a dead feed). The pulsing STALE badge is
+  // the actual alarm; keep this chip calm ('IDLE', amber) so a quiet session isn't shown as 'DEAD'.
+  const sourceLabel = isReal ? 'REAL' : isTickRule ? 'TICK' : isStarved ? 'IDLE' : isOff ? 'OFF' : 'CLV';
   const sourceClass = isReal
     ? 'bg-emerald-900/60 text-emerald-400'
     : isTickRule
       ? 'bg-amber-900/60 text-amber-400'
       : isStarved
-        ? 'bg-red-900/60 text-red-300'
+        ? 'bg-amber-900/60 text-amber-400'
         : isOff
           ? 'bg-zinc-700/60 text-zinc-400'
           : 'bg-yellow-900/60 text-yellow-400';
@@ -123,7 +125,7 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
     : isTickRule
       ? 'Real ticks, tick-rule classified (no fresh quote) — reduced confidence'
       : isStarved
-        ? 'Subscribed but no ticks flowing (feed starved/dead)'
+        ? 'No fresh ticks — quiet market or dead feed (see the STALE badge)'
         : isOff
           ? 'Not subscribed by design (pressure reduction)'
           : 'Estimated from candle close-location value';

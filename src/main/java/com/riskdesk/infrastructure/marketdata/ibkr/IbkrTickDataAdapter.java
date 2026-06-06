@@ -95,6 +95,17 @@ public class IbkrTickDataAdapter implements TickDataPort {
     }
 
     /**
+     * Reset the trade-to-trade tick-rule reference state for an instrument. Called when a fresh
+     * tick subscription starts (resubscribe / contract rollover) so the first trade on the new
+     * contract is never tick-rule-classified against the EXPIRED contract's stale price — which
+     * would otherwise emit a spurious BUY/SELL reflecting the calendar spread, not the aggressor.
+     */
+    public void resetTickRuleState(Instrument instrument) {
+        lastTradePrice.remove(instrument);
+        lastTickRuleDir.remove(instrument);
+    }
+
+    /**
      * Called by the IBKR native client when a tick-by-tick trade is received.
      * This method is thread-safe and can be called from the EReader thread.
      *

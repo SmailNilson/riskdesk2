@@ -227,8 +227,7 @@ public class OrderFlowOrchestrator {
         nativeClient.setDepthNumRows(properties.getDepth().getNumRows());
         tickByTickClient.setDisconnectionCallback(() -> {
             log.warn("Order flow: tick-by-tick connection lost — clearing all subscriptions, will reconnect on next scheduled check");
-            subscribedTickByTick.clear();
-            tickSubscribedAt.clear();
+            forgetAllTickState();
         });
         List<String> degraded = properties.getTickByTick().getDegradedInstruments();
         log.info("Order flow: tick-by-tick instruments={} depth instruments={}; degraded (no tick line, delta panels blank)={}",
@@ -446,6 +445,12 @@ public class OrderFlowOrchestrator {
 
             if (hasRealFlow) {
                 TickAggregation a = agg.get();
+                // Even with volume still in the 5-min window, a feed can be frozen — flag stale by
+                // the last CLASSIFIED tick age, not just by "has flow", so a freeze isn't masked for
+                // up to 300s (the window length) just because old ticks linger. When stale, the feed
+                // health degrades to STARVED rather than showing a misleading green REAL chip next to
+                // the red STALE badge.
+                boolean stale = isDeltaStale(instrument, tickDataPort);
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("instrument", instrument.name());
                 payload.put("delta", a.delta());
@@ -456,12 +461,10 @@ public class OrderFlowOrchestrator {
                 payload.put("deltaTrend", a.deltaTrend());
                 payload.put("divergenceDetected", a.divergenceDetected());
                 payload.put("divergenceType", a.divergenceType());
-                payload.put("source", a.source());
-                payload.put("feedHealth", a.source());   // REAL_TICKS or REAL_TICKS_TICKRULE
-                // Even with volume still in the 5-min window, a feed can be frozen — flag stale by
-                // the last CLASSIFIED tick age, not just by "has flow", so a freeze isn't masked
-                // for up to 300s (the window length) just because old ticks linger.
-                payload.put("serverStale", isDeltaStale(instrument, tickDataPort));
+                String feedHealth = stale ? "STARVED" : a.source();
+                payload.put("source", feedHealth);
+                payload.put("feedHealth", feedHealth);
+                payload.put("serverStale", stale);
                 // windowEnd is the last real tick's timestamp, so it drives the frontend STALE
                 // badge. Distinct from "timestamp" below, which is publish time and always fresh.
                 payload.put("dataTimestamp", a.windowEnd() != null ? a.windowEnd().toString() : null);
@@ -469,11 +472,11 @@ public class OrderFlowOrchestrator {
 
                 messagingTemplate.convertAndSend("/topic/order-flow", payload);
                 lastGenuineFlow.put(instrument, a);
-            } else {
-                // Quiet / empty / dead window: emit an explicit server-authoritative heartbeat
-                // (serverStale=true + the last genuine window end, never `now`, never a fabricated
-                // delta) so the STALE badge appears promptly instead of the client silently aging
-                // out — and a stray single tick can no longer clear a frozen feed's badge (L4).
+            } else if (!isDegraded(instrument)) {
+                // Quiet / empty / dead window for a SUBSCRIBED instrument: emit a server-authoritative
+                // heartbeat (serverStale + last genuine window end, never `now`/fabricated) so the STALE
+                // badge appears promptly. Degraded-by-design instruments (MGC/E6) are skipped — they
+                // never change state, so a 5s OFF frame forever would be pure WS churn.
                 publishOrderFlowHeartbeat(instrument, tickDataPort);
             }
 
@@ -524,6 +527,7 @@ public class OrderFlowOrchestrator {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instrument", instrument.name());
 
+        String feedHealth = feedHealthFor(instrument, tickDataPort);
         TickAggregation last = lastGenuineFlow.get(instrument);
         if (last != null) {
             payload.put("delta", last.delta());
@@ -532,7 +536,6 @@ public class OrderFlowOrchestrator {
             payload.put("sellVolume", last.sellVolume());
             payload.put("buyRatioPct", last.buyRatioPct());
             payload.put("deltaTrend", last.deltaTrend());
-            payload.put("source", last.source());
         } else {
             payload.put("delta", 0L);
             payload.put("cumulativeDelta", 0L);
@@ -540,9 +543,11 @@ public class OrderFlowOrchestrator {
             payload.put("sellVolume", 0L);
             payload.put("buyRatioPct", 0.0);
             payload.put("deltaTrend", TickAggregation.TREND_FLAT);
-            payload.put("source", "UNAVAILABLE");
         }
-        String feedHealth = feedHealthFor(instrument, tickDataPort);
+        // source mirrors feedHealth (STARVED / DEGRADED_NOT_SUBSCRIBED here) — never the replayed
+        // genuine source, so a consumer keying on `source` can't read a stale window as full REAL,
+        // and the WS payload matches the REST /status `source` field for the same state.
+        payload.put("source", feedHealth);
         // A DEGRADED_NOT_SUBSCRIBED instrument (MGC/E6, off by design) is OFF, not "frozen" — don't
         // raise the alarming STALE badge for it; the OFF chip already conveys the state.
         boolean degraded = "DEGRADED_NOT_SUBSCRIBED".equals(feedHealth);
@@ -557,22 +562,30 @@ public class OrderFlowOrchestrator {
     }
 
     /**
-     * Single source of an instrument's feed-health label, shared by the WS heartbeat and
-     * {@code /api/order-flow/status} so the two surfaces never diverge: DEGRADED_NOT_SUBSCRIBED
-     * (off by design) → the live source when data flows (REAL_TICKS / REAL_TICKS_TICKRULE) →
-     * STARVED (subscribed but no ticks). Uses the non-mutating read so it is safe off the scheduler.
+     * Single source of an instrument's feed-health label, shared by the WS heartbeat,
+     * {@code /api/order-flow/status} and the live publish branch so the surfaces never diverge:
+     * DEGRADED_NOT_SUBSCRIBED (off by design) → the live source when fresh data flows
+     * (REAL_TICKS / REAL_TICKS_TICKRULE) → STARVED. A feed counts as STARVED the moment its last
+     * <b>classified</b> tick is stale — NOT just when the deque drains — so a frozen feed whose old
+     * ticks still linger in the 5-min window is never mislabelled REAL alongside a STALE badge.
+     * Uses the non-mutating read so it is safe off the scheduler.
      */
     private String feedHealthFor(Instrument instrument, TickDataPort tickDataPort) {
-        List<String> degraded = properties.getTickByTick().getDegradedInstruments();
-        if (degraded != null && degraded.contains(instrument.name())) {
+        if (isDegraded(instrument)) {
             return "DEGRADED_NOT_SUBSCRIBED";
         }
-        if (tickDataPort != null) {
-            Optional<String> src = tickDataPort.currentAggregationReadOnly(instrument)
-                .map(TickAggregation::source);
-            if (src.isPresent()) return src.get();
+        if (tickDataPort == null || isDeltaStale(instrument, tickDataPort)) {
+            return "STARVED";
         }
-        return "STARVED";
+        return tickDataPort.currentAggregationReadOnly(instrument)
+            .map(TickAggregation::source)
+            .orElse("STARVED");
+    }
+
+    /** Configured to NOT open a tick line (delta panels blank by design). */
+    private boolean isDegraded(Instrument instrument) {
+        List<String> degraded = properties.getTickByTick().getDegradedInstruments();
+        return degraded != null && degraded.contains(instrument.name());
     }
 
     /** True when the last classified tick is older than the configured delta-staleness threshold. */
@@ -581,6 +594,28 @@ public class OrderFlowOrchestrator {
         return tickDataPort.lastClassifiedAt(instrument)
             .map(t -> System.currentTimeMillis() - t.toEpochMilli() > staleMs)
             .orElse(true);
+    }
+
+    /**
+     * Forget ALL per-instrument tick bookkeeping — used on a full tick-client disconnect/drop.
+     * Critically clears {@code deltaStaleStrikes}: otherwise an instrument that reached the strike
+     * cap during an outage would carry that cap across the reconnect and the delta watchdog's
+     * {@code strikes >= maxStrikes} backoff would lock it out from ever resubscribing again.
+     */
+    private void forgetAllTickState() {
+        subscribedTickByTick.clear();
+        tickSubscribedAt.clear();
+        deltaStaleStrikes.clear();
+        lastGenuineFlow.clear();
+    }
+
+    /** Forget one instrument's tick bookkeeping on eviction (keeps its strike count for backoff). */
+    private void evictTickState(Instrument instrument) {
+        subscribedTickByTick.remove(instrument);
+        tickSubscribedAt.remove(instrument);
+        // Drop the replayed flow so the heartbeat shows zeros, not a stale (possibly wrong-contract)
+        // delta, for an evicted/dead line.
+        lastGenuineFlow.remove(instrument);
     }
 
     /**
@@ -1121,8 +1156,7 @@ public class OrderFlowOrchestrator {
         // Safety net: tick client silently dropped without firing connectionClosed()
         if (!subscribedTickByTick.isEmpty() && !tickByTickClient.isConnected()) {
             log.warn("Connection health check: tick client disconnected without callback — clearing all subscriptions");
-            subscribedTickByTick.clear();
-            tickSubscribedAt.clear();
+            forgetAllTickState();
             return;
         }
 
@@ -1140,18 +1174,18 @@ public class OrderFlowOrchestrator {
         for (Instrument instrument : subscribedTickByTick) {
             Long subscribedAt = tickSubscribedAt.get(instrument);
             if (subscribedAt == null || (now - subscribedAt) < gracePeriodMs) continue;
-            // Honor the shared resubscribe rate cap so this coarse backstop never churns reqIds
-            // alongside the delta-freshness watchdog.
-            if (!tickDataPort.isRealTickDataAvailable(instrument)
-                    && tickByTickClient.allowResubscribe(instrument)) {
+            if (!tickDataPort.isRealTickDataAvailable(instrument)) {
                 toEvict.add(instrument);
             }
         }
+        // This coarse backstop runs only every 300s, so it is its own rate limit — it does NOT
+        // consult allowResubscribe (that is a side-effecting token consume whose token the direct
+        // ensureTickByTickSubscriptions re-subscribe never spends, which would both waste a token
+        // and double-count against the 15s delta watchdog).
         for (Instrument instrument : toEvict) {
             log.warn("Connection health check: no real tick data for {} after 5+ min — evicting for re-subscription",
                      instrument);
-            subscribedTickByTick.remove(instrument);
-            tickSubscribedAt.remove(instrument);
+            evictTickState(instrument);
         }
     }
 
@@ -1204,8 +1238,7 @@ public class OrderFlowOrchestrator {
             log.warn("Delta freshness watchdog: {} no classified tick for {}s — evicting for re-subscription",
                      instrument, ageSec);
             tickByTickClient.cancelTickByTick(instrument);
-            subscribedTickByTick.remove(instrument);
-            tickSubscribedAt.remove(instrument);
+            evictTickState(instrument);
             evictedAny = true;
 
             int strikes = deltaStaleStrikes.merge(instrument, 1, Integer::sum);

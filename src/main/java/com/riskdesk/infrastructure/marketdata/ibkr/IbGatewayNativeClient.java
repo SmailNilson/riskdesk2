@@ -2112,7 +2112,7 @@ public class IbGatewayNativeClient {
             Instant goodAt = lastGoodBboAt;
             Double gBid = lastGoodBid, gAsk = lastGoodAsk;
             if (goodAt != null && gBid != null && gAsk != null
-                    && Instant.now().getEpochSecond() - goodAt.getEpochSecond() <= maxStalenessSeconds) {
+                    && Instant.now().toEpochMilli() - goodAt.toEpochMilli() <= maxStalenessSeconds * 1000L) {
                 return Optional.of(new NativeMarketQuote(
                     BigDecimal.valueOf(gBid), BigDecimal.valueOf(gAsk),
                     bestPrice == null ? null : BigDecimal.valueOf(bestPrice), null, goodAt));

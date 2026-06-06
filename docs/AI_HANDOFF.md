@@ -39,7 +39,18 @@ null (sim-exec silently degraded).
 - **L5** `GateResult.abstain(...)` (new 3rd record component, backward-compatible 2-arg ctor); G3/G4/L3/L4
   abstain (not directional-fail) when the delta feed is down; `QuantSnapshot.deltaAvailable()` surfaces it.
 
-Validation: `mvn test` (2131 green, incl. `HexagonalArchitectureTest`), frontend `lint` + `build`.
+**Review-hardening (two multi-agent passes):** a frozen feed keeps old ticks lingering in the 5-min
+window, so the snapshot stays `REAL_TICKS` with a non-null delta for up to 300s. Closed everywhere
+that mattered: the Quant 7-gate now drops a delta whose `windowEnd` is older than `DELTA_MAX_AGE`
+(60s) → abstain (no auto-arm on a dead book); `feedHealthFor` returns `STARVED` the moment the last
+classified tick is stale (not only when the deque drains), so REST + WS never show green `REAL`
+beside a `STALE` badge; `snapshotReadOnly` filters by cutoff instead of `evictExpired` (no deque race
+off the scheduler); the disconnect/health-check wipes clear `deltaStaleStrikes` + `lastGenuineFlow`
+(no post-reconnect strike-lockout, no stale/wrong-contract replay); fresh subscriptions reset the
+tick-rule reference price (no cross-contract mis-classification at rollover); and L5's `abstain` /
+`deltaAvailable` are surfaced on `QuantGateView` / `QuantSnapshotResponse`.
+
+Validation: `mvn test` (2134 green, incl. `HexagonalArchitectureTest`), frontend `lint` + `build`.
 Fast rollback = config: restore instrument lists + `tick-rule-fallback-enabled=false` +
 `freshness.enabled=false` + `internal-watchdog-resubscribes=true`.
 

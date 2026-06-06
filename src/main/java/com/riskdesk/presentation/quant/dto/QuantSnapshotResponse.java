@@ -55,7 +55,10 @@ public record QuantSnapshotResponse(
     int longStructuralScoreModifier,
     int longFinalScore,
     boolean longBlocked,
-    boolean longAvailable
+    boolean longAvailable,
+    // false when a delta gate (G3/G4/L3/L4) abstained because the tick/delta feed was down — a low
+    // score then reflects a feed outage, not a directional read (L5).
+    boolean deltaAvailable
 ) {
 
     public static QuantSnapshotResponse from(QuantSnapshot snapshot) {
@@ -63,7 +66,7 @@ public record QuantSnapshotResponse(
         for (Gate g : Gate.values()) {
             var r = snapshot.gates().get(g);
             if (r == null) continue;
-            gateList.add(new QuantGateView(g.name(), r.ok(), r.reason()));
+            gateList.add(new QuantGateView(g.name(), r.ok(), r.abstain(), r.reason()));
         }
         List<StructuralBlockView> blocks = new ArrayList<>(snapshot.structuralBlocks().size());
         for (StructuralBlock b : snapshot.structuralBlocks()) {
@@ -113,7 +116,8 @@ public record QuantSnapshotResponse(
             snapshot.longStructuralScoreModifier(),
             snapshot.longFinalScore(),
             snapshot.longBlocked(),
-            snapshot.longAvailable()
+            snapshot.longAvailable(),
+            snapshot.deltaAvailable()
         );
     }
 

@@ -266,6 +266,20 @@ class TickByTickAggregatorTest {
     }
 
     @Test
+    void snapshotReadOnly_doesNotEvictTheSharedDeque() {
+        // The race fix: snapshotReadOnly() must filter expired ticks via a cutoff, NOT call
+        // evictExpired() (whose non-atomic peekFirst/pollFirst races the scheduler). So an expired
+        // tick is excluded from the result but REMAINS in the deque (hasData stays true).
+        var agg = new TickByTickAggregator(Instrument.MNQ, 10); // 10s window
+        var now = Instant.now();
+        agg.onTick(100.0, 50, BUY, now.minusSeconds(60)); // expired (older than 10s)
+
+        var snap = agg.snapshotReadOnly();
+        assertEquals(0, snap.buyVolume(), "expired tick excluded from the read-only result");
+        assertTrue(agg.hasData(), "read-only snapshot must NOT evict — the tick stays in the deque");
+    }
+
+    @Test
     void snapshotReadOnly_doesNotMutateTrendState() {
         // snapshotReadOnly() is called off the scheduler thread (status endpoint); it must NOT
         // touch previousCumulativeDelta or it would race + corrupt the scheduler's deltaTrend.
