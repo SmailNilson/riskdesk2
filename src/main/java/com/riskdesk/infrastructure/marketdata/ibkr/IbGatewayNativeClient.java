@@ -1135,6 +1135,22 @@ public class IbGatewayNativeClient {
     }
 
     /**
+     * Real top-of-book (bid/ask) from the existing streaming PRICE subscription — no new IBKR
+     * line. Futures only run a price subscription (never a quote one), so this exposes the live
+     * BBO that {@code StreamingPriceSubscription} already captures, with a last-known-good cache
+     * usable within {@code maxStalenessSeconds} (the live bid/ask is nulled after a 30s gap).
+     * Lets {@code TickByTickClient} classify trades against a real BBO instead of a synthesized
+     * mid, and fall back to the tick rule only when no BBO is available at all.
+     */
+    public Optional<NativeMarketQuote> latestStreamingBbo(Contract contract, int maxStalenessSeconds) {
+        if (contract == null) {
+            return Optional.empty();
+        }
+        StreamingPriceSubscription subscription = streamingSubscriptions.get(subscriptionKey(contract));
+        return subscription == null ? Optional.empty() : subscription.bbo(maxStalenessSeconds);
+    }
+
+    /**
      * Cancels all streaming subscriptions (price + quote) for the given instrument,
      * regardless of contract month. Called during contract rollover to prevent orphaned
      * subscriptions on expired months from producing stale prices.
@@ -1960,6 +1976,15 @@ public class IbGatewayNativeClient {
          */
         private volatile Instant lastPriceAt = null;
 
+        /**
+         * Last-known-good top-of-book (both sides valid), retained across the 30s bid/ask
+         * nulling below so ticks can still be classified within a bounded staleness when the
+         * live quote has gone quiet. See {@link #bbo(int)} and {@code latestStreamingBbo}.
+         */
+        private volatile Double lastGoodBid;
+        private volatile Double lastGoodAsk;
+        private volatile Instant lastGoodBboAt = null;
+
         /** Maximum spread-to-mid ratio for mid-price to be used as bestPrice fallback. */
         private static final double MAX_SPREAD_RATIO = 0.005; // 0.5%
         /** Seconds of silence before stale bid/ask quotes are cleared on the next tick. */
@@ -1995,6 +2020,15 @@ public class IbGatewayNativeClient {
                 }
             } else if (bestPrice == null && (tickType == TickType.CLOSE || tickType == TickType.DELAYED_CLOSE)) {
                 bestPrice = price;
+            }
+
+            // Capture the last-known-good top-of-book whenever both sides are valid, so a later
+            // SESSION_GAP nulling doesn't leave ticks unclassifiable during a quiet market (L1).
+            Double curBid = bid, curAsk = ask;
+            if (curBid != null && curAsk != null && curBid > 0 && curAsk > 0 && curAsk >= curBid) {
+                lastGoodBid = curBid;
+                lastGoodAsk = curAsk;
+                lastGoodBboAt = Instant.now();
             }
 
             if (bestPrice != null) {
@@ -2060,6 +2094,30 @@ public class IbGatewayNativeClient {
 
         private Optional<BigDecimal> bestPrice() {
             return bestPrice == null ? Optional.empty() : Optional.of(BigDecimal.valueOf(bestPrice));
+        }
+
+        /**
+         * Best bid/offer for tick classification, bounded by {@code maxStalenessSeconds}.
+         * <p>
+         * Always served from the last-known-good BBO with its capture time {@code lastGoodBboAt}
+         * (set whenever both sides were simultaneously valid in {@link #tickPrice}). We deliberately
+         * do NOT read the live {@code bid}/{@code ask} fields directly: they are nulled only lazily on
+         * the <i>next</i> {@code tickPrice}, so a silently frozen quote stream (no further ticks, while
+         * real-time TRADE bars keep {@code lastPriceAt} fresh) would otherwise leave them frozen at
+         * stale-but-valid values and classify trades against a minutes-old book. Bounding on
+         * {@code lastGoodBboAt} means a frozen stream returns empty once stale, so the caller falls
+         * back to the tick rule (L2) instead of mis-grading the delta as full-confidence REAL.
+         */
+        private Optional<NativeMarketQuote> bbo(int maxStalenessSeconds) {
+            Instant goodAt = lastGoodBboAt;
+            Double gBid = lastGoodBid, gAsk = lastGoodAsk;
+            if (goodAt != null && gBid != null && gAsk != null
+                    && Instant.now().toEpochMilli() - goodAt.toEpochMilli() <= maxStalenessSeconds * 1000L) {
+                return Optional.of(new NativeMarketQuote(
+                    BigDecimal.valueOf(gBid), BigDecimal.valueOf(gAsk),
+                    bestPrice == null ? null : BigDecimal.valueOf(bestPrice), null, goodAt));
+            }
+            return Optional.empty();
         }
 
         /**

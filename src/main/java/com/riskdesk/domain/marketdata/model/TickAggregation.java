@@ -37,8 +37,15 @@ public record TickAggregation(
     /** Delta trend: cumulative delta is flat (no significant change). */
     public static final String TREND_FLAT = "FLAT";
 
-    /** Source: real tick-by-tick data from IBKR AllLast feed. */
+    /** Source: real tick-by-tick data from IBKR AllLast feed, quote-classified (Lee-Ready). */
     public static final String SOURCE_REAL_TICKS = "REAL_TICKS";
+    /**
+     * Source: real tick-by-tick trades, but a meaningful share of the window was classified by
+     * the trade-to-trade tick rule (uptick=BUY / downtick=SELL) because no fresh BBO/quote was
+     * available. The volume is real; direction is less reliable than quote Lee-Ready, so strict
+     * consumers must treat it at reduced ({@code CLV_ESTIMATED}, 0.5) confidence — never as REAL.
+     */
+    public static final String SOURCE_REAL_TICKS_TICKRULE = "REAL_TICKS_TICKRULE";
     /** Source: estimated from candle Close Location Value (CLV). */
     public static final String SOURCE_CLV_ESTIMATED = "CLV_ESTIMATED";
 

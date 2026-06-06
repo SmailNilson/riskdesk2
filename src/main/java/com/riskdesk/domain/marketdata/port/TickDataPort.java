@@ -3,6 +3,7 @@ package com.riskdesk.domain.marketdata.port;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.model.Instrument;
 
+import java.time.Instant;
 import java.util.Optional;
 
 /**
@@ -30,8 +31,39 @@ public interface TickDataPort {
     }
 
     /**
+     * Like {@link #currentAggregation(Instrument)} but guaranteed not to mutate any trend state —
+     * safe to call from a non-scheduler thread (status/diagnostics) without racing the scheduler.
+     */
+    default Optional<TickAggregation> currentAggregationReadOnly(Instrument instrument) {
+        return currentAggregation(instrument);
+    }
+
+    /**
      * Returns true if real tick-by-tick data (not CLV estimation) is currently
      * available for this instrument.
      */
     boolean isRealTickDataAvailable(Instrument instrument);
+
+    /**
+     * Wall-clock instant of the last <b>classified</b> tick (BUY/SELL) for this instrument, or
+     * empty if none. Keyed on classification yield — not raw arrival — so a stream that delivers
+     * only UNCLASSIFIED trades reads as stale. Drives the delta-freshness watchdog (L3).
+     */
+    default Optional<Instant> lastClassifiedAt(Instrument instrument) {
+        return Optional.empty();
+    }
+
+    /**
+     * Timestamp of the last genuine (classified) tick's trade time for this instrument, or empty.
+     * Used as the {@code dataTimestamp} of a staleness heartbeat so a quiet/empty window surfaces
+     * the last real data time rather than {@code now} (L4).
+     */
+    default Optional<Instant> lastGenuineWindowEnd(Instrument instrument) {
+        return Optional.empty();
+    }
+
+    /** Total number of classified (BUY/SELL) ticks received — the gap vs raw ticks = dropped (L3). */
+    default long classifiedTicksReceived() {
+        return 0L;
+    }
 }

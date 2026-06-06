@@ -533,4 +533,41 @@ class GateEvaluatorTest {
         assertThat(state.distOnlyHistory()).extracting(DistEntry::ts)
             .containsExactly(t1, t2, t3);
     }
+
+    // ── L5: delta-feed ABSTAIN vs directional fail ──────────────────────────
+
+    @Test
+    @DisplayName("G3 abstains (not a directional fail) when the delta feed is down")
+    void g3_abstains_when_delta_unavailable() {
+        GateResult r = GateEvaluator.evaluateG3(null, java.util.List.of());
+        assertThat(r.ok()).isFalse();
+        assertThat(r.abstain()).isTrue();
+        assertThat(r.reason()).contains("ABSTAIN");
+    }
+
+    @Test
+    @DisplayName("G3 with a real (non-passing) delta is a directional fail, not an abstain")
+    void g3_directional_fail_is_not_abstain() {
+        GateResult r = GateEvaluator.evaluateG3(500.0, java.util.List.of()); // > threshold → fails
+        assertThat(r.ok()).isFalse();
+        assertThat(r.abstain()).isFalse();
+    }
+
+    @Test
+    @DisplayName("G4/L3/L4 abstain on null input; deltaAvailable() reflects it")
+    void delta_gates_abstain_and_snapshot_flags_unavailability() {
+        assertThat(GateEvaluator.evaluateG4(null).abstain()).isTrue();
+        assertThat(GateEvaluator.evaluateL3(null, java.util.List.of()).abstain()).isTrue();
+        assertThat(GateEvaluator.evaluateL4(null).abstain()).isTrue();
+
+        // A full evaluation with no delta/buyPct → the snapshot reports delta unavailable.
+        MarketSnapshot noDelta = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(null).buyPct(null)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .build();
+        QuantSnapshot snapshot = evaluator.evaluate(noDelta, baseState(), Instrument.MNQ)
+            .snapshot();
+        assertThat(snapshot.deltaAvailable()).isFalse();
+    }
 }

@@ -1617,7 +1617,9 @@ public class MentorSignalReviewService {
                     "buy_ratio_pct", agg.buyRatioPct(),
                     "delta_divergence_detected", agg.divergenceDetected(),
                     "delta_divergence_type", agg.divergenceType(),
-                    "source", TickAggregation.SOURCE_REAL_TICKS
+                    // Forward the real provenance (REAL_TICKS vs REAL_TICKS_TICKRULE) — never relabel
+                    // a tick-rule window as full-confidence REAL to the Mentor (reduced reliability).
+                    "source", agg.source()
                 );
             }
         }

@@ -128,6 +128,25 @@ class QuantGateServiceConcurrencyTest {
     }
 
     @Test
+    @DisplayName("A stale (frozen-but-windowed) REAL_TICKS delta makes the delta gates ABSTAIN, not score")
+    void staleDeltaAbstainsInsteadOfScoringAFrozenBook() {
+        RecordingStatePort statePort = new RecordingStatePort();
+        RecordingNotificationPort notif = new RecordingNotificationPort();
+        // Real quote-classified delta, but its windowEnd is 10 min old — the feed is frozen and
+        // only lingering ticks remain. The 7-gate must NOT score this; auto-arm on a dead book is
+        // exactly the hole the freshness filter closes.
+        DeltaPort staleDelta = instr ->
+            Optional.of(new DeltaSnapshot(-150.0, 45.0, Instant.now().minusSeconds(600), "REAL_TICKS"));
+        QuantGateService service = buildService(statePort, notif, staleDelta);
+
+        QuantSnapshot snap = service.scan(Instrument.MNQ);
+
+        assertThat(snap.deltaAvailable()).isFalse();
+        assertThat(snap.gates().get(com.riskdesk.domain.quant.model.Gate.G3_DELTA_NEG).abstain()).isTrue();
+        assertThat(snap.gates().get(com.riskdesk.domain.quant.model.Gate.G4_BUY_PCT_LOW).abstain()).isTrue();
+    }
+
+    @Test
     @DisplayName("Capture-time order matches publish-time order under contention")
     void publishOrderMatchesCaptureOrder() throws Exception {
         RecordingStatePort statePort = new RecordingStatePort();
@@ -190,10 +209,16 @@ class QuantGateServiceConcurrencyTest {
 
     private static QuantGateService buildService(RecordingStatePort statePort,
                                                   RecordingNotificationPort notif) {
+        return buildService(statePort, notif,
+            instr -> Optional.of(new DeltaSnapshot(-150.0, 45.0, Instant.now(), "REAL_TICKS")));
+    }
+
+    private static QuantGateService buildService(RecordingStatePort statePort,
+                                                  RecordingNotificationPort notif,
+                                                  DeltaPort delta) {
         AbsorptionPort absorption       = (instr, since) -> List.of();
         DistributionPort distribution   = (instr, since) -> List.of();
         CyclePort cycle                  = (instr, since) -> List.of();
-        DeltaPort delta                  = instr -> Optional.of(new DeltaSnapshot(-150.0, 45.0, Instant.now(), "REAL_TICKS"));
         LivePricePort livePrice          = instr -> Optional.of(new LivePriceSnapshot(20_000.0, Instant.now(), "LIVE_PUSH"));
 
         QuantSnapshotHistoryStore history = new QuantSnapshotHistoryStore();

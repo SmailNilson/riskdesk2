@@ -208,6 +208,28 @@ class TriggerContextBuilderTest {
     }
 
     @Test
+    void tickrule_source_is_accepted_but_downgraded_to_clv_grade() {
+        // A REAL_TICKS_TICKRULE window carries real volume but a less-reliable direction, so the
+        // builder must use it (not fall through to CLV path) yet stamp CLV_ESTIMATED — never REAL.
+        TickAggregation tickRuleAgg = new TickAggregation(
+            Instrument.MGC, 700, 300, 400L, 400L, 70.0,
+            TickAggregation.TREND_RISING, false, null,
+            Instant.parse("2026-04-17T11:55:00Z"), Instant.parse("2026-04-17T12:00:00Z"),
+            TickAggregation.SOURCE_REAL_TICKS_TICKRULE, 100.5, 99.5, 100.0, 100.0);
+        StubTickDataPort port = new StubTickDataPort(Instrument.MGC, tickRuleAgg);
+        TriggerContextBuilder builder = new TriggerContextBuilder(
+            new DescendingOrderCandleRepo(List.of()), port);
+
+        TriggerContext trig = builder.build(Instrument.MGC, "1h", emptySnapshot());
+
+        assertThat(trig.quality()).isEqualTo(TickDataQuality.CLV_ESTIMATED);
+        assertThat(trig.qualityMultiplier()).isEqualTo(0.5);
+        // Direction still read from the real volume: 70% buy → FLOW.
+        assertThat(trig.deltaSignature()).isEqualTo(DeltaSignature.FLOW);
+        assertThat(trig.buyRatio()).isEqualByComparingTo("0.7");
+    }
+
+    @Test
     void degrades_silently_when_port_throws() {
         TickDataPort port = new TickDataPort() {
             @Override public Optional<TickAggregation> currentAggregation(Instrument i) {

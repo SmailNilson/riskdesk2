@@ -103,6 +103,7 @@ These should stay transport-oriented only.
 
 - `application/service/MarketDataService.java`
 - `application/service/HistoricalDataService.java`
+- `application/service/OrderFlowOrchestrator.java` — owns the tick-by-tick / depth subscription lifecycle and `/topic/order-flow|depth|...` publication. Tick + depth default to `MNQ,MCL` (`MGC,E6` are `degraded-instruments`, surfaced as `DEGRADED_NOT_SUBSCRIBED`). `publishOrderFlowMetrics` (5s) emits a server-authoritative staleness **heartbeat** (`serverStale`, `feedHealth`, last-genuine `dataTimestamp`) on quiet windows. `checkDeltaFreshness` (15s) resubscribes a tick line whose last **classified** tick is stale, through the shared `TickByTickClient.allowResubscribe` rate cap (single owner of resubscription). `/api/order-flow/status` now also reports `classifiedTicksReceived` (vs raw `totalTicksReceived` — the gap = UNCLASSIFIED drops), per-instrument `classifiedTickAgeSec`, and feed health (`REAL_TICKS` / `REAL_TICKS_TICKRULE` / `STARVED` / `DEGRADED_NOT_SUBSCRIBED`) — the same `feedHealthFor` vocabulary the `/topic/order-flow` heartbeat uses, so REST and WS never diverge.
 - `application/service/PositionService.java`
 - `application/service/AlertService.java` — publishes indicator alerts and triggers a **unitary** Mentor capture per qualified directional alert. The `SignalConfluenceBuffer` (Engine v2) was deleted, so there is no weighted accumulation/consolidation.
 - `application/service/MentorAnalysisService.java`
