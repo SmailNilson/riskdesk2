@@ -58,6 +58,26 @@ function RegimeChip({ regime }: { regime: WtxStrategyStateView['regime'] }) {
   );
 }
 
+/**
+ * "Profil adapté" badge shown next to the regime badge — the data-derived recommended exit for the
+ * panel's (timeframe, regime). RIDE (violet) = laisser courir jusqu'au cross WT opposé, appliqué en
+ * TENDANCE sur 5m ; TRAIL (bleu) = trailing stop 30/15 (par défaut). Informatif.
+ */
+function AdaptedProfileChip({ profile }: { profile: WtxStrategyStateView['adaptedProfile'] }) {
+  if (!profile) return null;
+  const isRide = profile === 'RIDE';
+  const style = isRide
+    ? 'bg-violet-950/70 text-violet-300 border-violet-700/60'
+    : 'bg-sky-950/70 text-sky-300 border-sky-800/60';
+  const label = isRide ? '◆ RIDE' : '◇ TRAIL';
+  const title = isRide
+    ? 'Profil adapté : RIDE — en TENDANCE sur 5m, laisser courir jusqu’au cross WaveTrend opposé (pas de trailing serré). Backtest : flux 5m +6553$ → +8232$.'
+    : 'Profil adapté : TRAIL — trailing stop 30/15 (réglage par défaut). Optimal en RANGE/CHOPPY et sur le 10m.';
+  return (
+    <span title={title} className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{label}</span>
+  );
+}
+
 function SignalChip({ type }: { type: WtxSignalView['signalType'] }) {
   const isLong = type.startsWith('COMPRA');
   const style = isLong
@@ -501,6 +521,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
           {state && (
             <div className="flex items-center gap-1.5">
               <RegimeChip regime={state.regime} />
+              <AdaptedProfileChip profile={state.adaptedProfile} />
               <DirectionChip dir={state.currentDirection} />
               <span className="flex items-center gap-1 text-[10px]">
                 <span className={`w-1.5 h-1.5 rounded-full ${state.canTrade ? 'bg-emerald-400' : 'bg-red-500'}`} />

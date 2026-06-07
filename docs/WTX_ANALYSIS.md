@@ -102,3 +102,38 @@
   BASELINE sans edge ; TREND réglé par HTF (pas BASELINE) ; SL trop serré ; pas de TP ; NY = la session.
 - **Magnitudes = plafonds paper** (qty 1, close-de-barre, zéro coût). En réel : viser **40–60 %** des $ affichés.
 - Découpage par régime = **relatif** (méthode de tagging d'analyse, non live).
+
+---
+
+## 9. Décomposition par régime (config DÉPLOYÉE) & RIDE — 2026-06-07
+
+> Rejeu **fidèle au moteur réel de bout en bout** (WaveTrend / biais HTF / trailing) avec la config
+> **réellement déployée** : 4 flags signaux ON, SL 2.0×ATR, trailing POINTS 30/15, filtre de session ON.
+> qty 1, $2/pt (déployé qty 2 → ×2). Tag régime "strict" (4-arg) ≈ "fast-path" (vérifié quasi identique).
+
+**MNQ 5m — ~57 j cal**
+| Régime | HTF actuel (trailing 30/15) | TREND_RIDE (ride en tendance) |
+|---|---|---|
+| TOTAL | +6 553$ · 546 tr · WR 63% | **+8 232$** · 398 tr · WR 58% |
+| TENDANCE | +532$ · 52 tr | **+4 131$** · 37 tr |
+| RANGING | +5 473$ · 323 tr | +3 779$ · 235 tr |
+| CHOPPY | +360$ · 159 tr | +135$ · 114 tr |
+
+**MNQ 10m — ~150 j cal**
+| Régime | HTF actuel | TREND_RIDE |
+|---|---|---|
+| TOTAL | **+13 938$** · 792 tr · WR 68% | +11 810$ · 679 tr · WR 65% |
+| TENDANCE | +1 259$ · 70 tr | +340$ · 57 tr |
+| RANGING | +7 581$ · 351 tr | +6 121$ · 305 tr |
+| CHOPPY | +4 867$ · 362 tr | +5 118$ · 308 tr |
+
+**Conclusion — RIDE dépend du timeframe :**
+- **5m → RIDE** : le trail serré clippe les jambes de tendance rapides ; laisser courir = +1 679$ au total
+  (tendance ×7,8). ✅ **shippé** (`riskdesk.wtx.regime-ride.enabled`, 5m + MNQ).
+- **10m → garder le trailing** : RIDE y **coûte −2 128$** (give-back au retournement). RIDE exclu sur 10m.
+- **RANGING = le moteur** (le gros des trades et du P&L) ; **CHOPPY** rentable surtout sur 10m.
+- ⚠️ Corrige une estimation TREND_RIDE antérieure (+10 070$/×4,3) **non reproductible** (harnais supprimé,
+  mesure différente). Cette décomposition (moteur réel + config déployée) fait foi. Bucket TENDANCE petit
+  (37–70 tr) → à **forward-valider** en paper.
+
+> **Profil adapté** (badge UI + `WtxAdaptiveProfile`) : `5m + TENDANCE → RIDE`, sinon `TRAIL`.

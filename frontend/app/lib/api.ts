@@ -1776,6 +1776,13 @@ export interface WtxStrategyStateView {
    * WTX bleeds in TRENDING, so the UI flags it. Null during warm-up or unknown instrument.
    */
   regime: 'TRENDING_UP' | 'TRENDING_DOWN' | 'RANGING' | 'CHOPPY' | null;
+  /**
+   * Config-GATED recommended exit for this (instrument, timeframe, regime) — reflects what the engine
+   * will ACTUALLY do, not just the ideal. RIDE = let it run to the opposite WT cross (only shown when
+   * the regime-conditional ride exit truly engages: enabled + instrument in scope + 5m + TENDANCE);
+   * TRAIL = trailing stop (everything else). Null during warm-up / unknown regime.
+   */
+  adaptedProfile: 'RIDE' | 'TRAIL' | null;
   /** User-configured contracts to submit on the next OPEN / REVERSE open leg for this panel. */
   configuredOrderQty: number;
   /**

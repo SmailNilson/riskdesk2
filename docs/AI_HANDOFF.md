@@ -2,6 +2,35 @@
 
 Last updated: 2026-06-07
 
+## WTX — regime-conditional RIDE exit + "Profil adapté" badge (2026-06-07)
+
+Follow-up to the rules below. A faithful rebuild of the backtest (real engine end-to-end —
+WaveTrend / HTF bias / trailing — driven by the **deployed** config: all 4 signal flags ON, SL 2.0×ATR,
+POINTS 30/15) decomposed P&L by regime per timeframe. Finding: the tight 30/15 trail **clips fast 5m
+trend legs early**; letting a 5m position opened in TENDANCE ride to the opposite WaveTrend cross lifts
+the 5m flux (**+6553$ → +8232$**, the tendance bucket +532$ → +4131$, qty1 paper). RIDE **HURTS the 10m
+flux** (+13938$ → +11810$ — it gives back at the reversal), so RIDE is scoped to **5m only**.
+
+> ⚠️ This **superseded** an earlier, unreproducible TREND_RIDE figure (+10070$/×4.3). The earlier
+> throwaway harness used a different/looser measurement; the rebuild against the real engine + deployed
+> config is the authoritative result. The TENDANCE bucket is small (37–70 trades) — forward-validate.
+
+**Implementation (opt-in, reversible, paper-only — Auto-IBKR stays OFF):**
+- **`WtxAdaptiveProfile`** (domain, pure): `recommend(tf,regime)` → `RIDE`|`TRAIL`|null (RIDE only for 5m +
+  TRENDING_UP/DOWN); `shouldRide(enabled, instruments, instrument, tf, regime)` adds the config gate.
+- **`WtxStrategyService`**: in-memory `Map<instrument:timeframe, Boolean> ridingPositions`. Set at a fresh
+  OPEN/REVERSE entry (frozen entry-regime via `currentRegime`), read in STEP 1 to **skip the trailing
+  exit** while riding, cleared whenever the position is FLAT (+ in `forceCloseAll`). Transient by design —
+  a restart reverts an in-flight position to trailing (safe). **Max-loss latch + NY force-close still act
+  as backstops** on a riding position (they run after/independently of STEP 1).
+- **Config**: `riskdesk.wtx.regime-ride.enabled=true` + `regime-ride.instruments=MNQ`
+  (`application.properties`). Java default `false` so tests/other envs keep trailing.
+- **"Profil adapté" badge**: `adaptedProfile` on the state view (REST `WtxStrategyController` + WS
+  `toStatePayload`); `WtxStrategyPanel` renders an `AdaptedProfileChip` (violet `◆ RIDE` / blue `◇ TRAIL`)
+  next to the regime badge. Informational — shows the recommendation per panel (tf, regime).
+
+Tests: `WtxAdaptiveProfileTest` (8). Full WTX suite green (257), ArchUnit intact, frontend lint+tsc clean.
+
 ## WTX — analysis-driven trading rules shipped (2026-06-07)
 
 Backtest analysis (real engine on internal candles; see `docs/WTX_ANALYSIS.md`) drove four rule

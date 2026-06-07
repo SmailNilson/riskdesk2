@@ -64,6 +64,13 @@ public class WtxStrategyProperties {
     // reconciler upgrades any still on BASELINE to HTF (without overriding a manual choice).
     private List<String> htfDefaultInstruments = List.of("MNQ");
 
+    // Regime-conditional RIDE exit (opt-in). When a position OPENS in a TENDANCE regime on 5m, skip the
+    // trailing exit and let it ride to the opposite WaveTrend cross. Backtest (MNQ): +1679$ on the 5m flux;
+    // RIDE HURTS the 10m flux so it is excluded by WtxAdaptiveProfile (5m-only). Reversible; Auto-IBKR stays
+    // OFF. The Java default is false (tests/other envs keep trailing); application.properties opts in.
+    private boolean regimeRideEnabled = false;
+    private List<String> regimeRideInstruments = List.of("MNQ");
+
     // HTF bias — Pine "HTF" profile
     private String htfTimeframe = "1h";
     private int htfFastLen = 21;
@@ -250,6 +257,12 @@ public class WtxStrategyProperties {
 
     public List<String> getHtfDefaultInstruments() { return htfDefaultInstruments; }
     public void setHtfDefaultInstruments(List<String> htfDefaultInstruments) { this.htfDefaultInstruments = htfDefaultInstruments; }
+
+    public boolean isRegimeRideEnabled() { return regimeRideEnabled; }
+    public void setRegimeRideEnabled(boolean regimeRideEnabled) { this.regimeRideEnabled = regimeRideEnabled; }
+
+    public List<String> getRegimeRideInstruments() { return regimeRideInstruments; }
+    public void setRegimeRideInstruments(List<String> regimeRideInstruments) { this.regimeRideInstruments = regimeRideInstruments; }
 
     public String getHtfTimeframe() { return htfTimeframe; }
     public void setHtfTimeframe(String htfTimeframe) { this.htfTimeframe = htfTimeframe; }

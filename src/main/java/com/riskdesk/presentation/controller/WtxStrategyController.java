@@ -221,7 +221,10 @@ public class WtxStrategyController {
         view.put("autoExecutionEnabled", state.autoExecutionEnabled());
         view.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         view.put("currentSwingBias", wtxStrategyService.currentSwingBias(state.instrument(), state.timeframe()));
-        view.put("regime", wtxStrategyService.currentRegime(state.instrument(), state.timeframe()));
+        String regime = wtxStrategyService.currentRegime(state.instrument(), state.timeframe());
+        view.put("regime", regime);
+        view.put("adaptedProfile",
+                wtxStrategyService.adaptedProfile(state.instrument(), state.timeframe(), regime));
         view.put("configuredOrderQty", state.configuredOrderQty());
         view.put("telegramNotificationsEnabled", state.telegramNotificationsEnabled());
         // Open-position summary (null/zero when FLAT). entryPrice / entryQty come straight from
@@ -248,7 +251,9 @@ public class WtxStrategyController {
         view.put("autoExecutionEnabled", false);
         view.put("swingBiasFilterEnabled", false);
         view.put("currentSwingBias", null);
-        view.put("regime", wtxStrategyService.currentRegime(instrument, timeframe));
+        String regime = wtxStrategyService.currentRegime(instrument, timeframe);
+        view.put("regime", regime);
+        view.put("adaptedProfile", wtxStrategyService.adaptedProfile(instrument, timeframe, regime));
         view.put("configuredOrderQty", com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState.DEFAULT_ORDER_QTY);
         view.put("telegramNotificationsEnabled", WtxStrategyState.defaultTelegramEnabledFor(instrument));
         view.put("entryPrice", null);

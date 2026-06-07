@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrator for the WaveTrend XT strategy.
@@ -53,6 +54,15 @@ public class WtxStrategyService {
     private final ApplicationEventPublisher eventPublisher;
     private final WtxClosePnlSettler closePnlSettler;
     private final WtxPositionReconciler positionReconciler;
+
+    /**
+     * In-memory marker per (instrument:timeframe) for the regime-conditional RIDE exit: true while the
+     * CURRENT open position opened in a TENDANCE regime on a RIDE-eligible timeframe. When true the trailing
+     * exit is skipped and the position rides to the opposite WaveTrend cross. Transient by design — a restart
+     * clears it, so a position in flight after a restart safely reverts to trailing (max-loss + NY force-close
+     * still apply as backstops). Set at entry, cleared when the position goes FLAT.
+     */
+    private final Map<String, Boolean> ridingPositions = new ConcurrentHashMap<>();
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -102,6 +112,8 @@ public class WtxStrategyService {
             return;
         }
 
+        String rideKey = instrumentName + ":" + event.timeframe();
+
         // findRecentCandles returns DESC (newest first) — reverse to chronological for WT computation
         List<Candle> candles = new java.util.ArrayList<>(
                 candlePort.findRecentCandles(instrument, event.timeframe(), WARMUP_BARS));
@@ -141,11 +153,15 @@ public class WtxStrategyService {
         state = positionReconciler.reconcile(state, instrument, currentCandle.getClose(), reconcileAtr);
 
         // ── 1. Trailing exit check (profile >= SESSION_ATR) ───────────────────
-        if (profile.requiresAtrExits() && state.currentPosition() != WtxPosition.FLAT) {
+        // RIDE: when this position opened in a TENDANCE regime on a RIDE-eligible timeframe (5m), skip the
+        // trailing exit so it rides to the opposite WaveTrend cross. Max-loss + NY force-close still apply.
+        boolean riding = Boolean.TRUE.equals(ridingPositions.get(rideKey));
+        if (profile.requiresAtrExits() && state.currentPosition() != WtxPosition.FLAT && !riding) {
             WtxTrailingExitEvaluator.Decision exit =
                     WtxTrailingExitEvaluator.evaluate(state, currentCandle, config);
             if (exit.shouldExit()) {
                 state = applyExit(state, instrument, exit, event, profile);
+                ridingPositions.remove(rideKey);
             } else {
                 state = state.withTrailing(exit.updatedBestFavorablePrice(), exit.updatedTrailingStopPrice());
             }
@@ -214,6 +230,7 @@ public class WtxStrategyService {
                 }
             }
 
+            boolean entryApplied = false; // true ONLY when a fresh OPEN/REVERSE actually applied to the virtual state
             if (signal.canTrade() && signal.suggestedAction() != WtxAction.NONE) {
                 if (filterRewroteToClose) {
                     // Route BEFORE flattening so the bridge submits the full open quantity
@@ -253,8 +270,21 @@ public class WtxStrategyService {
                         state = preActionState;
                         log.warn("WTX [{} {}] open/reverse skipped — prior entry still in flight; virtual "
                                 + "state kept at pre-action side", instrumentName, event.timeframe());
+                    } else {
+                        // OPEN/REVERSE actually applied to the virtual state (paper, or a broker-routed open).
+                        entryApplied = true;
                     }
                 }
+            }
+
+            // RIDE bookkeeping: ONLY when a fresh OPEN/REVERSE entry actually applied (not reverted by an
+            // in-flight skip / flatten-only). Re-evaluates whether the NEW position rides — opened in a
+            // TENDANCE regime on a RIDE-eligible timeframe. Frozen at entry; cleared when the position is FLAT.
+            if (entryApplied && state.currentPosition() != WtxPosition.FLAT) {
+                String entryRegime = currentRegime(instrumentName, event.timeframe());
+                ridingPositions.put(rideKey, WtxAdaptiveProfile.shouldRide(
+                        properties.isRegimeRideEnabled(), properties.getRegimeRideInstruments(),
+                        instrumentName, event.timeframe(), entryRegime));
             }
 
             // Tag the close kind so the UI distinguishes a reverse from a TP/SL/force exit.
@@ -313,6 +343,12 @@ public class WtxStrategyService {
             }
         }
 
+        // RIDE cleanup: clear the marker whenever the position is FLAT (trailing exit, reverse-to-flat,
+        // max-loss halt, reconcile-to-flat) so the next entry re-evaluates ride eligibility from scratch.
+        if (state.currentPosition() == WtxPosition.FLAT) {
+            ridingPositions.remove(rideKey);
+        }
+
         statePort.save(state.withLastCandleTs(event.timestamp()));
         publishState(state, config);
     }
@@ -342,6 +378,7 @@ public class WtxStrategyService {
                                     ? state
                                     : closePosition(state, instrument, exitPrice);
                             forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
+                            ridingPositions.remove(instrumentName + ":" + timeframe);
                             historyPort.save(forceCloseSignal);
                             statePort.save(closed);
                             ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
@@ -479,6 +516,18 @@ public class WtxStrategyService {
             log.debug("WTX regime compute failed for {} {}: {}", instrument, timeframe, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Config-GATED "adapted profile" badge for an (instrument, timeframe, regime): {@code RIDE} only when
+     * the regime-conditional ride exit would ACTUALLY engage (enabled + in scope + 5m-trending), {@code
+     * TRAIL} for any other known regime, {@code null} when the regime is unknown. Reflects real engine
+     * behaviour so the badge never claims RIDE while the engine trails (out-of-scope instrument / disabled).
+     */
+    public String adaptedProfile(String instrument, String timeframe, String regime) {
+        return WtxAdaptiveProfile.recommendGated(
+                properties.isRegimeRideEnabled(), properties.getRegimeRideInstruments(),
+                instrument, timeframe, regime);
     }
 
     // ── private helpers ────────────────────────────────────────────────────
@@ -657,7 +706,9 @@ public class WtxStrategyService {
         payload.put("autoExecutionEnabled", state.autoExecutionEnabled());
         payload.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
-        payload.put("regime", currentRegime(state.instrument(), state.timeframe()));
+        String regime = currentRegime(state.instrument(), state.timeframe());
+        payload.put("regime", regime);
+        payload.put("adaptedProfile", adaptedProfile(state.instrument(), state.timeframe(), regime));
         payload.put("configuredOrderQty", state.configuredOrderQty());
         payload.put("entryPrice", state.entryPrice());
         payload.put("entryQty", state.entryQty());
