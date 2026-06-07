@@ -47,7 +47,7 @@ class TradeNotificationListenerTest {
             true, WtxAction.REVERSE_TO_LONG,
             WtxEnrichmentSnapshot.empty(),
             Instant.parse("2026-05-20T19:00:00Z"),
-            null, null, null, null
+            null, null, null, null, null
         );
         return WtxSignalDetectedEvent.from(signal, new BigDecimal("24390.25"));
     }

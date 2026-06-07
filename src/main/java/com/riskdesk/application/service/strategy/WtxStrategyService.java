@@ -245,6 +245,8 @@ public class WtxStrategyService {
                 }
             }
 
+            // Capture the day's realized P&L BEFORE any close so we can stamp the per-trade delta below.
+            BigDecimal realizedBefore = state.dailyRealizedPnl();
             if (signal.canTrade() && signal.suggestedAction() != WtxAction.NONE) {
                 if (filterRewroteToClose) {
                     // Route BEFORE flattening so the bridge submits the full open quantity
@@ -295,6 +297,12 @@ public class WtxStrategyService {
                     || signal.suggestedAction() == WtxAction.REVERSE_TO_SHORT) {
                 signal = signal.withExitType(WtxExitType.REVERSE);
             }
+            // Stamp the realized P&L this signal booked (delta of the day's realized P&L across the
+            // close). Non-zero only when a position actually closed — opens / skipped closes leave it null.
+            BigDecimal realizedDelta = state.dailyRealizedPnl().subtract(realizedBefore);
+            if (realizedDelta.signum() != 0) {
+                signal = signal.withRealizedPnl(realizedDelta);
+            }
             signal = signal.withPrice(currentCandle.getClose());
             historyPort.save(signal);
             ws.convertAndSend("/topic/wtx-signals", toWsPayload(signal, state));
@@ -320,6 +328,7 @@ public class WtxStrategyService {
                 WtxRoutingResult haltRouting =
                         routeToExecution(haltSignal, state, currentCandle.getClose());
                 haltSignal = haltSignal.withRouting(haltRouting);
+                BigDecimal haltRealizedBefore = state.dailyRealizedPnl();
                 if (skippedEntryInFlight(haltRouting)) {
                     // Prior entry still resting UNFILLED and IBKR flat → no broker flatten was sent.
                     // Do NOT mark max-loss-hit: withMaxLossHit() forces the state FLAT and the retry
@@ -331,6 +340,10 @@ public class WtxStrategyService {
                             + "position kept, will retry on a later bar", instrumentName);
                 } else {
                     state = closePosition(state, instrument, currentCandle.getClose());
+                }
+                BigDecimal haltRealizedDelta = state.dailyRealizedPnl().subtract(haltRealizedBefore);
+                if (haltRealizedDelta.signum() != 0) {
+                    haltSignal = haltSignal.withRealizedPnl(haltRealizedDelta);
                 }
                 haltSignal = haltSignal.withPrice(currentCandle.getClose());
                 historyPort.save(haltSignal);
@@ -372,6 +385,10 @@ public class WtxStrategyService {
                             WtxStrategyState closed = skippedEntryInFlight(fcRouting)
                                     ? state
                                     : closePosition(state, instrument, exitPrice);
+                            BigDecimal fcRealizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
+                            if (fcRealizedDelta.signum() != 0) {
+                                forceCloseSignal = forceCloseSignal.withRealizedPnl(fcRealizedDelta);
+                            }
                             forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
                             historyPort.save(forceCloseSignal);
                             statePort.save(closed);
@@ -583,6 +600,10 @@ public class WtxStrategyService {
         WtxStrategyState closed = skippedEntryInFlight(routing)
                 ? state
                 : closePosition(state, instrument, exit.exitPrice());
+        BigDecimal realizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
+        if (realizedDelta.signum() != 0) {
+            exitSignal = exitSignal.withRealizedPnl(realizedDelta);
+        }
         exitSignal = exitSignal.withPrice(exit.exitPrice());
         historyPort.save(exitSignal);
         ws.convertAndSend("/topic/wtx-signals", toWsPayload(exitSignal, closed));
@@ -608,7 +629,8 @@ public class WtxStrategyService {
                 null,
                 null,
                 null,
-                exitType
+                exitType,
+                null
         );
     }
 
@@ -704,6 +726,9 @@ public class WtxStrategyService {
         // Mirror toSignalView() — without this the live-streamed close arrives with no exitType and the
         // panel's first-wins de-dup keeps it over the REST copy, so the TP/SL badge never renders live.
         payload.put("exitType", signal.exitType() != null ? signal.exitType().name() : null);
+        // Same de-dup concern for realizedPnl — the live close must carry it so the per-day P&L total
+        // is correct before the next REST poll arrives.
+        payload.put("realizedPnl", signal.realizedPnl());
         return payload;
     }
 

@@ -5,8 +5,9 @@ import { Fragment, ReactNode, useMemo, useState } from 'react';
 /**
  * Groups a newest-first signal list into per-day collapsible sections.
  *
- * Day bucketing uses the browser-local calendar day so it stays consistent with
- * the HH:mm clock the signal cards already render (which also use local time).
+ * Day bucketing defaults to the browser-local calendar day so it stays consistent
+ * with the HH:mm clock the signal cards already render (which also use local time).
+ * Pass {@link Props.bucketOf} to override the boundary (e.g. CME trading day, 17:00 ET).
  * The newest day is expanded by default, older days collapsed — a user toggle
  * overrides that default per day.
  */
@@ -17,6 +18,14 @@ interface Props<T> {
   /** Stable React key accessor. */
   getKey: (s: T) => string;
   renderSignal: (s: T) => ReactNode;
+  /**
+   * Optional custom day bucketing. When provided it replaces the default local
+   * calendar-day bucket+label — used to group by CME trading day. Returns a stable
+   * bucket {@code key} and the {@code label} shown in the day header.
+   */
+  bucketOf?: (s: T) => { key: string; label: string };
+  /** Optional content rendered on the right of each day header (e.g. the day's realized P&L). */
+  renderDayMeta?: (items: T[]) => ReactNode;
   /** Accent used on the day-header hover state. */
   accent?: 'cyan' | 'fuchsia';
   emptyLabel?: string;
@@ -50,6 +59,8 @@ export default function DayGroupedSignals<T>({
   getTs,
   getKey,
   renderSignal,
+  bucketOf,
+  renderDayMeta,
   accent = 'cyan',
   emptyLabel = 'Aucun signal',
 }: Props<T>) {
@@ -60,17 +71,26 @@ export default function DayGroupedSignals<T>({
   const groups = useMemo(() => {
     const out: { key: string; label: string; items: T[] }[] = [];
     for (const sig of signals) {
-      const d = new Date(getTs(sig));
-      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      let key: string;
+      let label: string;
+      if (bucketOf) {
+        const b = bucketOf(sig);
+        key = b.key;
+        label = b.label;
+      } else {
+        const d = new Date(getTs(sig));
+        key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+        label = dayLabel(d);
+      }
       const last = out[out.length - 1];
       if (last && last.key === key) {
         last.items.push(sig);
       } else {
-        out.push({ key, label: dayLabel(d), items: [sig] });
+        out.push({ key, label, items: [sig] });
       }
     }
     return out;
-  }, [signals, getTs]);
+  }, [signals, getTs, bucketOf]);
 
   if (groups.length === 0) {
     return <p className="text-[10px] text-zinc-600 italic">{emptyLabel}</p>;
@@ -93,6 +113,7 @@ export default function DayGroupedSignals<T>({
                 <span className="capitalize">{g.label}</span>
                 <span className="text-zinc-600">({g.items.length})</span>
               </span>
+              {renderDayMeta && renderDayMeta(g.items)}
             </button>
             {open && g.items.map(sig => (
               <Fragment key={getKey(sig)}>{renderSignal(sig)}</Fragment>

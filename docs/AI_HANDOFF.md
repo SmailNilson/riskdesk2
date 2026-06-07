@@ -2,6 +2,31 @@
 
 Last updated: 2026-06-07
 
+## WTX — per-day realized P&L in the signal history (2026-06-07)
+
+To make the "Signaux récents" history readable at a glance, each WTX day-group header now shows that
+day's **realized P&L total** (e.g. `5 Juin (20) · +120$`, green/red).
+
+- **Source of truth.** The per-trade P&L was already computed on close
+  (`WtxStrategyService.closePosition` → `Instrument.calculatePnL`) but only folded into the running
+  `dailyRealizedPnl` and then discarded. It is now captured as the **delta of `dailyRealizedPnl`
+  across the close** and stamped onto the closing signal at all four close paths (REVERSE/CLOSE,
+  trailing exit, max-loss halt, force-close). Summing it per day therefore reconciles exactly with the
+  panel's live "Daily P&L" bar.
+- **New nullable field** `realizedPnl` on `WtxSignal` (record) + `wtx_signal_history.realizedPnl`
+  column (Hibernate `ddl-auto=update` creates it — no migration; mirrors how `price`/`exitType` were
+  added). Threaded through `JpaWtxSignalHistoryAdapter`, `WtxStrategyController.toSignalView`, and the
+  `/topic/wtx-signals` WS payload (so the live close carries it past the panel's first-wins de-dup).
+- **Day boundary = CME trading day (17:00 ET).** The history now groups by trading day, not local
+  calendar day, so the per-day total aligns with the backend daily reset
+  (`TradingSessionResolver.tradingDate`, replicated on the client in `WtxStrategyPanel.tradingDayBucket`).
+  `DayGroupedSignals` gained two opt-in props (`bucketOf`, `renderDayMeta`); `WtxRsiStrategyPanel` is
+  unchanged (still local-day, no total).
+- **Caveats.** Rows persisted before this change have `realizedPnl = null` (treated as 0 → no backfill);
+  totals are accurate going forward only. Under Auto-IBKR the value is the optimistic close P&L (may
+  roll back on an unfilled close, same as `dailyPnl`); in paper mode it is exact.
+- Tests: `JpaWtxSignalHistoryAdapterTest` (round-trips the column, null on opens).
+
 ## WTX — "HTF SL-only / ride" profile + frontend param config (2026-06-07)
 
 Real-1m backtest (true intrabar path; 2 windows ~84 days of 1m exported from prod/local PostgreSQL,
