@@ -30,12 +30,32 @@ public class ExecutionProperties {
     public static class UnifiedRouter {
         private boolean enabled = false;
 
+        /**
+         * Stuck-close retry grace, in seconds — the unified router's mirror of {@code
+         * riskdesk.wtx.stale-close-retry-seconds} (PR #409). When a close is stuck in {@code
+         * EXIT_SUBMITTED} past this window AND broker truth confirms IBKR still holds the position on the
+         * row's side (a dropped ack / fill, or a marketable close that gapped out and died), the router
+         * re-fires a FRESH close instead of skipping it as a duplicate — breaking the dead-lock where the
+         * instrument is frozen and the live position is left unmanaged until the background
+         * {@code StaleCloseReconciler} recovers it. {@code 0} disables the retry → the legacy unconditional
+         * duplicate-skip. Default 45 (matches the legacy WTX grace).
+         */
+        private int staleCloseRetrySeconds = 45;
+
         public boolean isEnabled() {
             return enabled;
         }
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public int getStaleCloseRetrySeconds() {
+            return staleCloseRetrySeconds;
+        }
+
+        public void setStaleCloseRetrySeconds(int staleCloseRetrySeconds) {
+            this.staleCloseRetrySeconds = staleCloseRetrySeconds;
         }
     }
 }
