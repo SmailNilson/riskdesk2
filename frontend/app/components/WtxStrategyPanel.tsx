@@ -32,6 +32,32 @@ function DirectionChip({ dir }: { dir: 'FLAT' | 'LONG' | 'SHORT' }) {
   );
 }
 
+/**
+ * Market-regime badge. WaveTrend is mean-reversion → it bleeds in TRENDING regimes, so a
+ * TRENDING_UP/DOWN regime is surfaced as an amber ⚠ warning. RANGING (the edge) is shown
+ * green, CHOPPY neutral. Informational only — does not gate trading (HTF handles direction).
+ */
+function RegimeChip({ regime }: { regime: WtxStrategyStateView['regime'] }) {
+  if (!regime) return null;
+  const isTrend = regime === 'TRENDING_UP' || regime === 'TRENDING_DOWN';
+  const style =
+    isTrend            ? 'bg-amber-950/70 text-amber-300 border-amber-700/60' :
+    regime === 'RANGING' ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' :
+                         'bg-zinc-800 text-zinc-400 border-zinc-700';
+  const label =
+    regime === 'TRENDING_UP'   ? '⚠ TENDANCE ▲' :
+    regime === 'TRENDING_DOWN' ? '⚠ TENDANCE ▼' :
+    regime === 'RANGING'       ? 'RANGE' : 'CHOPPY';
+  const title = isTrend
+    ? 'Régime TENDANCE — WTX (mean-reversion) y est faible. HTF bloque déjà les entrées à contre-tendance ; prudence.'
+    : regime === 'RANGING'
+      ? 'Régime RANGE — le cœur de l’edge de WTX.'
+      : 'Régime CHOPPY — neutre/faible selon le timeframe.';
+  return (
+    <span title={title} className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${style}`}>{label}</span>
+  );
+}
+
 function SignalChip({ type }: { type: WtxSignalView['signalType'] }) {
   const isLong = type.startsWith('COMPRA');
   const style = isLong
@@ -474,6 +500,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
         <div className="flex items-center gap-2">
           {state && (
             <div className="flex items-center gap-1.5">
+              <RegimeChip regime={state.regime} />
               <DirectionChip dir={state.currentDirection} />
               <span className="flex items-center gap-1 text-[10px]">
                 <span className={`w-1.5 h-1.5 rounded-full ${state.canTrade ? 'bg-emerald-400' : 'bg-red-500'}`} />

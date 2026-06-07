@@ -54,6 +54,16 @@ public class WtxStrategyProperties {
     // even if no fresh candle has been processed yet (WtxDailyResetScheduler).
     private boolean dailyResetEnabled = true;
 
+    // Session entry filter — block NEW entries during the thin Asia/overnight window.
+    // Boundaries are "HH:mm" in America/New_York (DST-safe), wrapping past midnight.
+    private boolean sessionFilterEnabled = true;
+    private String sessionBlockStartEt = "18:00";
+    private String sessionBlockEndEt = "03:00";
+
+    // Instruments whose (instrument, timeframe) states default to the HTF profile — a boot
+    // reconciler upgrades any still on BASELINE to HTF (without overriding a manual choice).
+    private List<String> htfDefaultInstruments = List.of("MNQ");
+
     // HTF bias — Pine "HTF" profile
     private String htfTimeframe = "1h";
     private int htfFastLen = 21;
@@ -115,8 +125,25 @@ public class WtxStrategyProperties {
                 htfTimeframe, htfFastLen, htfSlowLen,
                 structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints,
-                dailyResetEnabled, trailingPointsInstruments
+                dailyResetEnabled, trailingPointsInstruments,
+                sessionFilterEnabled, parseEtMinutes(sessionBlockStartEt, 1080),
+                parseEtMinutes(sessionBlockEndEt, 180)
         );
+    }
+
+    /** Parse "HH:mm" → minutes-of-day; falls back to {@code def} on null/blank/malformed input. */
+    public static int parseEtMinutes(String hhmm, int def) {
+        if (hhmm == null || hhmm.isBlank()) return def;
+        String[] parts = hhmm.trim().split(":");
+        if (parts.length != 2) return def;
+        try {
+            int h = Integer.parseInt(parts[0].trim());
+            int m = Integer.parseInt(parts[1].trim());
+            if (h < 0 || h > 23 || m < 0 || m > 59) return def;
+            return h * 60 + m;
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 
     public boolean isEnabled() { return enabled; }
@@ -211,6 +238,18 @@ public class WtxStrategyProperties {
 
     public boolean isDailyResetEnabled() { return dailyResetEnabled; }
     public void setDailyResetEnabled(boolean dailyResetEnabled) { this.dailyResetEnabled = dailyResetEnabled; }
+
+    public boolean isSessionFilterEnabled() { return sessionFilterEnabled; }
+    public void setSessionFilterEnabled(boolean sessionFilterEnabled) { this.sessionFilterEnabled = sessionFilterEnabled; }
+
+    public String getSessionBlockStartEt() { return sessionBlockStartEt; }
+    public void setSessionBlockStartEt(String sessionBlockStartEt) { this.sessionBlockStartEt = sessionBlockStartEt; }
+
+    public String getSessionBlockEndEt() { return sessionBlockEndEt; }
+    public void setSessionBlockEndEt(String sessionBlockEndEt) { this.sessionBlockEndEt = sessionBlockEndEt; }
+
+    public List<String> getHtfDefaultInstruments() { return htfDefaultInstruments; }
+    public void setHtfDefaultInstruments(List<String> htfDefaultInstruments) { this.htfDefaultInstruments = htfDefaultInstruments; }
 
     public String getHtfTimeframe() { return htfTimeframe; }
     public void setHtfTimeframe(String htfTimeframe) { this.htfTimeframe = htfTimeframe; }

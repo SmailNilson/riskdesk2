@@ -38,6 +38,19 @@ public final class WtxRiskGuard {
     }
 
     /**
+     * True when NEW entries should be blocked because the candle close falls inside the
+     * configured Asia/overnight session window. Boundaries are evaluated in America/New_York
+     * (DST-safe) and may wrap past midnight. Permissive (false) when the filter is disabled.
+     * Only gates fresh entries — open positions are still managed (trailing/force-close run).
+     */
+    public static boolean isEntryBlockedBySession(Instant candleTs, WtxConfig config) {
+        if (config == null || !config.sessionFilterEnabled()) return false;
+        ZonedDateTime ny = ZonedDateTime.ofInstant(candleTs, NY);
+        int nowMin = ny.getHour() * 60 + ny.getMinute();
+        return config.isWithinSessionBlock(nowMin);
+    }
+
+    /**
      * True when the current candle opens a new CME trading day relative to the
      * previous candle. The boundary is the 17:00 ET session close (17:00 ET → 17:00
      * ET next day), not midnight ET — so the daily P&L reset is aligned with the

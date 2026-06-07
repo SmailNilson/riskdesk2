@@ -66,7 +66,15 @@ public record WtxConfig(
 
         // Instruments POINTS trailing applies to (the 30/15 distances are MNQ-scale; other instruments
         // have very different point scales, so they stay on instrument-relative ATR trailing). Empty = all.
-        List<String> trailingPointsInstruments
+        List<String> trailingPointsInstruments,
+
+        // Session entry filter — blocks NEW entries (OPEN / REVERSE-open) inside a thin-liquidity
+        // window. Boundaries are minutes-of-day in America/New_York (DST-safe) and may wrap past
+        // midnight (start > end, e.g. 18:00 → 03:00 = Asia/overnight). Disabled by default so the
+        // domain defaults() stay bit-for-bit; the live config opts in.
+        boolean sessionFilterEnabled,
+        int sessionBlockStartMinEt,   // e.g. 18*60 = 1080 (18:00 ET)
+        int sessionBlockEndMinEt      // e.g.  3*60 =  180 (03:00 ET)
 ) {
 
     /** True when this instrument should use POINTS-mode arm/trail (else ATR). Empty list = all instruments. */
@@ -100,8 +108,27 @@ public record WtxConfig(
                 WtxTrailingMode.ATR,
                 BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.ZERO,
                 true,
-                List.of("MNQ")
+                List.of("MNQ"),
+                // Session filter disabled in domain defaults — keeps evaluator/risk-guard tests
+                // bit-for-bit. The live config (application.properties) opts in (18:00 → 03:00 ET).
+                false, 0, 0
         );
+    }
+
+    /**
+     * True when the session entry filter is enabled and {@code nyMinutes} (minutes-of-day in
+     * America/New_York) falls inside the blocked window. Handles a window that wraps past midnight
+     * (start &gt; end, e.g. 18:00 → 03:00). Block is half-open {@code [start, end)} on the wrap so
+     * the 03:00 bar itself is tradeable again.
+     */
+    public boolean isWithinSessionBlock(int nyMinutes) {
+        if (!sessionFilterEnabled) return false;
+        if (sessionBlockStartMinEt == sessionBlockEndMinEt) return false; // empty window = no block
+        if (sessionBlockStartMinEt < sessionBlockEndMinEt) {
+            return nyMinutes >= sessionBlockStartMinEt && nyMinutes < sessionBlockEndMinEt;
+        }
+        // wrap past midnight: blocked if at/after start OR before end
+        return nyMinutes >= sessionBlockStartMinEt || nyMinutes < sessionBlockEndMinEt;
     }
 
     /**
@@ -119,7 +146,8 @@ public record WtxConfig(
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 mode, activationPts, trailPts, slPts, dailyResetEnabled,
                 // Wither scopes point trailing to ALL instruments (empty) — convenience for tests/config.
-                List.of());
+                List.of(),
+                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
     }
 
     /** Copy scoping POINTS trailing to the given instruments (empty = all). Preserves all other fields. */
@@ -131,7 +159,20 @@ public record WtxConfig(
                 atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
-                pointsInstruments);
+                pointsInstruments,
+                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+    }
+
+    /** Copy enabling/disabling the session entry filter with explicit ET minute boundaries. Preserves all other fields. */
+    public WtxConfig withSessionFilter(boolean enabled, int blockStartMinEt, int blockEndMinEt) {
+        return new WtxConfig(
+                instruments, timeframes, n1, n2, signalPeriod, nsc, nsv,
+                useCompra, useCompra1, useVenta, useVenta1, reverseOnOpp, fixedQty,
+                maxDailyLossUsd, forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
+                trailingPointsInstruments, enabled, blockStartMinEt, blockEndMinEt);
     }
 
     public int nyCloseLimit() {

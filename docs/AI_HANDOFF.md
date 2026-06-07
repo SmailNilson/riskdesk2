@@ -1,6 +1,33 @@
 # AI Handoff
 
-Last updated: 2026-06-05
+Last updated: 2026-06-07
+
+## WTX — analysis-driven trading rules shipped (2026-06-07)
+
+Backtest analysis (real engine on internal candles; see `docs/WTX_ANALYSIS.md`) drove four rule
+changes. All paper-safe (Auto-IBKR stays OFF), reversible via config.
+
+1. **SL widened 1.3 → 2.0×ATR** (`application.properties` `riskdesk.wtx.sl-atr-mult`). The 1.3 stop
+   was the n°1 leak (premature stop-outs, deep MAE / near-zero MFE). The sweep showed 1.6–2.0×ATR
+   lifts P&L, PF **and** win rate together.
+2. **Session entry filter** — blocks NEW entries (OPEN / REVERSE-open) during the thin Asia/overnight
+   window, default **18:00 → 03:00 ET** (`riskdesk.wtx.session-filter-enabled` /
+   `session-block-{start,end}-et`). Boundaries are `America/New_York`, DST-safe, wrap past midnight.
+   Pure-domain: `WtxConfig.isWithinSessionBlock` + `WtxRiskGuard.isEntryBlockedBySession`, folded into
+   `WtxBarEvaluator` alongside `htfBlocked`/`structureBlocked` → blocked entry = action `NONE`.
+   Open positions are still managed (trailing/force-close run); only fresh overnight risk is gated.
+3. **HTF default for MNQ** — `WtxDefaultProfileBootstrap` (ApplicationReadyEvent) upgrades any MNQ
+   (instrument, timeframe) still on `BASELINE` to `HTF` at boot, **without** overriding a manual
+   SESSION_ATR/STRICT. Config: `riskdesk.wtx.htf-default-instruments=MNQ`. Swing-bias stays OFF
+   (validated: redundant with HTF). BASELINE was proven to have no edge — and to **bleed in trending**
+   (10m TREND −3158$ over 151d) — so HTF, not BASELINE, is the trend answer.
+4. **Regime warning badge** — `WtxStrategyService.currentRegime` (EMA9/50/200 + Bollinger-width →
+   `MarketRegimeDetector`) surfaced on the WTX state view + WS payload; `WtxStrategyPanel` shows an
+   amber `⚠ TENDANCE` chip in TRENDING. **Informational only** — does not gate trading (HTF already
+   filters direction). Max-loss kept as-is ($500 global) by request.
+
+Tests: `WtxSessionFilterTest` (DST spring/fall, wrap, parse, live config). Domain defaults() keep the
+session filter OFF so evaluator/risk-guard tests stay bit-for-bit. Full suite green (2142).
 
 ## Order-flow "delta" staleness — robust layered fix (L0–L5) (2026-06-05)
 
