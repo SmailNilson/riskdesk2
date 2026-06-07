@@ -175,6 +175,37 @@ public record WtxConfig(
                 trailingPointsInstruments, enabled, blockStartMinEt, blockEndMinEt);
     }
 
+    /**
+     * Copy with overridden WaveTrend periods (n1 = channel, n2 = average, signalPeriod = signal SMA).
+     * Used to apply per-(instrument,timeframe) frontend overrides on top of the global config.
+     * Preserves all other fields.
+     */
+    public WtxConfig withIndicatorParams(int newN1, int newN2, int newSignalPeriod) {
+        return new WtxConfig(
+                instruments, timeframes, newN1, newN2, newSignalPeriod, nsc, nsv,
+                useCompra, useCompra1, useVenta, useVenta1, reverseOnOpp, fixedQty,
+                maxDailyLossUsd, forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+    }
+
+    /**
+     * Copy with an overridden initial-stop ATR multiple. Used to apply a per-(instrument,timeframe)
+     * frontend SL override on top of the global config. Preserves all other fields.
+     */
+    public WtxConfig withSlAtrMult(BigDecimal newSlAtrMult) {
+        return new WtxConfig(
+                instruments, timeframes, n1, n2, signalPeriod, nsc, nsv,
+                useCompra, useCompra1, useVenta, useVenta1, reverseOnOpp, fixedQty,
+                maxDailyLossUsd, forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, newSlAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+    }
+
     public int nyCloseLimit() {
         return nySessionEndHour * 60 + nySessionEndMin - closeBeforeMin;
     }

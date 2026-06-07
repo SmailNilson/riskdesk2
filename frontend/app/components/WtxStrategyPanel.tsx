@@ -9,6 +9,8 @@ import {
   updateWtxSwingBiasFilter,
   updateWtxOrderQty,
   updateWtxTelegramNotifications,
+  updateWtxIndicatorParams,
+  updateWtxSl,
 } from '@/app/lib/api';
 import type {
   WtxStrategyStateView,
@@ -373,6 +375,12 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [qtyBusy, setQtyBusy] = useState(false);
   const [qtyDraft, setQtyDraft] = useState<string>('');
+  // Per-panel indicator/SL config drafts (n1/n2/signalPeriod ride one endpoint, SL another).
+  const [configBusy, setConfigBusy] = useState(false);
+  const [n1Draft, setN1Draft] = useState<string>('');
+  const [n2Draft, setN2Draft] = useState<string>('');
+  const [sigDraft, setSigDraft] = useState<string>('');
+  const [slDraft, setSlDraft] = useState<string>('');
   // Tracks the (instrument, timeframe) tuple the qty draft is currently tied to. When the
   // component is reused for a different panel, the new server state's qty overwrites the draft
   // exactly once; subsequent polls for the same panel leave the user's in-progress edits alone.
@@ -448,11 +456,68 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     }
   }, [instrument, timeframe, qtyBusy, qtyDraft, state]);
 
+  // n1/n2/signalPeriod commit together (they share one override endpoint). Blur/Enter saves.
+  const commitIndicatorParams = useCallback(async () => {
+    if (!state || configBusy) return;
+    const n1 = Number(n1Draft.trim());
+    const n2 = Number(n2Draft.trim());
+    const sig = Number(sigDraft.trim());
+    const intIn = (v: number, min: number, max: number) =>
+      Number.isFinite(v) && Number.isInteger(v) && v >= min && v <= max;
+    const reset = () => {
+      setN1Draft(String(state.n1));
+      setN2Draft(String(state.n2));
+      setSigDraft(String(state.signalPeriod));
+    };
+    if (!intIn(n1, 2, 100) || !intIn(n2, 2, 100) || !intIn(sig, 1, 50)) { reset(); return; }
+    if (n1 === state.n1 && n2 === state.n2 && sig === state.signalPeriod) { reset(); return; }
+    setConfigBusy(true);
+    try {
+      const updated = await updateWtxIndicatorParams(instrument, timeframe, n1, n2, sig);
+      if (updated) {
+        setState(updated);
+        setN1Draft(String(updated.n1));
+        setN2Draft(String(updated.n2));
+        setSigDraft(String(updated.signalPeriod));
+      } else {
+        reset();
+      }
+    } finally {
+      setConfigBusy(false);
+    }
+  }, [instrument, timeframe, configBusy, n1Draft, n2Draft, sigDraft, state]);
+
+  const commitSl = useCallback(async () => {
+    if (!state || configBusy) return;
+    const sl = Number(slDraft.trim());
+    if (!Number.isFinite(sl) || sl < 0.5 || sl > 5) {
+      setSlDraft(String(state.slAtrMult));
+      return;
+    }
+    if (sl === state.slAtrMult) { setSlDraft(String(state.slAtrMult)); return; }
+    setConfigBusy(true);
+    try {
+      const updated = await updateWtxSl(instrument, timeframe, sl);
+      if (updated) {
+        setState(updated);
+        setSlDraft(String(updated.slAtrMult));
+      } else {
+        setSlDraft(String(state.slAtrMult));
+      }
+    } finally {
+      setConfigBusy(false);
+    }
+  }, [instrument, timeframe, configBusy, slDraft, state]);
+
   // When the (instrument, timeframe) props change, blank the draft right away so a stale
   // in-progress edit from the previous panel can't be committed against the new panel during
   // the brief window before its state payload arrives.
   useEffect(() => {
     setQtyDraft('');
+    setN1Draft('');
+    setN2Draft('');
+    setSigDraft('');
+    setSlDraft('');
   }, [instrument, timeframe]);
 
   // Sync the qty draft from server state exactly once per panel identity, and only when the
@@ -465,6 +530,10 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
     if (draftPanelRef.current !== panelId) {
       draftPanelRef.current = panelId;
       setQtyDraft(String(state.configuredOrderQty));
+      setN1Draft(String(state.n1));
+      setN2Draft(String(state.n2));
+      setSigDraft(String(state.signalPeriod));
+      setSlDraft(String(state.slAtrMult));
     }
   }, [state, instrument, timeframe]);
 
@@ -581,6 +650,66 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
                     }
                   }}
                   disabled={qtyBusy}
+                  className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="WaveTrend channel period (n1) — défaut 10">
+                <span className="text-zinc-500">n1</span>
+                <input
+                  type="number" min={2} max={100} step={1}
+                  value={n1Draft}
+                  onChange={e => setN1Draft(e.target.value)}
+                  onBlur={commitIndicatorParams}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                    if (e.key === 'Escape') { setN1Draft(String(state.n1)); (e.target as HTMLInputElement).blur(); }
+                  }}
+                  disabled={configBusy}
+                  className="w-11 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="WaveTrend average period (n2) — défaut 28">
+                <span className="text-zinc-500">n2</span>
+                <input
+                  type="number" min={2} max={100} step={1}
+                  value={n2Draft}
+                  onChange={e => setN2Draft(e.target.value)}
+                  onBlur={commitIndicatorParams}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                    if (e.key === 'Escape') { setN2Draft(String(state.n2)); (e.target as HTMLInputElement).blur(); }
+                  }}
+                  disabled={configBusy}
+                  className="w-11 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="WaveTrend signal period (wt2 SMA) — défaut 2">
+                <span className="text-zinc-500">Sig</span>
+                <input
+                  type="number" min={1} max={50} step={1}
+                  value={sigDraft}
+                  onChange={e => setSigDraft(e.target.value)}
+                  onBlur={commitIndicatorParams}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                    if (e.key === 'Escape') { setSigDraft(String(state.signalPeriod)); (e.target as HTMLInputElement).blur(); }
+                  }}
+                  disabled={configBusy}
+                  className="w-10 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-[10px] text-zinc-400" title="Initial stop = SL × ATR (no trailing in SL_ONLY) — défaut 2.0">
+                <span className="text-zinc-500">SL×ATR</span>
+                <input
+                  type="number" min={0.5} max={5} step={0.1}
+                  value={slDraft}
+                  onChange={e => setSlDraft(e.target.value)}
+                  onBlur={commitSl}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                    if (e.key === 'Escape') { setSlDraft(String(state.slAtrMult)); (e.target as HTMLInputElement).blur(); }
+                  }}
+                  disabled={configBusy}
                   className="w-12 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200 hover:border-cyan-700 focus:border-cyan-600 focus:outline-none disabled:opacity-50"
                 />
               </label>

@@ -1791,6 +1791,14 @@ export interface WtxStrategyStateView {
    * the Telegram button on the panel.
    */
   telegramNotificationsEnabled: boolean;
+  /** Effective WaveTrend channel period (n1) for this panel — global config with this panel's override. */
+  n1: number;
+  /** Effective WaveTrend average period (n2). */
+  n2: number;
+  /** Effective WaveTrend signal-line period (wt2 SMA). */
+  signalPeriod: number;
+  /** Effective initial-stop ATR multiple (slAtrMult). */
+  slAtrMult: number;
   /** Entry price of the open position; null when FLAT. */
   entryPrice: number | null;
   /** Contracts held on the open position; 0 when FLAT. */
@@ -1915,6 +1923,32 @@ export async function updateWtxTelegramNotifications(instrument: string, timefra
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Override the WaveTrend periods (n1/n2/signalPeriod) for this panel. */
+export async function updateWtxIndicatorParams(
+  instrument: string, timeframe: string, n1: number, n2: number, signalPeriod: number,
+): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/indicator-params`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n1, n2, signalPeriod }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Override the initial-stop ATR multiple (slAtrMult) for this panel. */
+export async function updateWtxSl(
+  instrument: string, timeframe: string, slAtrMult: number,
+): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/sl`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slAtrMult }),
   });
   if (!res.ok) return null;
   return res.json();

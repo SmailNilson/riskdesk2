@@ -1,6 +1,7 @@
 package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.strategy.WtxStrategyService;
+import com.riskdesk.domain.engine.strategy.wtx.WtxConfig;
 import com.riskdesk.domain.engine.strategy.wtx.WtxProfile;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -206,6 +208,98 @@ public class WtxStrategyController {
         return ResponseEntity.ok(toStateView(updated));
     }
 
+    @PutMapping("/state/{instrument}/{timeframe}/indicator-params")
+    public ResponseEntity<Map<String, Object>> updateIndicatorParams(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing body"));
+        }
+        Integer n1, n2, signalPeriod;
+        try {
+            // Each is optional; an absent/null field clears that override (falls back to the global config).
+            n1 = optInt(body, "n1", 2, 100);
+            n2 = optInt(body, "n2", 2, 100);
+            signalPeriod = optInt(body, "signalPeriod", 1, 50);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateIndicatorParams(instrument, timeframe, n1, n2, signalPeriod);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
+    @PutMapping("/state/{instrument}/{timeframe}/sl")
+    public ResponseEntity<Map<String, Object>> updateSl(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing body"));
+        }
+        BigDecimal slAtrMult;
+        try {
+            // Null/absent clears the override (falls back to global slAtrMult).
+            slAtrMult = optDecimal(body, "slAtrMult", new BigDecimal("0.5"), new BigDecimal("5.0"));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage()));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateSlAtrMult(instrument, timeframe, slAtrMult);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
+    /** Parse an optional whole-number field; null/absent → null (clear override). Throws on malformed/out-of-range. */
+    private static Integer optInt(Map<String, Object> body, String key, int min, int max) {
+        Object raw = body.get(key);
+        if (raw == null) return null;
+        int v;
+        if (raw instanceof Number n) {
+            double d = n.doubleValue();
+            if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+                throw new IllegalArgumentException("'" + key + "' must be a whole number, got: " + raw);
+            }
+            v = (int) d;
+        } else if (raw instanceof String s) {
+            if (s.isBlank()) return null;
+            try {
+                v = Integer.parseInt(s.trim());
+            } catch (NumberFormatException ex) {
+                throw new IllegalArgumentException("'" + key + "' must be an integer, got: " + raw);
+            }
+        } else {
+            throw new IllegalArgumentException("'" + key + "' must be an integer");
+        }
+        if (v < min || v > max) {
+            throw new IllegalArgumentException("'" + key + "' must be between " + min + " and " + max + ", got: " + v);
+        }
+        return v;
+    }
+
+    /** Parse an optional decimal field; null/absent → null (clear override). Throws on malformed/out-of-range. */
+    private static BigDecimal optDecimal(Map<String, Object> body, String key, BigDecimal min, BigDecimal max) {
+        Object raw = body.get(key);
+        if (raw == null) return null;
+        BigDecimal v;
+        if (raw instanceof Number n) {
+            v = new BigDecimal(n.toString());
+        } else if (raw instanceof String s) {
+            if (s.isBlank()) return null;
+            try {
+                v = new BigDecimal(s.trim());
+            } catch (NumberFormatException ex) {
+                throw new IllegalArgumentException("'" + key + "' must be a number, got: " + raw);
+            }
+        } else {
+            throw new IllegalArgumentException("'" + key + "' must be a number");
+        }
+        if (v.compareTo(min) < 0 || v.compareTo(max) > 0) {
+            throw new IllegalArgumentException("'" + key + "' must be between " + min + " and " + max + ", got: " + v);
+        }
+        return v;
+    }
+
     private Map<String, Object> toStateView(WtxStrategyState state) {
         Map<String, Object> view = new HashMap<>();
         view.put("instrument", state.instrument());
@@ -227,6 +321,12 @@ public class WtxStrategyController {
                 wtxStrategyService.adaptedProfile(state.instrument(), state.timeframe(), regime));
         view.put("configuredOrderQty", state.configuredOrderQty());
         view.put("telegramNotificationsEnabled", state.telegramNotificationsEnabled());
+        // Effective WaveTrend periods + SL ATR-mult for this panel (global config + this panel's overrides).
+        WtxConfig eff = wtxStrategyService.effectiveConfig(state.instrument(), state.timeframe());
+        view.put("n1", eff.n1());
+        view.put("n2", eff.n2());
+        view.put("signalPeriod", eff.signalPeriod());
+        view.put("slAtrMult", eff.slAtrMult());
         // Open-position summary (null/zero when FLAT). entryPrice / entryQty come straight from
         // state; "stopLoss" surfaces the live trailing-exit stop (initial ATR stop until the
         // trailing phase arms, then the ratcheted trailing level).
@@ -256,6 +356,11 @@ public class WtxStrategyController {
         view.put("adaptedProfile", wtxStrategyService.adaptedProfile(instrument, timeframe, regime));
         view.put("configuredOrderQty", com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState.DEFAULT_ORDER_QTY);
         view.put("telegramNotificationsEnabled", WtxStrategyState.defaultTelegramEnabledFor(instrument));
+        WtxConfig eff = wtxStrategyService.effectiveConfig(instrument, timeframe);
+        view.put("n1", eff.n1());
+        view.put("n2", eff.n2());
+        view.put("signalPeriod", eff.signalPeriod());
+        view.put("slAtrMult", eff.slAtrMult());
         view.put("entryPrice", null);
         view.put("entryQty", 0);
         view.put("stopLoss", null);

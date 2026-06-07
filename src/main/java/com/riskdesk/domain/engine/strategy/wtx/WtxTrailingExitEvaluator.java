@@ -95,6 +95,32 @@ public final class WtxTrailingExitEvaluator {
 
         // Initial stop: fixed points (slPoints>0) or dynamic ATR. Activation + trail follow the mode.
         BigDecimal slDistance = slDistance(config, atr);
+
+        // SL_ONLY: no trailing ratchet. The fixed initial stop is the ONLY stop; the position rides
+        // until the opposite WaveTrend cross (handled by WtxBarEvaluator). We still track MFE for
+        // display/continuity, but the trail never arms. Real-1m backtests showed the tight ratchet was
+        // net-negative (it clipped winners / whipsawed on the true intrabar path); keeping only the
+        // wide fixed SL preserved the edge while bounding the tail.
+        if (config.trailingMode() == WtxTrailingMode.SL_ONLY) {
+            if (slDistance == null) {
+                return Decision.noExit(state.bestFavorablePrice(), state.trailingStopPrice());
+            }
+            boolean longPos = state.currentPosition() == WtxPosition.LONG;
+            BigDecimal mfeSl = state.bestFavorablePrice();
+            BigDecimal extreme = longPos ? candle.getHigh() : candle.getLow();
+            mfeSl = (mfeSl == null) ? extreme : (longPos ? mfeSl.max(extreme) : mfeSl.min(extreme));
+            BigDecimal fixedStop = longPos ? entry.subtract(slDistance) : entry.add(slDistance);
+            boolean fixedStopHit = longPos
+                    ? candle.getLow().compareTo(fixedStop) <= 0
+                    : candle.getHigh().compareTo(fixedStop) >= 0;
+            if (fixedStopHit) {
+                return new Decision(true,
+                        longPos ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT,
+                        fixedStop, mfeSl, fixedStop, ExitReason.INITIAL_STOP);
+            }
+            return Decision.noExit(mfeSl, fixedStop);
+        }
+
         BigDecimal trailDistance;
         BigDecimal activationDistance;
         if (config.usesPointTrailing(state.instrument())) {

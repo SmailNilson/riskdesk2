@@ -9,6 +9,11 @@ package com.riskdesk.domain.engine.strategy.wtx;
  *   <li>{@link #POINTS} — fixed point distances: activation = {@code trailingActivationPoints},
  *       trail = {@code trailingPoints}. Backtest-tuned arm/trail that does not widen on
  *       high-volatility legs (where ATR-scaling surrenders too much open profit).</li>
+ *   <li>{@link #SL_ONLY} — no trailing ratchet at all: the fixed initial stop is the ONLY stop,
+ *       and the position rides until the opposite WaveTrend cross (reverse). Real-1m backtests
+ *       showed the tight trailing ratchet was net-negative (it clipped winners / whipsawed on the
+ *       true intrabar path); keeping only the wide fixed SL preserved the edge while bounding the
+ *       tail. The fixed SL distance is still {@code slPoints} (when {@code > 0}) or {@code slAtrMult * ATR}.</li>
  * </ul>
  *
  * The initial stop-loss distance is chosen independently of this mode: a fixed
@@ -16,5 +21,6 @@ package com.riskdesk.domain.engine.strategy.wtx;
  */
 public enum WtxTrailingMode {
     ATR,
-    POINTS
+    POINTS,
+    SL_ONLY
 }
