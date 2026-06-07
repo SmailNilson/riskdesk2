@@ -8,6 +8,7 @@ import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator.WaveTrendResult;
 import com.riskdesk.domain.engine.strategy.wtx.*;
+import com.riskdesk.domain.engine.strategy.wtx.port.WtxParamOverridePort;
 import com.riskdesk.domain.engine.strategy.wtx.port.WtxSignalHistoryPort;
 import com.riskdesk.domain.engine.strategy.wtx.port.WtxStrategyStatePort;
 import com.riskdesk.domain.marketdata.event.CandleClosed;
@@ -53,6 +54,7 @@ public class WtxStrategyService {
     private final ApplicationEventPublisher eventPublisher;
     private final WtxClosePnlSettler closePnlSettler;
     private final WtxPositionReconciler positionReconciler;
+    private final WtxParamOverridePort paramOverridePort;
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -64,7 +66,8 @@ public class WtxStrategyService {
             ObjectProvider<WtxExecutionBridge> executionBridgeProvider,
             ApplicationEventPublisher eventPublisher,
             WtxClosePnlSettler closePnlSettler,
-            WtxPositionReconciler positionReconciler
+            WtxPositionReconciler positionReconciler,
+            WtxParamOverridePort paramOverridePort
     ) {
         this.statePort = statePort;
         this.historyPort = historyPort;
@@ -76,6 +79,29 @@ public class WtxStrategyService {
         this.eventPublisher = eventPublisher;
         this.closePnlSettler = closePnlSettler;
         this.positionReconciler = positionReconciler;
+        this.paramOverridePort = paramOverridePort;
+    }
+
+    /**
+     * Apply per-(instrument,timeframe) frontend overrides on top of a base config: each non-null
+     * override replaces the corresponding global value, others fall back. Idempotent (re-applying
+     * the same override yields the same config), so it is safe to call on an already-effective config.
+     */
+    private WtxConfig applyOverrides(WtxConfig base, WtxParamOverride ov) {
+        if (ov == null || ov.isEmpty()) return base;
+        int n1 = ov.n1() != null ? ov.n1() : base.n1();
+        int n2 = ov.n2() != null ? ov.n2() : base.n2();
+        int sig = ov.signalPeriod() != null ? ov.signalPeriod() : base.signalPeriod();
+        WtxConfig eff = base.withIndicatorParams(n1, n2, sig);
+        if (ov.slAtrMult() != null) {
+            eff = eff.withSlAtrMult(ov.slAtrMult());
+        }
+        return eff;
+    }
+
+    /** Global config with this panel's frontend overrides applied (n1/n2/signalPeriod/slAtrMult). */
+    public WtxConfig effectiveConfig(String instrument, String timeframe) {
+        return applyOverrides(properties.toConfig(), paramOverridePort.load(instrument, timeframe));
     }
 
     private void publishWtxEvent(WtxSignal signal, BigDecimal price) {
@@ -94,6 +120,11 @@ public class WtxStrategyService {
         if (!config.timeframes().contains(event.timeframe())) return;
 
         String instrumentName = event.instrument();
+
+        // Apply this panel's frontend overrides (n1/n2/signalPeriod/slAtrMult) on top of the global
+        // config. From here on `config` is the EFFECTIVE config — the WaveTrend construction and the
+        // trailing-exit evaluator below both read from it, so overrides take effect with no further wiring.
+        config = applyOverrides(config, paramOverridePort.load(instrumentName, event.timeframe()));
 
         Instrument instrument;
         try {
@@ -401,7 +432,7 @@ public class WtxStrategyService {
      * immediately after a fresh fill.
      */
     public BigDecimal effectiveStop(WtxStrategyState state) {
-        return WtxTrailingExitEvaluator.currentStop(state, properties.toConfig());
+        return WtxTrailingExitEvaluator.currentStop(state, effectiveConfig(state.instrument(), state.timeframe()));
     }
 
     public WtxStrategyState updateProfile(String instrument, String timeframe, WtxProfile profile) {
@@ -457,6 +488,39 @@ public class WtxStrategyService {
                 enabled ? "ENABLED" : "DISABLED");
         publishState(updated, properties.toConfig());
         return updated;
+    }
+
+    /**
+     * Override the WaveTrend periods for this (instrument, timeframe) panel. Any null arg clears that
+     * override (falls back to the global config value). Stored separately from {@link WtxStrategyState};
+     * applied per-bar in onCandleClosed. Returns the (unchanged) runtime state so the panel refreshes.
+     */
+    public WtxStrategyState updateIndicatorParams(String instrument, String timeframe,
+                                                  Integer n1, Integer n2, Integer signalPeriod) {
+        WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
+        WtxParamOverride next = new WtxParamOverride(n1, n2, signalPeriod, cur.slAtrMult());
+        paramOverridePort.save(instrument, timeframe, next);
+        log.info("WTX [{} {}] indicator params override -> n1={} n2={} signalPeriod={}",
+                instrument, timeframe, n1, n2, signalPeriod);
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        publishState(state, effectiveConfig(instrument, timeframe));
+        return state;
+    }
+
+    /**
+     * Override the initial-stop ATR multiple for this (instrument, timeframe) panel. A null arg clears
+     * the override (falls back to the global {@code slAtrMult}). Returns the runtime state so the panel refreshes.
+     */
+    public WtxStrategyState updateSlAtrMult(String instrument, String timeframe, BigDecimal slAtrMult) {
+        WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
+        WtxParamOverride next = new WtxParamOverride(cur.n1(), cur.n2(), cur.signalPeriod(), slAtrMult);
+        paramOverridePort.save(instrument, timeframe, next);
+        log.info("WTX [{} {}] SL ATR-mult override -> {}", instrument, timeframe, slAtrMult);
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        publishState(state, effectiveConfig(instrument, timeframe));
+        return state;
     }
 
     /**
@@ -684,6 +748,11 @@ public class WtxStrategyService {
         payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
         payload.put("regime", currentRegime(state.instrument(), state.timeframe()));
         payload.put("configuredOrderQty", state.configuredOrderQty());
+        // Effective WaveTrend periods + SL ATR-mult (global config with this panel's overrides applied).
+        payload.put("n1", config.n1());
+        payload.put("n2", config.n2());
+        payload.put("signalPeriod", config.signalPeriod());
+        payload.put("slAtrMult", config.slAtrMult());
         payload.put("entryPrice", state.entryPrice());
         payload.put("entryQty", state.entryQty());
         payload.put("stopLoss", WtxTrailingExitEvaluator.currentStop(state, config));

@@ -27,6 +27,38 @@ day's **realized P&L total** (e.g. `5 Juin (20) · +120$`, green/red).
   roll back on an unfilled close, same as `dailyPnl`); in paper mode it is exact.
 - Tests: `JpaWtxSignalHistoryAdapterTest` (round-trips the column, null on opens).
 
+## WTX — "HTF SL-only / ride" profile + frontend param config (2026-06-07)
+
+Real-1m backtest (true intrabar path; 2 windows ~84 days of 1m exported from prod/local PostgreSQL,
+resampled to 5m/10m) overturned the trailing magnitudes: the optimistic 5m/10m-OHLC backtest
+**massively overstated tight trailing** (the artifact grew with tightness) and **inverted the
+trail-distance ranking**. Verified findings: the WTX edge is the **1h entry filter** (path-independent,
+reliable), **NOT the trailing** — the tight ratchet was net-**negative** under the real path. Best
+config = **HTF + fixed SL 2.0×ATR + ride to the opposite WaveTrend cross (no trailing ratchet)**.
+
+Shipped (paper-safe, Auto-IBKR stays OFF, reversible via config):
+
+1. **New exit mode `WtxTrailingMode.SL_ONLY`** — the fixed initial SL is the only stop; the trail
+   never arms, so the position rides to the opposite cross. `WtxTrailingExitEvaluator.evaluate` gets
+   a self-contained SL_ONLY branch (keeps the fixed stop, still tracks MFE for display). Now the
+   global default: `riskdesk.wtx.trailing-mode=SL_ONLY` (POINTS/ATR retained for reversibility).
+2. **New defaults** (`application.properties`): `n2 21 → 28`, `signal-period 4 → 2` (most consistent
+   cell in the real-1m n1/n2×sig matrix). `n1=10`, `sl-atr-mult=2.0` unchanged.
+3. **Per-(instrument,timeframe) frontend overrides for n1 / n2 / signalPeriod / SL** — isolated store
+   (`wtx_param_overrides` table) via `WtxParamOverride` + `WtxParamOverridePort` +
+   `JpaWtxParamOverrideAdapter` (cached). Deliberately NOT on `WtxStrategyState` (its ~18 positional
+   withers make field-adds fragile). `onCandleClosed` reassigns `config` to an EFFECTIVE config
+   (`applyOverrides` → `WtxConfig.withIndicatorParams` / `withSlAtrMult`); since WaveTrend + the exit
+   evaluator both read `config`, overrides apply with no further wiring. Null override → global fallback.
+4. **Endpoints + UI**: `PUT /api/wtx/state/{i}/{tf}/indicator-params` `{n1,n2,signalPeriod}` and
+   `…/sl` `{slAtrMult}` (validated). State view/WS payload expose effective `n1/n2/signalPeriod/slAtrMult`.
+   `WtxStrategyPanel` adds 4 inline numeric inputs (n1, n2, Sig, SL×ATR) mirroring the Qty draft/commit
+   pattern. SL exposed as an **ATR multiple** (instrument-agnostic).
+
+Honesty caveats: real-1m edge is **thin** (≈ +2–5k$/40d qty1) with **low WR (33–37%)**, in-sample,
+no costs → forward-paper before any live. `BASELINE`/`SESSION_ATR`-alone are real-path bad (the entry
+filter is what works). Validation: 2151 tests green, ArchUnit clean, frontend lint + build clean.
+
 ## WTX — analysis-driven trading rules shipped (2026-06-07)
 
 Backtest analysis (real engine on internal candles; see `docs/WTX_ANALYSIS.md`) drove four rule
