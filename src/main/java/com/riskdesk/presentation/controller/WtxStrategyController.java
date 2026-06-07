@@ -274,6 +274,7 @@ public class WtxStrategyController {
         view.put("routingErrorMessage", signal.routingErrorMessage());
         view.put("price", signal.price());
         view.put("exitType", signal.exitType() != null ? signal.exitType().name() : null);
+        view.put("realizedPnl", signal.realizedPnl());
         return view;
     }
 }

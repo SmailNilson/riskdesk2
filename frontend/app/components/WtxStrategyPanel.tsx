@@ -22,6 +22,53 @@ import DayGroupedSignals from '@/app/components/strategy/DayGroupedSignals';
 const POLL_MS = 5000;
 const PROFILE_OPTIONS: WtxProfile[] = ['BASELINE', 'SESSION_ATR', 'HTF', 'STRICT'];
 
+// ── CME trading-day bucketing (matches backend TradingSessionResolver.tradingDate) ──────────
+// A CME trading day runs 17:00 ET → 17:00 ET; the trading date is the calendar date the session
+// CLOSES on. Grouping the history this way keeps each day's realized-P&L total aligned with the
+// panel's live "Daily P&L" bar, which resets on the same 17:00 ET boundary.
+const ET_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+});
+
+function nyTradingDate(iso: string): { y: number; m: number; d: number } {
+  const parts = ET_PARTS.formatToParts(new Date(iso));
+  const part = (t: string) => Number(parts.find(p => p.type === t)?.value);
+  const y = part('year'), m = part('month'), d = part('day'), hour = part('hour');
+  if (hour < 17) return { y, m, d };
+  // At/after 17:00 ET the tick belongs to the NEXT calendar day's session.
+  const next = new Date(Date.UTC(y, m - 1, d) + 86_400_000);
+  return { y: next.getUTCFullYear(), m: next.getUTCMonth() + 1, d: next.getUTCDate() };
+}
+
+function tradingDayBucket(iso: string): { key: string; label: string } {
+  const td = nyTradingDate(iso);
+  const key = `${td.y}-${td.m}-${td.d}`;
+  const today = nyTradingDate(new Date().toISOString());
+  const todayKey = `${today.y}-${today.m}-${today.d}`;
+  const yest = new Date(Date.UTC(today.y, today.m - 1, today.d) - 86_400_000);
+  const yestKey = `${yest.getUTCFullYear()}-${yest.getUTCMonth() + 1}-${yest.getUTCDate()}`;
+  // Label off a UTC date built from the trading-date parts so the day/month render is TZ-stable.
+  const dm = new Date(Date.UTC(td.y, td.m - 1, td.d))
+    .toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+  if (key === todayKey) return { key, label: `Aujourd'hui · ${dm}` };
+  if (key === yestKey) return { key, label: `Hier · ${dm}` };
+  return { key, label: dm };
+}
+
+/** Sum of realized P&L over a trading day's close rows, rendered on the right of the day header. */
+function DayPnl({ items }: { items: WtxSignalView[] }) {
+  // No close carried a realized P&L this day (opens only / legacy rows) → render nothing.
+  if (!items.some(s => s.realizedPnl != null)) return null;
+  const total = items.reduce((acc, s) => acc + (s.realizedPnl ?? 0), 0);
+  const color = total > 0 ? 'text-emerald-400' : total < 0 ? 'text-red-400' : 'text-zinc-400';
+  return (
+    <span className={`font-mono ${color}`}>
+      {total > 0 ? '+' : ''}{total.toFixed(0)}$
+    </span>
+  );
+}
+
 function DirectionChip({ dir }: { dir: 'FLAT' | 'LONG' | 'SHORT' }) {
   const style =
     dir === 'LONG'  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' :
@@ -628,6 +675,8 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
               getTs={sig => sig.signalTs}
               getKey={sig => sig.signalTs + sig.instrument}
               renderSignal={sig => <SignalCard sig={sig} />}
+              bucketOf={sig => tradingDayBucket(sig.signalTs)}
+              renderDayMeta={items => <DayPnl items={items} />}
               accent="cyan"
             />
           </div>

@@ -45,6 +45,7 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
         e.setRoutingErrorMessage(signal.routingErrorMessage());
         e.setPrice(signal.price());
         e.setExitType(signal.exitType() != null ? signal.exitType().name() : null);
+        e.setRealizedPnl(signal.realizedPnl());
         e.setSignalTs(signal.signalTs());
         e.setCreatedAt(Instant.now());
         repository.save(e);
@@ -94,7 +95,8 @@ public class JpaWtxSignalHistoryAdapter implements WtxSignalHistoryPort {
                 parseRoutingOutcome(e.getRoutingOutcome()),
                 e.getRoutingErrorMessage(),
                 e.getPrice(),
-                parseExitType(e.getExitType())
+                parseExitType(e.getExitType()),
+                e.getRealizedPnl()
         );
     }
 

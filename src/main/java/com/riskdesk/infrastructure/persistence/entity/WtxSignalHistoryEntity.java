@@ -71,6 +71,10 @@ public class WtxSignalHistoryEntity {
     @Column(length = 20)
     private String exitType;
 
+    /** Realized P&L (USD) booked when this signal closed a position. Null on opens / rows pre-dating this column. */
+    @Column(precision = 20, scale = 6)
+    private BigDecimal realizedPnl;
+
     @Column(nullable = false)
     private Instant signalTs;
 
@@ -119,6 +123,9 @@ public class WtxSignalHistoryEntity {
 
     public String getExitType() { return exitType; }
     public void setExitType(String exitType) { this.exitType = exitType; }
+
+    public BigDecimal getRealizedPnl() { return realizedPnl; }
+    public void setRealizedPnl(BigDecimal realizedPnl) { this.realizedPnl = realizedPnl; }
 
     public Instant getSignalTs() { return signalTs; }
     public void setSignalTs(Instant signalTs) { this.signalTs = signalTs; }

@@ -1058,7 +1058,7 @@ class WtxExecutionBridgeTest {
         // Different signalTs to bypass the executionKey de-dup at the top of handleEntry.
         WtxSignal later = new WtxSignal("MCL", "10m", WtxSignalType.COMPRA, "LONG",
                 bd(1), bd(0), true, WtxAction.OPEN_LONG, WtxEnrichmentSnapshot.empty(),
-                Instant.parse("2026-05-13T15:00:00Z"), null, null, null, null);
+                Instant.parse("2026-05-13T15:00:00Z"), null, null, null, null, null);
         bridgeWithReconcile.submit(later, state, bd(100));
 
         assertEquals(1, repo.all().size(), "tracking row must be idempotent across duplicate signals");
@@ -1478,7 +1478,7 @@ class WtxExecutionBridgeTest {
     private WtxSignal signal(WtxAction action, String timeframe) {
         return new WtxSignal("MCL", timeframe, WtxSignalType.COMPRA, "LONG",
                 bd(1), bd(0), true, action, WtxEnrichmentSnapshot.empty(),
-                Instant.parse("2026-05-13T14:00:00Z"), null, null, null, null);
+                Instant.parse("2026-05-13T14:00:00Z"), null, null, null, null, null);
     }
 
     private WtxStrategyState flatState() {

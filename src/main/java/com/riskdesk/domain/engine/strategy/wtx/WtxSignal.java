@@ -41,38 +41,45 @@ public record WtxSignal(
          * MAX_LOSS / SWING_BIAS). Null on OPEN / NONE signals and on rows persisted before
          * this field existed.
          */
-        WtxExitType exitType
+        WtxExitType exitType,
+        /**
+         * Realized P&L (USD) booked when this signal CLOSED a position — the delta added to the
+         * day's realized P&L for this round-trip. Null on OPEN / NONE signals and on rows persisted
+         * before this field existed. The sum across a CME trading day reconciles with the panel's
+         * Daily P&L (both are {@code dailyRealizedPnl}-based).
+         */
+        BigDecimal realizedPnl
 ) {
     public WtxSignal withEnrichment(WtxEnrichmentSnapshot enrichment) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price, exitType);
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 
     public WtxSignal withAction(WtxAction action) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, action, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price, exitType);
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 
     public WtxSignal withRoutingOutcome(WtxRoutingOutcome routingOutcome) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price, exitType);
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 
     /** Stamps the candle-close price at signal detection (the UI's ENTRY price). */
     public WtxSignal withPrice(BigDecimal price) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price, exitType);
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 
     /** Tags the close reason (TP / SL / REVERSE / …) so the UI can distinguish exit kinds. */
     public WtxSignal withExitType(WtxExitType exitType) {
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                routingOutcome, routingErrorMessage, price, exitType);
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 
     /**
@@ -86,6 +93,17 @@ public record WtxSignal(
         }
         return new WtxSignal(instrument, timeframe, signalType, direction,
                 wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
-                result.outcome(), result.errorMessage(), price, exitType);
+                result.outcome(), result.errorMessage(), price, exitType, realizedPnl);
+    }
+
+    /**
+     * Stamps the realized P&L (USD) booked by this close. Null/absent on opens.
+     * Mirrors {@link #withPrice(BigDecimal)} / {@link #withExitType(WtxExitType)} — used by the
+     * strategy service after a close to surface per-trade P&L in the history.
+     */
+    public WtxSignal withRealizedPnl(BigDecimal realizedPnl) {
+        return new WtxSignal(instrument, timeframe, signalType, direction,
+                wt1Value, wt2Value, canTrade, suggestedAction, enrichment, signalTs,
+                routingOutcome, routingErrorMessage, price, exitType, realizedPnl);
     }
 }

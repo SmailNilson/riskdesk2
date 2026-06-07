@@ -125,6 +125,7 @@ public final class WtxBarEvaluator {
                 null,
                 null,
                 null,
+                null,
                 null
         ));
     }

@@ -1848,6 +1848,8 @@ export interface WtxSignalView {
   price: number | null;
   /** Why an open position closed — distinguishes a TP/SL from a plain reverse. Null on opens / pre-existing rows. */
   exitType: 'REVERSE' | 'TRAILING_TP' | 'STOP_LOSS' | 'FORCE_CLOSE' | 'MAX_LOSS' | 'SWING_BIAS' | null;
+  /** Realized P&L (USD) booked when this signal closed a position. Null on opens / rows pre-dating this field. */
+  realizedPnl: number | null;
 }
 
 export async function getWtxState(instrument: string, timeframe: string): Promise<WtxStrategyStateView | null> {
