@@ -1771,6 +1771,11 @@ export interface WtxStrategyStateView {
   swingBiasFilterEnabled: boolean;
   /** Last seen swing bias direction from the most recent signal's enrichment. Null during warm-up. */
   currentSwingBias: 'BULLISH' | 'BEARISH' | null;
+  /**
+   * Current market regime (EMA9/50/200 + Bollinger-width). Informational warning badge —
+   * WTX bleeds in TRENDING, so the UI flags it. Null during warm-up or unknown instrument.
+   */
+  regime: 'TRENDING_UP' | 'TRENDING_DOWN' | 'RANGING' | 'CHOPPY' | null;
   /** User-configured contracts to submit on the next OPEN / REVERSE open leg for this panel. */
   configuredOrderQty: number;
   /**

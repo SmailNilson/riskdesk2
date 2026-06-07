@@ -76,6 +76,10 @@ public final class WtxBarEvaluator {
         boolean structureBlocked = profile.requiresStructureFilter()
                 && structureDecision != null
                 && !structureDecision.allows();
+        // Session entry filter (all profiles when enabled): block NEW entries inside the thin
+        // Asia/overnight window. An in-position opposite cross becomes NONE — the position is kept
+        // and stays managed by the trailing exits; we simply don't open fresh overnight risk.
+        boolean sessionBlocked = WtxRiskGuard.isEntryBlockedBySession(candleTs, config);
 
         WtxSignalType signalType;
         String direction;
@@ -84,7 +88,7 @@ public final class WtxBarEvaluator {
         if (longSignal) {
             signalType = compra ? WtxSignalType.COMPRA : WtxSignalType.COMPRA_1;
             direction  = "LONG";
-            if (!canTrade || htfBlocked || structureBlocked) {
+            if (!canTrade || htfBlocked || structureBlocked || sessionBlocked) {
                 action = WtxAction.NONE;
             } else if (state.currentPosition() == WtxPosition.SHORT && config.reverseOnOpp()) {
                 action = WtxAction.REVERSE_TO_LONG;
@@ -96,7 +100,7 @@ public final class WtxBarEvaluator {
         } else {
             signalType = venta ? WtxSignalType.VENTA : WtxSignalType.VENTA_1;
             direction  = "SHORT";
-            if (!canTrade || htfBlocked || structureBlocked) {
+            if (!canTrade || htfBlocked || structureBlocked || sessionBlocked) {
                 action = WtxAction.NONE;
             } else if (state.currentPosition() == WtxPosition.LONG && config.reverseOnOpp()) {
                 action = WtxAction.REVERSE_TO_SHORT;

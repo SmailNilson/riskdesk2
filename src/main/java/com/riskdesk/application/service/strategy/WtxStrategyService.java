@@ -2,7 +2,9 @@ package com.riskdesk.application.service.strategy;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.engine.indicators.AtrCalculator;
+import com.riskdesk.domain.engine.indicators.BollingerBandsIndicator;
 import com.riskdesk.domain.engine.indicators.EMAIndicator;
+import com.riskdesk.domain.engine.indicators.MarketRegimeDetector;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator;
 import com.riskdesk.domain.engine.indicators.WaveTrendIndicator.WaveTrendResult;
 import com.riskdesk.domain.engine.strategy.wtx.*;
@@ -453,6 +455,32 @@ public class WtxStrategyService {
         return enrichment != null ? enrichment.smcSwingBias() : null;
     }
 
+    /**
+     * Current market regime (TRENDING_UP/DOWN, RANGING, CHOPPY) for an (instrument, timeframe),
+     * from EMA9/50/200 alignment + Bollinger-width expansion on the most recent candles. Surfaced
+     * on the state view as an INFORMATIONAL badge — the analysis showed WTX bleeds in TRENDING, so
+     * the UI warns the operator. It does NOT gate trading (HTF already filters trend direction).
+     * Returns null when the instrument is unknown or there isn't enough history yet.
+     */
+    public String currentRegime(String instrument, String timeframe) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument);
+            List<Candle> candles = new java.util.ArrayList<>(
+                    candlePort.findRecentCandles(inst, timeframe, 220));
+            java.util.Collections.reverse(candles); // chronological (oldest → newest)
+            if (candles.size() < 210) return null;   // need EMA200 + a little warm-up
+            BigDecimal ema9 = new EMAIndicator(9).current(candles);
+            BigDecimal ema50 = new EMAIndicator(50).current(candles);
+            BigDecimal ema200 = new EMAIndicator(200).current(candles);
+            BollingerBandsIndicator.BBTrendResult bb = new BollingerBandsIndicator().currentTrend(candles);
+            boolean expanding = bb != null && bb.expanding();
+            return new MarketRegimeDetector().detect(ema9, ema50, ema200, expanding);
+        } catch (Exception e) {
+            log.debug("WTX regime compute failed for {} {}: {}", instrument, timeframe, e.getMessage());
+            return null;
+        }
+    }
+
     // ── private helpers ────────────────────────────────────────────────────
 
     private WtxStrategyState applyAction(WtxAction action, WtxStrategyState state,
@@ -629,6 +657,7 @@ public class WtxStrategyService {
         payload.put("autoExecutionEnabled", state.autoExecutionEnabled());
         payload.put("swingBiasFilterEnabled", state.swingBiasFilterEnabled());
         payload.put("currentSwingBias", currentSwingBias(state.instrument(), state.timeframe()));
+        payload.put("regime", currentRegime(state.instrument(), state.timeframe()));
         payload.put("configuredOrderQty", state.configuredOrderQty());
         payload.put("entryPrice", state.entryPrice());
         payload.put("entryQty", state.entryQty());
