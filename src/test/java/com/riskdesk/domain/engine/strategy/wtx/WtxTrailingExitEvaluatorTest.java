@@ -22,6 +22,9 @@ class WtxTrailingExitEvaluatorTest {
     // POINTS mode with a fixed 30-point stop (slPoints overrides ATR).
     private static final WtxConfig POINTS_FIXED_SL = WtxConfig.defaults().withTrailing(
             WtxTrailingMode.POINTS, BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.valueOf(30));
+    // SL_ONLY mode: no trailing ratchet; the fixed initial SL (slPoints=0 → slAtrMult*ATR) is the only stop.
+    private static final WtxConfig SL_ONLY = WtxConfig.defaults().withTrailing(
+            WtxTrailingMode.SL_ONLY, BigDecimal.valueOf(30), BigDecimal.valueOf(15), BigDecimal.ZERO);
 
     @Test
     void flatPosition_returnsNoExit() {
@@ -195,6 +198,43 @@ class WtxTrailingExitEvaluatorTest {
         assertFalse(d.shouldExit());
         // ATR trail (2.0) not the point trail (15) → 101.5 - 2.0 = 99.5
         assertEquals(0, BigDecimal.valueOf(99.5).compareTo(d.updatedTrailingStopPrice()));
+    }
+
+    // ── SL_ONLY mode (no trailing ratchet — ride to opposite cross with fixed SL) ───────────────
+
+    @Test
+    void slOnly_long_neverArmsTrailing_keepsFixedInitialStop() {
+        // ATR=1, slMult=1.4 → fixed stop 98.6. High 101.5 would arm the trail (→99.5) in ATR/POINTS
+        // mode; in SL_ONLY the stop must STAY at the fixed initial 98.6 (no ratchet) and not exit.
+        WtxStrategyState state = openLong(100.0, 1.0);
+        Candle c = candle(100, 101.5, 100.3, 101.0);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(state, c, SL_ONLY);
+        assertFalse(d.shouldExit());
+        assertEquals(0, BigDecimal.valueOf(98.6).compareTo(d.updatedTrailingStopPrice()));
+        // MFE still tracked for display continuity.
+        assertEquals(0, BigDecimal.valueOf(101.5).compareTo(d.updatedBestFavorablePrice()));
+    }
+
+    @Test
+    void slOnly_long_fixedStopHit_isInitialStop() {
+        WtxStrategyState state = openLong(100.0, 1.0); // fixed stop = 98.6
+        Candle c = candle(100, 100.2, 98.5, 99.0);     // low pierces 98.6
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(state, c, SL_ONLY);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxAction.CLOSE_LONG, d.exitAction());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason());
+        assertEquals(0, BigDecimal.valueOf(98.6).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void slOnly_short_fixedStopHit_isInitialStop() {
+        WtxStrategyState state = openShort(100.0, 1.0); // fixed stop = 101.4
+        Candle c = candle(100, 101.5, 99.6, 100.5);     // high pierces 101.4
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(state, c, SL_ONLY);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxAction.CLOSE_SHORT, d.exitAction());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason());
+        assertEquals(0, BigDecimal.valueOf(101.4).compareTo(d.exitPrice()));
     }
 
     private static WtxStrategyState openLong(double entry, double atr) {
