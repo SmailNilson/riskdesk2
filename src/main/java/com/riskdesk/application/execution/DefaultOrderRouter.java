@@ -15,6 +15,7 @@ import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
 import com.riskdesk.domain.quant.port.LivePricePort;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort.CreateOutcome;
@@ -24,6 +25,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
@@ -85,6 +87,9 @@ public class DefaultOrderRouter implements OrderRouter {
      *  restart. Seeded from {@code riskdesk.execution.marketable-*}; cross-ticks mirrors the proven Quant
      *  force-close convention ({@code riskdesk.quant.sim-exec.flatten-cross-ticks}). */
     private final MarketableSettingsProvider marketableSettings;
+    /** Execution-core config — read for the unified-router stuck-close retry grace ({@code
+     *  riskdesk.execution.unified-router.stale-close-retry-seconds}), the mirror of the legacy WTX knob. */
+    private final ExecutionProperties executionProperties;
 
     public DefaultOrderRouter(IbkrOrderService ibkrOrderService,
                               TradeExecutionRepositoryPort executionRepository,
@@ -95,7 +100,8 @@ public class DefaultOrderRouter implements OrderRouter {
                               Optional<OrderAffordabilityPort> affordability,
                               DailyLossCapGuard lossCapGuard,
                               LivePricePort livePricePort,
-                              MarketableSettingsProvider marketableSettings) {
+                              MarketableSettingsProvider marketableSettings,
+                              ExecutionProperties executionProperties) {
         this.ibkrOrderService = ibkrOrderService;
         this.executionRepository = executionRepository;
         this.ibkrProperties = ibkrProperties;
@@ -106,6 +112,7 @@ public class DefaultOrderRouter implements OrderRouter {
         this.lossCapGuard = lossCapGuard;
         this.livePricePort = livePricePort;
         this.marketableSettings = marketableSettings;
+        this.executionProperties = executionProperties;
     }
 
     @Override
@@ -571,13 +578,34 @@ public class DefaultOrderRouter implements OrderRouter {
                 "no open execution row to " + (flatten ? "flatten" : "close"));
         }
         TradeExecutionRecord row = active.get();
+        // Read broker truth ONCE up front — needed both for the stuck-close decision below and for the
+        // available / confirmed-flat / held-side branches that follow.
+        BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
         if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
             // A close is already resting at the broker (awaiting fill). A second reducing order could
-            // over-close and flip the position once both fill — skip (matches WtxExecutionBridge.handleClose).
-            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
-                "close already in flight (EXIT_SUBMITTED) — duplicate exit skipped", row.getId(), row.getEntryOrderId());
+            // over-close and flip the position once both fill — skip as a duplicate (matches
+            // WtxExecutionBridge.handleClose).
+            //
+            // BUT a marketable close whose ack / fill callback was dropped (a known race) can leave the row
+            // stuck in EXIT_SUBMITTED while IBKR STILL holds the position. The old unconditional skip then
+            // DEAD-LOCKED the instrument: every later CLOSE returned SKIPPED_DUPLICATE here and every same-side
+            // OPEN returned SKIPPED_DUPLICATE from the reconcile, so the position could be neither exited nor
+            // reversed and bled — recovered only by the background StaleCloseReconciler 60-90s later, leaving
+            // the live position unmanaged in between. {@link #stuckCloseNeedsRetry} returns true ONLY once the
+            // close has been EXIT_SUBMITTED past the retry grace AND broker truth confirms the position is
+            // still open on this row's side — then we fall through and re-fire a FRESH close (a per-signal exit
+            // ref, exactly what submitCloseLeg was built to retry). Within the grace, when broker truth is
+            // unavailable, or when IBKR is confirmed flat (StaleCloseReconciler owns that case), we keep the
+            // duplicate-skip so a genuinely in-flight close is never double-submitted. Ports PR #409's
+            // WtxExecutionBridge fix into the unified router.
+            if (!stuckCloseNeedsRetry(row, pos)) {
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                    "close already in flight (EXIT_SUBMITTED) — duplicate exit skipped", row.getId(), row.getEntryOrderId());
+            }
+            log.warn("OrderRouter {} — prior close stuck (execution {} EXIT_SUBMITTED past grace, IBKR still "
+                + "holds the position) — re-firing a fresh close to break the dead-lock", reasonPrefix, row.getId());
+            // fall through to submit a fresh close leg on this same row
         }
-        BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
         if (!pos.available()) {
             // Broker position truth is unreadable. We cannot confirm a live position exists, so firing a
             // reducing order blind risks a NAKED order. This is the only path by which the REVERSE close/
@@ -640,6 +668,52 @@ public class DefaultOrderRouter implements OrderRouter {
         int qty = Math.min(rowQty, pos.net().abs().intValue());
         return submitCloseLeg(row, intent.instrument(), closeAction, qty, intent.limitPrice(), reasonPrefix,
             intent.idempotencyKey());
+    }
+
+    /**
+     * True when an {@code EXIT_SUBMITTED} close is STUCK and must be re-fired rather than skipped as a
+     * duplicate exit: it has been non-terminal for longer than the retry grace AND IBKR still holds a live
+     * position on this row's side, so the close clearly never completed (a marketable close that gapped out
+     * and died, or a lost ack / fill callback). Re-firing a fresh close is the only way to flatten —
+     * otherwise the instrument dead-locks (every later CLOSE skips here as a duplicate, every same-side OPEN
+     * skips in the reconcile as a duplicate) and the live position bleeds unmanaged until the background
+     * {@code StaleCloseReconciler} recovers it. Port of {@code WtxExecutionBridge.stuckCloseNeedsRetry} (PR #409).
+     *
+     * <p>Deliberately conservative — returns {@code false} (keep the duplicate-skip) when:
+     * <ul>
+     *   <li>broker truth is unavailable ({@code net == null}) — never re-fire on a guess;</li>
+     *   <li>IBKR is flat (net 0), or holds the OPPOSITE side — the close completed (the flat-but-stuck row is
+     *       finalized to CLOSED by {@code StaleCloseReconciler}), or this is a deeper divergence the
+     *       entry-path reconcile owns; flattening here could open an unintended position;</li>
+     *   <li>still within the grace window — a genuinely in-flight marketable close fills in seconds, so a
+     *       fresh close must NOT be double-submitted on top of it.</li>
+     * </ul>
+     * Grace is {@code riskdesk.execution.unified-router.stale-close-retry-seconds} (0 disables the retry →
+     * the legacy unconditional skip).
+     */
+    private boolean stuckCloseNeedsRetry(TradeExecutionRecord row, BrokerPositionState pos) {
+        if (row.getStatus() != ExecutionStatus.EXIT_SUBMITTED) {
+            return false;
+        }
+        if (!pos.available() || pos.isNetZero()) {
+            return false; // unknown or flat → not a re-fire case (StaleCloseReconciler owns the flat-but-stuck row)
+        }
+        // Only re-fire when IBKR still holds the SAME side this row tracks: flattening a short is a BUY, so it
+        // must never run while IBKR is (somehow) long, which would stack rather than flatten.
+        boolean rowIsLong = "LONG".equalsIgnoreCase(row.getAction());
+        boolean stillHoldsSameSide = rowIsLong ? pos.isLong() : pos.isShort();
+        if (!stillHoldsSameSide) {
+            return false;
+        }
+        int graceSeconds = executionProperties.getUnifiedRouter().getStaleCloseRetrySeconds();
+        if (graceSeconds <= 0) {
+            return false; // retry disabled → legacy unconditional skip
+        }
+        Instant since = row.getExitSubmittedAt() != null ? row.getExitSubmittedAt() : row.getUpdatedAt();
+        if (since == null) {
+            return false;
+        }
+        return Duration.between(since, Instant.now()).getSeconds() >= graceSeconds;
     }
 
     /**

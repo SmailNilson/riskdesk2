@@ -18,6 +18,7 @@ import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
 import com.riskdesk.domain.quant.port.LivePricePort;
+import com.riskdesk.infrastructure.config.ExecutionProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrOrderRejectionException;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbkrProperties;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +53,9 @@ class DefaultOrderRouterTest {
     @Mock private ExecutionReconciler reconciler;
 
     private IbkrProperties props;
+    /** Execution-core config for the router constructor. Defaults to the unified-router stuck-close grace
+     *  of 45s; stuck-close tests mutate {@code execProps.getUnifiedRouter().setStaleCloseRetrySeconds(...)}. */
+    private ExecutionProperties execProps;
     private DefaultOrderRouter router;
 
     /** Default test live-price port: no price → exit legs fall back to the passive intent limit
@@ -67,8 +71,9 @@ class DefaultOrderRouterTest {
     void setUp() {
         props = new IbkrProperties();
         props.setEnabled(true);
+        execProps = new ExecutionProperties();
         router = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10));
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10), execProps);
         // createIfAbsentTracked: we created the row (created=true) — it assigns the PK; save echoes it.
         lenient().when(repo.createIfAbsentTracked(any())).thenAnswer(inv -> {
             TradeExecutionRecord r = inv.getArgument(0);
@@ -124,7 +129,7 @@ class DefaultOrderRouterTest {
     void routesOpen_roundsToProviderMinTick_notHardcodedInstrumentTick() {
         // The router rounds to the provider's (broker ContractDetails.minTick) value, not the hardcoded tick.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, settings(true, true, 10)); // broker minTick 0.50
+            instr -> new BigDecimal("0.50"), Optional.empty(), null, NO_PRICE, settings(true, true, 10), execProps); // broker minTick 0.50
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(12345L, "Submitted"));
 
         r.route(openLong()); // entry 18000.30
@@ -687,7 +692,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter pricedRouter(LivePricePort port, int crossTicks, boolean reverseOpenMarketable) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, port, settings(true, reverseOpenMarketable, crossTicks));
+            Instrument::getTickSize, Optional.empty(), null, port, settings(true, reverseOpenMarketable, crossTicks), execProps);
     }
 
     /** Fixed internal live price (fresh LIVE_PUSH provenance). */
@@ -806,7 +811,7 @@ class DefaultOrderRouterTest {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
         when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4));
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4), execProps);
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("-1"); // broker SHORT 1
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
@@ -827,7 +832,7 @@ class DefaultOrderRouterTest {
         OrderAffordabilityPort aff = mock(OrderAffordabilityPort.class);
         when(aff.check(any(), any(), anyInt(), any(), any())).thenReturn(OrderAffordabilityPort.Affordability.allow());
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4));
+            Instrument::getTickSize, Optional.of(aff), null, livePrice("18005.00"), settings(true, true, 4), execProps);
         when(reconciler.readPositionState(any(), any())).thenReturn(new BrokerPositionState(BigDecimal.ZERO, true)); // flat
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
         when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(900L, "Filled"));
@@ -852,7 +857,7 @@ class DefaultOrderRouterTest {
             .thenReturn(Optional.of(new LivePriceSnapshot(18100.0, Instant.now(), "LIVE_PUSH")))  // read 2: open preflight
             .thenReturn(Optional.of(new LivePriceSnapshot(18200.0, Instant.now(), "LIVE_PUSH"))); // would be a 2nd open read
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, jumpy, settings(true, true, 4));
+            Instrument::getTickSize, Optional.of(aff), null, jumpy, settings(true, true, 4), execProps);
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("-1"); // broker SHORT 1 → reverse to LONG 2 is size-increasing (delta 1); open BUY crosses up
         when(reconciler.reconcile(any(), any())).thenReturn(new ReconcilePlan.Reverse(Side.LONG));
@@ -874,7 +879,7 @@ class DefaultOrderRouterTest {
     void close_marketableDisabled_usesPassiveIntentLimit() {
         // Kill-switch OFF → even with a live price, the exit rests at the passive intent limit.
         DefaultOrderRouter r = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), settings(false, true, 4));
+            Instrument::getTickSize, Optional.empty(), null, livePrice("18000.00"), settings(false, true, 4), execProps);
         stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
         stubBroker("1");
         when(ibkrOrderService.submitEntryOrder(any()))
@@ -969,6 +974,108 @@ class DefaultOrderRouterTest {
     void close_alreadyExitSubmitted_skipsDuplicate() {
         // A close is already resting (EXIT_SUBMITTED) — a second reducing order could over-close the position.
         stubActive(activeRow(ExecutionStatus.EXIT_SUBMITTED, 1, 100L));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    // ---- Stuck-close retry (port of PR #409's WtxExecutionBridge.stuckCloseNeedsRetry) ---------
+    // A close stuck in EXIT_SUBMITTED past the grace, while IBKR STILL holds the position on the row's
+    // side, is a dropped ack / fill — re-fire a FRESH close to break the dead-lock instead of skipping it
+    // as a duplicate forever. Conservative: never re-fire within grace, on unavailable truth, on a flat
+    // broker (the StaleCloseReconciler owns that), or when IBKR holds the OPPOSITE side.
+
+    /** Mark a row EXIT_SUBMITTED as of {@code ageSeconds} ago (for the stuck-close grace window). */
+    private TradeExecutionRecord exitSubmittedRow(long ageSeconds) {
+        TradeExecutionRecord row = activeRow(ExecutionStatus.EXIT_SUBMITTED, 2, 100L); // action "LONG", qty 2
+        row.setExitSubmittedAt(Instant.now().minusSeconds(ageSeconds));
+        return row;
+    }
+
+    @Test
+    void close_stuckExitSubmitted_pastGrace_ibkrStillHolds_refiresFreshClose() {
+        // Stuck EXIT_SUBMITTED for 120s (past the 45s default grace) and IBKR STILL holds the long — the
+        // prior close died (dropped ack/fill). Re-fire a FRESH close rather than skip as a duplicate.
+        stubActive(exitSubmittedRow(120));
+        stubBroker("2"); // IBKR still LONG 2 (same side as the row)
+        when(ibkrOrderService.submitEntryOrder(any()))
+            .thenReturn(new BrokerEntryOrderSubmission(960L, "Submitted", "k", Instant.now()));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED); // re-fired, NOT SKIPPED_DUPLICATE
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // SELL to reduce the long
+        assertThat(req.getValue().quantity()).isEqualTo(2);      // capped to the live broker net
+        // Re-fire stays retry-safe: a per-signal exit ref distinct from the original close's ref.
+        assertThat(req.getValue().executionKey()).startsWith("wtx:MNQ:5m:1:OPEN_LONG:exit:");
+        assertThat(req.getValue().executionKey()).endsWith(":wtx:MNQ:5m:2:CLOSE_LONG");
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED); // non-terminal until its own fill
+    }
+
+    @Test
+    void close_stuckExitSubmitted_withinGrace_skipsDuplicate() {
+        // Within the grace window the close is genuinely in flight (fills in seconds) — a fresh close must
+        // NOT be double-submitted on top of it, even though IBKR still shows the position.
+        stubActive(exitSubmittedRow(5)); // just submitted — inside the 45s grace
+        stubBroker("2");                  // IBKR still LONG 2
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_stuckExitSubmitted_ibkrFlat_skipsDuplicate_reconcilerOwnsIt() {
+        // Past grace but IBKR is flat → the close already completed (lost fill callback). We must NOT re-fire
+        // a naked flatten; the flat-but-stuck row is finalized to CLOSED out-of-band by StaleCloseReconciler.
+        stubActive(exitSubmittedRow(120));
+        stubFlat(true); // IBKR confirmed flat
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_stuckExitSubmitted_brokerTruthUnavailable_skipsDuplicate() {
+        // Past grace but broker truth is unreadable — never re-fire on a guess. Stay a duplicate-skip.
+        stubActive(exitSubmittedRow(120));
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_stuckExitSubmitted_ibkrHoldsOppositeSide_skipsDuplicate_noRefire() {
+        // Past grace but IBKR holds the OPPOSITE side (row LONG, broker SHORT — a deeper divergence). A
+        // re-fire here (SELL to flatten the long) would STACK the short — never re-fire; keep the skip.
+        stubActive(exitSubmittedRow(120)); // row action "LONG"
+        stubBroker("-2");                   // IBKR SHORT 2 (opposite)
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void close_stuckExitSubmitted_retryDisabled_skipsDuplicate() {
+        // Kill-switch: stale-close-retry-seconds = 0 restores the legacy unconditional duplicate-skip even
+        // when the row is long-stuck and IBKR still holds the position.
+        execProps.getUnifiedRouter().setStaleCloseRetrySeconds(0);
+        stubActive(exitSubmittedRow(600));
+        stubBroker("2"); // IBKR still LONG 2
 
         RoutingResult r = router.route(closeLong());
 
@@ -1112,7 +1219,7 @@ class DefaultOrderRouterTest {
     @Test
     void skipsWhenNotReady() {
         DefaultOrderRouter gated = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> false, reconciler,
-            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10));
+            Instrument::getTickSize, Optional.empty(), null, NO_PRICE, settings(true, true, 10), execProps);
 
         RoutingResult r = gated.route(openLong());
 
@@ -1124,7 +1231,7 @@ class DefaultOrderRouterTest {
 
     private DefaultOrderRouter routerWith(OrderAffordabilityPort aff) {
         return new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, settings(true, true, 10));
+            Instrument::getTickSize, Optional.of(aff), null, NO_PRICE, settings(true, true, 10), execProps);
     }
 
     @Test
@@ -1132,7 +1239,7 @@ class DefaultOrderRouterTest {
         DailyLossCapGuard tripped = mock(DailyLossCapGuard.class);
         when(tripped.blocksNewEntries()).thenReturn(true);
         DefaultOrderRouter capped = new DefaultOrderRouter(ibkrOrderService, repo, props, () -> true, reconciler,
-            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, settings(true, true, 10));
+            Instrument::getTickSize, Optional.empty(), tripped, NO_PRICE, settings(true, true, 10), execProps);
 
         RoutingResult r = capped.route(openLong());
 
