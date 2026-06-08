@@ -335,6 +335,7 @@ function ExitTypeChip({ type }: { type: NonNullable<WtxSignalView['exitType']> }
     FORCE_CLOSE: { label: 'FORCE',     style: 'bg-amber-950/70 text-amber-300 border-amber-800/60' },
     MAX_LOSS:    { label: 'MAX-LOSS',  style: 'bg-rose-950/70 text-rose-300 border-rose-800/60' },
     SWING_BIAS:  { label: 'BIAS',      style: 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60' },
+    HTF_BIAS:    { label: 'BIAS 1H',   style: 'bg-violet-950/70 text-violet-300 border-violet-800/60' },
   };
   const { label, style } = meta[type];
   return (
