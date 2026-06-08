@@ -2,6 +2,22 @@
 
 Last updated: 2026-06-07
 
+## WTX — session block moved Asia/overnight → London (forward-paper, 2026-06-07)
+
+Config-only change (reversible): `application.properties` session block
+`18:00→03:00` (Asia/overnight) → `03:00→08:00` (London/UK).
+
+**Why:** the overnight block was tuned for the old TRAILING exit (whipsawed in thin overnight
+chop). The now-deployed SL_ONLY/ride exit flips it — on the real-1m backtest (2 windows, ~82d),
+overnight is the ride config's BEST session (+~7.5k$/82d qty1) while LONDON/UK is the genuinely
+weak one (5m mild, 10m negative). Moving the block to London gained ~+7.6k$ net/82d in backtest.
+
+**Caveat (why it's forward-paper, not "done"):** that gain ≈ trading overnight, where execution
+(thin-liquidity slippage on Asia fills) is NOT modeled by the backtest. Run in paper (Auto-IBKR
+stays OFF) and watch overnight fills before trusting it. Revert the two values to `18:00→03:00`
+to restore the old block. The `WtxStrategyProperties` Java default stays `18:00→03:00` as the
+conservative fallback (so the existing `WtxSessionFilterTest` is unchanged and still green).
+
 ## WTX — per-day realized P&L in the signal history (2026-06-07)
 
 To make the "Signaux récents" history readable at a glance, each WTX day-group header now shows that
