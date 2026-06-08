@@ -12,6 +12,11 @@ import java.math.BigDecimal;
  *   2. After bestFavorablePrice has moved trailingActivationR * slAtrMult * entryAtr in favor of the position,
  *      switch to a trailing stop at bestFavorablePrice ± trailingAtrMult * entryAtr.
  *
+ * Optional fixed take-profit (opt-in via {@code takeProfitEnabled}, default OFF): a hard profit target at
+ * entry ± (tpPoints, or tpAtrMult * entryAtr). It lets a position bank profit without waiting for the
+ * opposite WaveTrend cross / HTF-bias flip. Checked AFTER the stop, so a bar that spans BOTH levels exits
+ * at the stop (pessimistic — same rule as TradeSimulationService). When disabled, behaviour is unchanged.
+ *
  * Exit detection is intra-bar: the stop is considered touched if the candle's low (LONG) or high (SHORT)
  * crosses the stop level. Fill price is the stop level itself (paper-trading assumption — slippage not modeled).
  *
@@ -24,7 +29,8 @@ public final class WtxTrailingExitEvaluator {
     public enum ExitReason {
         NONE,
         INITIAL_STOP,
-        TRAILING_STOP
+        TRAILING_STOP,
+        TAKE_PROFIT
     }
 
     public record Decision(
@@ -118,6 +124,20 @@ public final class WtxTrailingExitEvaluator {
                         longPos ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT,
                         fixedStop, mfeSl, fixedStop, ExitReason.INITIAL_STOP);
             }
+            // Optional fixed take-profit ALSO applies in SL_ONLY — checked AFTER the stop (pessimistic), so
+            // a position can bank a hard target instead of riding solely to the opposite cross / HTF flip.
+            BigDecimal tpDistSlOnly = tpDistance(config, atr);
+            if (tpDistSlOnly != null) {
+                BigDecimal tpPrice = longPos ? entry.add(tpDistSlOnly) : entry.subtract(tpDistSlOnly);
+                boolean tpHit = longPos
+                        ? candle.getHigh().compareTo(tpPrice) >= 0
+                        : candle.getLow().compareTo(tpPrice) <= 0;
+                if (tpHit) {
+                    return new Decision(true,
+                            longPos ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT,
+                            tpPrice, mfeSl, fixedStop, ExitReason.TAKE_PROFIT);
+                }
+            }
             return Decision.noExit(mfeSl, fixedStop);
         }
 
@@ -181,6 +201,47 @@ public final class WtxTrailingExitEvaluator {
                     trailingArmed ? ExitReason.TRAILING_STOP : ExitReason.INITIAL_STOP
             );
         }
+
+        // Optional fixed take-profit (opt-in, default OFF). Checked AFTER the stop so a single bar that spans
+        // BOTH levels resolves to the stop (pessimistic — same rule as TradeSimulationService). The target is
+        // fixed at entry ± tpDistance (a hard profit objective), independent of the trailing ratchet, so a
+        // position can bank profit without waiting for the opposite WaveTrend cross / HTF-bias flip.
+        BigDecimal tpDistance = tpDistance(config, atr);
+        if (tpDistance != null) {
+            BigDecimal tpPrice = isLong ? entry.add(tpDistance) : entry.subtract(tpDistance);
+            boolean tpHit = isLong
+                    ? candle.getHigh().compareTo(tpPrice) >= 0
+                    : candle.getLow().compareTo(tpPrice) <= 0;
+            if (tpHit) {
+                return new Decision(
+                        true,
+                        isLong ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT,
+                        tpPrice,
+                        mfe,
+                        stopPrice,
+                        ExitReason.TAKE_PROFIT
+                );
+            }
+        }
         return Decision.noExit(mfe, stopPrice);
+    }
+
+    /**
+     * Optional fixed take-profit distance: a fixed {@code tpPoints} when configured ({@code > 0}), otherwise
+     * the dynamic {@code tpAtrMult * ATR} (mirrors {@link #slDistance} for the stop). Null when the take-profit
+     * is disabled ({@code takeProfitEnabled == false}) or no usable distance is available — the position then
+     * has no profit target and exits only on stop / reverse / force-close (the legacy SL_ONLY behaviour).
+     */
+    private static BigDecimal tpDistance(WtxConfig config, BigDecimal atr) {
+        if (!config.takeProfitEnabled()) {
+            return null;
+        }
+        if (config.tpPoints() != null && config.tpPoints().signum() > 0) {
+            return config.tpPoints();
+        }
+        if (atr != null && atr.signum() > 0 && config.tpAtrMult() != null && config.tpAtrMult().signum() > 0) {
+            return atr.multiply(config.tpAtrMult());
+        }
+        return null;
     }
 }

@@ -9,6 +9,7 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxTrailingExitEvaluator.ExitReas
  * <ul>
  *   <li>{@link #REVERSE} — closed because the opposite WaveTrend signal fired (reverse-on-opp).</li>
  *   <li>{@link #TRAILING_TP} — ATR/point trailing stop hit after arming in profit (take-profit).</li>
+ *   <li>{@link #TAKE_PROFIT} — fixed take-profit target hit (opt-in hard profit objective).</li>
  *   <li>{@link #STOP_LOSS} — initial protective stop hit before the trail armed.</li>
  *   <li>{@link #FORCE_CLOSE} — flattened by the NY session-end force-close window.</li>
  *   <li>{@link #MAX_LOSS} — flattened by the daily max-loss latch.</li>
@@ -20,16 +21,18 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxTrailingExitEvaluator.ExitReas
 public enum WtxExitType {
     REVERSE,
     TRAILING_TP,
+    TAKE_PROFIT,
     STOP_LOSS,
     FORCE_CLOSE,
     MAX_LOSS,
     SWING_BIAS;
 
-    /** Maps the trailing evaluator's reason to the exit type (TRAILING_STOP = take-profit). */
+    /** Maps the trailing evaluator's reason to the exit type (TRAILING_STOP = trailing take-profit). */
     public static WtxExitType fromExitReason(ExitReason reason) {
         if (reason == null) return null;
         return switch (reason) {
             case TRAILING_STOP -> TRAILING_TP;
+            case TAKE_PROFIT -> TAKE_PROFIT;
             case INITIAL_STOP -> STOP_LOSS;
             case NONE -> null;
         };

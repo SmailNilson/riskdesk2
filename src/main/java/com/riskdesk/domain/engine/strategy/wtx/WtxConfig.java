@@ -74,7 +74,13 @@ public record WtxConfig(
         // domain defaults() stay bit-for-bit; the live config opts in.
         boolean sessionFilterEnabled,
         int sessionBlockStartMinEt,   // e.g. 18*60 = 1080 (18:00 ET)
-        int sessionBlockEndMinEt      // e.g.  3*60 =  180 (03:00 ET)
+        int sessionBlockEndMinEt,     // e.g.  3*60 =  180 (03:00 ET)
+
+        // Optional fixed take-profit (opt-in; default OFF). When enabled, a hard profit target at
+        // entry ± (tpPoints when > 0, else tpAtrMult * ATR) lets a position bank profit without waiting for
+        // the opposite WaveTrend cross / HTF-bias flip. OFF keeps the validated SL_ONLY behaviour.
+        boolean takeProfitEnabled,
+        BigDecimal tpPoints                   // 0 → use tpAtrMult * ATR (dynamic); > 0 → fixed point target
 ) {
 
     /** True when this instrument should use POINTS-mode arm/trail (else ATR). Empty list = all instruments. */
@@ -111,7 +117,9 @@ public record WtxConfig(
                 List.of("MNQ"),
                 // Session filter disabled in domain defaults — keeps evaluator/risk-guard tests
                 // bit-for-bit. The live config (application.properties) opts in (18:00 → 03:00 ET).
-                false, 0, 0
+                false, 0, 0,
+                // Take-profit OFF by default — keeps the validated SL_ONLY behaviour and existing tests intact.
+                false, BigDecimal.ZERO
         );
     }
 
@@ -147,7 +155,8 @@ public record WtxConfig(
                 mode, activationPts, trailPts, slPts, dailyResetEnabled,
                 // Wither scopes point trailing to ALL instruments (empty) — convenience for tests/config.
                 List.of(),
-                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt,
+                takeProfitEnabled, tpPoints);
     }
 
     /** Copy scoping POINTS trailing to the given instruments (empty = all). Preserves all other fields. */
@@ -160,7 +169,8 @@ public record WtxConfig(
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
                 pointsInstruments,
-                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+                sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt,
+                takeProfitEnabled, tpPoints);
     }
 
     /** Copy enabling/disabling the session entry filter with explicit ET minute boundaries. Preserves all other fields. */
@@ -172,7 +182,8 @@ public record WtxConfig(
                 atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
-                trailingPointsInstruments, enabled, blockStartMinEt, blockEndMinEt);
+                trailingPointsInstruments, enabled, blockStartMinEt, blockEndMinEt,
+                takeProfitEnabled, tpPoints);
     }
 
     /**
@@ -188,7 +199,8 @@ public record WtxConfig(
                 atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
-                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt,
+                takeProfitEnabled, tpPoints);
     }
 
     /**
@@ -203,7 +215,22 @@ public record WtxConfig(
                 atrLength, newSlAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
                 htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
-                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt,
+                takeProfitEnabled, tpPoints);
+    }
+
+    /** Copy enabling/disabling the optional fixed take-profit. {@code tpPts <= 0} uses the dynamic
+     *  {@code tpAtrMult * ATR} target. Preserves all other fields — convenience for tests and config wiring. */
+    public WtxConfig withTakeProfit(boolean enabled, BigDecimal tpPts) {
+        return new WtxConfig(
+                instruments, timeframes, n1, n2, signalPeriod, nsc, nsv,
+                useCompra, useCompra1, useVenta, useVenta1, reverseOnOpp, fixedQty,
+                maxDailyLossUsd, forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt,
+                enabled, tpPts);
     }
 
     public int nyCloseLimit() {

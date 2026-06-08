@@ -60,6 +60,12 @@ public class WtxStrategyProperties {
     private String sessionBlockStartEt = "18:00";
     private String sessionBlockEndEt = "03:00";
 
+    // Optional fixed take-profit (opt-in; default OFF → validated SL_ONLY behaviour). When enabled, a hard
+    // target at entry ± (tpPoints when >0, else tpAtrMult*ATR) banks profit without waiting for the opposite
+    // WaveTrend cross / HTF-bias flip. Validate on a real-1m backtest before enabling live.
+    private boolean takeProfitEnabled = false;
+    private BigDecimal tpPoints = BigDecimal.ZERO; // 0 → tpAtrMult*ATR (dynamic); >0 → fixed point target
+
     // Instruments whose (instrument, timeframe) states default to the HTF profile — a boot
     // reconciler upgrades any still on BASELINE to HTF (without overriding a manual choice).
     private List<String> htfDefaultInstruments = List.of("MNQ");
@@ -127,7 +133,8 @@ public class WtxStrategyProperties {
                 trailingMode, trailingActivationPoints, trailingPoints, slPoints,
                 dailyResetEnabled, trailingPointsInstruments,
                 sessionFilterEnabled, parseEtMinutes(sessionBlockStartEt, 1080),
-                parseEtMinutes(sessionBlockEndEt, 180)
+                parseEtMinutes(sessionBlockEndEt, 180),
+                takeProfitEnabled, tpPoints
         );
     }
 
@@ -247,6 +254,12 @@ public class WtxStrategyProperties {
 
     public String getSessionBlockEndEt() { return sessionBlockEndEt; }
     public void setSessionBlockEndEt(String sessionBlockEndEt) { this.sessionBlockEndEt = sessionBlockEndEt; }
+
+    public boolean isTakeProfitEnabled() { return takeProfitEnabled; }
+    public void setTakeProfitEnabled(boolean takeProfitEnabled) { this.takeProfitEnabled = takeProfitEnabled; }
+
+    public BigDecimal getTpPoints() { return tpPoints; }
+    public void setTpPoints(BigDecimal tpPoints) { this.tpPoints = tpPoints; }
 
     public List<String> getHtfDefaultInstruments() { return htfDefaultInstruments; }
     public void setHtfDefaultInstruments(List<String> htfDefaultInstruments) { this.htfDefaultInstruments = htfDefaultInstruments; }

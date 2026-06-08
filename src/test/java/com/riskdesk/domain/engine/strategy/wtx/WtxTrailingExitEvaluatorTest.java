@@ -237,6 +237,94 @@ class WtxTrailingExitEvaluatorTest {
         assertEquals(0, BigDecimal.valueOf(101.4).compareTo(d.exitPrice()));
     }
 
+    // ── Optional fixed take-profit (opt-in; default OFF) ───────────────────────
+
+    // POINTS mode + fixed 20-point TP. 20 < the 30-point trailing activation, so the TP fires while the
+    // trail is still disarmed — isolates the TP from trailing interference.
+    private static final WtxConfig TP_POINTS = POINTS.withTakeProfit(true, BigDecimal.valueOf(20));
+
+    @Test
+    void tp_long_targetHit_isTakeProfit() {
+        // TP = entry + 20 = 30020; stop (dynamic 1.4*ATR=14) at 29986 stays clear.
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30020, 30005, 30015); // high touches TP, low above stop
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, TP_POINTS);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxAction.CLOSE_LONG, d.exitAction());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.TAKE_PROFIT, d.reason());
+        assertEquals(0, BigDecimal.valueOf(30020).compareTo(d.exitPrice()));
+        assertEquals(WtxExitType.TAKE_PROFIT, WtxExitType.fromExitReason(d.reason()));
+    }
+
+    @Test
+    void tp_short_targetHit_isTakeProfit() {
+        // Short TP = entry - 20 = 29980; stop at 30014 stays clear.
+        WtxStrategyState s = openShort(30000, 10);
+        Candle c = candle(30000, 29995, 29980, 29985); // low touches TP, high below stop
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, TP_POINTS);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxAction.CLOSE_SHORT, d.exitAction());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.TAKE_PROFIT, d.reason());
+        assertEquals(0, BigDecimal.valueOf(29980).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void tp_disabled_noTakeProfitExit() {
+        // Same favorable bar, but TP OFF (default) → no TP exit; trail disarmed, stop clear → no exit at all.
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30020, 30005, 30015);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, POINTS); // TP off
+        assertFalse(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.NONE, d.reason());
+    }
+
+    @Test
+    void tp_stopAndTpSameBar_stopWins_pessimistic() {
+        // A bar that spans BOTH the stop (29986) and the TP (30020) must resolve to the STOP (loss),
+        // never the TP — pessimistic, matching TradeSimulationService.
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30025, 29980, 29990); // high >= TP AND low <= stop
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, TP_POINTS);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason()); // stop wins, not TAKE_PROFIT
+    }
+
+    @Test
+    void tp_atrBased_whenTpPointsZero() {
+        // tpPoints=0 → dynamic target = tpAtrMult(2.1)*ATR. ATR=1 → TP = 100 + 2.1 = 102.1.
+        WtxConfig tpAtr = CONFIG.withTakeProfit(true, BigDecimal.ZERO);
+        WtxStrategyState s = openLong(100.0, 1.0);
+        Candle c = candle(100, 102.2, 100.5, 102.0); // high touches 102.1; armed trail (100.2) stays clear of low
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, tpAtr);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.TAKE_PROFIT, d.reason());
+        assertEquals(0, BigDecimal.valueOf(102.1).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void tp_slOnlyMode_targetHit_isTakeProfit() {
+        // The key integration: in SL_ONLY (the validated profile), an enabled TP must still fire — the
+        // SL_ONLY branch must not short-circuit past the take-profit. TP = entry + 20 = 30020; SL at 29986.
+        WtxConfig slOnlyTp = SL_ONLY.withTakeProfit(true, BigDecimal.valueOf(20));
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30020, 30005, 30015);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, slOnlyTp);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.TAKE_PROFIT, d.reason());
+        assertEquals(0, BigDecimal.valueOf(30020).compareTo(d.exitPrice()));
+    }
+
+    @Test
+    void tp_slOnlyMode_stopBeforeTp_pessimistic() {
+        // In SL_ONLY too, a bar spanning both the fixed stop (29986) and TP (30020) resolves to the stop.
+        WtxConfig slOnlyTp = SL_ONLY.withTakeProfit(true, BigDecimal.valueOf(20));
+        WtxStrategyState s = openLong(30000, 10);
+        Candle c = candle(30000, 30025, 29980, 29990);
+        WtxTrailingExitEvaluator.Decision d = WtxTrailingExitEvaluator.evaluate(s, c, slOnlyTp);
+        assertTrue(d.shouldExit());
+        assertEquals(WtxTrailingExitEvaluator.ExitReason.INITIAL_STOP, d.reason());
+    }
+
     private static WtxStrategyState openLong(double entry, double atr) {
         return WtxStrategyState.initial("MCL", "10m", BigDecimal.valueOf(10000))
                 .withPosition(WtxPosition.LONG, BigDecimal.valueOf(entry), BigDecimal.valueOf(1),
