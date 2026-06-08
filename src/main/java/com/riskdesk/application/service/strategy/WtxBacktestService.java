@@ -131,8 +131,13 @@ public class WtxBacktestService {
                     htfIdx++;
                 }
                 if (htfIdx >= minHtfBars - 1) {
+                    // EMAIndicator.calculate() trims the warmup: its result for HTF bar i is at index
+                    // (i - period + 1), and EMA-fast vs EMA-slow have DIFFERENT offsets. Index each by its
+                    // own offset — NOT by htfIdx — or the bias reads off a misaligned (wrong) EMA.
                     ctx = new WtxHtfBiasFilter.HtfBiasContext(
-                            htfBars.get(htfIdx).getClose(), fastEma.get(htfIdx), slowEma.get(htfIdx));
+                            htfBars.get(htfIdx).getClose(),
+                            fastEma.get(htfIdx - config.htfFastLen() + 1),
+                            slowEma.get(htfIdx - config.htfSlowLen() + 1));
                 }
             }
             List<Candle> minutes = minutesByBucket.getOrDefault(barEpoch, List.of(bar));
