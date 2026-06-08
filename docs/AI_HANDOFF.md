@@ -1,6 +1,38 @@
 # AI Handoff
 
-Last updated: 2026-06-07
+Last updated: 2026-06-08
+
+## WTX — HTF-bias early exit ("A2") shipped (forward-paper, 2026-06-08)
+
+New opt-in exit on top of the SL_ONLY/ride profile: **close an open position when the 1h bias no
+longer SUPPORTS its direction** (turned NEUTRAL or flipped against it). The ride otherwise only
+leaves on the initial SL or a full opposite WaveTrend cross — A2 gives it a way out the moment the
+higher-timeframe trend that justified the position fades, instead of waiting for the cross.
+
+**Edge (real-1m MNQ 10m backtest, 2 windows ~82d, qty1):** +60% net vs ride-only, win-rate
+**32% → 46%**, robust on both windows. The 1h bias only changes on 1h closes, so it's evaluated on
+each closed 10m candle with **no cross-timeframe coupling** — A2 at 10m granularity ≈ A2 at 5m
+granularity (+11.9k vs +12.2k$), so the clean 10m implementation was chosen.
+
+**Rule** (`WtxHtfBiasExitEvaluator.shouldExit(position, bias)`, pure domain):
+LONG exits on `BEARISH`/`NEUTRAL`; SHORT exits on `BULLISH`/`NEUTRAL`; a supporting or
+`UNAVAILABLE` bias never forces an exit (fail-safe); FLAT is a no-op.
+
+**Wiring:**
+1. `WtxHtfBiasExitEvaluator` (domain) — pure decision, unit-tested (`WtxHtfBiasExitEvaluatorTest`).
+2. `WtxStrategyService.onCandleClosed` §3b — after the signal block, before max-loss. Guarded by
+   `state.currentPosition() == posBeforeSignal` so it only acts on a position that *rode* this bar
+   (never double-closes a §3 reverse/close; a freshly opened position already passed the HTF gate,
+   so re-checking is a no-op). Reuses the MAX_LOSS/force-close close pattern: route-before-flatten,
+   `skippedEntryInFlight` guard, realized-P&L delta stamp, `/topic/wtx-signals` publish.
+3. New `WtxExitType.HTF_BIAS` — close rows carry it; UI chip **"BIAS 1H"** (violet) in
+   `WtxStrategyPanel`, union extended in `api.ts`.
+4. Flag `riskdesk.wtx.htf-bias-exit-enabled` on `WtxStrategyProperties` (read directly in the
+   service to avoid the 47-field `WtxConfig` record arity change). **Default OFF** (Java); the live
+   `application.properties` opts in (`=true`) for forward-paper.
+
+**Caveat (why forward-paper, not "done"):** validated on backtest P&L only; Auto-IBKR stays OFF.
+Set `riskdesk.wtx.htf-bias-exit-enabled=false` to restore the pure ride (SL + opposite-cross only).
 
 ## WTX — session block moved Asia/overnight → London (forward-paper, 2026-06-07)
 

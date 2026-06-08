@@ -13,6 +13,9 @@ import com.riskdesk.domain.engine.strategy.wtx.WtxTrailingExitEvaluator.ExitReas
  *   <li>{@link #FORCE_CLOSE} — flattened by the NY session-end force-close window.</li>
  *   <li>{@link #MAX_LOSS} — flattened by the daily max-loss latch.</li>
  *   <li>{@link #SWING_BIAS} — closed by the swing-bias filter (position against resolved bias).</li>
+ *   <li>{@link #HTF_BIAS} — closed because the HTF (1h) bias no longer supports the position's
+ *       direction (turned NEUTRAL or opposite). Opt-in early exit — see
+ *       {@code riskdesk.wtx.htf-bias-exit-enabled}.</li>
  * </ul>
  *
  * Null on OPEN / NONE signals — only close rows carry an exit type.
@@ -23,7 +26,8 @@ public enum WtxExitType {
     STOP_LOSS,
     FORCE_CLOSE,
     MAX_LOSS,
-    SWING_BIAS;
+    SWING_BIAS,
+    HTF_BIAS;
 
     /** Maps the trailing evaluator's reason to the exit type (TRAILING_STOP = take-profit). */
     public static WtxExitType fromExitReason(ExitReason reason) {

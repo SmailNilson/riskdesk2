@@ -60,6 +60,11 @@ public class WtxStrategyProperties {
     private String sessionBlockStartEt = "18:00";
     private String sessionBlockEndEt = "03:00";
 
+    // HTF-bias early exit (profile >= HTF): close an open position when the 1h bias no longer
+    // supports its direction (turned NEUTRAL or opposite). Real-1m backtest on 10m: +60% net,
+    // WR 32->44%. Global flag (not per-instrument). Default OFF; the live config opts in.
+    private boolean htfBiasExitEnabled = false;
+
     // Instruments whose (instrument, timeframe) states default to the HTF profile — a boot
     // reconciler upgrades any still on BASELINE to HTF (without overriding a manual choice).
     private List<String> htfDefaultInstruments = List.of("MNQ");
@@ -247,6 +252,9 @@ public class WtxStrategyProperties {
 
     public String getSessionBlockEndEt() { return sessionBlockEndEt; }
     public void setSessionBlockEndEt(String sessionBlockEndEt) { this.sessionBlockEndEt = sessionBlockEndEt; }
+
+    public boolean isHtfBiasExitEnabled() { return htfBiasExitEnabled; }
+    public void setHtfBiasExitEnabled(boolean htfBiasExitEnabled) { this.htfBiasExitEnabled = htfBiasExitEnabled; }
 
     public List<String> getHtfDefaultInstruments() { return htfDefaultInstruments; }
     public void setHtfDefaultInstruments(List<String> htfDefaultInstruments) { this.htfDefaultInstruments = htfDefaultInstruments; }

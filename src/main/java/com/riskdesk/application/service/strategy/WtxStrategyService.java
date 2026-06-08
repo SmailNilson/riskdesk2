@@ -214,6 +214,10 @@ public class WtxStrategyService {
             }
         }
 
+        // Side we hold going into the signal block — lets the HTF-bias exit (§3b) tell a position
+        // that merely RODE this bar apart from one the signal block just opened / reversed / closed.
+        WtxPosition posBeforeSignal = state.currentPosition();
+
         // ── 3. Final signal evaluation with filter decisions ──────────────────
         Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(
                 prev, curr, config, state, event.timestamp(), event.timeframe(),
@@ -311,6 +315,45 @@ public class WtxStrategyService {
                     instrumentName, signal.signalType(), signal.suggestedAction(),
                     signal.canTrade(), signal.wt1Value(),
                     htfBiasLabel, structureReason);
+        }
+
+        // ── 3b. HTF-bias early exit ("A2", opt-in) ────────────────────────────
+        // Close an open position the 1h bias no longer SUPPORTS (turned NEUTRAL or opposite) — on top
+        // of the normal SL / opposite-WT reverse. Fires only when (a) opted in via the global flag,
+        // (b) the HTF context was built (HTF profile), and (c) the signal block above did NOT touch the
+        // position this bar (same side we entered the bar with). A freshly opened / reversed position
+        // already passed the HTF gate, so re-checking it would be a no-op; the guard also avoids a
+        // double close after a §3 reverse/close. Real-1m MNQ 10m backtest: +60% net, WR 32%->46%.
+        if (properties.isHtfBiasExitEnabled()
+                && htfCtx != null
+                && state.currentPosition() != WtxPosition.FLAT
+                && state.currentPosition() == posBeforeSignal) {
+            WtxHtfBiasFilter.HtfBias bias = WtxHtfBiasFilter.evaluate("LONG", htfCtx).bias();
+            if (WtxHtfBiasExitEvaluator.shouldExit(state.currentPosition(), bias)) {
+                WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                        ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                WtxSignal biasExit = buildCloseSignal(state, event.timeframe(), closeAction,
+                        "HTF_BIAS_EXIT:" + bias.name(), WtxExitType.HTF_BIAS, event.timestamp());
+                // Route BEFORE flattening so the bridge submits the full open quantity (same ordering
+                // invariant as applyExit() / MAX_LOSS_HALT — withFlat clears entryQty to 0 otherwise).
+                WtxRoutingResult biasRouting = routeToExecution(biasExit, state, currentCandle.getClose());
+                biasExit = biasExit.withRouting(biasRouting);
+                BigDecimal biasRealizedBefore = state.dailyRealizedPnl();
+                // Skip the flatten if a prior entry is still resting unfilled — no broker order was sent.
+                if (!skippedEntryInFlight(biasRouting)) {
+                    state = closePosition(state, instrument, currentCandle.getClose());
+                }
+                BigDecimal biasRealizedDelta = state.dailyRealizedPnl().subtract(biasRealizedBefore);
+                if (biasRealizedDelta.signum() != 0) {
+                    biasExit = biasExit.withRealizedPnl(biasRealizedDelta);
+                }
+                biasExit = biasExit.withPrice(currentCandle.getClose());
+                historyPort.save(biasExit);
+                ws.convertAndSend("/topic/wtx-signals", toWsPayload(biasExit, state));
+                publishWtxEvent(biasExit, currentCandle.getClose());
+                log.info("WTX [{} {}] HTF-bias early exit — pos={} bias={} closed",
+                        instrumentName, event.timeframe(), posBeforeSignal, bias);
+            }
         }
 
         // ── 4. Max-loss enforcement (profile >= SESSION_ATR) ──────────────────
