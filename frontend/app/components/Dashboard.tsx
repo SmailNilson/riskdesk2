@@ -297,12 +297,6 @@ export default function Dashboard() {
             liveSignals={wtxRsiSignals}
             liveState={wtxRsiStates[`${instrument}:5m`] ?? null}
           />
-          <WtxRsiStrategyPanel
-            instrument={instrument}
-            timeframe="10m"
-            liveSignals={wtxRsiSignals}
-            liveState={wtxRsiStates[`${instrument}:10m`] ?? null}
-          />
           <Quant7GatesSimulationPanel />
           <StrategyPanel instrument={instrument} timeframe={timeframe} />
           <ExternalSetupPanel />
