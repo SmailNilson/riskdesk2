@@ -117,6 +117,11 @@ class IndicatorServiceTest {
         }
 
         @Override
+        public List<Candle> findCandlesBetweenPaged(Instrument instrument, String timeframe, Instant from, Instant to, int limit) {
+            return Collections.emptyList();
+        }
+
+        @Override
         public List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe, String contractMonth, int limit) {
             return Collections.emptyList();
         }

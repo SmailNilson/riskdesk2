@@ -49,6 +49,15 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     }
 
     @Override
+    public List<Candle> findCandlesBetweenPaged(Instrument instrument, String timeframe,
+                                                Instant from, Instant to, int limit) {
+        return springDataRepo.findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
+                instrument, timeframe, from, to, PageRequest.of(0, limit)).stream()
+            .map(CandleEntityMapper::toDomain)
+            .toList();
+    }
+
+    @Override
     public Optional<Instant> findLatestTimestamp(Instrument instrument, String timeframe) {
         return springDataRepo.findMaxTimestamp(instrument, timeframe);
     }

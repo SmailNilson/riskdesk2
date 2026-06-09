@@ -33,6 +33,9 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     private static final DateTimeFormatter IB_DATE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd HH:mm:ss");
     // 1-min deep backfill walks day-by-day, so a 30-day target needs ~30 chunks; keep headroom.
     private static final int MAX_BACKFILL_CHUNKS = 45;
+    // Range backfill can span far more than the count-based path (e.g. 90 days of 1m bars
+    // pages day-by-day). Higher safety cap; the walk stops early once `from` is reached.
+    private static final int MAX_RANGE_CHUNKS = 240;
     /** Max expired contracts to walk backward through for deep backfill. */
     private static final int MAX_CONTRACT_WALK = 24;
     /** Pause between IBKR historical requests to respect pacing limits (~60 req/10 min). */
@@ -109,6 +112,144 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 log.warn("IB Gateway fetchHistoryBefore skipped for {} {}: no contract resolved", instrument, timeframe);
                 return List.of();
             });
+    }
+
+    /**
+     * Range-bounded deep backfill: reconstructs every available bar in {@code [from, to]}.
+     *
+     * <p>Walks backward from {@code to} on the front-month contract, then continues into
+     * expired contracts (gap-fill only — never overwriting newer-contract candles) until the
+     * window's lower bound is reached or no more contracts remain. Throttled to respect IBKR
+     * pacing. The application layer is responsible for idempotent persistence.</p>
+     */
+    @Override
+    public List<Candle> fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to) {
+        if (!instrument.isExchangeTradedFuture() || !supports(instrument, timeframe)) {
+            return List.of();
+        }
+        if (from == null || to == null || !from.isBefore(to)) {
+            log.warn("IB Gateway range backfill skipped for {} {}: invalid window [{} .. {}]", instrument, timeframe, from, to);
+            return List.of();
+        }
+
+        return contractResolver.resolve(instrument)
+            .map(resolved -> {
+                Map<Instant, Candle> merged = new LinkedHashMap<>();
+                String currentMonth = normalizeMonth(resolved.contract().lastTradeDateOrContractMonth());
+                int contractsUsed = 1;
+
+                // Phase 1: front-month contract, walking back from `to` toward `from`.
+                fetchRangeChunksFromContract(instrument, timeframe, from, to, resolved.contract(), currentMonth, merged);
+
+                // Phase 2: walk backward through expired contracts until the lower bound is covered.
+                int maxWalk = maxContractWalk(instrument, timeframe);
+                String prevMonth = currentMonth;
+                for (int walk = 0; walk < maxWalk && !coversFrom(merged, from); walk++) {
+                    prevMonth = ActiveContractRegistryInitializer.previousContractMonth(instrument, prevMonth);
+                    if (prevMonth == null) break;
+
+                    Optional<IbGatewayResolvedContract> prevResolved = contractResolver.resolveExpiredMonth(instrument, prevMonth);
+                    if (prevResolved.isEmpty()) {
+                        log.debug("IB Gateway range backfill: no expired contract for {} {}, stopping walk", instrument, prevMonth);
+                        break;
+                    }
+
+                    Map<Instant, Candle> olderData = new LinkedHashMap<>();
+                    fetchRangeChunksFromContract(instrument, timeframe, from, to, prevResolved.get().contract(), prevMonth, olderData);
+                    if (olderData.isEmpty()) {
+                        log.debug("IB Gateway range backfill: {} {} returned no data, stopping walk", instrument, prevMonth);
+                        break;
+                    }
+
+                    int beforeSize = merged.size();
+                    mergeGapFillOnly(merged, olderData);
+                    if (merged.size() == beforeSize) break;
+                    contractsUsed++;
+                }
+
+                List<Candle> result = merged.values().stream()
+                    .filter(c -> !c.getTimestamp().isBefore(from) && !c.getTimestamp().isAfter(to))
+                    .sorted(Comparator.comparing(Candle::getTimestamp))
+                    .toList();
+                if (!result.isEmpty()) {
+                    log.info("IB Gateway range backfill {} {} [{} .. {}] -> {} candles across {} contracts ({} .. {})",
+                        instrument, timeframe, from, to, result.size(), contractsUsed,
+                        result.get(0).getTimestamp(), result.get(result.size() - 1).getTimestamp());
+                }
+                return result;
+            })
+            .orElseGet(() -> {
+                log.warn("IB Gateway range backfill skipped for {} {}: no contract resolved", instrument, timeframe);
+                return List.of();
+            });
+    }
+
+    /** True once the merged dataset reaches the window's lower bound. */
+    private boolean coversFrom(Map<Instant, Candle> merged, Instant from) {
+        return merged.keySet().stream().min(Comparator.naturalOrder())
+            .map(min -> !min.isAfter(from))
+            .orElse(false);
+    }
+
+    /**
+     * Fetches chunked historical data from one contract bounded by {@code [from, to]}, walking
+     * backward from {@code to}. Only bars inside the window are kept; the walk stops once it
+     * reaches {@code from}, makes no backward progress, or hits the chunk/timeout safety caps.
+     */
+    private void fetchRangeChunksFromContract(Instrument instrument, String timeframe, Instant from, Instant to,
+                                              com.ib.client.Contract contract, String contractMonth,
+                                              Map<Instant, Candle> merged) {
+        HistoricalQuery chunkQuery = chunkQueryFor(timeframe);
+        long stepSeconds = timeframeSeconds(timeframe);
+        Instant endDateTime = to;
+        Instant previousOldest = null;
+        int consecutiveTimeouts = 0;
+
+        for (int chunkIndex = 0; chunkIndex < MAX_RANGE_CHUNKS; chunkIndex++) {
+            if (chunkIndex > 0) {
+                try { Thread.sleep(PACING_DELAY_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            }
+
+            List<Bar> bars = nativeClient.requestHistoricalBars(
+                contract, endDateTime, chunkQuery.duration(), chunkQuery.durationUnit(),
+                chunkQuery.barSize(), WhatToShow.TRADES, false);
+
+            if (bars.isEmpty()) {
+                consecutiveTimeouts++;
+                if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                    log.warn("IB Gateway range backfill {} {} [{}]: {} consecutive empty responses — aborting",
+                        instrument, timeframe, contractMonth, consecutiveTimeouts);
+                    break;
+                }
+                continue;
+            }
+            consecutiveTimeouts = 0;
+
+            List<Candle> candles = bars.stream()
+                .map(bar -> toCandleWithMonth(instrument, timeframe, bar, contractMonth))
+                .sorted(Comparator.comparing(Candle::getTimestamp))
+                .toList();
+            if (candles.isEmpty()) break;
+
+            Instant oldest = candles.get(0).getTimestamp();
+            Instant newest = candles.get(candles.size() - 1).getTimestamp();
+
+            for (Candle candle : candles) {
+                Instant ts = candle.getTimestamp();
+                if (!ts.isBefore(from) && !ts.isAfter(to)) {
+                    merged.putIfAbsent(ts, candle);
+                }
+            }
+
+            log.debug("IB Gateway range backfill {} {} [{}] chunk {}/{} -> {} bars ({} .. {}), kept total={}",
+                instrument, timeframe, contractMonth, chunkIndex + 1, MAX_RANGE_CHUNKS,
+                candles.size(), oldest, newest, merged.size());
+
+            if (!oldest.isAfter(from)) break;                                   // reached lower bound
+            if (previousOldest != null && !oldest.isBefore(previousOldest)) break; // no backward progress
+            previousOldest = oldest;
+            endDateTime = oldest.minusSeconds(Math.max(stepSeconds, 1));
+        }
     }
 
     @Override

@@ -1,6 +1,42 @@
 # AI Handoff
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
+
+## Deep 1m range backfill + cursor-paginated range read (2026-06-09)
+
+Backtests need real 1m over many days, but the DB only held a narrow 1m window and the chart
+endpoint is hard-capped at 1000 candles. Two additions close that gap — **ingestion** and
+**retrieval** — without touching the chart endpoint or adding any external data source.
+
+**Ingestion — deep, idempotent range backfill (admin-triggered):**
+- New domain port method `HistoricalDataProvider.fetchHistoryRange(instrument, tf, from, to)`
+  (default no-op). Implemented in `IbGatewayHistoricalProvider`: walks **backward from `to` to
+  `from`** day-by-day for 1m (2s IBKR pacing), crossing into expired contracts gap-fill-only
+  (never overwriting newer-contract bars), bounded by `MAX_RANGE_CHUNKS=240`. Unlike the existing
+  count-based `fetchDeepHistory` it can reconstruct an arbitrary historical window and fill
+  **middle** gaps, not just append past the high-water mark.
+- `HistoricalDataService.startBackfillRange(...)` orchestrates it. **Idempotent**: loads existing
+  timestamps in `[from,to]` and saves only the missing ones, so re-running (e.g. daily to top up)
+  is a no-op on already-present bars and never trips the `(instrument,timeframe,ts)` unique key.
+  Runs on a dedicated single thread (serialises heavy pulls, protects pacing); same-pair jobs are
+  coalesced. Async by default with a `RUNNING→DONE/FAILED` job snapshot; validation guards reject
+  inverted/oversized windows (`backfill-range-max-days`, default 120).
+- REST (`CandleBackfillController`): `POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true]`
+  and `GET /api/candles/backfill/{instrument}/{timeframe}/status`.
+- **Daily currency** of 1m reuses the *existing* hwm-delta path (`gapFillTimeframe`, same as 5m/10m)
+  at startup — no new scheduler was added (deliberate; the deep seed is a one-shot admin call).
+
+**Retrieval — cursor-paginated range read (overcomes the 1000 cap):**
+- New `CandleRepositoryPort.findCandlesBetweenPaged(...)` + Spring Data `Between ... Pageable`.
+- `GET /api/candles/{instrument}/{timeframe}/range?from=ISO&to=ISO&limit=N` returns **raw** candles
+  (no out-of-session purge, no contract-month filter — matches what `WtxRsiBacktestService` actually
+  consumes) oldest→newest with a `nextFrom` epoch-second cursor (`null` when exhausted). Page size
+  defaults to `riskdesk.candles.range.default-page-size` (5000), capped at `max-page-size` (50000).
+- The original `?limit=N` (≤1000) chart endpoint is **unchanged**.
+
+Params accept ISO-8601 or bare epoch seconds (`RequestInstants`). Config keys added under
+`riskdesk.market-data.historical.backfill-range-max-days` and `riskdesk.candles.range.*`.
+Tested: backfill idempotency/validation, range cursor math, repo pagination (H2), controller wiring.
 
 ## WTX — HTF-bias early exit ("A2") shipped (forward-paper, 2026-06-08)
 

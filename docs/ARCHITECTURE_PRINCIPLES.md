@@ -452,6 +452,22 @@ Constants are hardcoded for CME: `ZoneId.of("America/New_York")`, session close 
 - **Daily (1d):** aggregate from `dailySessionStart()` to `dailySessionEnd()` via `TradingSessionResolver`. Do NOT truncate to midnight UTC — this would mix two CME sessions.
 - **Weekly (1w):** aggregate from `weeklySessionStart()` (Sunday 17:00 ET) to Friday 17:00 ET via `TradingSessionResolver`.
 
+### Candle Backfill & Range Read Rule
+
+- **Deep range backfill** (`HistoricalDataProvider.fetchHistoryRange` →
+  `HistoricalDataService.startBackfillRange`) must stay **IBKR-only** and **idempotent**: load the
+  timestamps already stored in `[from, to]` and persist only the missing ones. Never rely on the DB
+  unique key to "dedupe by exception", and never overwrite newer-contract bars when walking expired
+  contracts (gap-fill-only merge). It is distinct from `gapFillTimeframe` (hwm-delta, append-only) —
+  use the range path when filling middle gaps or seeding an arbitrary historical window.
+- Heavy backfills run on a single dedicated thread and respect IBKR pacing (2s/chunk). Bound the
+  window with `riskdesk.market-data.historical.backfill-range-max-days`.
+- **Range read** (`GET /api/candles/{instrument}/{timeframe}/range`) returns **raw** candles —
+  no `CandleSeriesNormalizer.purgeOutOfSession`, no contract-month filter — so the series is byte-for-byte
+  what the backtest engine consumes. The 1000-cap chart endpoint (`?limit=N`) is the opposite contract
+  (session-purged, contract-filtered) and must stay separate. Paginate large windows with the
+  `nextFrom` cursor; never lift the chart endpoint's `@Max(1000)` to serve backtests.
+
 ### VWAP Reset Convention
 
 Session VWAP resets at **midnight ET** (change of `LocalDate` in `America/New_York`), consistent with TradingView and Bloomberg. This is NOT the same as the CME session boundary (17:00 ET). Do not "fix" this to 17:00 ET — it would break comparability with external charting platforms.
