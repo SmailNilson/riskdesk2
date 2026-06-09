@@ -45,6 +45,13 @@ This rule is intentional and strict.
 - historical candles should come from the IBKR/PostgreSQL pipeline
 - PostgreSQL fallback is acceptable when IBKR is temporarily unavailable
 - external providers must not be introduced as “temporary fixes”
+- **deep 1m history for backtests** is seeded via the admin range backfill
+  (`POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO`), still IBKR-only and
+  idempotent (skips bars already present); it walks backward `to → from` across contracts with IBKR
+  pacing. Read it back over the 1000-candle cap with the cursor-paginated
+  `GET /api/candles/{instrument}/{timeframe}/range?from=ISO&to=ISO&limit=N` (`nextFrom` cursor).
+  The range read returns **raw** candles (no session purge / contract-month filter) so the series
+  matches exactly what the backtest engine consumes.
 
 ### Synthetic Dollar Index
 
@@ -352,6 +359,13 @@ npm run lint
 ```bash
 curl -s http://localhost:8080/actuator/health
 curl -s http://localhost:8080/api/live-price/E6
+
+# Seed 90 days of real 1m for a backtest (idempotent; async by default), then poll status:
+curl -s -X POST "http://localhost:8090/api/candles/backfill/MNQ/1m?from=2026-03-01T00:00:00Z&to=2026-05-30T00:00:00Z"
+curl -s "http://localhost:8090/api/candles/backfill/MNQ/1m/status"
+
+# Read back beyond the 1000-candle cap via the cursor (pass nextFrom back as from):
+curl -s "http://localhost:8090/api/candles/MNQ/1m/range?from=2026-03-01T00:00:00Z&to=2026-05-30T00:00:00Z&limit=5000"
 ```
 
 ## Coding Conventions

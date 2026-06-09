@@ -37,6 +37,15 @@ public interface CandleRepositoryPort {
      */
     List<Candle> findCandlesBetween(Instrument instrument, String timeframe, Instant from, Instant to);
 
+    /**
+     * Returns at most {@code limit} candles within a time range, ordered oldest-first.
+     * Used by the cursor-paginated range endpoint to stream large 1m windows for
+     * backtests without breaching the 1000-candle chart cap. The caller advances the
+     * cursor by re-querying with {@code from} set just after the last returned timestamp.
+     */
+    List<Candle> findCandlesBetweenPaged(Instrument instrument, String timeframe,
+                                         Instant from, Instant to, int limit);
+
     Candle save(Candle candle);
 
     List<Candle> saveAll(List<Candle> candles);
