@@ -20,7 +20,11 @@ endpoint is hard-capped at 1000 candles. Two additions close that gap — **inge
   is a no-op on already-present bars and never trips the `(instrument,timeframe,ts)` unique key.
   Runs on a dedicated single thread (serialises heavy pulls, protects pacing); same-pair jobs are
   coalesced. Async by default with a `RUNNING→DONE/FAILED` job snapshot; validation guards reject
-  inverted/oversized windows (`backfill-range-max-days`, default 120).
+  inverted/oversized windows (`backfill-range-max-days`, default 200 ≈ the practical IBKR 1m depth).
+  The expired-contract walk depth **scales with the requested window**
+  (`IbGatewayHistoricalProvider.rangeContractWalk`, capped at `MAX_CONTRACT_WALK=24`), so 4–6 month
+  1m pulls reach far enough back across contracts without manual tuning — the loop still exits early
+  once `from` is covered. Real ceiling is now IBKR (1m history ≈ 6 months for futures), not the code.
 - REST (`CandleBackfillController`): `POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true]`
   and `GET /api/candles/backfill/{instrument}/{timeframe}/status`.
 - **Daily currency** of 1m reuses the *existing* hwm-delta path (`gapFillTimeframe`, same as 5m/10m)

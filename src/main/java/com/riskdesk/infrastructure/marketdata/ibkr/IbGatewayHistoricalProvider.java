@@ -142,7 +142,10 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 fetchRangeChunksFromContract(instrument, timeframe, from, to, resolved.contract(), currentMonth, merged);
 
                 // Phase 2: walk backward through expired contracts until the lower bound is covered.
-                int maxWalk = maxContractWalk(instrument, timeframe);
+                // The walk depth scales with the requested window (not a fixed per-timeframe span),
+                // so 4–6 month 1m pulls reach far enough back without manual tuning. The loop still
+                // stops early once `from` is covered, so a generous bound never costs extra requests.
+                int maxWalk = rangeContractWalk(instrument, from, to);
                 String prevMonth = currentMonth;
                 for (int walk = 0; walk < maxWalk && !coversFrom(merged, from); walk++) {
                     prevMonth = ActiveContractRegistryInitializer.previousContractMonth(instrument, prevMonth);
@@ -436,6 +439,20 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
         boolean quarterly = instrument == Instrument.E6 || instrument == Instrument.MNQ;
         int monthsPerContract = quarterly ? 3 : 1;
         return Math.min(MAX_CONTRACT_WALK, (baseDays / (monthsPerContract * 30)) + 2);
+    }
+
+    /**
+     * Number of expired contracts to walk for a <em>range</em> backfill — derived from the actual
+     * {@code [from, to]} width rather than a static per-timeframe span, so the walk reaches as far
+     * back as the requested window needs (MNQ/E6 roll quarterly ≈ 90d/contract, MCL/MGC monthly
+     * ≈ 30d). A +2 buffer absorbs contract-boundary overlap; the result is capped at
+     * {@link #MAX_CONTRACT_WALK} and the caller's loop still exits early once {@code from} is reached.
+     */
+    static int rangeContractWalk(Instrument instrument, Instant from, Instant to) {
+        long windowDays = Math.max(1, java.time.Duration.between(from, to).toDays());
+        boolean quarterly = instrument == Instrument.E6 || instrument == Instrument.MNQ;
+        int daysPerContract = (quarterly ? 3 : 1) * 30;
+        return (int) Math.min(MAX_CONTRACT_WALK, (windowDays / daysPerContract) + 2);
     }
 
     private Candle toCandle(Instrument instrument, String timeframe, Bar bar) {

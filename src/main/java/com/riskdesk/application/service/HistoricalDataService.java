@@ -89,7 +89,7 @@ public class HistoricalDataService implements ApplicationRunner {
     private long mentorRefreshCooldownMs;
 
     /** Safety bound on the width of an on-demand range backfill window (protects IBKR pacing). */
-    @Value("${riskdesk.market-data.historical.backfill-range-max-days:120}")
+    @Value("${riskdesk.market-data.historical.backfill-range-max-days:200}")
     private int backfillRangeMaxDays;
 
     /** Set to true once real candles have been successfully loaded (quick startup). */
