@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
 
@@ -124,30 +125,58 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
      */
     @Override
     public List<Candle> fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to) {
+        // Convenience wrapper for non-streaming callers: collect the streamed chunks into one
+        // deduplicated, oldest-first list. Buffers the whole window — only use for small windows
+        // or tests; the memory-sensitive backfill path uses the streaming overload below.
+        Map<Instant, Candle> merged = new LinkedHashMap<>();
+        fetchHistoryRange(instrument, timeframe, from, to,
+            chunk -> chunk.forEach(c -> merged.putIfAbsent(c.getTimestamp(), c)));
+        return merged.values().stream()
+            .sorted(Comparator.comparing(Candle::getTimestamp))
+            .toList();
+    }
+
+    @Override
+    public int fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to,
+                                 Consumer<List<Candle>> chunkSink) {
         if (!instrument.isExchangeTradedFuture() || !supports(instrument, timeframe)) {
-            return List.of();
+            return 0;
         }
         if (from == null || to == null || !from.isBefore(to)) {
             log.warn("IB Gateway range backfill skipped for {} {}: invalid window [{} .. {}]", instrument, timeframe, from, to);
-            return List.of();
+            return 0;
         }
 
         return contractResolver.resolve(instrument)
             .map(resolved -> {
-                Map<Instant, Candle> merged = new LinkedHashMap<>();
+                // Coverage tracker: a single Instant (earliest bar seen so far) and a running count,
+                // instead of buffering the whole window. The sink streams each chunk straight to the
+                // caller (which persists it) so heap stays bounded to ~one IBKR request.
+                Instant[] minSeen = { null };
+                int[] total = { 0 };
+                Consumer<List<Candle>> sink = chunk -> {
+                    if (chunk.isEmpty()) return;
+                    total[0] += chunk.size();
+                    Instant oldest = chunk.get(0).getTimestamp(); // chunks are oldest-first within a chunk
+                    if (minSeen[0] == null || oldest.isBefore(minSeen[0])) minSeen[0] = oldest;
+                    chunkSink.accept(chunk);
+                };
+
                 String currentMonth = normalizeMonth(resolved.contract().lastTradeDateOrContractMonth());
                 int contractsUsed = 1;
 
                 // Phase 1: front-month contract, walking back from `to` toward `from`.
-                fetchRangeChunksFromContract(instrument, timeframe, from, to, resolved.contract(), currentMonth, merged);
+                fetchRangeChunksFromContract(instrument, timeframe, from, to, resolved.contract(), currentMonth, sink);
 
                 // Phase 2: walk backward through expired contracts until the lower bound is covered.
                 // The walk depth scales with the requested window (not a fixed per-timeframe span),
                 // so 4–6 month 1m pulls reach far enough back without manual tuning. The loop still
                 // stops early once `from` is covered, so a generous bound never costs extra requests.
+                // Older-contract bars that overlap newer ones are naturally gap-fill-only: front-month
+                // chunks are streamed (and persisted) first, so the idempotent sink skips the overlap.
                 int maxWalk = rangeContractWalk(instrument, from, to);
                 String prevMonth = currentMonth;
-                for (int walk = 0; walk < maxWalk && !coversFrom(merged, from); walk++) {
+                for (int walk = 0; walk < maxWalk && !reaches(minSeen[0], from); walk++) {
                     prevMonth = ActiveContractRegistryInitializer.previousContractMonth(instrument, prevMonth);
                     if (prevMonth == null) break;
 
@@ -157,41 +186,31 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                         break;
                     }
 
-                    Map<Instant, Candle> olderData = new LinkedHashMap<>();
-                    fetchRangeChunksFromContract(instrument, timeframe, from, to, prevResolved.get().contract(), prevMonth, olderData);
-                    if (olderData.isEmpty()) {
-                        log.debug("IB Gateway range backfill: {} {} returned no data, stopping walk", instrument, prevMonth);
+                    Instant beforeMin = minSeen[0];
+                    fetchRangeChunksFromContract(instrument, timeframe, from, to, prevResolved.get().contract(), prevMonth, sink);
+                    // Stop if this older contract produced no earlier data (no backward progress).
+                    if (minSeen[0] == null || (beforeMin != null && !minSeen[0].isBefore(beforeMin))) {
+                        log.debug("IB Gateway range backfill: {} {} made no backward progress, stopping walk", instrument, prevMonth);
                         break;
                     }
-
-                    int beforeSize = merged.size();
-                    mergeGapFillOnly(merged, olderData);
-                    if (merged.size() == beforeSize) break;
                     contractsUsed++;
                 }
 
-                List<Candle> result = merged.values().stream()
-                    .filter(c -> !c.getTimestamp().isBefore(from) && !c.getTimestamp().isAfter(to))
-                    .sorted(Comparator.comparing(Candle::getTimestamp))
-                    .toList();
-                if (!result.isEmpty()) {
-                    log.info("IB Gateway range backfill {} {} [{} .. {}] -> {} candles across {} contracts ({} .. {})",
-                        instrument, timeframe, from, to, result.size(), contractsUsed,
-                        result.get(0).getTimestamp(), result.get(result.size() - 1).getTimestamp());
+                if (total[0] > 0) {
+                    log.info("IB Gateway range backfill {} {} [{} .. {}] -> {} candles streamed across {} contracts (earliest {})",
+                        instrument, timeframe, from, to, total[0], contractsUsed, minSeen[0]);
                 }
-                return result;
+                return total[0];
             })
             .orElseGet(() -> {
                 log.warn("IB Gateway range backfill skipped for {} {}: no contract resolved", instrument, timeframe);
-                return List.of();
+                return 0;
             });
     }
 
-    /** True once the merged dataset reaches the window's lower bound. */
-    private boolean coversFrom(Map<Instant, Candle> merged, Instant from) {
-        return merged.keySet().stream().min(Comparator.naturalOrder())
-            .map(min -> !min.isAfter(from))
-            .orElse(false);
+    /** True once the earliest bar seen reaches the window's lower bound. */
+    private static boolean reaches(Instant minSeen, Instant from) {
+        return minSeen != null && !minSeen.isAfter(from);
     }
 
     /**
@@ -201,7 +220,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
      */
     private void fetchRangeChunksFromContract(Instrument instrument, String timeframe, Instant from, Instant to,
                                               com.ib.client.Contract contract, String contractMonth,
-                                              Map<Instant, Candle> merged) {
+                                              Consumer<List<Candle>> sink) {
         HistoricalQuery chunkQuery = chunkQueryFor(timeframe);
         long stepSeconds = timeframeSeconds(timeframe);
         Instant endDateTime = to;
@@ -237,16 +256,17 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             Instant oldest = candles.get(0).getTimestamp();
             Instant newest = candles.get(candles.size() - 1).getTimestamp();
 
-            for (Candle candle : candles) {
-                Instant ts = candle.getTimestamp();
-                if (!ts.isBefore(from) && !ts.isAfter(to)) {
-                    merged.putIfAbsent(ts, candle);
-                }
+            // Stream only the in-window bars straight to the sink — never accumulate the window.
+            List<Candle> windowed = candles.stream()
+                .filter(c -> !c.getTimestamp().isBefore(from) && !c.getTimestamp().isAfter(to))
+                .toList();
+            if (!windowed.isEmpty()) {
+                sink.accept(windowed);
             }
 
-            log.debug("IB Gateway range backfill {} {} [{}] chunk {}/{} -> {} bars ({} .. {}), kept total={}",
+            log.debug("IB Gateway range backfill {} {} [{}] chunk {}/{} -> {} bars ({} .. {}), kept {}",
                 instrument, timeframe, contractMonth, chunkIndex + 1, MAX_RANGE_CHUNKS,
-                candles.size(), oldest, newest, merged.size());
+                candles.size(), oldest, newest, windowed.size());
 
             if (!oldest.isAfter(from)) break;                                   // reached lower bound
             if (previousOldest != null && !oldest.isBefore(previousOldest)) break; // no backward progress

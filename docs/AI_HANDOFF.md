@@ -8,18 +8,25 @@ Backtests need real 1m over many days, but the DB only held a narrow 1m window a
 endpoint is hard-capped at 1000 candles. Two additions close that gap — **ingestion** and
 **retrieval** — without touching the chart endpoint or adding any external data source.
 
-**Ingestion — deep, idempotent range backfill (admin-triggered):**
-- New domain port method `HistoricalDataProvider.fetchHistoryRange(instrument, tf, from, to)`
-  (default no-op). Implemented in `IbGatewayHistoricalProvider`: walks **backward from `to` to
-  `from`** day-by-day for 1m (2s IBKR pacing), crossing into expired contracts gap-fill-only
-  (never overwriting newer-contract bars), bounded by `MAX_RANGE_CHUNKS=240`. Unlike the existing
-  count-based `fetchDeepHistory` it can reconstruct an arbitrary historical window and fill
-  **middle** gaps, not just append past the high-water mark.
-- `HistoricalDataService.startBackfillRange(...)` orchestrates it. **Idempotent**: loads existing
-  timestamps in `[from,to]` and saves only the missing ones, so re-running (e.g. daily to top up)
-  is a no-op on already-present bars and never trips the `(instrument,timeframe,ts)` unique key.
-  Runs on a dedicated single thread (serialises heavy pulls, protects pacing); same-pair jobs are
-  coalesced. Async by default with a `RUNNING→DONE/FAILED` job snapshot; validation guards reject
+**Ingestion — deep, idempotent, *streaming* range backfill (admin-triggered):**
+- Domain port `HistoricalDataProvider.fetchHistoryRange(instrument, tf, from, to, Consumer<List<Candle>>)`
+  — the **streaming** overload is the real path; it hands each fetched chunk (~one IBKR request) to
+  the sink the moment it arrives instead of accumulating the window. The old List-returning overload
+  is kept as a thin convenience wrapper (buffers — small windows/tests only). Implemented in
+  `IbGatewayHistoricalProvider`: walks **backward from `to` to `from`** day-by-day for 1m (2s IBKR
+  pacing), crossing into expired contracts gap-fill-only (never overwriting newer-contract bars),
+  bounded by `MAX_RANGE_CHUNKS=240`. Coverage is tracked with a single `minSeen` instant, not a
+  buffered map. Unlike the count-based `fetchDeepHistory` it reconstructs an arbitrary window and
+  fills **middle** gaps, not just past the high-water mark.
+- `HistoricalDataService.startBackfillRange(...)` orchestrates it. **Memory-bounded**: chunks stream
+  straight into PostgreSQL via `persistBackfillChunk` — heap stays at ~one IBKR request, never the
+  whole `[from,to]` window (a deep 1m window is ~10^5 candles and must not be buffered). **Idempotent
+  per chunk**: an existence probe bounded by the chunk's own min/max skips already-present
+  timestamps, so re-runs (and older-contract chunks overlapping already-saved front-month bars) are
+  no-op saves that never trip the `(instrument,timeframe,ts)` unique key. Gap-fill-only across
+  contracts falls out naturally: front-month chunks are persisted first, so the idempotent sink drops
+  the overlap. Runs on a dedicated single thread (serialises heavy pulls, protects pacing); same-pair
+  jobs are coalesced. Async by default with a `RUNNING→DONE/FAILED` job snapshot; validation guards reject
   inverted/oversized windows (`backfill-range-max-days`, default 200 ≈ the practical IBKR 1m depth).
   The expired-contract walk depth **scales with the requested window**
   (`IbGatewayHistoricalProvider.rangeContractWalk`, capped at `MAX_CONTRACT_WALK=24`), so 4–6 month
