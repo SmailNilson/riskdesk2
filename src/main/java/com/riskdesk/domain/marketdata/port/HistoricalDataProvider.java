@@ -5,6 +5,7 @@ import com.riskdesk.domain.model.Instrument;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Port for fetching historical OHLCV candles from the internal market-data pipeline.
@@ -41,5 +42,26 @@ public interface HistoricalDataProvider {
      */
     default List<Candle> fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to) {
         return List.of();
+    }
+
+    /**
+     * Streaming variant of {@link #fetchHistoryRange(Instrument, String, Instant, Instant)} that
+     * hands each fetched chunk to {@code chunkSink} the moment it is retrieved, instead of
+     * accumulating the whole {@code [from, to]} window in memory. Heap stays bounded to a single
+     * chunk (~one IBKR request) — essential for deep 1m windows that span months and would
+     * otherwise hold ~10^5 candles in RAM before a single write.
+     *
+     * <p>Bars within a chunk are oldest-first, but chunks may arrive newest-first (the walk goes
+     * backward) and may overlap across contract boundaries, so the sink must persist idempotently.</p>
+     *
+     * @return total number of candles handed to the sink
+     */
+    default int fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to,
+                                  Consumer<List<Candle>> chunkSink) {
+        List<Candle> all = fetchHistoryRange(instrument, timeframe, from, to);
+        if (!all.isEmpty()) {
+            chunkSink.accept(all);
+        }
+        return all.size();
     }
 }

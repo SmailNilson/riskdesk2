@@ -295,34 +295,24 @@ public class HistoricalDataService implements ApplicationRunner {
     private BackfillJob runBackfillRange(Instrument instrument, String timeframe,
                                          Instant from, Instant to, long startedAt) {
         RefreshKey key = new RefreshKey(instrument, timeframe);
+        AtomicInteger fetched  = new AtomicInteger(0);
+        AtomicInteger existing = new AtomicInteger(0);
+        AtomicInteger saved    = new AtomicInteger(0);
         try {
-            List<Candle> fetched = historicalProvider.fetchHistoryRange(instrument, timeframe, from, to);
-            fetched = tagWithContractMonth(fetched, instrument);
-            fetched = deduplicate(fetched);
-
-            // Idempotency: skip timestamps already persisted in the window so re-runs are no-ops
-            // and middle gaps are filled without violating the (instrument, timeframe, ts) unique key.
-            Set<Instant> existingTs = candlePort.findCandlesBetween(instrument, timeframe, from, to).stream()
-                .map(Candle::getTimestamp)
-                .collect(Collectors.toCollection(HashSet::new));
-
-            List<Candle> toSave = fetched.stream()
-                .filter(c -> !existingTs.contains(c.getTimestamp()))
-                .toList();
-
-            if (!toSave.isEmpty()) {
-                candlePort.saveAll(toSave);
-                realDataLoaded.set(true);
-            }
+            // Stream the window chunk-by-chunk straight into PostgreSQL. Heap stays bounded to a
+            // single chunk (~one IBKR request) rather than holding the whole [from,to] window — a
+            // deep 1m window spans months (~10^5 candles) and must never be buffered in memory.
+            historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, chunk ->
+                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved));
 
             BackfillJob done = new BackfillJob(instrument, timeframe, "DONE", from, to,
-                fetched.size(), existingTs.size(), toSave.size(),
+                fetched.get(), existing.get(), saved.get(),
                 startedAt, System.currentTimeMillis(),
                 String.format("Backfill complete: %d fetched, %d already present, %d new saved.",
-                    fetched.size(), existingTs.size(), toSave.size()));
+                    fetched.get(), existing.get(), saved.get()));
             backfillJobs.put(key, done);
-            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved.",
-                instrument, timeframe, from, to, fetched.size(), existingTs.size(), toSave.size());
+            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved (streamed).",
+                instrument, timeframe, from, to, fetched.get(), existing.get(), saved.get());
             return done;
         } catch (Exception e) {
             BackfillJob failed = new BackfillJob(instrument, timeframe, "FAILED", from, to,
@@ -330,6 +320,43 @@ public class HistoricalDataService implements ApplicationRunner {
             backfillJobs.put(key, failed);
             log.error("HistoricalDataService [range-backfill]: {} {} failed", instrument, timeframe, e);
             return failed;
+        }
+    }
+
+    /**
+     * Persists one streamed backfill chunk idempotently and tallies counters. The existence probe
+     * is bounded to this chunk's own min/max timestamp, so the lookup stays small and re-runs (or
+     * older-contract chunks overlapping already-saved front-month bars) become no-op saves without
+     * tripping the {@code (instrument, timeframe, ts)} unique key.
+     */
+    private void persistBackfillChunk(Instrument instrument, String timeframe, List<Candle> chunk,
+                                      AtomicInteger fetched, AtomicInteger existing, AtomicInteger saved) {
+        if (chunk == null || chunk.isEmpty()) return;
+        fetched.addAndGet(chunk.size());
+
+        List<Candle> deduped = deduplicate(tagWithContractMonth(chunk, instrument));
+
+        Instant chunkFrom = deduped.get(0).getTimestamp();
+        Instant chunkTo   = chunkFrom;
+        for (Candle c : deduped) {
+            Instant ts = c.getTimestamp();
+            if (ts.isBefore(chunkFrom)) chunkFrom = ts;
+            if (ts.isAfter(chunkTo))    chunkTo   = ts;
+        }
+
+        Set<Instant> existingTs = candlePort.findCandlesBetween(instrument, timeframe, chunkFrom, chunkTo).stream()
+            .map(Candle::getTimestamp)
+            .collect(Collectors.toCollection(HashSet::new));
+
+        List<Candle> toSave = deduped.stream()
+            .filter(c -> !existingTs.contains(c.getTimestamp()))
+            .toList();
+
+        existing.addAndGet(deduped.size() - toSave.size());
+        if (!toSave.isEmpty()) {
+            candlePort.saveAll(toSave);
+            saved.addAndGet(toSave.size());
+            realDataLoaded.set(true);
         }
     }
 

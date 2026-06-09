@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,10 +60,11 @@ class HistoricalDataServiceBackfillRangeTest {
         Candle c2 = candle("2026-03-01T00:02:00Z", "102");
 
         when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
-        when(provider.fetchHistoryRange(Instrument.MNQ, "1m", FROM, TO)).thenReturn(List.of(c0, c1, c2));
+        stubStreamRange(provider, FROM, TO, List.of(c0, c1, c2));
         when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.of("202609"));
-        // c1 already persisted in the window — must be skipped on save.
-        when(candlePort.findCandlesBetween(Instrument.MNQ, "1m", FROM, TO)).thenReturn(List.of(c1));
+        // c1 already persisted in the window — must be skipped on save. The streaming path probes
+        // existence per chunk (bounded by the chunk's own min/max), so match any window here.
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of(c1));
         when(candlePort.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
 
         HistoricalDataService service = newService(provider, candlePort, registry, true);
@@ -90,9 +92,9 @@ class HistoricalDataServiceBackfillRangeTest {
         Candle c1 = candle("2026-03-01T00:01:00Z", "101");
 
         when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
-        when(provider.fetchHistoryRange(Instrument.MNQ, "1m", FROM, TO)).thenReturn(List.of(c0, c1));
+        stubStreamRange(provider, FROM, TO, List.of(c0, c1));
         when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
-        when(candlePort.findCandlesBetween(Instrument.MNQ, "1m", FROM, TO)).thenReturn(List.of(c0, c1));
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of(c0, c1));
 
         HistoricalDataService service = newService(provider, candlePort, registry, true);
         BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false);
@@ -174,7 +176,7 @@ class HistoricalDataServiceBackfillRangeTest {
         ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
 
         when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
-        when(provider.fetchHistoryRange(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+        stubStreamRange(provider, FROM, TO, List.of());
         when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
         when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
 
@@ -191,5 +193,16 @@ class HistoricalDataServiceBackfillRangeTest {
     private static Candle candle(String ts, String price) {
         BigDecimal p = new BigDecimal(price);
         return new Candle(Instrument.MNQ, "1m", Instant.parse(ts), p, p, p, p, 1L);
+    }
+
+    /** Stubs the streaming range overload to feed {@code chunk} into the sink (one chunk). */
+    @SuppressWarnings("unchecked")
+    private static void stubStreamRange(HistoricalDataProvider provider, Instant from, Instant to, List<Candle> chunk) {
+        when(provider.fetchHistoryRange(eq(Instrument.MNQ), eq("1m"), eq(from), eq(to), any()))
+            .thenAnswer(inv -> {
+                Consumer<List<Candle>> sink = inv.getArgument(4);
+                if (!chunk.isEmpty()) sink.accept(chunk);
+                return chunk.size();
+            });
     }
 }
