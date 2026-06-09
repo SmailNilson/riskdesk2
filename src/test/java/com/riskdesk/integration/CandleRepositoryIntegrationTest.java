@@ -152,47 +152,4 @@ class CandleRepositoryIntegrationTest {
         assertTrue(result.stream().allMatch(c -> "10m".equals(c.getTimeframe())),
                 "All candles should be for 10m timeframe");
     }
-
-    // -----------------------------------------------------------------------
-    // findByInstrumentAndTimeframeAndTimestampBetween (Pageable) — range cursor
-    // -----------------------------------------------------------------------
-
-    @Test
-    void findBetweenPaged_returnsWindowAscendingAndHonoursPageSize() {
-        Instant base = Instant.parse("2026-03-01T00:00:00Z");
-
-        // 6 MNQ/1m candles at base, base+1m, ... base+5m
-        for (int i = 0; i < 6; i++) {
-            candleRepository.save(createCandle(
-                    Instrument.MNQ, "1m", base.plus(i, ChronoUnit.MINUTES),
-                    20000 + i, 20001 + i, 19999 + i, 20000.5 + i, 10 + i));
-        }
-        // Outside the window / other timeframe — must be excluded
-        candleRepository.save(createCandle(
-                Instrument.MNQ, "1m", base.minus(1, ChronoUnit.MINUTES), 1, 1, 1, 1, 1));
-        candleRepository.save(createCandle(
-                Instrument.MNQ, "5m", base, 1, 1, 1, 1, 1));
-
-        Instant from = base;
-        Instant to = base.plus(5, ChronoUnit.MINUTES);
-
-        // First page of 3 within [from, to]
-        List<CandleEntity> page1 = candleRepository
-                .findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
-                        Instrument.MNQ, "1m", from, to, PageRequest.of(0, 3));
-
-        assertEquals(3, page1.size(), "Page size must be honoured");
-        assertEquals(base, page1.get(0).getTimestamp(), "Oldest-first within the window");
-        assertEquals(base.plus(2, ChronoUnit.MINUTES), page1.get(2).getTimestamp());
-
-        // Cursor: resume strictly after the last returned bar
-        Instant cursor = page1.get(2).getTimestamp().plusSeconds(1);
-        List<CandleEntity> page2 = candleRepository
-                .findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
-                        Instrument.MNQ, "1m", cursor, to, PageRequest.of(0, 3));
-
-        assertEquals(3, page2.size(), "Remaining 3 bars in the window");
-        assertEquals(base.plus(3, ChronoUnit.MINUTES), page2.get(0).getTimestamp());
-        assertEquals(to, page2.get(2).getTimestamp(), "Range is inclusive of 'to'");
-    }
 }

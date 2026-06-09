@@ -342,7 +342,6 @@ class TriggerContextBuilderTest {
         @Override public List<Candle> findRecentCandlesByContractMonth(Instrument i, String tf, String c, int limit) { throw new AssertionError("unused"); }
         @Override public Optional<Instant> findLatestTimestamp(Instrument i, String tf) { throw new AssertionError("unused"); }
         @Override public List<Candle> findCandlesBetween(Instrument i, String tf, Instant from, Instant to) { throw new AssertionError("unused"); }
-        @Override public List<Candle> findCandlesBetweenPaged(Instrument i, String tf, Instant from, Instant to, int limit) { throw new AssertionError("unused"); }
         @Override public Candle save(Candle c) { throw new AssertionError("unused"); }
         @Override public List<Candle> saveAll(List<Candle> c) { throw new AssertionError("unused"); }
         @Override public void deleteAll() { throw new AssertionError("unused"); }
@@ -363,7 +362,6 @@ class TriggerContextBuilderTest {
         @Override public List<Candle> findRecentCandlesByContractMonth(Instrument i, String tf, String c, int limit) { throw new AssertionError("unused"); }
         @Override public Optional<Instant> findLatestTimestamp(Instrument i, String tf) { throw new AssertionError("unused"); }
         @Override public List<Candle> findCandlesBetween(Instrument i, String tf, Instant from, Instant to) { throw new AssertionError("unused"); }
-        @Override public List<Candle> findCandlesBetweenPaged(Instrument i, String tf, Instant from, Instant to, int limit) { throw new AssertionError("unused"); }
         @Override public Candle save(Candle c) { throw new AssertionError("unused"); }
         @Override public List<Candle> saveAll(List<Candle> c) { throw new AssertionError("unused"); }
         @Override public void deleteAll() { throw new AssertionError("unused"); }

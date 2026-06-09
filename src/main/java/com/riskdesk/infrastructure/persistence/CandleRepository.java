@@ -30,13 +30,6 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     List<CandleEntity> findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
             Instrument instrument, String timeframe, Instant from, Instant to);
 
-    /**
-     * Fetches up to {@code pageable.getPageSize()} candles within a time range, oldest-first.
-     * Backs cursor pagination for the range read endpoint (use PageRequest.of(0, limit)).
-     */
-    List<CandleEntity> findByInstrumentAndTimeframeAndTimestampBetweenOrderByTimestampAsc(
-            Instrument instrument, String timeframe, Instant from, Instant to, Pageable pageable);
-
     /** Fetches candles for a specific contract month, newest-first. */
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
             Instrument instrument, String timeframe, String contractMonth, Pageable pageable);

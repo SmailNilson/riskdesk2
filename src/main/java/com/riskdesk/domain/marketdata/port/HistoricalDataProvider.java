@@ -27,19 +27,4 @@ public interface HistoricalDataProvider {
     default List<Candle> fetchHistoryBefore(Instrument instrument, String timeframe, Instant endTime, int count) {
         return List.of();
     }
-
-    /**
-     * Fetches every available bar within the closed range {@code [from, to]}, oldest-first.
-     *
-     * <p>Unlike {@link #fetchHistory} (count-targeted, anchored at "now"), this walks
-     * backward from {@code to} down to {@code from}, crossing expired contract boundaries
-     * as needed, so an arbitrary historical window can be reconstructed for deep backfill.
-     * Implementations must respect IBKR pacing limits. The result may contain gaps where
-     * the exchange was closed; it is the caller's job to persist idempotently.</p>
-     *
-     * @return candles ordered oldest-first; empty list if unsupported or unavailable
-     */
-    default List<Candle> fetchHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to) {
-        return List.of();
-    }
 }

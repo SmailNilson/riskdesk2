@@ -19,12 +19,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -32,7 +30,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 /**
  * Manages historical OHLCV candle data from IBKR.
@@ -88,32 +85,11 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.mentor-refresh-cooldown-ms:60000}")
     private long mentorRefreshCooldownMs;
 
-    /** Safety bound on the width of an on-demand range backfill window (protects IBKR pacing). */
-    @Value("${riskdesk.market-data.historical.backfill-range-max-days:200}")
-    private int backfillRangeMaxDays;
-
     /** Set to true once real candles have been successfully loaded (quick startup). */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
     private final Map<RefreshKey, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
 
-    /** Last/active range-backfill job per instrument+timeframe (observability for the admin endpoint). */
-    private final Map<RefreshKey, BackfillJob> backfillJobs = new ConcurrentHashMap<>();
-
-    /**
-     * Single-threaded so heavy range backfills never run concurrently — serialising them keeps the
-     * app well under IBKR historical pacing limits and avoids starving the common ForkJoinPool.
-     */
-    private final ExecutorService backfillExecutor = Executors.newSingleThreadExecutor(
-        r -> { Thread t = new Thread(r, "hist-range-backfill"); t.setDaemon(true); return t; });
-
     private record RefreshKey(Instrument instrument, String timeframe) {}
-
-    /** Immutable snapshot of a range-backfill job, exposed to the admin REST endpoint. */
-    public record BackfillJob(Instrument instrument, String timeframe, String state,
-                              Instant from, Instant to, int fetched, int existing, int saved,
-                              long startedAt, Long finishedAt, String message) {
-        public boolean running() { return "RUNNING".equals(state); }
-    }
 
     public HistoricalDataService(HistoricalDataProvider historicalProvider,
                                  CandleRepositoryPort candlePort,
@@ -210,127 +186,6 @@ public class HistoricalDataService implements ApplicationRunner {
                 return null;
             });
         return Map.of("status", "ok", "message", "Database refresh started in background.");
-    }
-
-    // -------------------------------------------------------------------------
-    // Deep range backfill (on-demand, idempotent, bounded window)
-    // -------------------------------------------------------------------------
-
-    /**
-     * Triggers a deep, idempotent backfill of a single instrument/timeframe over the closed
-     * window {@code [from, to]}. Unlike {@link #gapFillTimeframe} (which only appends past the
-     * high-water mark), this reconstructs the whole window and fills middle gaps — making it the
-     * right tool to seed 1m history for faithful backtests.
-     *
-     * <p>Idempotent: timestamps already stored in the window are skipped, so the call is safe to
-     * re-run (e.g. daily) to top up missing data. Heavy work runs on a single dedicated thread
-     * to respect IBKR pacing; concurrent jobs for the same pair are coalesced.</p>
-     *
-     * @param async when {@code true}, returns immediately with a {@code RUNNING} snapshot; poll
-     *              {@link #backfillStatus} for completion. When {@code false}, blocks until done.
-     */
-    public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
-                                          Instant from, Instant to, boolean async) {
-        long now = System.currentTimeMillis();
-        if (!enabled) {
-            return new BackfillJob(instrument, timeframe, "DISABLED", from, to, 0, 0, 0, now, now,
-                "Historical data fetch is disabled (riskdesk.market-data.historical.enabled=false).");
-        }
-
-        String rejection = validateBackfillRange(instrument, timeframe, from, to);
-        if (rejection != null) {
-            return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now, rejection);
-        }
-
-        RefreshKey key = new RefreshKey(instrument, timeframe);
-        BackfillJob existingJob = backfillJobs.get(key);
-        if (existingJob != null && existingJob.running()) {
-            return existingJob; // coalesce — a job for this pair is already in flight
-        }
-
-        BackfillJob started = new BackfillJob(instrument, timeframe, "RUNNING", from, to,
-            0, 0, 0, now, null, "Backfill started.");
-        backfillJobs.put(key, started);
-
-        if (async) {
-            CompletableFuture
-                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now), backfillExecutor)
-                .exceptionally(ex -> {
-                    backfillJobs.put(key, new BackfillJob(instrument, timeframe, "FAILED", from, to,
-                        0, 0, 0, now, System.currentTimeMillis(), "Backfill failed: " + ex.getMessage()));
-                    log.error("HistoricalDataService [range-backfill]: {} {} async failed", instrument, timeframe, ex);
-                    return null;
-                });
-            return started;
-        }
-        return runBackfillRange(instrument, timeframe, from, to, now);
-    }
-
-    /** Returns the last known backfill job for a pair, if any. */
-    public Optional<BackfillJob> backfillStatus(Instrument instrument, String timeframe) {
-        return Optional.ofNullable(backfillJobs.get(new RefreshKey(instrument, timeframe)));
-    }
-
-    private String validateBackfillRange(Instrument instrument, String timeframe, Instant from, Instant to) {
-        if (!instrument.isExchangeTradedFuture()) {
-            return "Instrument " + instrument + " is not an exchange-traded future.";
-        }
-        if (!historicalProvider.supports(instrument, timeframe)) {
-            return "Timeframe '" + timeframe + "' is not supported for backfill.";
-        }
-        if (from == null || to == null) {
-            return "Both 'from' and 'to' are required.";
-        }
-        if (!from.isBefore(to)) {
-            return "'from' must be strictly before 'to'.";
-        }
-        long days = Duration.between(from, to).toDays();
-        if (days > backfillRangeMaxDays) {
-            return String.format("Requested window of %d days exceeds the maximum of %d days "
-                + "(riskdesk.market-data.historical.backfill-range-max-days).", days, backfillRangeMaxDays);
-        }
-        return null;
-    }
-
-    private BackfillJob runBackfillRange(Instrument instrument, String timeframe,
-                                         Instant from, Instant to, long startedAt) {
-        RefreshKey key = new RefreshKey(instrument, timeframe);
-        try {
-            List<Candle> fetched = historicalProvider.fetchHistoryRange(instrument, timeframe, from, to);
-            fetched = tagWithContractMonth(fetched, instrument);
-            fetched = deduplicate(fetched);
-
-            // Idempotency: skip timestamps already persisted in the window so re-runs are no-ops
-            // and middle gaps are filled without violating the (instrument, timeframe, ts) unique key.
-            Set<Instant> existingTs = candlePort.findCandlesBetween(instrument, timeframe, from, to).stream()
-                .map(Candle::getTimestamp)
-                .collect(Collectors.toCollection(HashSet::new));
-
-            List<Candle> toSave = fetched.stream()
-                .filter(c -> !existingTs.contains(c.getTimestamp()))
-                .toList();
-
-            if (!toSave.isEmpty()) {
-                candlePort.saveAll(toSave);
-                realDataLoaded.set(true);
-            }
-
-            BackfillJob done = new BackfillJob(instrument, timeframe, "DONE", from, to,
-                fetched.size(), existingTs.size(), toSave.size(),
-                startedAt, System.currentTimeMillis(),
-                String.format("Backfill complete: %d fetched, %d already present, %d new saved.",
-                    fetched.size(), existingTs.size(), toSave.size()));
-            backfillJobs.put(key, done);
-            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved.",
-                instrument, timeframe, from, to, fetched.size(), existingTs.size(), toSave.size());
-            return done;
-        } catch (Exception e) {
-            BackfillJob failed = new BackfillJob(instrument, timeframe, "FAILED", from, to,
-                0, 0, 0, startedAt, System.currentTimeMillis(), "Backfill failed: " + e.getMessage());
-            backfillJobs.put(key, failed);
-            log.error("HistoricalDataService [range-backfill]: {} {} failed", instrument, timeframe, e);
-            return failed;
-        }
     }
 
     // -------------------------------------------------------------------------
