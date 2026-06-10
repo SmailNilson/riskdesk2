@@ -2,6 +2,7 @@ package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.strategy.WtxStrategyService;
 import com.riskdesk.domain.engine.strategy.wtx.WtxConfig;
+import com.riskdesk.domain.engine.strategy.wtx.WtxParamOverride;
 import com.riskdesk.domain.engine.strategy.wtx.WtxProfile;
 import com.riskdesk.domain.engine.strategy.wtx.WtxSignal;
 import com.riskdesk.domain.engine.strategy.wtx.WtxStrategyState;
@@ -250,6 +251,48 @@ public class WtxStrategyController {
         return ResponseEntity.ok(toStateView(updated));
     }
 
+    /**
+     * Apply a named override preset to this panel in one call — e.g. {@code {"preset":"top-train-z35"}}
+     * sets WaveTrend 5/14/2, SL 4.0×ATR and zone-only entries at ±35 together; {@code {"preset":"clear"}}
+     * removes every override (back to the global config). Unknown names → 400 with the known list.
+     */
+    @PutMapping("/state/{instrument}/{timeframe}/preset")
+    public ResponseEntity<Map<String, Object>> applyPreset(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        Object raw = body == null ? null : body.get("preset");
+        if (raw == null || raw.toString().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'preset' field",
+                    "known", List.of("top-train-z35", "clear")));
+        }
+        return WtxParamOverride.preset(raw.toString())
+                .map(preset -> ResponseEntity.ok(
+                        toStateView(wtxStrategyService.applyPreset(instrument, timeframe, preset))))
+                .orElseGet(() -> ResponseEntity.badRequest().body(Map.of(
+                        "error", "Unknown preset: " + raw,
+                        "known", List.of("top-train-z35", "clear"))));
+    }
+
+    /**
+     * Configured variant panels (parallel named signals, e.g. {@code top-train-Z35} on MNQ 10m
+     * under panel key {@code 10m-z35}). The frontend renders one panel per variant below the
+     * legacy WTX panel; every per-panel endpoint above accepts the {@code panelKey} as its
+     * {@code timeframe} path variable.
+     */
+    @GetMapping("/variants")
+    public ResponseEntity<List<Map<String, Object>>> getVariants() {
+        return ResponseEntity.ok(wtxStrategyService.getVariants().stream()
+                .map(v -> Map.<String, Object>of(
+                        "name", v.name(),
+                        "instrument", v.instrument(),
+                        "baseTimeframe", v.baseTimeframe(),
+                        "preset", v.preset(),
+                        "panelKey", v.panelKey()))
+                .toList());
+    }
+
     /** Parse an optional whole-number field; null/absent → null (clear override). Throws on malformed/out-of-range. */
     private static Integer optInt(Map<String, Object> body, String key, int min, int max) {
         Object raw = body.get(key);
@@ -324,6 +367,10 @@ public class WtxStrategyController {
         view.put("n2", eff.n2());
         view.put("signalPeriod", eff.signalPeriod());
         view.put("slAtrMult", eff.slAtrMult());
+        // Effective signal-zone gating (preset-aware): OB/OS levels + zone-only entry mode.
+        view.put("nsc", eff.nsc());
+        view.put("nsv", eff.nsv());
+        view.put("zoneOnlyEntries", !eff.useCompra1() && !eff.useVenta1());
         // Open-position summary (null/zero when FLAT). entryPrice / entryQty come straight from
         // state; "stopLoss" surfaces the live trailing-exit stop (initial ATR stop until the
         // trailing phase arms, then the ratcheted trailing level).
@@ -356,6 +403,9 @@ public class WtxStrategyController {
         view.put("n2", eff.n2());
         view.put("signalPeriod", eff.signalPeriod());
         view.put("slAtrMult", eff.slAtrMult());
+        view.put("nsc", eff.nsc());
+        view.put("nsv", eff.nsv());
+        view.put("zoneOnlyEntries", !eff.useCompra1() && !eff.useVenta1());
         view.put("entryPrice", null);
         view.put("entryQty", 0);
         view.put("stopLoss", null);

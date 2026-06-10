@@ -66,24 +66,34 @@ public class WtxDailyResetScheduler {
         int reset = 0;
         for (String instrument : config.instruments()) {
             for (String timeframe : config.timeframes()) {
-                Optional<WtxStrategyState> loaded = statePort.load(instrument, timeframe);
-                if (loaded.isEmpty()) {
-                    continue;
-                }
-                // Settle any optimistic close P&L against execution-row truth BEFORE the reset archives
-                // the day's realized P&L — mirrors WtxStrategyService's settle-then-day-reset invariant,
-                // so an unconfirmed pendingClosePnl is never silently dropped by withDayReset.
-                WtxStrategyState state = closePnlSettler.settle(loaded.get());
-                boolean wasBlocked = state.maxLossHit();
-                statePort.save(state.withDayReset(state.currentEquity()));
-                reset++;
-                if (wasBlocked) {
-                    log.info("WTX [{} {}] 17:00 ET reset — max-loss latch cleared (was blocked); "
-                            + "equity rebaselined to {}", instrument, timeframe, state.currentEquity());
-                }
+                reset += resetOne(instrument, timeframe);
             }
+        }
+        // Variant panels carry their own daily equity / max-loss latch — rebaseline them too.
+        for (var variant : properties.getVariants() == null
+                ? java.util.List.<com.riskdesk.infrastructure.config.WtxStrategyProperties.Variant>of()
+                : properties.getVariants()) {
+            reset += resetOne(variant.getInstrument(), variant.getPanelKey());
         }
         log.info("WTX daily reset @17:00 ET — rebaselined {} state(s)", reset);
         return reset;
+    }
+
+    private int resetOne(String instrument, String timeframe) {
+        Optional<WtxStrategyState> loaded = statePort.load(instrument, timeframe);
+        if (loaded.isEmpty()) {
+            return 0;
+        }
+        // Settle any optimistic close P&L against execution-row truth BEFORE the reset archives
+        // the day's realized P&L — mirrors WtxStrategyService's settle-then-day-reset invariant,
+        // so an unconfirmed pendingClosePnl is never silently dropped by withDayReset.
+        WtxStrategyState state = closePnlSettler.settle(loaded.get());
+        boolean wasBlocked = state.maxLossHit();
+        statePort.save(state.withDayReset(state.currentEquity()));
+        if (wasBlocked) {
+            log.info("WTX [{} {}] 17:00 ET reset — max-loss latch cleared (was blocked); "
+                    + "equity rebaselined to {}", instrument, timeframe, state.currentEquity());
+        }
+        return 1;
     }
 }

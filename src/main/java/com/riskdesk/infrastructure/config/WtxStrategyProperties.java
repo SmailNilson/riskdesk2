@@ -69,6 +69,13 @@ public class WtxStrategyProperties {
     // reconciler upgrades any still on BASELINE to HTF (without overriding a manual choice).
     private List<String> htfDefaultInstruments = List.of("MNQ");
 
+    // Variant panels: additional named WTX signals evaluated in PARALLEL with the legacy panel on
+    // the same closed candles, but with their own state / signal history / overrides under a short
+    // panel key (the override timeframe column caps at 10 chars). The base config of a variant is
+    // the global config + its named preset (WtxParamOverride.preset). Empty by default — the live
+    // config opts in (e.g. top-train-Z35 on MNQ 10m under key "10m-z35").
+    private List<Variant> variants = List.of();
+
     // HTF bias — Pine "HTF" profile
     private String htfTimeframe = "1h";
     private int htfFastLen = 21;
@@ -258,6 +265,45 @@ public class WtxStrategyProperties {
 
     public List<String> getHtfDefaultInstruments() { return htfDefaultInstruments; }
     public void setHtfDefaultInstruments(List<String> htfDefaultInstruments) { this.htfDefaultInstruments = htfDefaultInstruments; }
+
+    public List<Variant> getVariants() { return variants; }
+    public void setVariants(List<Variant> variants) { this.variants = variants == null ? List.of() : variants; }
+
+    /**
+     * A named WTX variant signal: {@code name} is the display label (e.g. {@code top-train-Z35}),
+     * {@code preset} the {@link com.riskdesk.domain.engine.strategy.wtx.WtxParamOverride} preset
+     * name seeding its base config, {@code baseTimeframe} the candle source, and {@code panelKey}
+     * the short identity used for state / signals / overrides / REST paths (keep it ≤ 10 chars —
+     * the override table's timeframe column length).
+     */
+    public static class Variant {
+        private String name;
+        private String instrument;
+        private String baseTimeframe;
+        private String preset;
+        private String panelKey;
+
+        public Variant() {}
+
+        public Variant(String name, String instrument, String baseTimeframe, String preset, String panelKey) {
+            this.name = name;
+            this.instrument = instrument;
+            this.baseTimeframe = baseTimeframe;
+            this.preset = preset;
+            this.panelKey = panelKey;
+        }
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+        public String getInstrument() { return instrument; }
+        public void setInstrument(String instrument) { this.instrument = instrument; }
+        public String getBaseTimeframe() { return baseTimeframe; }
+        public void setBaseTimeframe(String baseTimeframe) { this.baseTimeframe = baseTimeframe; }
+        public String getPreset() { return preset; }
+        public void setPreset(String preset) { this.preset = preset; }
+        public String getPanelKey() { return panelKey; }
+        public void setPanelKey(String panelKey) { this.panelKey = panelKey; }
+    }
 
     public String getHtfTimeframe() { return htfTimeframe; }
     public void setHtfTimeframe(String htfTimeframe) { this.htfTimeframe = htfTimeframe; }

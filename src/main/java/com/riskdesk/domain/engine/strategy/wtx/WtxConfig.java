@@ -192,6 +192,24 @@ public record WtxConfig(
     }
 
     /**
+     * Copy with overridden signal-zone gating: {@code nsc}/{@code nsv} overbought/oversold levels
+     * and the {@code useCompra1}/{@code useVenta1} every-cross flags. With both flags false,
+     * entries are restricted to crosses inside the zones (zone-only mode — the top-train-Z35
+     * preset shape). Preserves all other fields.
+     */
+    public WtxConfig withSignalZone(BigDecimal newNsc, BigDecimal newNsv,
+                                    boolean newUseCompra1, boolean newUseVenta1) {
+        return new WtxConfig(
+                instruments, timeframes, n1, n2, signalPeriod, newNsc, newNsv,
+                useCompra, newUseCompra1, useVenta, newUseVenta1, reverseOnOpp, fixedQty,
+                maxDailyLossUsd, forceCloseNy, nySessionEndHour, nySessionEndMin, closeBeforeMin,
+                atrLength, slAtrMult, tpAtrMult, trailingAtrMult, trailingActivationR,
+                htfTimeframe, htfFastLen, htfSlowLen, structureLookback, sweepBufferAtr,
+                trailingMode, trailingActivationPoints, trailingPoints, slPoints, dailyResetEnabled,
+                trailingPointsInstruments, sessionFilterEnabled, sessionBlockStartMinEt, sessionBlockEndMinEt);
+    }
+
+    /**
      * Copy with an overridden initial-stop ATR multiple. Used to apply a per-(instrument,timeframe)
      * frontend SL override on top of the global config. Preserves all other fields.
      */

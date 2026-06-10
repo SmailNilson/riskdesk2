@@ -1,6 +1,48 @@
 # AI Handoff
 
-Last updated: 2026-06-09
+Last updated: 2026-06-10
+
+## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
+
+A real-1m grid study (MNQ 10m, train mars-avril 2026 → OOS mai-juin 2026, exits replayed on 1m
+children) surfaced a **zone-entry** configuration that beat the deployed every-cross config on
+quality metrics (OOS ≈ +$6.6k / 54% WR at qty=1 session-off vs 33% WR deployed; PF 1.75 vs 1.18
+over the full window). Shape: WaveTrend **5/14/2**, initial stop **4.0×ATR** (SL_ONLY ride),
+entries **only on crosses inside the ±35 zone** (`useCompra1/useVenta1=false`, `nsc/nsv=±35`).
+
+To make it activatable per panel without touching the global config:
+- `WtxParamOverride` gained four nullable fields — `nsc`, `nsv`, `useCompra1`, `useVenta1` — plus
+  the named preset constant `TOP_TRAIN_Z35` and a `preset(name)` resolver (`"clear"` → `NONE`).
+- `WtxConfig.withSignalZone(...)` wither; `WtxStrategyService.applyOverrides` applies the zone
+  fields; the partial panel edits (`updateIndicatorParams`, `updateSlAtrMult`) now **preserve**
+  the zone override instead of wiping it.
+- New endpoint `PUT /api/wtx/state/{instrument}/{timeframe}/preset` with body
+  `{"preset":"top-train-z35"}` (or `"clear"`), backed by `WtxStrategyService.applyPreset(...)`.
+  State views/WS payloads now expose effective `nsc` / `nsv` / `zoneOnlyEntries`.
+- `wtx_param_overrides` gains nullable columns (`nsc`, `nsv`, `use_compra1`, `use_venta1`) —
+  Hibernate ddl-auto extends the table in place.
+
+**Variant panels — the `top-train-Z35` SIGNAL runs in PARALLEL with the legacy panel.** The
+preset is not just an override you can apply to the legacy panel: `riskdesk.wtx.variants[...]`
+declares parallel named signals. Each variant rides the SAME closed candles as its base timeframe
+but keeps its own state / signal history / overrides under a short **panel key** (`10m-z35`,
+≤10 chars — the override table's timeframe column length). Wiring:
+- `WtxStrategyService.onCandleClosed` → `processPanel(event, panelKey)` runs once for the legacy
+  panel (key == timeframe, bit-for-bit legacy behaviour) then once per matching variant. Candle
+  data / enrichment always read the BASE timeframe; identity (state, signals, WS topics,
+  overrides) uses the panel key. A variant's base config = global + its named preset; stored
+  per-panel overrides still apply on top (the panel stays tunable from the UI).
+- `forceCloseAll`, `WtxDailyResetScheduler` and `WtxDefaultProfileBootstrap` (BASELINE→HTF) all
+  cover variant panels. Auto-execution defaults OFF like any fresh panel → paper by default.
+- `GET /api/wtx/variants` lists configured variants (served as `WtxVariantView` — presentation
+  must not touch the infrastructure config type, ArchUnit enforces it). Every per-panel endpoint
+  accepts the panel key as its `{timeframe}` path variable.
+- Frontend: `Dashboard.tsx` renders a `WtxStrategyPanel` with `displayName="top-train-Z35"` and
+  `timeframe="10m-z35"` just below the legacy WTX panels for MNQ (amber header = variant).
+
+**Caveats**: the preset is in-sample-selected (mars-avril) with one OOS window (mai-juin, bullish);
+the study assumed no slippage and qty=1. Intended path: let the variant panel run on paper
+(auto-execution OFF) and compare against the deployed config on forward data before any live use.
 
 ## Deep 1m range backfill + cursor-paginated range read (2026-06-09)
 
