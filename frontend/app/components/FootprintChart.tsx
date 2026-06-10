@@ -4,6 +4,37 @@ import { useEffect, useState } from 'react';
 import { useOrderFlow, FootprintBar, FootprintLevel } from '@/app/hooks/useOrderFlow';
 import { api, isFootprintBar } from '@/app/lib/api';
 
+function barTimeLabel(barTimestamp: number): string {
+  const d = new Date(barTimestamp * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Compact strip of recently closed bars: open time, delta, POC. */
+function HistoryStrip({ bars }: { bars: FootprintBar[] }) {
+  if (bars.length === 0) return null;
+  return (
+    <div className="border-t border-zinc-800/60 px-2 py-1.5">
+      <div className="text-[9px] text-zinc-600 font-medium mb-1">CLOSED BARS</div>
+      <div className="flex flex-col gap-0.5 max-h-[120px] overflow-y-auto">
+        {bars.map(b => (
+          <div key={b.barTimestamp} className="flex items-center gap-2 text-[10px] font-mono">
+            <span className="w-10 text-zinc-500">{barTimeLabel(b.barTimestamp)}</span>
+            <span className={`w-12 text-right ${b.totalDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {b.totalDelta >= 0 ? '+' : ''}{b.totalDelta}
+            </span>
+            <span className="w-16 text-right text-amber-400/80" title="Point of Control">
+              {b.pocPrice.toFixed(2)}
+            </span>
+            <span className="flex-1 text-right text-zinc-600">
+              B:{b.totalBuyVolume} S:{b.totalSellVolume}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface FootprintChartProps {
   selectedInstrument?: string;
 }
@@ -94,6 +125,7 @@ function FootprintBarView({ bar }: { bar: FootprintBar }) {
 export default function FootprintChart({ selectedInstrument }: FootprintChartProps) {
   const { footprintData } = useOrderFlow();
   const [restBar, setRestBar] = useState<FootprintBar | null>(null);
+  const [history, setHistory] = useState<FootprintBar[]>([]);
 
   // REST fallback: fetch initial footprint on instrument switch so the panel
   // has data before the first WebSocket tick arrives. The backend may return
@@ -113,6 +145,18 @@ export default function FootprintChart({ selectedInstrument }: FootprintChartPro
   const liveBar = selectedInstrument ? footprintData.get(selectedInstrument) : undefined;
   const bar = liveBar ?? restBar ?? undefined;
 
+  // Closed-bar history: refresh on instrument switch and whenever the live bar
+  // rolls into a new window (its barTimestamp changes => previous bar closed).
+  const liveBarTimestamp = liveBar?.barTimestamp;
+  useEffect(() => {
+    if (!selectedInstrument) { setHistory([]); return; }
+    let cancelled = false;
+    api.getFootprintHistory(selectedInstrument).then(bars => {
+      if (!cancelled) setHistory(Array.isArray(bars) ? bars : []);
+    }).catch(() => { if (!cancelled) setHistory([]); });
+    return () => { cancelled = true; };
+  }, [selectedInstrument, liveBarTimestamp]);
+
   const totalDelta = bar?.totalDelta ?? 0;
   const totalBuy = bar?.totalBuyVolume ?? 0;
   const totalSell = bar?.totalSellVolume ?? 0;
@@ -127,7 +171,7 @@ export default function FootprintChart({ selectedInstrument }: FootprintChartPro
           <span className="text-xs font-semibold text-zinc-300">Footprint</span>
           {bar && (
             <span className="text-[10px] text-zinc-600">
-              {bar.timeframe} &middot; {levelCount} levels
+              {bar.timeframe} &middot; {barTimeLabel(bar.barTimestamp)} &middot; {levelCount} levels
             </span>
           )}
         </div>
@@ -158,6 +202,9 @@ export default function FootprintChart({ selectedInstrument }: FootprintChartPro
           </div>
         )}
       </div>
+
+      {/* Closed-bar history */}
+      <HistoryStrip bars={history} />
     </div>
   );
 }

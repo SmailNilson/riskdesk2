@@ -19,6 +19,28 @@ New activity-normalized chart: one candle per N classified trades (MNQ 200, MCL 
   `Dashboard` above the footprint; REST seed + live WS merge in `useOrderFlow`.
   lightweight-charts needs strictly increasing times, so same-second closes are
   de-duplicated by bumping +1s.
+## Footprint: real clock-aligned 10m bars + persisted history (2026-06-10)
+
+The footprint "bar" was previously a cumulative-since-boot profile: `IbkrFootprintAdapter.onCandleClose`
+had no caller, the aggregator never reset, the WS payload was hardcoded `"5m"` with
+`barTimestamp = now()`, and `order_flow_footprint_bars` had never received a single row.
+
+Reworked (user-validated spec: **10m bars, 5.00pt MNQ / 0.05 MCL price buckets**):
+- `FootprintAggregator` (domain, pure) now owns the bar lifecycle: clock-aligned windows
+  (`floor(epoch/barSeconds)`), tick-driven roll-over returning the closed bar, `closeIfElapsed`
+  for idle sweeps, and floor-to-bucket price binning (`riskdesk.order-flow.footprint.bucket-size.*`,
+  fallback = native tick size).
+- `IbkrFootprintAdapter` publishes each closed bar as a `FootprintBarClosed` domain event;
+  `OrderFlowEventPersistenceService` persists it (idempotent on the unique constraint);
+  `OrderFlowOrchestrator` pushes closed bars + the in-progress bar on `/topic/footprint`
+  and sweeps idle bars on the 5s footprint scheduler.
+- `FootprintPort` is now `currentBar(Instrument)` + `closeElapsedBars(Instant)` — the
+  `timeframe` request param on `GET /api/order-flow/footprint/{instrument}` is accepted
+  but ignored (bar duration is server-side config `riskdesk.order-flow.footprint.bar-minutes`).
+- New history endpoint `GET /api/order-flow/footprint/{instrument}/history?bars=12`
+  (via `OrderFlowHistoryService.recentFootprintBars`, profile JSON round-trip).
+- Frontend `FootprintChart.tsx`: shows bar open time, and a "CLOSED BARS" strip
+  (time / delta / POC / volumes) refreshed when the live bar rolls.
 
 ## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
 

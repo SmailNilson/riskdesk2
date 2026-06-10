@@ -1041,11 +1041,15 @@ export const api = {
   toggleAutoAnalysis: () =>
     post<{ enabled: boolean }>('/api/mentor/auto-analysis/toggle', {}),
   // Backend may return {available: false} or {error: "..."} with HTTP 200 —
-  // callers must narrow with isFootprintBar() before use.
-  getFootprint: (instrument: string, timeframe = '5m') =>
+  // callers must narrow with isFootprintBar() before use. Bar duration and price
+  // buckets are configured server-side (10m bars, 5pt MNQ / 0.05 MCL buckets).
+  getFootprint: (instrument: string) =>
     get<FootprintBar | { available?: boolean; error?: string }>(
-      `/api/order-flow/footprint/${instrument}?timeframe=${timeframe}`,
+      `/api/order-flow/footprint/${instrument}`,
     ),
+  // Most recent closed footprint bars, newest first.
+  getFootprintHistory: (instrument: string, bars = 12) =>
+    get<FootprintBar[]>(`/api/order-flow/footprint/${instrument}/history?bars=${bars}`),
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
   // Tick chart bars (oldest first; last element may be the in-progress bar).
