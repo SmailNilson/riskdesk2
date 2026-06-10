@@ -860,6 +860,24 @@ export interface CycleEventHistory {
 }
 
 // ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
+export interface TickBarDto {
+  instrument: string;
+  ticksPerBar: number;
+  seq: number;
+  openTime: number;
+  closeTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+  delta: number;
+  tickCount: number;
+  complete: boolean;
+}
+
 export interface OrderFlowDepthSnapshot {
   instrument: string;
   available: boolean;
@@ -1030,6 +1048,9 @@ export const api = {
     ),
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
+  // Tick chart bars (oldest first; last element may be the in-progress bar).
+  getTickBars: (instrument: string, limit = 200) =>
+    get<TickBarDto[]>(`/api/order-flow/tick-bars/${instrument}?limit=${limit}`),
   // ── Order Flow history (last N persisted events, newest first) ──────────
   getIcebergEvents: (instrument: string, limit = 20) =>
     get<IcebergEventHistory[]>(`/api/order-flow/iceberg/${instrument}?limit=${limit}`),

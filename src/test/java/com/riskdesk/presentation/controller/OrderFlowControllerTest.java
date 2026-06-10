@@ -44,10 +44,12 @@ class OrderFlowControllerTest {
     private final ObjectProvider<TickDataPort> tickDataPortProvider = mock(ObjectProvider.class);
     @SuppressWarnings("unchecked")
     private final ObjectProvider<MarketDepthPort> depthPortProvider = mock(ObjectProvider.class);
+    @SuppressWarnings("unchecked")
+    private final ObjectProvider<com.riskdesk.domain.orderflow.port.TickBarPort> tickBarPortProvider = mock(ObjectProvider.class);
     private final OrderFlowHistoryService historyService = mock(OrderFlowHistoryService.class);
 
     private final OrderFlowController controller = new OrderFlowController(
-        orchestratorProvider, tickDataPortProvider, depthPortProvider, historyService);
+        orchestratorProvider, tickDataPortProvider, depthPortProvider, tickBarPortProvider, historyService);
 
     // ------------------------------------------------------------------ Iceberg
 

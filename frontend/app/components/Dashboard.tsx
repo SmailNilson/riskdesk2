@@ -19,6 +19,7 @@ import IbkrPortfolioPanel from './IbkrPortfolioPanel';
 import OrderFlowPanel from './OrderFlowPanel';
 import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
+import TickChart from './TickChart';
 import FlashCrashPanel from './FlashCrashPanel';
 import PerfectSetupPanel from './PerfectSetupPanel';
 import CorrelationPanel from './CorrelationPanel';
@@ -265,6 +266,7 @@ export default function Dashboard() {
             livePrice={prices[instrument]}
           />
           <OrderFlowPanel selectedInstrument={instrument} />
+          <TickChart selectedInstrument={instrument} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">

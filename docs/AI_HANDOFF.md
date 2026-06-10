@@ -2,6 +2,24 @@
 
 Last updated: 2026-06-10
 
+## Tick chart — constant-tick-count bars (2026-06-10)
+
+New activity-normalized chart: one candle per N classified trades (MNQ 200, MCL 100;
+`riskdesk.order-flow.tick-chart.*`), with a per-bar delta histogram.
+
+- Domain: `TickBar` record (OHLC + buy/sell volume + delta + monotonic `seq`) and
+  `TickBarAggregator` (pure, per-instrument bounded ring buffer of 300 completed bars
+  plus the in-progress bar, `complete=false`).
+- Infra: `IbkrTickBarAdapter` (implements new `TickBarPort`), fed from
+  `IbkrTickDataAdapter` next to the footprint routing (classified ticks only).
+- REST: `GET /api/order-flow/tick-bars/{instrument}?limit=200` (oldest first).
+- WS: `/topic/tick-bars` pushes `{instrument, bars: last-3 tail}` every 2s — consumers
+  merge by `seq`, so bars completed between pushes reconcile on the next one.
+- Frontend: `TickChart.tsx` (lightweight-charts candles + delta histogram) mounted in
+  `Dashboard` above the footprint; REST seed + live WS merge in `useOrderFlow`.
+  lightweight-charts needs strictly increasing times, so same-second closes are
+  de-duplicated by bumping +1s.
+
 ## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
 
 A real-1m grid study (MNQ 10m, train mars-avril 2026 → OOS mai-juin 2026, exits replayed on 1m

@@ -87,6 +87,24 @@ export interface FootprintLevel {
   imbalance: boolean;
 }
 
+export interface TickBar {
+  instrument: string;
+  ticksPerBar: number;
+  seq: number;
+  openTime: number;   // epoch seconds
+  closeTime: number;  // epoch seconds
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+  delta: number;
+  tickCount: number;
+  complete: boolean;
+}
+
 export interface FootprintBar {
   instrument: string;
   timeframe: string;
@@ -191,6 +209,7 @@ export function useOrderFlow() {
   const [icebergEvents, setIcebergEvents] = useState<IcebergEvent[]>([]);
   const [flashCrashState, setFlashCrashState] = useState<Map<string, FlashCrashState>>(new Map());
   const [footprintData, setFootprintData] = useState<Map<string, FootprintBar>>(new Map());
+  const [tickBars, setTickBars] = useState<Map<string, TickBar[]>>(new Map());
   const [distributionEvents, setDistributionEvents] = useState<DistributionEvent[]>([]);
   const [momentumEvents, setMomentumEvents] = useState<MomentumEvent[]>([]);
   const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
@@ -255,6 +274,24 @@ export function useOrderFlow() {
           });
         });
 
+        // Tick chart tail: {instrument, bars: [last completed…, in-progress]}.
+        // Merge by seq so bars completed between pushes are reconciled.
+        client.subscribe('/topic/tick-bars', (msg: IMessage) => {
+          const payload: { instrument: string; bars: TickBar[] } = JSON.parse(msg.body);
+          if (!payload?.bars?.length) return;
+          setTickBars(prev => {
+            const next = new Map(prev);
+            const existing = next.get(payload.instrument) ?? [];
+            const bySeq = new Map(existing.map(b => [b.seq, b]));
+            for (const bar of payload.bars) bySeq.set(bar.seq, bar);
+            const merged = Array.from(bySeq.values())
+              .sort((a, b) => a.seq - b.seq)
+              .slice(-300);
+            next.set(payload.instrument, merged);
+            return next;
+          });
+        });
+
         client.subscribe('/topic/distribution', (msg: IMessage) => {
           const event: DistributionEvent = JSON.parse(msg.body);
           setDistributionEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
@@ -302,6 +339,7 @@ export function useOrderFlow() {
     icebergEvents,
     flashCrashState,
     footprintData,
+    tickBars,
     distributionEvents,
     momentumEvents,
     cycleEvents,
