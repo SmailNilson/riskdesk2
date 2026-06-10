@@ -208,32 +208,48 @@ class IbGatewayContractResolverTest {
     }
 
     /**
-     * The continuous contract is a pure construction (CONTFUT, no expiry): it must require no
-     * IBKR round-trip and must not touch the front-month cache — CONTFUT is historical-only and
-     * could otherwise leak into live resolution.
+     * The CONTFUT spec is probed variant-by-variant against reqContractDetails (gateway builds
+     * differ in what they acknowledge) — the first acknowledged contract wins and is cached, so
+     * later calls cost no IBKR round-trip.
      */
     @Test
-    void continuousContract_buildsContfut_withoutTouchingIbkrOrCache() {
-        Optional<Contract> mnq = resolver.continuousContract(Instrument.MNQ);
+    void resolveContinuous_probesVariants_acknowledgedOneWins_andIsCached() {
+        Contract resolved = new Contract();
+        resolved.conid(555);
+        resolved.symbol("MNQ");
+        resolved.tradingClass("MNQ");
+        ContractDetails details = new ContractDetails();
+        details.contract(resolved);
+        // First variant rejected, second acknowledged.
+        when(nativeClient.requestContractDetails(any()))
+            .thenReturn(List.of())
+            .thenReturn(List.of(details));
 
-        assertThat(mnq).isPresent();
-        assertThat(mnq.get().secType()).isEqualTo(com.ib.client.Types.SecType.CONTFUT);
-        assertThat(mnq.get().symbol()).isEqualTo("MNQ");
-        assertThat(mnq.get().exchange()).isEqualTo("CME");
-        assertThat(mnq.get().tradingClass()).isEqualTo("MNQ");
-        assertThat(mnq.get().lastTradeDateOrContractMonth()).isNullOrEmpty();
+        Optional<Contract> first = resolver.resolveContinuous(Instrument.MNQ);
 
-        // E6 keeps its IBKR symbol mapping (EUR / trading class 6E).
-        Optional<Contract> e6 = resolver.continuousContract(Instrument.E6);
-        assertThat(e6).isPresent();
-        assertThat(e6.get().symbol()).isEqualTo("EUR");
-        assertThat(e6.get().tradingClass()).isEqualTo("6E");
+        assertThat(first).isPresent();
+        assertThat(first.get().conid()).isEqualTo(555);
+        assertThat(first.get().exchange()).isEqualTo("CME"); // routing exchange backfilled from the variant
+        verify(nativeClient, org.mockito.Mockito.times(2)).requestContractDetails(any());
 
-        verify(nativeClient, never()).requestContractDetails(any());
+        // Cache hit — no further IBKR calls.
+        Optional<Contract> second = resolver.resolveContinuous(Instrument.MNQ);
+        assertThat(second).isPresent();
+        verify(nativeClient, org.mockito.Mockito.times(2)).requestContractDetails(any());
     }
 
     @Test
-    void continuousContract_isEmptyForNonFutures() {
-        assertThat(resolver.continuousContract(Instrument.DXY)).isEmpty();
+    void resolveContinuous_emptyWhenGatewayRejectsEveryVariant() {
+        when(nativeClient.requestContractDetails(any())).thenReturn(List.of());
+
+        assertThat(resolver.resolveContinuous(Instrument.MNQ)).isEmpty();
+        // 2 tradingClass options x 2 includeExpired options = 4 probes.
+        verify(nativeClient, org.mockito.Mockito.times(4)).requestContractDetails(any());
+    }
+
+    @Test
+    void resolveContinuous_isEmptyForNonFutures() {
+        assertThat(resolver.resolveContinuous(Instrument.DXY)).isEmpty();
+        verify(nativeClient, never()).requestContractDetails(any());
     }
 }

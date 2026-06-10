@@ -227,7 +227,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
                 instrument, timeframe, from, to);
             return 0;
         }
-        return contractResolver.continuousContract(instrument)
+        return contractResolver.resolveContinuous(instrument)
             .map(contract -> {
                 int[] total = { 0 };
                 Consumer<List<Candle>> sink = chunk -> {
