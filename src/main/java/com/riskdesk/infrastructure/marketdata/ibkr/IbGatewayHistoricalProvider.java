@@ -246,6 +246,44 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             });
     }
 
+    /**
+     * Explicit-contract range fetch: the whole window is sourced from one named (possibly
+     * expired) contract month, resolved with {@code includeExpired=true} — the same resolution
+     * the expired-contract walk uses. Candles are tagged with the real {@code contractMonth},
+     * so {@code buildContinuousCandles} splices them at the correct roll date. This is the
+     * proven fallback for gateway builds that reject CONTFUT (IBKR error 200).
+     */
+    @Override
+    public int fetchContractMonthHistoryRange(Instrument instrument, String timeframe, String contractMonth,
+                                              Instant from, Instant to, Consumer<List<Candle>> chunkSink) {
+        if (!instrument.isExchangeTradedFuture() || !supports(instrument, timeframe)) {
+            return 0;
+        }
+        if (from == null || to == null || !from.isBefore(to)) {
+            log.warn("IB Gateway contract-month backfill skipped for {} {}: invalid window [{} .. {}]",
+                instrument, timeframe, from, to);
+            return 0;
+        }
+        return contractResolver.resolveExpiredMonth(instrument, contractMonth)
+            .map(resolved -> {
+                int[] total = { 0 };
+                Consumer<List<Candle>> sink = chunk -> {
+                    if (chunk.isEmpty()) return;
+                    total[0] += chunk.size();
+                    chunkSink.accept(chunk);
+                };
+                fetchRangeChunksFromContract(instrument, timeframe, from, to, resolved.contract(), contractMonth, sink);
+                log.info("IB Gateway contract-month backfill {} {} [{} .. {}] -> {} candles streamed (contract {})",
+                    instrument, timeframe, from, to, total[0], contractMonth);
+                return total[0];
+            })
+            .orElseGet(() -> {
+                log.warn("IB Gateway contract-month backfill skipped for {} {}: no contract resolved for month {}",
+                    instrument, timeframe, contractMonth);
+                return 0;
+            });
+    }
+
     /** True once the earliest bar seen reaches the window's lower bound. */
     private static boolean reaches(Instant minSeen, Instant from) {
         return minSeen != null && !minSeen.isAfter(from);

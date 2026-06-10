@@ -83,4 +83,23 @@ public interface HistoricalDataProvider {
                                             Consumer<List<Candle>> chunkSink) {
         return 0;
     }
+
+    /**
+     * Streaming range fetch pinned to one <em>explicit</em> (possibly expired) contract month
+     * instead of the front-month walk or the continuous series. The operator names the contract
+     * that was front over {@code [from, to]} (e.g. {@code "202603"} for a window inside that
+     * contract's front period), and every bar comes from — and is tagged with — that single
+     * contract. This is the fallback when the gateway build rejects CONTFUT contracts
+     * (IBKR error 200) but still serves expired single contracts.
+     *
+     * <p>Same streaming/idempotence contract as
+     * {@link #fetchHistoryRange(Instrument, String, Instant, Instant, Consumer)}.</p>
+     *
+     * @param contractMonth target contract month, {@code YYYYMM}
+     * @return total number of candles handed to the sink; 0 when unsupported or unresolvable
+     */
+    default int fetchContractMonthHistoryRange(Instrument instrument, String timeframe, String contractMonth,
+                                               Instant from, Instant to, Consumer<List<Candle>> chunkSink) {
+        return 0;
+    }
 }

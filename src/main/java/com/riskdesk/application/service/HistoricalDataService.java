@@ -123,13 +123,21 @@ public class HistoricalDataService implements ApplicationRunner {
     public record BackfillJob(Instrument instrument, String timeframe, String state,
                               Instant from, Instant to, int fetched, int existing, int saved,
                               long startedAt, Long finishedAt, String message,
-                              boolean continuous, boolean replace) {
+                              boolean continuous, boolean replace, String contractMonth) {
         /** Legacy shape (no source/purge flags) — keeps pre-continuous call sites compiling. */
         public BackfillJob(Instrument instrument, String timeframe, String state,
                            Instant from, Instant to, int fetched, int existing, int saved,
                            long startedAt, Long finishedAt, String message) {
             this(instrument, timeframe, state, from, to, fetched, existing, saved,
-                startedAt, finishedAt, message, false, false);
+                startedAt, finishedAt, message, false, false, null);
+        }
+        /** Pre-contract-month shape — keeps continuous/replace call sites compiling. */
+        public BackfillJob(Instrument instrument, String timeframe, String state,
+                           Instant from, Instant to, int fetched, int existing, int saved,
+                           long startedAt, Long finishedAt, String message,
+                           boolean continuous, boolean replace) {
+            this(instrument, timeframe, state, from, to, fetched, existing, saved,
+                startedAt, finishedAt, message, continuous, replace, null);
         }
         public boolean running() { return "RUNNING".equals(state); }
     }
@@ -271,53 +279,69 @@ public class HistoricalDataService implements ApplicationRunner {
     public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
                                           Instant from, Instant to, boolean async,
                                           boolean continuous, boolean replace) {
+        return startBackfillRange(instrument, timeframe, from, to, async, continuous, replace, null);
+    }
+
+    /**
+     * Range backfill pinned to an explicit contract month.
+     *
+     * @param contractMonth when non-null ({@code YYYYMM}), the whole window is sourced from that
+     *                      single (possibly expired) contract and rows are tagged with it — the
+     *                      operator names the contract that was front over {@code [from, to]}.
+     *                      Fallback for gateway builds that reject CONTFUT (IBKR error 200);
+     *                      mutually exclusive with {@code continuous}.
+     */
+    public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
+                                          Instant from, Instant to, boolean async,
+                                          boolean continuous, boolean replace, String contractMonth) {
         long now = System.currentTimeMillis();
         if (!enabled) {
             return new BackfillJob(instrument, timeframe, "DISABLED", from, to, 0, 0, 0, now, now,
                 "Historical data fetch is disabled (riskdesk.market-data.historical.enabled=false).");
         }
 
-        String rejection = validateBackfillRange(instrument, timeframe, from, to, continuous);
+        String rejection = validateBackfillRange(instrument, timeframe, from, to, continuous, contractMonth);
         if (rejection != null) {
             return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now,
-                rejection, continuous, replace);
+                rejection, continuous, replace, contractMonth);
         }
 
         RefreshKey key = new RefreshKey(instrument, timeframe);
         BackfillJob existingJob = backfillJobs.get(key);
         if (existingJob != null && existingJob.running()) {
             boolean identicalRequest = existingJob.from().equals(from) && existingJob.to().equals(to)
-                && existingJob.continuous() == continuous && existingJob.replace() == replace;
+                && existingJob.continuous() == continuous && existingJob.replace() == replace
+                && java.util.Objects.equals(existingJob.contractMonth(), contractMonth);
             if (identicalRequest) {
                 return existingJob; // coalesce — the same request is already in flight
             }
             // A DIFFERENT request must never be silently swallowed by the in-flight job: the
             // caller would believe their continuous/replace re-source was accepted when it wasn't.
             return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now,
-                String.format("A backfill for %s %s is already running ([%s .. %s], continuous=%s, replace=%s); "
+                String.format("A backfill for %s %s is already running ([%s .. %s], continuous=%s, replace=%s, contractMonth=%s); "
                         + "retry after it completes.",
                     instrument, timeframe, existingJob.from(), existingJob.to(),
-                    existingJob.continuous(), existingJob.replace()),
-                continuous, replace);
+                    existingJob.continuous(), existingJob.replace(), existingJob.contractMonth()),
+                continuous, replace, contractMonth);
         }
 
         BackfillJob started = new BackfillJob(instrument, timeframe, "RUNNING", from, to,
-            0, 0, 0, now, null, "Backfill started.", continuous, replace);
+            0, 0, 0, now, null, "Backfill started.", continuous, replace, contractMonth);
         backfillJobs.put(key, started);
 
         if (async) {
             CompletableFuture
-                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now, continuous, replace), backfillExecutor)
+                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now, continuous, replace, contractMonth), backfillExecutor)
                 .exceptionally(ex -> {
                     backfillJobs.put(key, new BackfillJob(instrument, timeframe, "FAILED", from, to,
                         0, 0, 0, now, System.currentTimeMillis(), "Backfill failed: " + ex.getMessage(),
-                        continuous, replace));
+                        continuous, replace, contractMonth));
                     log.error("HistoricalDataService [range-backfill]: {} {} async failed", instrument, timeframe, ex);
                     return null;
                 });
             return started;
         }
-        return runBackfillRange(instrument, timeframe, from, to, now, continuous, replace);
+        return runBackfillRange(instrument, timeframe, from, to, now, continuous, replace, contractMonth);
     }
 
     /** Returns the last known backfill job for a pair, if any. */
@@ -326,9 +350,16 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     private String validateBackfillRange(Instrument instrument, String timeframe, Instant from, Instant to,
-                                         boolean continuous) {
+                                         boolean continuous, String contractMonth) {
         if (!instrument.isExchangeTradedFuture()) {
             return "Instrument " + instrument + " is not an exchange-traded future.";
+        }
+        if (contractMonth != null && continuous) {
+            return "'contractMonth' and 'continuous=true' are mutually exclusive — name the explicit contract "
+                + "OR let IBKR stitch the continuous series, not both.";
+        }
+        if (contractMonth != null && !contractMonth.matches("\\d{6}")) {
+            return "Invalid 'contractMonth' format: '" + contractMonth + "'; expected YYYYMM (e.g. 202603).";
         }
         if (!historicalProvider.supports(instrument, timeframe)) {
             return "Timeframe '" + timeframe + "' is not supported for backfill.";
@@ -362,7 +393,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
     private BackfillJob runBackfillRange(Instrument instrument, String timeframe,
                                          Instant from, Instant to, long startedAt,
-                                         boolean continuous, boolean replace) {
+                                         boolean continuous, boolean replace, String contractMonth) {
         RefreshKey key = new RefreshKey(instrument, timeframe);
         AtomicInteger fetched  = new AtomicInteger(0);
         AtomicInteger existing = new AtomicInteger(0);
@@ -388,9 +419,11 @@ public class HistoricalDataService implements ApplicationRunner {
                     Instant ts = c.getTimestamp();
                     minSeen.updateAndGet(cur -> cur == null || ts.isBefore(cur) ? ts : cur);
                 }
-                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved);
+                persistBackfillChunk(instrument, timeframe, chunk, contractMonth, fetched, existing, saved);
             };
-            if (continuous) {
+            if (contractMonth != null) {
+                historicalProvider.fetchContractMonthHistoryRange(instrument, timeframe, contractMonth, from, to, sink);
+            } else if (continuous) {
                 historicalProvider.fetchContinuousHistoryRange(instrument, timeframe, from, to, sink);
             } else {
                 historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, sink);
@@ -405,7 +438,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
             StringBuilder msg = new StringBuilder(String.format("Backfill %s%s: %d fetched, %d already present, %d new saved%s.",
                 partial ? "PARTIAL" : "complete",
-                continuous ? " (continuous)" : "",
+                continuous ? " (continuous)" : contractMonth != null ? " (contract " + contractMonth + ")" : "",
                 fetched.get(), existing.get(), saved.get(),
                 replace ? ", " + purgedCount + " purged (replace)" : ""));
             if (replace && purged.get() < 0) {
@@ -418,11 +451,11 @@ public class HistoricalDataService implements ApplicationRunner {
 
             BackfillJob done = new BackfillJob(instrument, timeframe, state, from, to,
                 fetched.get(), existing.get(), saved.get(),
-                startedAt, System.currentTimeMillis(), msg.toString(), continuous, replace);
+                startedAt, System.currentTimeMillis(), msg.toString(), continuous, replace, contractMonth);
             backfillJobs.put(key, done);
             log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} — {} fetched, {} already present, {} new saved (streamed{}).",
                 instrument, timeframe, from, to, state, fetched.get(), existing.get(), saved.get(),
-                continuous ? ", continuous" : "");
+                continuous ? ", continuous" : contractMonth != null ? ", contract " + contractMonth : "");
             return done;
         } catch (Exception e) {
             String failMsg = "Backfill failed: " + e.getMessage()
@@ -431,7 +464,7 @@ public class HistoricalDataService implements ApplicationRunner {
                     : "");
             BackfillJob failed = new BackfillJob(instrument, timeframe, "FAILED", from, to,
                 fetched.get(), existing.get(), saved.get(), startedAt, System.currentTimeMillis(),
-                failMsg, continuous, replace);
+                failMsg, continuous, replace, contractMonth);
             backfillJobs.put(key, failed);
             log.error("HistoricalDataService [range-backfill]: {} {} failed", instrument, timeframe, e);
             return failed;
@@ -445,11 +478,17 @@ public class HistoricalDataService implements ApplicationRunner {
      * tripping the {@code (instrument, timeframe, ts)} unique key.
      */
     private void persistBackfillChunk(Instrument instrument, String timeframe, List<Candle> chunk,
+                                      String explicitContractMonth,
                                       AtomicInteger fetched, AtomicInteger existing, AtomicInteger saved) {
         if (chunk == null || chunk.isEmpty()) return;
         fetched.addAndGet(chunk.size());
 
-        List<Candle> deduped = deduplicate(tagWithContractMonth(chunk, instrument));
+        // Explicit-contract mode: untagged bars take the REQUESTED month, never the registry's
+        // current front month — a January window sourced from MNQ 202603 must not be tagged 202609.
+        List<Candle> tagged = explicitContractMonth != null
+            ? tagWithMonth(chunk, explicitContractMonth)
+            : tagWithContractMonth(chunk, instrument);
+        List<Candle> deduped = deduplicate(tagged);
 
         Instant chunkFrom = deduped.get(0).getTimestamp();
         Instant chunkTo   = chunkFrom;
@@ -646,7 +685,10 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     private List<Candle> tagWithContractMonth(List<Candle> candles, Instrument instrument) {
-        String contractMonth = contractRegistry.getContractMonth(instrument).orElse(null);
+        return tagWithMonth(candles, contractRegistry.getContractMonth(instrument).orElse(null));
+    }
+
+    private static List<Candle> tagWithMonth(List<Candle> candles, String contractMonth) {
         if (contractMonth == null) return candles;
         for (Candle candle : candles) {
             if (candle.getContractMonth() == null) {
