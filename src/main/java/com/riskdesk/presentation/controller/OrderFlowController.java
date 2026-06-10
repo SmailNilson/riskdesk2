@@ -2,12 +2,14 @@ package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.OrderFlowHistoryService;
 import com.riskdesk.application.service.OrderFlowOrchestrator;
+import com.riskdesk.application.service.WallTrackingService;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.DepthLevel;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.TickBar;
+import com.riskdesk.domain.orderflow.model.WallEpisode;
 import com.riskdesk.domain.orderflow.port.TickBarPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.application.dto.AbsorptionEventView;
@@ -43,17 +45,20 @@ public class OrderFlowController {
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
     private final ObjectProvider<TickBarPort> tickBarPortProvider;
     private final OrderFlowHistoryService historyService;
+    private final WallTrackingService wallTrackingService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
                                 ObjectProvider<MarketDepthPort> depthPortProvider,
                                 ObjectProvider<TickBarPort> tickBarPortProvider,
-                                OrderFlowHistoryService historyService) {
+                                OrderFlowHistoryService historyService,
+                                WallTrackingService wallTrackingService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
         this.tickBarPortProvider = tickBarPortProvider;
         this.historyService = historyService;
+        this.wallTrackingService = wallTrackingService;
     }
 
     /**
@@ -172,11 +177,49 @@ public class OrderFlowController {
         }
         try {
             Instrument inst = Instrument.valueOf(instrument.toUpperCase());
-            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 500));
+            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 3000));
             return ResponseEntity.ok(bars);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }
+    }
+
+    /**
+     * GET /api/order-flow/walls/{instrument}?limit=30
+     * Wall traceability (UC-OF-012): live walls currently flagged in the book plus the
+     * most recent closed episodes with their outcome (CONSUMED / PULLED / FADED /
+     * OUT_OF_RANGE), newest first.
+     */
+    @GetMapping("/walls/{instrument}")
+    public ResponseEntity<?> getWalls(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "30") int limit) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<Map<String, Object>> active = wallTrackingService.activeWalls(inst).stream()
+                .map(OrderFlowController::activeWallPayload)
+                .toList();
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("instrument", inst.name());
+            result.put("active", active);
+            result.put("recent", historyService.recentWallEpisodes(inst, limit));
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /** Serializes a live (still-open) wall episode. */
+    private static Map<String, Object> activeWallPayload(WallEpisode ep) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("side", ep.side().name());
+        m.put("price", ep.price());
+        m.put("size", ep.lastSize());
+        m.put("maxSize", ep.maxSize());
+        m.put("firstSeenAt", ep.firstSeenAt().toString());
+        m.put("ageSeconds", ep.durationSeconds());
+        m.put("distanceTicks", Double.isNaN(ep.endDistanceTicks()) ? null : ep.endDistanceTicks());
+        return m;
     }
 
     /** Serializes a depth ladder to a list of {price, size, wall} maps. */

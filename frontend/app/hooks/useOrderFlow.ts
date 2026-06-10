@@ -296,7 +296,7 @@ export function useOrderFlow() {
             for (const bar of payload.bars) bySeq.set(bar.seq, bar);
             const merged = Array.from(bySeq.values())
               .sort((a, b) => a.seq - b.seq)
-              .slice(-300);
+              .slice(-3000); // matches the backend ring + TickChart's re-aggregation window
             next.set(payload.instrument, merged);
             return next;
           });

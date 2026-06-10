@@ -58,6 +58,7 @@ class OrderFlowHistoryServiceTest {
                 momentumRepo,
                 cycleRepo,
                 mock(JpaFootprintBarRepository.class),
+                mock(com.riskdesk.infrastructure.persistence.JpaWallEpisodeRepository.class),
                 properties,
                 new com.fasterxml.jackson.databind.ObjectMapper());
     }
