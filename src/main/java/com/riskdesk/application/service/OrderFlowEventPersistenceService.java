@@ -8,6 +8,7 @@ import com.riskdesk.domain.orderflow.event.IcebergDetected;
 import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
 import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
 import com.riskdesk.domain.orderflow.event.SpoofingDetected;
+import com.riskdesk.domain.orderflow.event.WallEpisodeClosed;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.IcebergSignal;
@@ -15,6 +16,7 @@ import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
+import com.riskdesk.domain.orderflow.model.WallEpisode;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
@@ -23,6 +25,7 @@ import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaWallEpisodeRepository;
 import com.riskdesk.infrastructure.persistence.entity.AbsorptionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
@@ -31,6 +34,7 @@ import com.riskdesk.infrastructure.persistence.entity.IcebergEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.SpoofingEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.WallEpisodeEntity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
@@ -67,6 +71,7 @@ public class OrderFlowEventPersistenceService {
     private final JpaDistributionEventRepository distributionRepository;
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
+    private final JpaWallEpisodeRepository wallEpisodeRepository;
     private final ObjectMapper objectMapper;
 
     public OrderFlowEventPersistenceService(JpaAbsorptionEventRepository absorptionRepository,
@@ -77,6 +82,7 @@ public class OrderFlowEventPersistenceService {
                                             JpaDistributionEventRepository distributionRepository,
                                             JpaMomentumEventRepository momentumRepository,
                                             JpaCycleEventRepository cycleRepository,
+                                            JpaWallEpisodeRepository wallEpisodeRepository,
                                             ObjectMapper objectMapper) {
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
@@ -86,7 +92,34 @@ public class OrderFlowEventPersistenceService {
         this.distributionRepository = distributionRepository;
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
+        this.wallEpisodeRepository = wallEpisodeRepository;
         this.objectMapper = objectMapper;
+    }
+
+    @Async
+    @EventListener
+    @Transactional
+    public void onWallEpisodeClosed(WallEpisodeClosed event) {
+        try {
+            WallEpisode ep = event.episode();
+            wallEpisodeRepository.save(new WallEpisodeEntity(
+                    event.instrument(),
+                    ep.endedAt() != null ? ep.endedAt() : event.timestamp(),
+                    ep.side().name(),
+                    ep.price(),
+                    ep.initialSize(),
+                    ep.maxSize(),
+                    ep.lastSize(),
+                    ep.firstSeenAt(),
+                    ep.durationSeconds(),
+                    ep.outcome().name(),
+                    // NaN (side unavailable at finalization) is not representable in a
+                    // NOT NULL double column — store 0 and rely on outcome OUT_OF_RANGE.
+                    Double.isNaN(ep.endDistanceTicks()) ? 0.0 : ep.endDistanceTicks()
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to persist wall episode for {}: {}", event.instrument(), e.getMessage());
+        }
     }
 
     @Async
@@ -298,11 +331,12 @@ public class OrderFlowEventPersistenceService {
             int distribution = distributionRepository.deleteByTimestampBefore(cutoff);
             int momentum = momentumRepository.deleteByTimestampBefore(cutoff);
             int cycle = cycleRepository.deleteByTimestampBefore(cutoff);
-            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle > 0) {
+            int walls = wallEpisodeRepository.deleteByTimestampBefore(cutoff);
+            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle + walls > 0) {
                 log.info("Purged order flow events: {} absorption, {} spoofing, {} iceberg, {} flash crash, " +
-                         "{} footprint, {} distribution, {} momentum, {} cycle",
+                         "{} footprint, {} distribution, {} momentum, {} cycle, {} wall episodes",
                          absorption, spoofing, iceberg, flashCrash, footprint,
-                         distribution, momentum, cycle);
+                         distribution, momentum, cycle, walls);
             }
         } catch (Exception e) {
             log.error("Failed to purge expired order flow events: {}", e.getMessage(), e);

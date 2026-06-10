@@ -29,6 +29,7 @@ public class OrderFlowProperties {
     private FlashCrash flashCrash = new FlashCrash();
     private TickChart tickChart = new TickChart();
     private Footprint footprint = new Footprint();
+    private WallTracker wallTracker = new WallTracker();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -58,6 +59,8 @@ public class OrderFlowProperties {
     public void setTickChart(TickChart tickChart) { this.tickChart = tickChart; }
     public Footprint getFootprint() { return footprint; }
     public void setFootprint(Footprint footprint) { this.footprint = footprint; }
+    public WallTracker getWallTracker() { return wallTracker; }
+    public void setWallTracker(WallTracker wallTracker) { this.wallTracker = wallTracker; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -134,6 +137,38 @@ public class OrderFlowProperties {
         public void setNumRows(int numRows) { this.numRows = numRows; }
         public double getWallThresholdMultiplier() { return wallThresholdMultiplier; }
         public void setWallThresholdMultiplier(double wallThresholdMultiplier) { this.wallThresholdMultiplier = wallThresholdMultiplier; }
+    }
+
+    /**
+     * Wall lifecycle tracker (UC-OF-012): traces every DOM "WALL" level (≥ wall-threshold ×
+     * average level size) from appearance to outcome — CONSUMED / PULLED / FADED /
+     * OUT_OF_RANGE. History persisted in {@code order_flow_wall_episodes}.
+     */
+    public static class WallTracker {
+        private boolean enabled = true;
+        /** Seconds a wall may vanish from the book before its episode is finalized (re-flag within grace = same episode). */
+        private double graceSeconds = 5.0;
+        /** Episodes flagged for less than this (seconds) are dropped as book flicker. */
+        private double minLifetimeSeconds = 3.0;
+        /** End distance (ticks) at or below which the wall counts as CONSUMED — price reached it. */
+        private double consumedProximityTicks = 1.0;
+        /** End size below this fraction of max size (price still away) = PULLED (spoof suspect). */
+        private double pulledRemnantRatio = 0.25;
+        /** Absolute minimum size (contracts) to open an episode. 0 = relative threshold only. */
+        private long minSize = 0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getGraceSeconds() { return graceSeconds; }
+        public void setGraceSeconds(double v) { this.graceSeconds = v; }
+        public double getMinLifetimeSeconds() { return minLifetimeSeconds; }
+        public void setMinLifetimeSeconds(double v) { this.minLifetimeSeconds = v; }
+        public double getConsumedProximityTicks() { return consumedProximityTicks; }
+        public void setConsumedProximityTicks(double v) { this.consumedProximityTicks = v; }
+        public double getPulledRemnantRatio() { return pulledRemnantRatio; }
+        public void setPulledRemnantRatio(double v) { this.pulledRemnantRatio = v; }
+        public long getMinSize() { return minSize; }
+        public void setMinSize(long v) { this.minSize = v; }
     }
 
     /** Tick data logging (persistence for calibration). */
