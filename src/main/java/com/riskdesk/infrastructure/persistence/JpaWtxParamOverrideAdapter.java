@@ -46,12 +46,17 @@ public class JpaWtxParamOverrideAdapter implements WtxParamOverridePort {
         entity.setN2(override.n2());
         entity.setSignalPeriod(override.signalPeriod());
         entity.setSlAtrMult(override.slAtrMult());
+        entity.setNsc(override.nsc());
+        entity.setNsv(override.nsv());
+        entity.setUseCompra1(override.useCompra1());
+        entity.setUseVenta1(override.useVenta1());
         entity.setUpdatedAt(Instant.now());
         repository.save(entity);
         cache.put(key(instrument, timeframe), override == null ? WtxParamOverride.NONE : override);
     }
 
     private static WtxParamOverride toDomain(WtxParamOverrideEntity e) {
-        return new WtxParamOverride(e.getN1(), e.getN2(), e.getSignalPeriod(), e.getSlAtrMult());
+        return new WtxParamOverride(e.getN1(), e.getN2(), e.getSignalPeriod(), e.getSlAtrMult(),
+                e.getNsc(), e.getNsv(), e.getUseCompra1(), e.getUseVenta1());
     }
 }

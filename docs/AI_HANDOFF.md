@@ -1,6 +1,30 @@
 # AI Handoff
 
-Last updated: 2026-06-09
+Last updated: 2026-06-10
+
+## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
+
+A real-1m grid study (MNQ 10m, train mars-avril 2026 → OOS mai-juin 2026, exits replayed on 1m
+children) surfaced a **zone-entry** configuration that beat the deployed every-cross config on
+quality metrics (OOS ≈ +$6.6k / 54% WR at qty=1 session-off vs 33% WR deployed; PF 1.75 vs 1.18
+over the full window). Shape: WaveTrend **5/14/2**, initial stop **4.0×ATR** (SL_ONLY ride),
+entries **only on crosses inside the ±35 zone** (`useCompra1/useVenta1=false`, `nsc/nsv=±35`).
+
+To make it activatable per panel without touching the global config:
+- `WtxParamOverride` gained four nullable fields — `nsc`, `nsv`, `useCompra1`, `useVenta1` — plus
+  the named preset constant `TOP_TRAIN_Z35` and a `preset(name)` resolver (`"clear"` → `NONE`).
+- `WtxConfig.withSignalZone(...)` wither; `WtxStrategyService.applyOverrides` applies the zone
+  fields; the partial panel edits (`updateIndicatorParams`, `updateSlAtrMult`) now **preserve**
+  the zone override instead of wiping it.
+- New endpoint `PUT /api/wtx/state/{instrument}/{timeframe}/preset` with body
+  `{"preset":"top-train-z35"}` (or `"clear"`), backed by `WtxStrategyService.applyPreset(...)`.
+  State views/WS payloads now expose effective `nsc` / `nsv` / `zoneOnlyEntries`.
+- `wtx_param_overrides` gains nullable columns (`nsc`, `nsv`, `use_compra1`, `use_venta1`) —
+  Hibernate ddl-auto extends the table in place.
+
+**Caveats**: the preset is in-sample-selected (mars-avril) with one OOS window (mai-juin, bullish);
+the study assumed no slippage and qty=1. Intended path: apply on a paper MNQ 10m panel
+(auto-execution OFF) and compare against the deployed config on forward data before any live use.
 
 ## Deep 1m range backfill + cursor-paginated range read (2026-06-09)
 

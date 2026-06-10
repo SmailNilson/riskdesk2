@@ -39,6 +39,20 @@ public class WtxParamOverrideEntity {
     @Column(precision = 10, scale = 4)
     private BigDecimal slAtrMult;
 
+    // Signal-zone gating overrides (nullable = use the global config). Added columns are
+    // nullable so Hibernate ddl-auto=update extends the existing table in place.
+    @Column(precision = 10, scale = 4)
+    private BigDecimal nsc;
+
+    @Column(precision = 10, scale = 4)
+    private BigDecimal nsv;
+
+    @Column
+    private Boolean useCompra1;
+
+    @Column
+    private Boolean useVenta1;
+
     @Column
     private Instant updatedAt;
 
@@ -61,6 +75,18 @@ public class WtxParamOverrideEntity {
 
     public BigDecimal getSlAtrMult() { return slAtrMult; }
     public void setSlAtrMult(BigDecimal slAtrMult) { this.slAtrMult = slAtrMult; }
+
+    public BigDecimal getNsc() { return nsc; }
+    public void setNsc(BigDecimal nsc) { this.nsc = nsc; }
+
+    public BigDecimal getNsv() { return nsv; }
+    public void setNsv(BigDecimal nsv) { this.nsv = nsv; }
+
+    public Boolean getUseCompra1() { return useCompra1; }
+    public void setUseCompra1(Boolean useCompra1) { this.useCompra1 = useCompra1; }
+
+    public Boolean getUseVenta1() { return useVenta1; }
+    public void setUseVenta1(Boolean useVenta1) { this.useVenta1 = useVenta1; }
 
     public Instant getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }

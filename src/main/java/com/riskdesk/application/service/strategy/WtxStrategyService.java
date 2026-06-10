@@ -96,10 +96,17 @@ public class WtxStrategyService {
         if (ov.slAtrMult() != null) {
             eff = eff.withSlAtrMult(ov.slAtrMult());
         }
+        if (ov.nsc() != null || ov.nsv() != null || ov.useCompra1() != null || ov.useVenta1() != null) {
+            eff = eff.withSignalZone(
+                    ov.nsc() != null ? ov.nsc() : eff.nsc(),
+                    ov.nsv() != null ? ov.nsv() : eff.nsv(),
+                    ov.useCompra1() != null ? ov.useCompra1() : eff.useCompra1(),
+                    ov.useVenta1() != null ? ov.useVenta1() : eff.useVenta1());
+        }
         return eff;
     }
 
-    /** Global config with this panel's frontend overrides applied (n1/n2/signalPeriod/slAtrMult). */
+    /** Global config with this panel's frontend overrides applied (n1/n2/signalPeriod/slAtrMult/zone). */
     public WtxConfig effectiveConfig(String instrument, String timeframe) {
         return applyOverrides(properties.toConfig(), paramOverridePort.load(instrument, timeframe));
     }
@@ -541,7 +548,9 @@ public class WtxStrategyService {
     public WtxStrategyState updateIndicatorParams(String instrument, String timeframe,
                                                   Integer n1, Integer n2, Integer signalPeriod) {
         WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
-        WtxParamOverride next = new WtxParamOverride(n1, n2, signalPeriod, cur.slAtrMult());
+        // Preserve the SL and zone overrides — this endpoint only edits the WaveTrend periods.
+        WtxParamOverride next = new WtxParamOverride(n1, n2, signalPeriod, cur.slAtrMult(),
+                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1());
         paramOverridePort.save(instrument, timeframe, next);
         log.info("WTX [{} {}] indicator params override -> n1={} n2={} signalPeriod={}",
                 instrument, timeframe, n1, n2, signalPeriod);
@@ -557,9 +566,27 @@ public class WtxStrategyService {
      */
     public WtxStrategyState updateSlAtrMult(String instrument, String timeframe, BigDecimal slAtrMult) {
         WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
-        WtxParamOverride next = new WtxParamOverride(cur.n1(), cur.n2(), cur.signalPeriod(), slAtrMult);
+        // Preserve the period and zone overrides — this endpoint only edits the SL multiple.
+        WtxParamOverride next = new WtxParamOverride(cur.n1(), cur.n2(), cur.signalPeriod(), slAtrMult,
+                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1());
         paramOverridePort.save(instrument, timeframe, next);
         log.info("WTX [{} {}] SL ATR-mult override -> {}", instrument, timeframe, slAtrMult);
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        publishState(state, effectiveConfig(instrument, timeframe));
+        return state;
+    }
+
+    /**
+     * Apply a complete named override preset (e.g. {@link WtxParamOverride#TOP_TRAIN_Z35}) to this
+     * (instrument, timeframe) panel in one atomic save — periods, SL multiple AND signal-zone
+     * gating together. Applying {@link WtxParamOverride#NONE} clears every override (back to the
+     * global config). Returns the runtime state so the panel refreshes.
+     */
+    public WtxStrategyState applyPreset(String instrument, String timeframe, WtxParamOverride preset) {
+        WtxParamOverride effective = preset == null ? WtxParamOverride.NONE : preset;
+        paramOverridePort.save(instrument, timeframe, effective);
+        log.info("WTX [{} {}] override preset applied -> {}", instrument, timeframe, effective);
         WtxStrategyState state = statePort.load(instrument, timeframe)
                 .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
         publishState(state, effectiveConfig(instrument, timeframe));
@@ -796,6 +823,10 @@ public class WtxStrategyService {
         payload.put("n2", config.n2());
         payload.put("signalPeriod", config.signalPeriod());
         payload.put("slAtrMult", config.slAtrMult());
+        // Effective signal-zone gating (global config + this panel's overrides / preset).
+        payload.put("nsc", config.nsc());
+        payload.put("nsv", config.nsv());
+        payload.put("zoneOnlyEntries", !config.useCompra1() && !config.useVenta1());
         payload.put("entryPrice", state.entryPrice());
         payload.put("entryQty", state.entryQty());
         payload.put("stopLoss", WtxTrailingExitEvaluator.currentStop(state, config));
