@@ -87,6 +87,12 @@ public class JpaCandleRepositoryAdapter implements CandleRepositoryPort {
     }
 
     @Override
+    @Transactional
+    public int deleteRange(Instrument instrument, String timeframe, Instant from, Instant to) {
+        return springDataRepo.deleteRange(instrument, timeframe, from, to);
+    }
+
+    @Override
     public List<Candle> findRecentCandlesByContractMonth(Instrument instrument, String timeframe,
                                                          String contractMonth, int limit) {
         return springDataRepo.findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(

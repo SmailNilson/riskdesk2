@@ -347,6 +347,7 @@ class TriggerContextBuilderTest {
         @Override public List<Candle> saveAll(List<Candle> c) { throw new AssertionError("unused"); }
         @Override public void deleteAll() { throw new AssertionError("unused"); }
         @Override public void deleteByInstrumentAndTimeframe(Instrument i, String tf) { throw new AssertionError("unused"); }
+        @Override public int deleteRange(Instrument i, String tf, Instant from, Instant to) { throw new AssertionError("unused"); }
         @Override public long count() { throw new AssertionError("unused"); }
     }
 
@@ -368,6 +369,7 @@ class TriggerContextBuilderTest {
         @Override public List<Candle> saveAll(List<Candle> c) { throw new AssertionError("unused"); }
         @Override public void deleteAll() { throw new AssertionError("unused"); }
         @Override public void deleteByInstrumentAndTimeframe(Instrument i, String tf) { throw new AssertionError("unused"); }
+        @Override public int deleteRange(Instrument i, String tf, Instant from, Instant to) { throw new AssertionError("unused"); }
         @Override public long count() { throw new AssertionError("unused"); }
     }
 }

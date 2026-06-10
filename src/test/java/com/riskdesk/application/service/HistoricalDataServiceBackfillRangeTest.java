@@ -190,6 +190,81 @@ class HistoricalDataServiceBackfillRangeTest {
         assertEquals("DONE", status.get().state());
     }
 
+    @Test
+    void backfillRange_continuousRoutesToTheContinuousProvider() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        Candle c0 = candle("2026-03-01T00:00:00Z", "100");
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+        when(provider.fetchContinuousHistoryRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), any()))
+            .thenAnswer(inv -> {
+                Consumer<List<Candle>> sink = inv.getArgument(4);
+                sink.accept(List.of(c0));
+                return 1;
+            });
+        when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+        when(candlePort.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, true, false);
+
+        assertEquals("DONE", job.state());
+        assertEquals(1, job.saved());
+        assertTrue(job.message().contains("continuous"));
+        // The continuous path must NOT fall back to the front-month + expired-contract walk,
+        // and continuous alone must never purge stored data.
+        verify(provider, never()).fetchHistoryRange(any(), any(), any(), any(), any());
+        verify(candlePort, never()).deleteRange(any(), any(), any(), any());
+    }
+
+    @Test
+    void backfillRange_replacePurgesTheWindowBeforeRefilling() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        Candle c0 = candle("2026-03-01T00:00:00Z", "100");
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+        stubStreamRange(provider, FROM, TO, List.of(c0));
+        when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+        when(candlePort.deleteRange(Instrument.MNQ, "1m", FROM, TO)).thenReturn(42);
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+        when(candlePort.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, false, true);
+
+        assertEquals("DONE", job.state());
+        assertEquals(1, job.saved());
+        assertTrue(job.message().contains("42 purged"));
+        // Purge strictly before refill — otherwise the just-saved bars would be deleted again.
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(candlePort);
+        inOrder.verify(candlePort).deleteRange(Instrument.MNQ, "1m", FROM, TO);
+        inOrder.verify(candlePort).saveAll(anyList());
+    }
+
+    @Test
+    void backfillRange_legacyOverloadNeverPurgesNorUsesContinuous() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+        stubStreamRange(provider, FROM, TO, List.of());
+        when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false);
+
+        assertEquals("DONE", job.state());
+        verify(candlePort, never()).deleteRange(any(), any(), any(), any());
+        verify(provider, never()).fetchContinuousHistoryRange(any(), any(), any(), any(), any());
+    }
+
     private static Candle candle(String ts, String price) {
         BigDecimal p = new BigDecimal(price);
         return new Candle(Instrument.MNQ, "1m", Instant.parse(ts), p, p, p, p, 1L);

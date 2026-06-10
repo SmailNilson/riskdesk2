@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -231,6 +232,25 @@ public class HistoricalDataService implements ApplicationRunner {
      */
     public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
                                           Instant from, Instant to, boolean async) {
+        return startBackfillRange(instrument, timeframe, from, to, async, false, false);
+    }
+
+    /**
+     * Range backfill with source/purge control.
+     *
+     * @param continuous when {@code true}, fetches the window from the provider's continuous
+     *                   (CONTFUT) series — at every past date the bars come from the contract that
+     *                   was front-month at that date — instead of the front-month + expired-contract
+     *                   walk. Use for windows that predate the current contract's front period.
+     * @param replace    when {@code true}, deletes every stored candle of the pair inside
+     *                   {@code [from, to]} <em>before</em> fetching, so the window is re-sourced
+     *                   instead of gap-filled (the idempotent skip would otherwise keep the old
+     *                   rows). DESTRUCTIVE: if the fetch then fails, the window stays empty until a
+     *                   re-run succeeds.
+     */
+    public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
+                                          Instant from, Instant to, boolean async,
+                                          boolean continuous, boolean replace) {
         long now = System.currentTimeMillis();
         if (!enabled) {
             return new BackfillJob(instrument, timeframe, "DISABLED", from, to, 0, 0, 0, now, now,
@@ -254,7 +274,7 @@ public class HistoricalDataService implements ApplicationRunner {
 
         if (async) {
             CompletableFuture
-                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now), backfillExecutor)
+                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now, continuous, replace), backfillExecutor)
                 .exceptionally(ex -> {
                     backfillJobs.put(key, new BackfillJob(instrument, timeframe, "FAILED", from, to,
                         0, 0, 0, now, System.currentTimeMillis(), "Backfill failed: " + ex.getMessage()));
@@ -263,7 +283,7 @@ public class HistoricalDataService implements ApplicationRunner {
                 });
             return started;
         }
-        return runBackfillRange(instrument, timeframe, from, to, now);
+        return runBackfillRange(instrument, timeframe, from, to, now, continuous, replace);
     }
 
     /** Returns the last known backfill job for a pair, if any. */
@@ -293,26 +313,42 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     private BackfillJob runBackfillRange(Instrument instrument, String timeframe,
-                                         Instant from, Instant to, long startedAt) {
+                                         Instant from, Instant to, long startedAt,
+                                         boolean continuous, boolean replace) {
         RefreshKey key = new RefreshKey(instrument, timeframe);
         AtomicInteger fetched  = new AtomicInteger(0);
         AtomicInteger existing = new AtomicInteger(0);
         AtomicInteger saved    = new AtomicInteger(0);
         try {
+            int purged = 0;
+            if (replace) {
+                purged = candlePort.deleteRange(instrument, timeframe, from, to);
+                log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — replace mode, {} stored candles purged before refill.",
+                    instrument, timeframe, from, to, purged);
+            }
+
             // Stream the window chunk-by-chunk straight into PostgreSQL. Heap stays bounded to a
             // single chunk (~one IBKR request) rather than holding the whole [from,to] window — a
             // deep 1m window spans months (~10^5 candles) and must never be buffered in memory.
-            historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, chunk ->
-                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved));
+            Consumer<List<Candle>> sink = chunk ->
+                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved);
+            if (continuous) {
+                historicalProvider.fetchContinuousHistoryRange(instrument, timeframe, from, to, sink);
+            } else {
+                historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, sink);
+            }
 
             BackfillJob done = new BackfillJob(instrument, timeframe, "DONE", from, to,
                 fetched.get(), existing.get(), saved.get(),
                 startedAt, System.currentTimeMillis(),
-                String.format("Backfill complete: %d fetched, %d already present, %d new saved.",
-                    fetched.get(), existing.get(), saved.get()));
+                String.format("Backfill complete%s: %d fetched, %d already present, %d new saved%s.",
+                    continuous ? " (continuous)" : "",
+                    fetched.get(), existing.get(), saved.get(),
+                    replace ? ", " + purged + " purged (replace)" : ""));
             backfillJobs.put(key, done);
-            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved (streamed).",
-                instrument, timeframe, from, to, fetched.get(), existing.get(), saved.get());
+            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved (streamed{}).",
+                instrument, timeframe, from, to, fetched.get(), existing.get(), saved.get(),
+                continuous ? ", continuous" : "");
             return done;
         } catch (Exception e) {
             BackfillJob failed = new BackfillJob(instrument, timeframe, "FAILED", from, to,

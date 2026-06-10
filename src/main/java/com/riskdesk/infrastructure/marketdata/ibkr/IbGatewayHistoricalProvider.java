@@ -43,6 +43,8 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     private static final long PACING_DELAY_MS = 2_000L;
     /** Abort a contract/timeframe after this many consecutive timeouts. */
     private static final int MAX_CONSECUTIVE_TIMEOUTS = 3;
+    /** contract_month tag for candles sourced from the continuous (CONTFUT) series. */
+    public static final String CONTINUOUS_MONTH_TAG = "CONT";
 
     private final IbGatewayNativeClient nativeClient;
     private final IbGatewayContractResolver contractResolver;
@@ -204,6 +206,42 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
             })
             .orElseGet(() -> {
                 log.warn("IB Gateway range backfill skipped for {} {}: no contract resolved", instrument, timeframe);
+                return 0;
+            });
+    }
+
+    /**
+     * Continuous-contract (secType CONTFUT) range fetch: IBKR itself returns, at every past date,
+     * the bars of the contract that was front-month at that date — no expired-contract walk, no
+     * back-month projection. Candles are tagged {@value #CONTINUOUS_MONTH_TAG} so their provenance
+     * is distinguishable from single-contract rows.
+     */
+    @Override
+    public int fetchContinuousHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to,
+                                           Consumer<List<Candle>> chunkSink) {
+        if (!instrument.isExchangeTradedFuture() || !supports(instrument, timeframe)) {
+            return 0;
+        }
+        if (from == null || to == null || !from.isBefore(to)) {
+            log.warn("IB Gateway continuous backfill skipped for {} {}: invalid window [{} .. {}]",
+                instrument, timeframe, from, to);
+            return 0;
+        }
+        return contractResolver.continuousContract(instrument)
+            .map(contract -> {
+                int[] total = { 0 };
+                Consumer<List<Candle>> sink = chunk -> {
+                    if (chunk.isEmpty()) return;
+                    total[0] += chunk.size();
+                    chunkSink.accept(chunk);
+                };
+                fetchRangeChunksFromContract(instrument, timeframe, from, to, contract, CONTINUOUS_MONTH_TAG, sink);
+                log.info("IB Gateway continuous backfill {} {} [{} .. {}] -> {} candles streamed (CONTFUT)",
+                    instrument, timeframe, from, to, total[0]);
+                return total[0];
+            })
+            .orElseGet(() -> {
+                log.warn("IB Gateway continuous backfill skipped for {} {}: no CONTFUT contract", instrument, timeframe);
                 return 0;
             });
     }

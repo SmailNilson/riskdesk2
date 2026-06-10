@@ -54,5 +54,14 @@ public interface CandleRepositoryPort {
 
     void deleteByInstrumentAndTimeframe(Instrument instrument, String timeframe);
 
+    /**
+     * Deletes every candle for the pair inside the closed range {@code [from, to]}.
+     * Used by the replace-mode backfill to purge a window before refilling it from a
+     * better source (e.g. re-sourcing back-month bars with the continuous contract).
+     *
+     * @return number of candles deleted
+     */
+    int deleteRange(Instrument instrument, String timeframe, Instant from, Instant to);
+
     long count();
 }

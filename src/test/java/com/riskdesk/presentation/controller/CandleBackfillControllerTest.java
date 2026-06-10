@@ -36,47 +36,47 @@ class CandleBackfillControllerTest {
 
     @Test
     void backfill_delegatesWithParsedInstants_andReturns202ForRunning() {
-        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true)))
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true), eq(false), eq(false)))
             .thenReturn(job("RUNNING"));
 
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true);
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true, false, false);
 
         assertEquals(HttpStatus.ACCEPTED, resp.getStatusCode());
         assertEquals("RUNNING", resp.getBody().get("state"));
         assertEquals(FROM.getEpochSecond(), resp.getBody().get("from"));
-        verify(service).startBackfillRange(Instrument.MNQ, "1m", FROM, TO, true);
+        verify(service).startBackfillRange(Instrument.MNQ, "1m", FROM, TO, true, false, false);
     }
 
     @Test
     void backfill_returns200ForSyncDone() {
-        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(false)))
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(false), eq(false), eq(false)))
             .thenReturn(job("DONE"));
 
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), false);
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), false, false, false);
 
         assertEquals(HttpStatus.OK, resp.getStatusCode());
     }
 
     @Test
     void backfill_mapsRejectedTo400() {
-        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true)))
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true), eq(false), eq(false)))
             .thenReturn(job("REJECTED"));
 
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true);
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true, false, false);
 
         assertEquals(HttpStatus.BAD_REQUEST, resp.getStatusCode());
     }
 
     @Test
     void backfill_mapsDisabledTo409() {
-        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true)))
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true), eq(false), eq(false)))
             .thenReturn(job("DISABLED"));
 
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true);
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true, false, false);
 
         assertEquals(HttpStatus.CONFLICT, resp.getStatusCode());
     }
@@ -84,7 +84,7 @@ class CandleBackfillControllerTest {
     @Test
     void backfill_rejectsUnknownInstrument_withoutTouchingService() {
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("XYZ", "1m", FROM.toString(), TO.toString(), true);
+            controller.backfill("XYZ", "1m", FROM.toString(), TO.toString(), true, false, false);
 
         assertEquals(HttpStatus.BAD_REQUEST, resp.getStatusCode());
         verifyNoInteractions(service);
@@ -93,10 +93,22 @@ class CandleBackfillControllerTest {
     @Test
     void backfill_rejectsUnparseableInstant_withoutTouchingService() {
         ResponseEntity<Map<String, Object>> resp =
-            controller.backfill("mnq", "1m", "garbage", TO.toString(), true);
+            controller.backfill("mnq", "1m", "garbage", TO.toString(), true, false, false);
 
         assertEquals(HttpStatus.BAD_REQUEST, resp.getStatusCode());
         verifyNoInteractions(service);
+    }
+
+    @Test
+    void backfill_passesContinuousAndReplaceThrough() {
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true), eq(true), eq(true)))
+            .thenReturn(job("RUNNING"));
+
+        ResponseEntity<Map<String, Object>> resp =
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), true, true, true);
+
+        assertEquals(HttpStatus.ACCEPTED, resp.getStatusCode());
+        verify(service).startBackfillRange(Instrument.MNQ, "1m", FROM, TO, true, true, true);
     }
 
     @Test

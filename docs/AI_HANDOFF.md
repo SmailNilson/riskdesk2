@@ -2,6 +2,29 @@
 
 Last updated: 2026-06-10
 
+## Candle backfill — continuous contract (CONTFUT) + replace mode (2026-06-10)
+
+The deep range backfill previously reconstructed past windows from the **current** front
+month first (expired contracts only gap-filled the holes). For windows that predate the
+current contract's front period (e.g. backfilling January when the front is M6), that
+yields thin back-month bars with futures-curve offset — not the prices that actually
+traded as front. Two new opt-in params on `POST /api/candles/backfill/{inst}/{tf}`:
+
+- `continuous=true` — sources the window from IBKR's continuous series (secType
+  `CONTFUT`): at every past date the bars come from the contract that was front-month
+  at that date (TradingView-style stitching, done by IBKR). New port method
+  `HistoricalDataProvider.fetchContinuousHistoryRange` (default 0), implemented in
+  `IbGatewayHistoricalProvider` via `IbGatewayContractResolver.continuousContract`
+  (pure construction, never cached — CONTFUT is historical-only, no live/orders).
+  Candles are tagged `contract_month = "CONT"` for provenance.
+- `replace=true` — purges the stored window (`CandleRepositoryPort.deleteRange`,
+  closed range, scoped to the pair) **before** refilling, so a polluted window is
+  re-sourced instead of being kept by the idempotent skip. Destructive: a failed
+  fetch after the purge leaves the window empty until a re-run succeeds.
+
+Typical use (re-source a window that was filled with back-month bars):
+`POST /api/candles/backfill/MNQ/1m?from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z&continuous=true&replace=true`
+
 ## Tick chart — constant-tick-count bars (2026-06-10)
 
 New activity-normalized chart: one candle per N classified trades (MNQ 200, MCL 100;

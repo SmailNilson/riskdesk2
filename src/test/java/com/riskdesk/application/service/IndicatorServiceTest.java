@@ -152,6 +152,11 @@ class IndicatorServiceTest {
         }
 
         @Override
+        public int deleteRange(Instrument instrument, String timeframe, Instant from, Instant to) {
+            throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
+        }
+
+        @Override
         public long count() {
             throw new UnsupportedOperationException("Not used in IndicatorServiceTest");
         }
