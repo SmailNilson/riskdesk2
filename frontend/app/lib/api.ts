@@ -890,6 +890,8 @@ export interface OrderFlowDepthSnapshot {
   spreadTicks?: number;
   bidWall?: { price: number; size: number } | null;
   askWall?: { price: number; size: number } | null;
+  bids?: { price: number; size: number; wall: boolean }[];
+  asks?: { price: number; size: number; wall: boolean }[];
   timestamp?: string | null;
   error?: string;
 }

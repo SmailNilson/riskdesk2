@@ -13,6 +13,7 @@ import {
   CycleEvent,
 } from '@/app/hooks/useOrderFlow';
 import { useQuantStream } from '@/app/hooks/useQuantStream';
+import DepthBookWidget from './DepthBookWidget';
 import { api } from '@/app/lib/api';
 import QuantTelemetryDashboard, { INSTRUMENT_THRESHOLDS } from './quant/QuantTelemetryDashboard';
 import { QUANT_INSTRUMENTS, type QuantInstrument } from './quant/types';
@@ -659,6 +660,19 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
           }
         </div>
       </div>
+
+      {/* Section 2a: Order Book ladder (real L2 levels) */}
+      {selectedInstrument && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+            Order Book — {selectedInstrument}
+          </h4>
+          <DepthBookWidget
+            instrument={selectedInstrument}
+            depthData={depthData.get(selectedInstrument)}
+          />
+        </div>
+      )}
 
       {/* Section 2b: Smart Money Cycle (highest-signal meta-detector) */}
       <div>

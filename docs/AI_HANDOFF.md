@@ -62,6 +62,20 @@ Smart Money Cycle panel was EMPTY (confidences cluster 51-53, display floor was 
   (correct keys `score`/`delta`) and by `OrderFlowCorrelationService` (mismatched keys
   `absorptionScore`/`aggressiveDelta` → blank duplicate rows in the UI). The correlation
   listener is now log-only.
+## Real L2 order book exposed end-to-end (2026-06-10)
+
+The frontend `DepthBookWidget` was an **orphan component** (mounted nowhere) that fabricated
+ladder levels from aggregates with `Math.random()`. Meanwhile the backend's `MutableOrderBook`
+already held the real 10 levels per side from `reqMktDepth` but only published aggregates.
+
+- `DepthMetrics` (domain) gains `bids` / `asks`: full best-first ladders of the new
+  `DepthLevel(price, size, wall)` record; built inside the seqlock read in
+  `MutableOrderBook.computeMetrics` (level arrays copied before the generation re-check).
+- `/topic/depth` payloads and `GET /api/order-flow/depth/{instrument}` now include
+  `bids` / `asks` as `{price, size, wall}` lists.
+- `DepthBookWidget` rewritten as a real DOM ladder (asks above the spread separator,
+  bids below, proportional volume bars, WALL highlight) and mounted in
+  `OrderFlowPanel` under the depth gauges for the selected instrument.
 
 ## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
 

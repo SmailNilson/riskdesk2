@@ -1,6 +1,7 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.model.DepthLevel;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.WallEvent;
 import com.riskdesk.domain.orderflow.model.WallInfo;
@@ -173,6 +174,16 @@ public class MutableOrderBook {
             double bestBid = bc > 0 ? bidPrices[0] : 0;
             double bestAsk = ac > 0 ? askPrices[0] : 0;
 
+            // Copy the ladders locally so the seqlock check below validates them too.
+            double[] bidPx = new double[bc];
+            long[] bidSz = new long[bc];
+            double[] askPx = new double[ac];
+            long[] askSz = new long[ac];
+            System.arraycopy(bidPrices, 0, bidPx, 0, bc);
+            System.arraycopy(bidSizes, 0, bidSz, 0, bc);
+            System.arraycopy(askPrices, 0, askPx, 0, ac);
+            System.arraycopy(askSizes, 0, askSz, 0, ac);
+
             long maxBidSize = 0;
             double maxBidPrice = 0;
             int maxBidLevel = -1;
@@ -233,15 +244,30 @@ public class MutableOrderBook {
             return new DepthMetrics(
                 instrument, totalBidSize, totalAskSize, depthImbalance,
                 bestBid, bestAsk, spread, spreadTicks,
-                bidWall, askWall, Instant.ofEpochMilli(lastUpdateMillis)
+                bidWall, askWall,
+                buildLadder(bidPx, bidSz, avgBidSize),
+                buildLadder(askPx, askSz, avgAskSize),
+                Instant.ofEpochMilli(lastUpdateMillis)
             );
         }
 
         log.warn("Seqlock retries exhausted for {} — returning zero-value metrics", instrument);
         return new DepthMetrics(
             instrument, 0, 0, 0, 0, 0, 0, 0,
-            null, null, Instant.ofEpochMilli(lastUpdateMillis)
+            null, null, List.of(), List.of(), Instant.ofEpochMilli(lastUpdateMillis)
         );
+    }
+
+    /** Builds an immutable best-first ladder, flagging levels above the wall threshold. */
+    private List<DepthLevel> buildLadder(double[] prices, long[] sizes, double avgSize) {
+        if (prices.length == 0) return List.of();
+        double threshold = wallThresholdMultiplier * avgSize;
+        List<DepthLevel> ladder = new ArrayList<>(prices.length);
+        for (int i = 0; i < prices.length; i++) {
+            boolean wall = avgSize > 0 && sizes[i] > threshold;
+            ladder.add(new DepthLevel(prices[i], sizes[i], wall));
+        }
+        return Collections.unmodifiableList(ladder);
     }
 
     /**

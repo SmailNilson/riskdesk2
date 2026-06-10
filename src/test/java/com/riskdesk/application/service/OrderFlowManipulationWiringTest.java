@@ -111,7 +111,7 @@ class OrderFlowManipulationWiringTest {
         DepthMetrics depth = new DepthMetrics(
             Instrument.MNQ, 1000, 1000, 0.0,
             20060.0, 20060.25, 0.25, 1,
-            null, null, now);
+            null, null, java.util.List.of(), java.util.List.of(), now);
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
 
         orchestrator.evaluateBookManipulation(now);
@@ -154,7 +154,7 @@ class OrderFlowManipulationWiringTest {
 
         DepthMetrics depth = new DepthMetrics(
             Instrument.MNQ, 500, 1500, -0.5,
-            20000.0, 20000.25, 0.25, 1, null, null, now);
+            20000.0, 20000.25, 0.25, 1, null, null, java.util.List.of(), java.util.List.of(), now);
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
         when(flashCrashConfig.loadThresholds(Instrument.MNQ)).thenReturn(Optional.empty());
 
@@ -174,7 +174,7 @@ class OrderFlowManipulationWiringTest {
 
         DepthMetrics depth = new DepthMetrics(
             Instrument.MNQ, 1000, 1000, 0.0,
-            20000.0, 20000.25, 0.25, 1, null, null, now);
+            20000.0, 20000.25, 0.25, 1, null, null, java.util.List.of(), java.util.List.of(), now);
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
         when(flashCrashConfig.loadThresholds(Instrument.MNQ)).thenReturn(Optional.empty());
 
@@ -204,7 +204,7 @@ class OrderFlowManipulationWiringTest {
 
         DepthMetrics depth = new DepthMetrics(
             Instrument.MNQ, 1500, 500, 0.5,   // imbalance 0.5 → NOT < 0.3, so condition[3] is off
-            20000.0, 20000.25, 0.25, 1, null, null, now);
+            20000.0, 20000.25, 0.25, 1, null, null, java.util.List.of(), java.util.List.of(), now);
         when(depthPort.currentDepth(Instrument.MNQ)).thenReturn(Optional.of(depth));
         when(flashCrashConfig.loadThresholds(Instrument.MNQ)).thenReturn(Optional.empty());
 

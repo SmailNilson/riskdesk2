@@ -5,6 +5,7 @@ import com.riskdesk.application.service.OrderFlowOrchestrator;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.orderflow.model.DepthLevel;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.TickBar;
 import com.riskdesk.domain.orderflow.port.TickBarPort;
@@ -147,6 +148,8 @@ public class OrderFlowController {
             if (d.askWall() != null) {
                 result.put("askWall", Map.of("price", d.askWall().price(), "size", d.askWall().size()));
             }
+            result.put("bids", ladderPayload(d.bids()));
+            result.put("asks", ladderPayload(d.asks()));
             result.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : null);
             return ResponseEntity.ok(result);
         } catch (IllegalArgumentException e) {
@@ -174,6 +177,16 @@ public class OrderFlowController {
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }
+    }
+
+    /** Serializes a depth ladder to a list of {price, size, wall} maps. */
+    private static List<Map<String, Object>> ladderPayload(List<DepthLevel> ladder) {
+        if (ladder == null || ladder.isEmpty()) return List.of();
+        List<Map<String, Object>> out = new java.util.ArrayList<>(ladder.size());
+        for (DepthLevel level : ladder) {
+            out.add(Map.of("price", level.price(), "size", level.size(), "wall", level.wall()));
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------------------
