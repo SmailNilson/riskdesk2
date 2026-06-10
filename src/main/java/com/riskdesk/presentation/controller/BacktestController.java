@@ -435,14 +435,20 @@ public class BacktestController {
      * TradingView's no-adjustment continuous contract (e.g., MNQ1!).
      *
      * Candles with null contractMonth (legacy, untagged) are treated as the oldest layer
-     * and are always included before tagged contracts.
+     * and are always included before tagged contracts. CONT-tagged candles (continuous
+     * CONTFUT re-source — already front-month-at-their-date) belong to that same base
+     * layer: they carry no roll boundary, and sorting "CONT" as a month tag would place
+     * it after every "yyyyMM" tag and silently drop the whole re-sourced window at the
+     * splice's roll-date cut.
      *
      * If fewer than 2 distinct tagged contract months exist, returns the input unchanged.
      */
-    private List<Candle> buildContinuousCandles(List<Candle> rawCandles, Instrument inst, String timeframe) {
-        // Partition into legacy (null contractMonth) and tagged groups
+    static List<Candle> buildContinuousCandles(List<Candle> rawCandles, Instrument inst, String timeframe) {
+        // Partition into base (legacy null + continuous CONT) and month-tagged groups
         Map<String, List<Candle>> byMonth = rawCandles.stream()
-            .collect(Collectors.groupingBy(c -> c.getContractMonth() != null ? c.getContractMonth() : ""));
+            .collect(Collectors.groupingBy(c ->
+                c.getContractMonth() != null && !Candle.CONTRACT_MONTH_CONTINUOUS.equals(c.getContractMonth())
+                    ? c.getContractMonth() : ""));
 
         List<String> taggedMonths = byMonth.keySet().stream()
             .filter(k -> !k.isEmpty())

@@ -97,6 +97,7 @@ public class CandleBackfillController {
         return switch (job.state()) {
             case "RUNNING"  -> HttpStatus.ACCEPTED;
             case "DONE"     -> HttpStatus.OK;
+            case "PARTIAL"  -> HttpStatus.PARTIAL_CONTENT; // replace purged but refill fell short — re-run
             case "REJECTED" -> HttpStatus.BAD_REQUEST;
             case "DISABLED" -> HttpStatus.CONFLICT;
             default          -> HttpStatus.INTERNAL_SERVER_ERROR; // FAILED
@@ -116,6 +117,8 @@ public class CandleBackfillController {
         body.put("startedAt", job.startedAt());
         body.put("finishedAt", job.finishedAt());
         body.put("message", job.message());
+        body.put("continuous", job.continuous());
+        body.put("replace", job.replace());
         return body;
     }
 }

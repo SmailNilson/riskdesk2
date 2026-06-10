@@ -18,9 +18,24 @@ traded as front. Two new opt-in params on `POST /api/candles/backfill/{inst}/{tf
   (pure construction, never cached — CONTFUT is historical-only, no live/orders).
   Candles are tagged `contract_month = "CONT"` for provenance.
 - `replace=true` — purges the stored window (`CandleRepositoryPort.deleteRange`,
-  closed range, scoped to the pair) **before** refilling, so a polluted window is
-  re-sourced instead of being kept by the idempotent skip. Destructive: a failed
-  fetch after the purge leaves the window empty until a re-run succeeds.
+  closed range, scoped to the pair) so a polluted window is re-sourced instead of
+  being kept by the idempotent skip. The purge is **lazy** (fires on the first
+  fetched chunk), so a dead gateway / no-op provider can never empty a window it
+  cannot refill. If the refill dies mid-walk after the purge, the job ends
+  **`PARTIAL`** (HTTP 206) with an explicit re-run message — never a silent DONE.
+
+Hardening (adversarial review findings, same PR):
+- `"CONT"` rows are part of the **base layer** in `BacktestController.buildContinuousCandles`
+  (like legacy null-tag rows). Constant lives on `Candle.CONTRACT_MONTH_CONTINUOUS` —
+  do NOT sort/splice "CONT" as a month tag (it sorts after every "yyyyMM" and the
+  roll-date cut would drop the whole window).
+- Continuous windows must END ≥ `riskdesk.market-data.historical.continuous-min-age-days`
+  (default 7) in the past — CONT rows in the live window would be invisible to
+  active-month-filtered consumers (indicators, Mentor, scanners).
+- An in-flight job only coalesces an **identical** request (same window + flags);
+  a different one is REJECTED instead of silently swallowed.
+- Known residual risk: jobs live in memory — an app restart mid-replace loses the
+  `/status` evidence. Re-run the same command after a restart (idempotent).
 
 Typical use (re-source a window that was filled with back-month bars):
 `POST /api/candles/backfill/MNQ/1m?from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z&continuous=true&replace=true`

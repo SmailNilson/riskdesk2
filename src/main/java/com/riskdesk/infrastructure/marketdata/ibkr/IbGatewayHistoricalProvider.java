@@ -44,7 +44,7 @@ public class IbGatewayHistoricalProvider implements HistoricalDataProvider {
     /** Abort a contract/timeframe after this many consecutive timeouts. */
     private static final int MAX_CONSECUTIVE_TIMEOUTS = 3;
     /** contract_month tag for candles sourced from the continuous (CONTFUT) series. */
-    public static final String CONTINUOUS_MONTH_TAG = "CONT";
+    public static final String CONTINUOUS_MONTH_TAG = Candle.CONTRACT_MONTH_CONTINUOUS;
 
     private final IbGatewayNativeClient nativeClient;
     private final IbGatewayContractResolver contractResolver;

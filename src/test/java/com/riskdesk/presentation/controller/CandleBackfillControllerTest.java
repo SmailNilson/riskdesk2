@@ -100,6 +100,17 @@ class CandleBackfillControllerTest {
     }
 
     @Test
+    void backfill_mapsPartialTo206() {
+        when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(false), eq(false), eq(true)))
+            .thenReturn(job("PARTIAL"));
+
+        ResponseEntity<Map<String, Object>> resp =
+            controller.backfill("mnq", "1m", FROM.toString(), TO.toString(), false, false, true);
+
+        assertEquals(HttpStatus.PARTIAL_CONTENT, resp.getStatusCode());
+    }
+
+    @Test
     void backfill_passesContinuousAndReplaceThrough() {
         when(service.startBackfillRange(eq(Instrument.MNQ), eq("1m"), eq(FROM), eq(TO), eq(true), eq(true), eq(true)))
             .thenReturn(job("RUNNING"));
