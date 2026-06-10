@@ -1109,6 +1109,8 @@ public class OrderFlowOrchestrator {
                 if (d.bidWall() != null) {
                     payload.put("bidWall", Map.of("price", d.bidWall().price(), "size", d.bidWall().size()));
                 }
+                payload.put("bids", depthLadderPayload(d.bids()));
+                payload.put("asks", depthLadderPayload(d.asks()));
                 if (d.askWall() != null) {
                     payload.put("askWall", Map.of("price", d.askWall().price(), "size", d.askWall().size()));
                 }
@@ -1123,6 +1125,16 @@ public class OrderFlowOrchestrator {
                 // ignore — instrument may not have depth
             }
         }
+    }
+
+    /** Serializes a depth ladder to a list of {price, size, wall} maps for WS/REST payloads. */
+    private static List<Map<String, Object>> depthLadderPayload(List<com.riskdesk.domain.orderflow.model.DepthLevel> ladder) {
+        if (ladder == null || ladder.isEmpty()) return List.of();
+        List<Map<String, Object>> out = new ArrayList<>(ladder.size());
+        for (var level : ladder) {
+            out.add(Map.of("price", level.price(), "size", level.size(), "wall", level.wall()));
+        }
+        return out;
     }
 
     // -------------------------------------------------------------------------

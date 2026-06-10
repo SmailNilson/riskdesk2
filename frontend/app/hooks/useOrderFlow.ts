@@ -27,6 +27,12 @@ export interface OrderFlowMetrics {
   feedHealth?: string;
 }
 
+export interface BookLevel {
+  price: number;
+  size: number;
+  wall: boolean;
+}
+
 export interface DepthMetrics {
   instrument: string;
   totalBidSize: number;
@@ -35,6 +41,10 @@ export interface DepthMetrics {
   spread: number;
   bidWall?: { price: number; size: number };
   askWall?: { price: number; size: number };
+  // Full L2 ladders (up to 10 levels per side), best-first. Present since the
+  // real-order-book backend change; optional for older payloads.
+  bids?: BookLevel[];
+  asks?: BookLevel[];
   // ISO timestamp of the last real L2 update — drives the STALE badge.
   dataTimestamp?: string;
 }

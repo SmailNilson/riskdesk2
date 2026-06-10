@@ -3,6 +3,7 @@ package com.riskdesk.domain.orderflow.model;
 import com.riskdesk.domain.model.Instrument;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * Aggregated order book depth metrics computed on-demand from the MutableOrderBook.
@@ -22,5 +23,9 @@ public record DepthMetrics(
     WallInfo bidWall,
     /** Largest ask cluster above wall threshold, or null if none. */
     WallInfo askWall,
+    /** Full bid ladder, best-first (descending price). Up to 10 levels. */
+    List<DepthLevel> bids,
+    /** Full ask ladder, best-first (ascending price). Up to 10 levels. */
+    List<DepthLevel> asks,
     Instant timestamp
 ) {}
