@@ -221,6 +221,104 @@ class HistoricalDataServiceBackfillRangeTest {
     }
 
     @Test
+    void backfillRange_contractMonthRoutesToTheExplicitContractProvider() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        Candle c0 = candle("2026-03-01T00:00:00Z", "100");
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+        when(provider.fetchContractMonthHistoryRange(eq(Instrument.MNQ), eq("1m"), eq("202603"), eq(FROM), eq(TO), any()))
+            .thenAnswer(inv -> {
+                Consumer<List<Candle>> sink = inv.getArgument(5);
+                sink.accept(List.of(c0));
+                return 1;
+            });
+        when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.empty());
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+        when(candlePort.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, false, false, "202603");
+
+        assertEquals("DONE", job.state());
+        assertEquals(1, job.saved());
+        assertEquals("202603", job.contractMonth());
+        assertTrue(job.message().contains("contract 202603"), job.message());
+        // The explicit-contract path must NOT fall back to the front-month walk or the
+        // continuous series, and contractMonth alone must never purge stored data.
+        verify(provider, never()).fetchHistoryRange(any(), any(), any(), any(), any());
+        verify(provider, never()).fetchContinuousHistoryRange(any(), any(), any(), any(), any());
+        verify(candlePort, never()).deleteRange(any(), any(), any(), any());
+    }
+
+    @Test
+    void backfillRange_contractMonthTagsUntaggedRowsWithTheRequestedMonth() {
+        // The registry's CURRENT front month (202609) must never leak onto rows sourced from an
+        // explicit past contract — untagged bars take the requested month (202603).
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        Candle untagged = candle("2026-03-01T00:00:00Z", "100");
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+        when(provider.fetchContractMonthHistoryRange(eq(Instrument.MNQ), eq("1m"), eq("202603"), eq(FROM), eq(TO), any()))
+            .thenAnswer(inv -> {
+                Consumer<List<Candle>> sink = inv.getArgument(5);
+                sink.accept(List.of(untagged));
+                return 1;
+            });
+        when(registry.getContractMonth(Instrument.MNQ)).thenReturn(Optional.of("202609"));
+        when(candlePort.findCandlesBetween(eq(Instrument.MNQ), eq("1m"), any(), any())).thenReturn(List.of());
+        when(candlePort.saveAll(anyList())).thenAnswer(inv -> inv.getArgument(0));
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, false, false, "202603");
+
+        assertEquals("DONE", job.state());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Candle>> captor = ArgumentCaptor.forClass(List.class);
+        verify(candlePort).saveAll(captor.capture());
+        assertEquals("202603", captor.getValue().get(0).getContractMonth());
+    }
+
+    @Test
+    void backfillRange_contractMonthAndContinuous_isRejectedBeforeAnyWork() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, true, false, "202603");
+
+        assertEquals("REJECTED", job.state());
+        assertTrue(job.message().contains("mutually exclusive"), job.message());
+        verifyNoInteractions(candlePort);
+        verify(provider, never()).fetchContractMonthHistoryRange(any(), any(), any(), any(), any(), any());
+        verify(provider, never()).fetchContinuousHistoryRange(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void backfillRange_contractMonthWithBadFormat_isRejected() {
+        HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry registry = mock(ActiveContractRegistry.class);
+
+        when(provider.supports(Instrument.MNQ, "1m")).thenReturn(true);
+
+        HistoricalDataService service = newService(provider, candlePort, registry, true);
+        for (String bad : List.of("2026-03", "20263", "2026031", "MAR26")) {
+            BackfillJob job = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, false, false, false, bad);
+            assertEquals("REJECTED", job.state(), bad);
+            assertTrue(job.message().contains("YYYYMM"), job.message());
+        }
+        verifyNoInteractions(candlePort);
+        verify(provider, never()).fetchContractMonthHistoryRange(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void backfillRange_replacePurgesTheWindowBeforeRefilling() {
         HistoricalDataProvider provider = mock(HistoricalDataProvider.class);
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
@@ -345,6 +443,12 @@ class HistoricalDataServiceBackfillRangeTest {
         assertEquals("REJECTED", different.state());
         assertTrue(different.message().contains("already running"), different.message());
 
+        // A request differing ONLY by contractMonth is also a different request — the explicit
+        // contract re-source must not coalesce into the in-flight front-month walk.
+        BackfillJob differentMonth = service.startBackfillRange(Instrument.MNQ, "1m", FROM, TO, true, false, false, "202603");
+        assertEquals("REJECTED", differentMonth.state());
+        assertTrue(differentMonth.message().contains("already running"), differentMonth.message());
+
         release.countDown();
         // Drain: wait for the in-flight job to finish so the executor is idle for other tests.
         for (int i = 0; i < 100 && service.backfillStatus(Instrument.MNQ, "1m").map(BackfillJob::running).orElse(false); i++) {
@@ -370,6 +474,7 @@ class HistoricalDataServiceBackfillRangeTest {
         assertEquals("DONE", job.state());
         verify(candlePort, never()).deleteRange(any(), any(), any(), any());
         verify(provider, never()).fetchContinuousHistoryRange(any(), any(), any(), any(), any());
+        verify(provider, never()).fetchContractMonthHistoryRange(any(), any(), any(), any(), any(), any());
     }
 
     private static Candle candle(String ts, String price) {

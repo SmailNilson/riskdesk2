@@ -17,7 +17,7 @@ import java.util.Map;
  * (IBKR → PostgreSQL) so backtests have faithful 1m data over arbitrary windows.
  *
  * <pre>
- * POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true][&continuous=true][&replace=true]
+ * POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true][&continuous=true][&replace=true][&contractMonth=YYYYMM]
  * GET  /api/candles/backfill/{instrument}/{timeframe}/status
  * </pre>
  *
@@ -31,6 +31,12 @@ import java.util.Map;
  * current contract's front period. {@code replace=true} purges the stored window first so it is
  * re-sourced rather than gap-filled (destructive; the idempotent skip would otherwise keep the
  * old rows).</p>
+ *
+ * <p>{@code contractMonth=YYYYMM} pins the whole window to one explicit (possibly expired)
+ * contract — the operator names the contract that was front over {@code [from, to]} (e.g.
+ * {@code 202603} for an MNQ window inside that contract's front period) and rows are tagged with
+ * that real month. This is the proven fallback when the gateway build rejects CONTFUT contracts
+ * with IBKR error 200. Mutually exclusive with {@code continuous=true}.</p>
  */
 @RestController
 @RequestMapping("/api/candles/backfill")
@@ -51,7 +57,8 @@ public class CandleBackfillController {
             @RequestParam String to,
             @RequestParam(defaultValue = "true") boolean async,
             @RequestParam(defaultValue = "false") boolean continuous,
-            @RequestParam(defaultValue = "false") boolean replace) {
+            @RequestParam(defaultValue = "false") boolean replace,
+            @RequestParam(required = false) String contractMonth) {
 
         Instrument inst;
         try {
@@ -70,8 +77,9 @@ public class CandleBackfillController {
                 "error", "Invalid 'from'/'to'; use ISO-8601 (e.g. 2026-03-01T00:00:00Z) or epoch seconds."));
         }
 
+        String month = contractMonth != null && !contractMonth.isBlank() ? contractMonth.trim() : null;
         BackfillJob job = historicalDataService.startBackfillRange(inst, timeframe, fromTs, toTs, async,
-            continuous, replace);
+            continuous, replace, month);
         return ResponseEntity.status(statusFor(job)).body(toBody(job));
     }
 
@@ -119,6 +127,7 @@ public class CandleBackfillController {
         body.put("message", job.message());
         body.put("continuous", job.continuous());
         body.put("replace", job.replace());
+        body.put("contractMonth", job.contractMonth());
         return body;
     }
 }

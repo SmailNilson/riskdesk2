@@ -2,6 +2,39 @@
 
 Last updated: 2026-06-10
 
+## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
+
+The prod IB Gateway build rejects CONTFUT contracts with IBKR error 200 ("No security
+definition has been found"), so `continuous=true` is dead on that build. The proven
+alternative (validated 2026-06-10 via a one-shot prod script) is fetching an explicit,
+possibly-expired quarterly contract for its front period — e.g. MNQ `202603` for
+2026-01-01→2026-03-12, then MNQ `202606` for 2026-03-12→2026-04-10.
+
+New opt-in param on `POST /api/candles/backfill/{inst}/{tf}`:
+
+- `contractMonth=YYYYMM` — pins the whole `[from, to]` window to that single contract.
+  Threaded `CandleBackfillController` → `HistoricalDataService.startBackfillRange` →
+  new port default `HistoricalDataProvider.fetchContractMonthHistoryRange` (default 0),
+  implemented in `IbGatewayHistoricalProvider` via
+  `IbGatewayContractResolver.resolveExpiredMonth` (`includeExpired=true`, same
+  resolution the expired-contract walk uses) + the existing
+  `fetchRangeChunksFromContract` with the real month tag.
+- Rows are tagged with the **real** contract month (`yyyyMM`), so
+  `BacktestController.buildContinuousCandles` splices them at the correct roll date —
+  unlike `"CONT"` rows, which are base-layer. The service-side null-tag fallback also
+  uses the requested month, never the registry's current front month.
+- **Mutually exclusive with `continuous=true`** — both set is REJECTED (HTTP 400).
+  Format is validated (`\d{6}`); blank is normalized to absent. No recency guard
+  (unlike continuous): the tag is the real month, so live-window rows stay visible to
+  active-month consumers.
+- Follows PR #434's hardening: composes with `replace=true` (lazy purge, `PARTIAL`
+  state), and `contractMonth` is part of the strict-coalescing identity (an in-flight
+  job only coalesces an identical request, including the month) and of the
+  `BackfillJob` record + `/status` body.
+
+Typical use (re-source January from the contract that was front then):
+`POST /api/candles/backfill/MNQ/1m?from=2026-01-01T00:00:00Z&to=2026-03-12T00:00:00Z&contractMonth=202603&replace=true`
+
 ## Wall Tracker — traceability of large resting orders (UC-OF-012, 2026-06-10)
 
 User goal: trace the big walls seen in the DOM ("WALL" flag, >5× avg level size) —
