@@ -175,6 +175,37 @@ public class WtxStrategyController {
         return ResponseEntity.ok(toStateView(updated));
     }
 
+    @PutMapping("/state/{instrument}/{timeframe}/session-filter")
+    public ResponseEntity<Map<String, Object>> updateSessionFilter(
+            @PathVariable String instrument,
+            @PathVariable String timeframe,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (body == null || !body.containsKey("enabled")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Missing 'enabled' boolean field"));
+        }
+        // Same strict true/false parse as the swing-bias / telegram endpoints: a malformed value
+        // must 400, never silently disable the gate on a live panel.
+        Boolean enabled = parseStrictBoolean(body.get("enabled"));
+        if (enabled == null) {
+            return ResponseEntity.badRequest().body(Map.of("error",
+                    "'enabled' must be boolean (true/false), got: " + body.get("enabled")));
+        }
+        WtxStrategyState updated = wtxStrategyService.updateSessionFilter(instrument, timeframe, enabled);
+        return ResponseEntity.ok(toStateView(updated));
+    }
+
+    /** Strict boolean parse: Boolean or the exact strings "true"/"false" (case-insensitive); else null. */
+    private static Boolean parseStrictBoolean(Object raw) {
+        if (raw instanceof Boolean b) return b;
+        if (raw instanceof String s) {
+            String normalized = s.trim().toLowerCase();
+            if ("true".equals(normalized)) return Boolean.TRUE;
+            if ("false".equals(normalized)) return Boolean.FALSE;
+        }
+        return null;
+    }
+
     @PutMapping("/state/{instrument}/{timeframe}/telegram-notifications")
     public ResponseEntity<Map<String, Object>> updateTelegramNotifications(
             @PathVariable String instrument,

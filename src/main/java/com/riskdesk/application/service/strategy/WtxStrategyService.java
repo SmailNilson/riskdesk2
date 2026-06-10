@@ -663,6 +663,26 @@ public class WtxStrategyService {
     }
 
     /**
+     * Override the session entry filter for this (instrument, timeframe) panel. {@code true}/{@code false}
+     * forces the gate on/off regardless of the global config; a null arg clears the override (falls back
+     * to the global session filter). Only the on/off gate is per-panel — the blocked window itself stays
+     * the global one (currently 03:00-08:00 ET). Exits are never gated; entries only. Returns the runtime
+     * state so the panel refreshes.
+     */
+    public WtxStrategyState updateSessionFilter(String instrument, String timeframe, Boolean enabled) {
+        WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
+        // Preserve the period, SL and zone overrides — this endpoint only edits the session gate.
+        WtxParamOverride next = new WtxParamOverride(cur.n1(), cur.n2(), cur.signalPeriod(), cur.slAtrMult(),
+                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1(), enabled);
+        paramOverridePort.save(instrument, timeframe, next);
+        log.info("WTX [{} {}] session filter override -> {}", instrument, timeframe, enabled);
+        WtxStrategyState state = statePort.load(instrument, timeframe)
+                .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe, properties.getInitialEquity()));
+        publishState(state, effectiveConfig(instrument, timeframe));
+        return state;
+    }
+
+    /**
      * Apply a complete named override preset (e.g. {@link WtxParamOverride#TOP_TRAIN_Z35}) to this
      * (instrument, timeframe) panel in one atomic save — periods, SL multiple AND signal-zone
      * gating together. Applying {@link WtxParamOverride#NONE} clears every override (back to the

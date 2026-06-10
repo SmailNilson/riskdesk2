@@ -139,6 +139,32 @@ class WtxStrategyServicePresetTest {
     }
 
     @Test
+    void sessionToggle_persistsOnlyTheGate_andPreservesTheZoneOverride() {
+        // Global config WITH the 03:00-08:00 ET entry block (the prod shape).
+        WtxStrategyService svc = service(WtxConfig.defaults().withSessionFilter(true, 180, 480));
+        svc.applyPreset("MNQ", "10m-z35", WtxParamOverride.TOP_TRAIN_Z35); // preset = session OFF
+
+        // The button re-enables the gate on THIS panel without touching the rest of the preset.
+        svc.updateSessionFilter("MNQ", "10m-z35", true);
+
+        WtxParamOverride stored = overridePort.load("MNQ", "10m-z35");
+        assertEquals(Boolean.TRUE, stored.sessionFilterEnabled());
+        assertEquals(5, stored.n1());
+        assertEquals(0, BigDecimal.valueOf(35).compareTo(stored.nsc()));
+        assertEquals(Boolean.FALSE, stored.useCompra1());
+        WtxConfig eff = svc.effectiveConfig("MNQ", "10m-z35");
+        org.junit.jupiter.api.Assertions.assertTrue(eff.sessionFilterEnabled());
+        // The blocked window itself stays the global one — only the gate is per-panel.
+        assertEquals(180, eff.sessionBlockStartMinEt());
+        assertEquals(480, eff.sessionBlockEndMinEt());
+
+        // And the reverse: OFF on the legacy panel affects only that panel.
+        svc.updateSessionFilter("MNQ", "10m", false);
+        org.junit.jupiter.api.Assertions.assertFalse(svc.effectiveConfig("MNQ", "10m").sessionFilterEnabled());
+        org.junit.jupiter.api.Assertions.assertTrue(svc.effectiveConfig("MNQ", "10m-z35").sessionFilterEnabled());
+    }
+
+    @Test
     void applyingClearPreset_restoresGlobalConfig() {
         WtxStrategyService svc = service();
         svc.applyPreset("MNQ", "10m", WtxParamOverride.TOP_TRAIN_Z35);
