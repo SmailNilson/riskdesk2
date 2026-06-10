@@ -2,6 +2,44 @@
 
 Last updated: 2026-06-10
 
+## Candle backfill — continuous contract (CONTFUT) + replace mode (2026-06-10)
+
+The deep range backfill previously reconstructed past windows from the **current** front
+month first (expired contracts only gap-filled the holes). For windows that predate the
+current contract's front period (e.g. backfilling January when the front is M6), that
+yields thin back-month bars with futures-curve offset — not the prices that actually
+traded as front. Two new opt-in params on `POST /api/candles/backfill/{inst}/{tf}`:
+
+- `continuous=true` — sources the window from IBKR's continuous series (secType
+  `CONTFUT`): at every past date the bars come from the contract that was front-month
+  at that date (TradingView-style stitching, done by IBKR). New port method
+  `HistoricalDataProvider.fetchContinuousHistoryRange` (default 0), implemented in
+  `IbGatewayHistoricalProvider` via `IbGatewayContractResolver.continuousContract`
+  (pure construction, never cached — CONTFUT is historical-only, no live/orders).
+  Candles are tagged `contract_month = "CONT"` for provenance.
+- `replace=true` — purges the stored window (`CandleRepositoryPort.deleteRange`,
+  closed range, scoped to the pair) so a polluted window is re-sourced instead of
+  being kept by the idempotent skip. The purge is **lazy** (fires on the first
+  fetched chunk), so a dead gateway / no-op provider can never empty a window it
+  cannot refill. If the refill dies mid-walk after the purge, the job ends
+  **`PARTIAL`** (HTTP 206) with an explicit re-run message — never a silent DONE.
+
+Hardening (adversarial review findings, same PR):
+- `"CONT"` rows are part of the **base layer** in `BacktestController.buildContinuousCandles`
+  (like legacy null-tag rows). Constant lives on `Candle.CONTRACT_MONTH_CONTINUOUS` —
+  do NOT sort/splice "CONT" as a month tag (it sorts after every "yyyyMM" and the
+  roll-date cut would drop the whole window).
+- Continuous windows must END ≥ `riskdesk.market-data.historical.continuous-min-age-days`
+  (default 7) in the past — CONT rows in the live window would be invisible to
+  active-month-filtered consumers (indicators, Mentor, scanners).
+- An in-flight job only coalesces an **identical** request (same window + flags);
+  a different one is REJECTED instead of silently swallowed.
+- Known residual risk: jobs live in memory — an app restart mid-replace loses the
+  `/status` evidence. Re-run the same command after a restart (idempotent).
+
+Typical use (re-source a window that was filled with back-month bars):
+`POST /api/candles/backfill/MNQ/1m?from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z&continuous=true&replace=true`
+
 ## Tick chart — constant-tick-count bars (2026-06-10)
 
 New activity-normalized chart: one candle per N classified trades (MNQ 200, MCL 100;

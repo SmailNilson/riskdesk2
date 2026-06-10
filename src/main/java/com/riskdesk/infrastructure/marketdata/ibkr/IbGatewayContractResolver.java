@@ -330,6 +330,31 @@ public class IbGatewayContractResolver {
         };
     }
 
+    /**
+     * Builds the IBKR <em>continuous-futures</em> contract (secType {@code CONTFUT}) for an
+     * instrument. IBKR stitches the series itself: at every past date the bars come from the
+     * contract that was actually front-month at that date — the TradingView-style continuous
+     * series. Historical-data only: a CONTFUT contract cannot back live subscriptions or orders,
+     * so this is intentionally NOT cached in {@link #resolve}'s front-month cache.
+     */
+    public Optional<Contract> continuousContract(Instrument instrument) {
+        if (!instrument.isExchangeTradedFuture()) {
+            return Optional.empty();
+        }
+        Contract contract = switch (instrument) {
+            case MCL -> buildQuery("MCL", "NYMEX", "USD", null, "MCL");
+            case MGC -> buildQuery("MGC", "COMEX", "USD", null, "MGC");
+            case MNQ -> buildQuery("MNQ", "CME", "USD", null, "MNQ");
+            case E6  -> buildQuery("EUR", "CME", "USD", null, "6E");
+            default  -> null;
+        };
+        if (contract == null) {
+            return Optional.empty();
+        }
+        contract.secType(SecType.CONTFUT);
+        return Optional.of(contract);
+    }
+
     private Contract buildQuery(String symbol,
                                 String exchange,
                                 String currency,

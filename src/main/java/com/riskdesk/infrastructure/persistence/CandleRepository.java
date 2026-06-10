@@ -4,6 +4,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.infrastructure.persistence.entity.CandleEntity;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -40,4 +41,11 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     /** Fetches candles for a specific contract month, newest-first. */
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
             Instrument instrument, String timeframe, String contractMonth, Pageable pageable);
+
+    /** Bulk-deletes candles inside the closed range [from, to]; returns rows removed. */
+    @Modifying
+    @Query("DELETE FROM CandleEntity c WHERE c.instrument = :instrument AND c.timeframe = :timeframe"
+            + " AND c.timestamp >= :from AND c.timestamp <= :to")
+    int deleteRange(@Param("instrument") Instrument instrument, @Param("timeframe") String timeframe,
+                    @Param("from") Instant from, @Param("to") Instant to);
 }

@@ -17,13 +17,20 @@ import java.util.Map;
  * (IBKR → PostgreSQL) so backtests have faithful 1m data over arbitrary windows.
  *
  * <pre>
- * POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true]
+ * POST /api/candles/backfill/{instrument}/{timeframe}?from=ISO&to=ISO[&async=true][&continuous=true][&replace=true]
  * GET  /api/candles/backfill/{instrument}/{timeframe}/status
  * </pre>
  *
  * <p>The backfill is idempotent: timestamps already present in the window are skipped, so the
  * endpoint is safe to re-run (e.g. daily) to top up missing bars. Heavy windows run async by
  * default — poll {@code /status} for completion.</p>
+ *
+ * <p>{@code continuous=true} sources the window from IBKR's continuous-contract series (CONTFUT):
+ * at every past date the bars come from the contract that was actually front-month at that date,
+ * instead of projecting today's front month into the past — required for windows that predate the
+ * current contract's front period. {@code replace=true} purges the stored window first so it is
+ * re-sourced rather than gap-filled (destructive; the idempotent skip would otherwise keep the
+ * old rows).</p>
  */
 @RestController
 @RequestMapping("/api/candles/backfill")
@@ -42,7 +49,9 @@ public class CandleBackfillController {
             @PathVariable String timeframe,
             @RequestParam String from,
             @RequestParam String to,
-            @RequestParam(defaultValue = "true") boolean async) {
+            @RequestParam(defaultValue = "true") boolean async,
+            @RequestParam(defaultValue = "false") boolean continuous,
+            @RequestParam(defaultValue = "false") boolean replace) {
 
         Instrument inst;
         try {
@@ -61,7 +70,8 @@ public class CandleBackfillController {
                 "error", "Invalid 'from'/'to'; use ISO-8601 (e.g. 2026-03-01T00:00:00Z) or epoch seconds."));
         }
 
-        BackfillJob job = historicalDataService.startBackfillRange(inst, timeframe, fromTs, toTs, async);
+        BackfillJob job = historicalDataService.startBackfillRange(inst, timeframe, fromTs, toTs, async,
+            continuous, replace);
         return ResponseEntity.status(statusFor(job)).body(toBody(job));
     }
 
@@ -87,6 +97,7 @@ public class CandleBackfillController {
         return switch (job.state()) {
             case "RUNNING"  -> HttpStatus.ACCEPTED;
             case "DONE"     -> HttpStatus.OK;
+            case "PARTIAL"  -> HttpStatus.PARTIAL_CONTENT; // replace purged but refill fell short — re-run
             case "REJECTED" -> HttpStatus.BAD_REQUEST;
             case "DISABLED" -> HttpStatus.CONFLICT;
             default          -> HttpStatus.INTERNAL_SERVER_ERROR; // FAILED
@@ -106,6 +117,8 @@ public class CandleBackfillController {
         body.put("startedAt", job.startedAt());
         body.put("finishedAt", job.finishedAt());
         body.put("message", job.message());
+        body.put("continuous", job.continuous());
+        body.put("replace", job.replace());
         return body;
     }
 }

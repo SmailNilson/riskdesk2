@@ -32,6 +32,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -92,6 +94,15 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.backfill-range-max-days:200}")
     private int backfillRangeMaxDays;
 
+    /**
+     * Continuous (CONTFUT) backfills must END at least this many days in the past. Re-sourcing the
+     * live window as CONT-tagged rows would make those bars invisible to every consumer that
+     * filters by the active contract month (indicators, Mentor, scanners) — continuous data is for
+     * historical windows only.
+     */
+    @Value("${riskdesk.market-data.historical.continuous-min-age-days:7}")
+    private int continuousMinAgeDays;
+
     /** Set to true once real candles have been successfully loaded (quick startup). */
     private final AtomicBoolean realDataLoaded = new AtomicBoolean(false);
     private final Map<RefreshKey, Long> mentorRefreshTimestamps = new ConcurrentHashMap<>();
@@ -111,7 +122,15 @@ public class HistoricalDataService implements ApplicationRunner {
     /** Immutable snapshot of a range-backfill job, exposed to the admin REST endpoint. */
     public record BackfillJob(Instrument instrument, String timeframe, String state,
                               Instant from, Instant to, int fetched, int existing, int saved,
-                              long startedAt, Long finishedAt, String message) {
+                              long startedAt, Long finishedAt, String message,
+                              boolean continuous, boolean replace) {
+        /** Legacy shape (no source/purge flags) — keeps pre-continuous call sites compiling. */
+        public BackfillJob(Instrument instrument, String timeframe, String state,
+                           Instant from, Instant to, int fetched, int existing, int saved,
+                           long startedAt, Long finishedAt, String message) {
+            this(instrument, timeframe, state, from, to, fetched, existing, saved,
+                startedAt, finishedAt, message, false, false);
+        }
         public boolean running() { return "RUNNING".equals(state); }
     }
 
@@ -231,39 +250,74 @@ public class HistoricalDataService implements ApplicationRunner {
      */
     public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
                                           Instant from, Instant to, boolean async) {
+        return startBackfillRange(instrument, timeframe, from, to, async, false, false);
+    }
+
+    /**
+     * Range backfill with source/purge control.
+     *
+     * @param continuous when {@code true}, fetches the window from the provider's continuous
+     *                   (CONTFUT) series — at every past date the bars come from the contract that
+     *                   was front-month at that date — instead of the front-month + expired-contract
+     *                   walk. Use for windows that predate the current contract's front period.
+     * @param replace    when {@code true}, re-sources the window instead of gap-filling it (the
+     *                   idempotent skip would otherwise keep the old rows). The purge of stored
+     *                   candles in {@code [from, to]} is LAZY — it fires only once the first
+     *                   fetched chunk arrives, so a dead gateway or a no-op provider can never
+     *                   empty a window it cannot refill. Still destructive: a fetch that dies
+     *                   mid-walk leaves the purged window partially refilled (job state
+     *                   {@code PARTIAL}) until a re-run completes it.
+     */
+    public BackfillJob startBackfillRange(Instrument instrument, String timeframe,
+                                          Instant from, Instant to, boolean async,
+                                          boolean continuous, boolean replace) {
         long now = System.currentTimeMillis();
         if (!enabled) {
             return new BackfillJob(instrument, timeframe, "DISABLED", from, to, 0, 0, 0, now, now,
                 "Historical data fetch is disabled (riskdesk.market-data.historical.enabled=false).");
         }
 
-        String rejection = validateBackfillRange(instrument, timeframe, from, to);
+        String rejection = validateBackfillRange(instrument, timeframe, from, to, continuous);
         if (rejection != null) {
-            return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now, rejection);
+            return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now,
+                rejection, continuous, replace);
         }
 
         RefreshKey key = new RefreshKey(instrument, timeframe);
         BackfillJob existingJob = backfillJobs.get(key);
         if (existingJob != null && existingJob.running()) {
-            return existingJob; // coalesce — a job for this pair is already in flight
+            boolean identicalRequest = existingJob.from().equals(from) && existingJob.to().equals(to)
+                && existingJob.continuous() == continuous && existingJob.replace() == replace;
+            if (identicalRequest) {
+                return existingJob; // coalesce — the same request is already in flight
+            }
+            // A DIFFERENT request must never be silently swallowed by the in-flight job: the
+            // caller would believe their continuous/replace re-source was accepted when it wasn't.
+            return new BackfillJob(instrument, timeframe, "REJECTED", from, to, 0, 0, 0, now, now,
+                String.format("A backfill for %s %s is already running ([%s .. %s], continuous=%s, replace=%s); "
+                        + "retry after it completes.",
+                    instrument, timeframe, existingJob.from(), existingJob.to(),
+                    existingJob.continuous(), existingJob.replace()),
+                continuous, replace);
         }
 
         BackfillJob started = new BackfillJob(instrument, timeframe, "RUNNING", from, to,
-            0, 0, 0, now, null, "Backfill started.");
+            0, 0, 0, now, null, "Backfill started.", continuous, replace);
         backfillJobs.put(key, started);
 
         if (async) {
             CompletableFuture
-                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now), backfillExecutor)
+                .runAsync(() -> runBackfillRange(instrument, timeframe, from, to, now, continuous, replace), backfillExecutor)
                 .exceptionally(ex -> {
                     backfillJobs.put(key, new BackfillJob(instrument, timeframe, "FAILED", from, to,
-                        0, 0, 0, now, System.currentTimeMillis(), "Backfill failed: " + ex.getMessage()));
+                        0, 0, 0, now, System.currentTimeMillis(), "Backfill failed: " + ex.getMessage(),
+                        continuous, replace));
                     log.error("HistoricalDataService [range-backfill]: {} {} async failed", instrument, timeframe, ex);
                     return null;
                 });
             return started;
         }
-        return runBackfillRange(instrument, timeframe, from, to, now);
+        return runBackfillRange(instrument, timeframe, from, to, now, continuous, replace);
     }
 
     /** Returns the last known backfill job for a pair, if any. */
@@ -271,7 +325,8 @@ public class HistoricalDataService implements ApplicationRunner {
         return Optional.ofNullable(backfillJobs.get(new RefreshKey(instrument, timeframe)));
     }
 
-    private String validateBackfillRange(Instrument instrument, String timeframe, Instant from, Instant to) {
+    private String validateBackfillRange(Instrument instrument, String timeframe, Instant from, Instant to,
+                                         boolean continuous) {
         if (!instrument.isExchangeTradedFuture()) {
             return "Instrument " + instrument + " is not an exchange-traded future.";
         }
@@ -289,34 +344,94 @@ public class HistoricalDataService implements ApplicationRunner {
             return String.format("Requested window of %d days exceeds the maximum of %d days "
                 + "(riskdesk.market-data.historical.backfill-range-max-days).", days, backfillRangeMaxDays);
         }
+        if (continuous && to.isAfter(Instant.now().minus(Duration.ofDays(continuousMinAgeDays)))) {
+            return String.format("Continuous (CONTFUT) backfill is limited to historical windows: 'to' must be "
+                + "at least %d days in the past (riskdesk.market-data.historical.continuous-min-age-days). "
+                + "CONT-tagged rows inside the live front-month window would be invisible to "
+                + "active-contract-month consumers (indicators, Mentor, scanners).", continuousMinAgeDays);
+        }
         return null;
     }
 
+    /**
+     * PARTIAL-coverage tolerance for replace mode: the refill's earliest bar may legitimately sit
+     * a weekend + holiday after the window's lower bound (CME never closes longer), but a bigger
+     * shortfall means the fetch walk died before reaching {@code from}.
+     */
+    private static final Duration REPLACE_COVERAGE_TOLERANCE = Duration.ofDays(3);
+
     private BackfillJob runBackfillRange(Instrument instrument, String timeframe,
-                                         Instant from, Instant to, long startedAt) {
+                                         Instant from, Instant to, long startedAt,
+                                         boolean continuous, boolean replace) {
         RefreshKey key = new RefreshKey(instrument, timeframe);
         AtomicInteger fetched  = new AtomicInteger(0);
         AtomicInteger existing = new AtomicInteger(0);
         AtomicInteger saved    = new AtomicInteger(0);
+        // -1 = purge not executed. The purge is LAZY — it fires only when the first non-empty
+        // chunk arrives, so a dead gateway or a no-op provider can never empty a window it
+        // cannot refill (the fetch layer returns 0 instead of throwing on unavailability).
+        AtomicInteger purged = new AtomicInteger(-1);
+        AtomicReference<Instant> minSeen = new AtomicReference<>();
         try {
             // Stream the window chunk-by-chunk straight into PostgreSQL. Heap stays bounded to a
             // single chunk (~one IBKR request) rather than holding the whole [from,to] window — a
             // deep 1m window spans months (~10^5 candles) and must never be buffered in memory.
-            historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, chunk ->
-                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved));
+            Consumer<List<Candle>> sink = chunk -> {
+                if (chunk == null || chunk.isEmpty()) return;
+                if (replace && purged.get() < 0) {
+                    int n = candlePort.deleteRange(instrument, timeframe, from, to);
+                    purged.set(n);
+                    log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — replace mode, {} stored candles purged on first fetched chunk.",
+                        instrument, timeframe, from, to, n);
+                }
+                for (Candle c : chunk) {
+                    Instant ts = c.getTimestamp();
+                    minSeen.updateAndGet(cur -> cur == null || ts.isBefore(cur) ? ts : cur);
+                }
+                persistBackfillChunk(instrument, timeframe, chunk, fetched, existing, saved);
+            };
+            if (continuous) {
+                historicalProvider.fetchContinuousHistoryRange(instrument, timeframe, from, to, sink);
+            } else {
+                historicalProvider.fetchHistoryRange(instrument, timeframe, from, to, sink);
+            }
 
-            BackfillJob done = new BackfillJob(instrument, timeframe, "DONE", from, to,
+            int purgedCount = Math.max(0, purged.get());
+            // PARTIAL: the whole window was purged but the refill never reached its lower bound —
+            // the operator must re-run, and the state must say so instead of reporting success.
+            boolean partial = replace && purgedCount > 0
+                && (minSeen.get() == null || minSeen.get().isAfter(from.plus(REPLACE_COVERAGE_TOLERANCE)));
+            String state = partial ? "PARTIAL" : "DONE";
+
+            StringBuilder msg = new StringBuilder(String.format("Backfill %s%s: %d fetched, %d already present, %d new saved%s.",
+                partial ? "PARTIAL" : "complete",
+                continuous ? " (continuous)" : "",
                 fetched.get(), existing.get(), saved.get(),
-                startedAt, System.currentTimeMillis(),
-                String.format("Backfill complete: %d fetched, %d already present, %d new saved.",
-                    fetched.get(), existing.get(), saved.get()));
+                replace ? ", " + purgedCount + " purged (replace)" : ""));
+            if (replace && purged.get() < 0) {
+                msg.append(" Purge skipped — provider returned no data, stored window left untouched.");
+            }
+            if (partial) {
+                msg.append(String.format(" Earliest refilled bar is %s but the purged window starts %s — re-run to fill the gap.",
+                    minSeen.get(), from));
+            }
+
+            BackfillJob done = new BackfillJob(instrument, timeframe, state, from, to,
+                fetched.get(), existing.get(), saved.get(),
+                startedAt, System.currentTimeMillis(), msg.toString(), continuous, replace);
             backfillJobs.put(key, done);
-            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} fetched, {} already present, {} new saved (streamed).",
-                instrument, timeframe, from, to, fetched.get(), existing.get(), saved.get());
+            log.info("HistoricalDataService [range-backfill]: {} {} [{} .. {}] — {} — {} fetched, {} already present, {} new saved (streamed{}).",
+                instrument, timeframe, from, to, state, fetched.get(), existing.get(), saved.get(),
+                continuous ? ", continuous" : "");
             return done;
         } catch (Exception e) {
+            String failMsg = "Backfill failed: " + e.getMessage()
+                + (purged.get() > 0
+                    ? String.format(" (replace purge of %d rows already committed — re-run after fixing the cause)", purged.get())
+                    : "");
             BackfillJob failed = new BackfillJob(instrument, timeframe, "FAILED", from, to,
-                0, 0, 0, startedAt, System.currentTimeMillis(), "Backfill failed: " + e.getMessage());
+                fetched.get(), existing.get(), saved.get(), startedAt, System.currentTimeMillis(),
+                failMsg, continuous, replace);
             backfillJobs.put(key, failed);
             log.error("HistoricalDataService [range-backfill]: {} {} failed", instrument, timeframe, e);
             return failed;

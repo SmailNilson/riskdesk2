@@ -5,10 +5,18 @@ import java.time.Instant;
 
 public class Candle {
 
+    /**
+     * {@link #contractMonth} value for candles sourced from the continuous (CONTFUT) series:
+     * at their date these bars WERE the front-month contract, but the stitched feed does not say
+     * which month. Consumers must treat them like legacy untagged rows (base layer), never as a
+     * contract to splice or filter by.
+     */
+    public static final String CONTRACT_MONTH_CONTINUOUS = "CONT";
+
     private Long id;
     private Instrument instrument;
     private String timeframe; // "1m", "5m", "10m", "1h", "4h", "1d"
-    private String contractMonth; // "YYYYMM" e.g. "202606" — nullable for legacy rows
+    private String contractMonth; // "YYYYMM" e.g. "202606" — nullable for legacy rows, "CONT" for continuous
     private Instant timestamp;
     private BigDecimal open;
     private BigDecimal high;

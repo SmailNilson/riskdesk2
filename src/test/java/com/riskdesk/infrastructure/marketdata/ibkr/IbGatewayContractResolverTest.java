@@ -206,4 +206,34 @@ class IbGatewayContractResolverTest {
         // Cache hit ⇒ no IBKR call at all.
         verify(nativeClient, never()).requestContractDetails(any());
     }
+
+    /**
+     * The continuous contract is a pure construction (CONTFUT, no expiry): it must require no
+     * IBKR round-trip and must not touch the front-month cache — CONTFUT is historical-only and
+     * could otherwise leak into live resolution.
+     */
+    @Test
+    void continuousContract_buildsContfut_withoutTouchingIbkrOrCache() {
+        Optional<Contract> mnq = resolver.continuousContract(Instrument.MNQ);
+
+        assertThat(mnq).isPresent();
+        assertThat(mnq.get().secType()).isEqualTo(com.ib.client.Types.SecType.CONTFUT);
+        assertThat(mnq.get().symbol()).isEqualTo("MNQ");
+        assertThat(mnq.get().exchange()).isEqualTo("CME");
+        assertThat(mnq.get().tradingClass()).isEqualTo("MNQ");
+        assertThat(mnq.get().lastTradeDateOrContractMonth()).isNullOrEmpty();
+
+        // E6 keeps its IBKR symbol mapping (EUR / trading class 6E).
+        Optional<Contract> e6 = resolver.continuousContract(Instrument.E6);
+        assertThat(e6).isPresent();
+        assertThat(e6.get().symbol()).isEqualTo("EUR");
+        assertThat(e6.get().tradingClass()).isEqualTo("6E");
+
+        verify(nativeClient, never()).requestContractDetails(any());
+    }
+
+    @Test
+    void continuousContract_isEmptyForNonFutures() {
+        assertThat(resolver.continuousContract(Instrument.DXY)).isEmpty();
+    }
 }

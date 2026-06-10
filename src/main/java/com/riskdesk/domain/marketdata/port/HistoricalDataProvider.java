@@ -64,4 +64,23 @@ public interface HistoricalDataProvider {
         }
         return all.size();
     }
+
+    /**
+     * Streaming range fetch on the provider's <em>continuous</em> contract series instead of the
+     * current front-month + expired-contract walk. The continuous series returns, at every past
+     * date, the contract that was actually front at that date (TradingView-style stitching), so a
+     * deep window is never reconstructed from today's front month projected into the past — that
+     * projection yields thin back-month bars with curve offset for dates where the contract was
+     * not yet front.
+     *
+     * <p>Same streaming/idempotence contract as
+     * {@link #fetchHistoryRange(Instrument, String, Instant, Instant, Consumer)}. Continuous data
+     * is historical-only; it cannot back live subscriptions or orders.</p>
+     *
+     * @return total number of candles handed to the sink; 0 when unsupported
+     */
+    default int fetchContinuousHistoryRange(Instrument instrument, String timeframe, Instant from, Instant to,
+                                            Consumer<List<Candle>> chunkSink) {
+        return 0;
+    }
 }
