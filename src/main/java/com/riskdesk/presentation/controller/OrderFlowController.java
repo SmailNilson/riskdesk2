@@ -172,7 +172,7 @@ public class OrderFlowController {
         }
         try {
             Instrument inst = Instrument.valueOf(instrument.toUpperCase());
-            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 500));
+            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 3000));
             return ResponseEntity.ok(bars);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));

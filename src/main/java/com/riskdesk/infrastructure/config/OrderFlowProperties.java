@@ -440,8 +440,12 @@ public class OrderFlowProperties {
             "MNQ", 200,
             "MCL", 100
         ));
-        /** Completed bars kept per instrument (ring buffer). */
-        private int maxBars = 300;
+        /**
+         * Completed bars kept per instrument (ring buffer). Sized so client-side
+         * re-aggregation into larger bars (1000/2000 ticks) still has ~300 merged
+         * bars of history (~140 bytes/bar → <1 MB for two instruments).
+         */
+        private int maxBars = 3000;
 
         public int getDefaultTicksPerBar() { return defaultTicksPerBar; }
         public void setDefaultTicksPerBar(int v) { this.defaultTicksPerBar = v; }
