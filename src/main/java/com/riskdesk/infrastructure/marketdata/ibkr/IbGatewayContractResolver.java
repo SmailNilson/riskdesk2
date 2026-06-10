@@ -23,9 +23,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public class IbGatewayContractResolver {
 
     private static final Logger log = LoggerFactory.getLogger(IbGatewayContractResolver.class);
+
+    /** Minimum delay between two re-resolution attempts of a provisional (conId=0) contract. */
+    private static final long PROVISIONAL_RETRY_INTERVAL_MS = 60_000;
+
     private final IbGatewayNativeClient nativeClient;
     private final ActiveContractRegistry registry;
     private final Map<Instrument, IbGatewayResolvedContract> cache = new ConcurrentHashMap<>();
+    private final Map<Instrument, Long> provisionalRetryAt = new ConcurrentHashMap<>();
 
     public IbGatewayContractResolver(IbGatewayNativeClient nativeClient, ActiveContractRegistry registry) {
         this.nativeClient = nativeClient;
@@ -38,6 +43,13 @@ public class IbGatewayContractResolver {
         }
         IbGatewayResolvedContract cached = cache.get(instrument);
         if (cached != null) {
+            // A provisional contract (conId=0, synthetic fallback from refreshToMonth) was cached
+            // because IBKR was unreachable at resolution time. IBKR rejects subscriptions on it
+            // ("No security definition", code 200), so retry the real resolution periodically
+            // instead of serving the poison forever.
+            if (isProvisional(cached)) {
+                return Optional.of(retryProvisional(instrument, cached));
+            }
             return Optional.of(cached);
         }
         // Prefer the registry's month — the registry is the Single Source of Truth.
@@ -119,15 +131,75 @@ public class IbGatewayContractResolver {
             }
         }
         // IBKR didn't return the target month — build a synthetic contract from the query
-        // so the cache is seeded and resolve() doesn't fall back to front-month
+        // so the cache is seeded and resolve() doesn't fall back to front-month.
+        // The synthetic has conId=0 and is therefore PROVISIONAL: resolve() keeps retrying
+        // the real resolution (see retryProvisional) until IBKR confirms the contract.
         List<Contract> queries = buildQueries(instrument);
         if (!queries.isEmpty()) {
             Contract synthetic = queries.get(0);
             synthetic.lastTradeDateOrContractMonth(targetMonth);
             cache.put(instrument, new IbGatewayResolvedContract(instrument, synthetic, null));
-            log.warn("refreshToMonth: {} → {} (synthetic fallback — IBKR did not return this month)",
-                instrument, targetMonth);
+            log.warn("refreshToMonth: {} → {} (synthetic fallback — IBKR did not return this month; "
+                + "will re-resolve every {}s until confirmed)",
+                instrument, targetMonth, PROVISIONAL_RETRY_INTERVAL_MS / 1000);
         }
+    }
+
+    /**
+     * True when the cached contract is the synthetic fallback seeded by
+     * {@link #refreshToMonth} while IBKR was unreachable (no conId). IBKR rejects all
+     * subscriptions on such a contract with error code 200 ("No security definition").
+     */
+    private static boolean isProvisional(IbGatewayResolvedContract resolved) {
+        return resolved.contract().conid() == 0;
+    }
+
+    /**
+     * Attempts to replace a provisional (conId=0) cached contract with the real IBKR
+     * contract for the same target month. Rate-limited to one attempt per
+     * {@link #PROVISIONAL_RETRY_INTERVAL_MS}. On success the cache is updated and live
+     * IBKR streams (price/quote/depth) are switched to the real contract; tick-by-tick
+     * re-subscription follows on the orchestrator's next ensure/watchdog cycle.
+     *
+     * <p>This self-heals the startup race where contract resolution runs before the
+     * IB Gateway connection is up: without it, the poisoned synthetic contract was
+     * served from the cache forever and every subscription died with error code 200.</p>
+     */
+    private IbGatewayResolvedContract retryProvisional(Instrument instrument, IbGatewayResolvedContract provisional) {
+        long now = System.currentTimeMillis();
+        Long lastAttempt = provisionalRetryAt.get(instrument);
+        if (lastAttempt != null && now - lastAttempt < PROVISIONAL_RETRY_INTERVAL_MS) {
+            return provisional;
+        }
+        provisionalRetryAt.put(instrument, now);
+
+        String targetMonth = normalizeMonth(provisional.contract().lastTradeDateOrContractMonth());
+        if (targetMonth == null) {
+            return provisional;
+        }
+
+        for (Contract query : buildQueries(instrument)) {
+            try {
+                List<ContractDetails> details = nativeClient.requestContractDetails(query);
+                if (details.isEmpty()) continue;
+                Optional<ContractDetails> match = details.stream()
+                    .filter(d -> targetMonth.equals(normalizeMonth(d.contract().lastTradeDateOrContractMonth())))
+                    .findFirst();
+                if (match.isPresent()) {
+                    ContractDetails d = match.get();
+                    IbGatewayResolvedContract real = new IbGatewayResolvedContract(instrument, d.contract(), d);
+                    cache.put(instrument, real);
+                    provisionalRetryAt.remove(instrument);
+                    log.info("ContractResolver: {} provisional month {} re-resolved to real conId={} — switching IBKR streams",
+                        instrument, targetMonth, d.contract().conid());
+                    nativeClient.cancelAndResubscribe(provisional.contract(), d.contract(), instrument);
+                    return real;
+                }
+            } catch (Exception e) {
+                log.debug("retryProvisional: {} {} query failed — {}", instrument, targetMonth, e.getMessage());
+            }
+        }
+        return provisional;
     }
 
     /**
