@@ -143,14 +143,16 @@ class OrderFlowHistoryServiceTest {
     // ─── Bug 2: Cycle confidence threshold ────────────────────────────────
 
     @Test
-    void recentCycles_appliesDefault70Threshold() {
+    void recentCycles_appliesDefault55Threshold() {
+        // Default recalibrated 70 -> 55 (2026-06-10): prod confidences cluster at 51-53,
+        // so a 70 floor left the Smart Money Cycle panel empty.
         when(cycleRepo.findByInstrumentAndConfidenceGreaterThanEqualOrderByTimestampDesc(
                 any(), any(Integer.class), any())).thenReturn(List.of());
 
         service.recentCycles(Instrument.MNQ, 20);
 
         verify(cycleRepo).findByInstrumentAndConfidenceGreaterThanEqualOrderByTimestampDesc(
-                eq(Instrument.MNQ), eq(70), any(Pageable.class));
+                eq(Instrument.MNQ), eq(55), any(Pageable.class));
     }
 
     @Test

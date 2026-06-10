@@ -4,9 +4,9 @@ import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
 import com.riskdesk.domain.orderflow.event.IcebergDetected;
 import com.riskdesk.domain.orderflow.event.SpoofingDetected;
-import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
 import com.riskdesk.domain.orderflow.model.IcebergSignal;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
+import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
@@ -26,29 +26,27 @@ public class OrderFlowCorrelationService {
     private static final Logger log = LoggerFactory.getLogger(OrderFlowCorrelationService.class);
 
     private final SimpMessagingTemplate messagingTemplate;
+    private final OrderFlowProperties properties;
 
-    public OrderFlowCorrelationService(SimpMessagingTemplate messagingTemplate) {
+    public OrderFlowCorrelationService(SimpMessagingTemplate messagingTemplate,
+                                       OrderFlowProperties properties) {
         this.messagingTemplate = messagingTemplate;
+        this.properties = properties;
     }
 
+    /**
+     * Log-only: the WebSocket payload for /topic/absorption is published by
+     * OrderFlowOrchestrator (whose key names match the frontend AbsorptionEvent type).
+     * This listener used to publish a SECOND payload with mismatched keys
+     * (absorptionScore/aggressiveDelta vs score/delta), producing duplicate blank
+     * rows in the UI list.
+     */
     @EventListener
     public void onAbsorptionDetected(AbsorptionDetected event) {
         log.info("Absorption detected: {} {} score={} delta={} at {}",
                 event.instrument(), event.signal().side(),
                 event.signal().absorptionScore(), event.signal().aggressiveDelta(),
                 event.timestamp());
-
-        AbsorptionSignal signal = event.signal();
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("instrument", event.instrument().name());
-        payload.put("side", signal.side().name());
-        payload.put("absorptionScore", signal.absorptionScore());
-        payload.put("aggressiveDelta", signal.aggressiveDelta());
-        payload.put("priceMoveTicks", signal.priceMoveTicks());
-        payload.put("totalVolume", signal.totalVolume());
-        payload.put("timestamp", event.timestamp().toString());
-
-        messagingTemplate.convertAndSend("/topic/absorption", payload);
     }
 
     @EventListener
@@ -59,6 +57,11 @@ public class OrderFlowCorrelationService {
                 event.signal().priceCrossed(), event.timestamp());
 
         SpoofingSignal signal = event.signal();
+        // Display calibration: only push spoofing events above the per-instrument
+        // display score to the UI; detection and persistence are unfiltered.
+        if (signal.spoofScore() < properties.getSpoofing().minDisplayScoreFor(event.instrument().name())) {
+            return;
+        }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instrument", event.instrument().name());
         payload.put("side", signal.side().name());

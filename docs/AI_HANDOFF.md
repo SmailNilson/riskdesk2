@@ -41,6 +41,27 @@ Reworked (user-validated spec: **10m bars, 5.00pt MNQ / 0.05 MCL price buckets**
   (via `OrderFlowHistoryService.recentFootprintBars`, profile JSON round-trip).
 - Frontend `FootprintChart.tsx`: shows bar open time, and a "CLOSED BARS" strip
   (time / delta / POC / volumes) refreshed when the live bar rolls.
+## Order-flow detector recalibration — data-driven (2026-06-10)
+
+Calibrated from 14 days of prod score percentiles (queried live from `order_flow_*_events`).
+Problem was inverted tuning: absorption ~1100 events/day on MNQ (spam) while momentum fired
+0-2/day (median emitted score 0.59 vs threshold 0.55 → dense just under the cutoff) and the
+Smart Money Cycle panel was EMPTY (confidences cluster 51-53, display floor was 70).
+
+- **Display-only filters** (new): `riskdesk.order-flow.{absorption,spoofing}.min-display-score.<INSTRUMENT>`
+  applied at the UI boundary (WS topics + REST history via new score-filtered repository
+  queries). Detection, persistence, the distribution chain and quant gates are NOT filtered —
+  internal consumers still see every event. Defaults: absorption MNQ 80 (≈P99 → ~11/day),
+  MCL/MGC/E6 30; spoofing MNQ 35, others 20.
+- **Momentum**: score-threshold 0.55 → 0.50, min-price-move 0.3 → 0.2 ATR (~3-10/day target).
+- **Cycle**: min-confidence 70 → 55 (panel shows the genuine >P90 tail instead of nothing).
+- **Iceberg**: score is degenerate in prod (every event = exactly 100) so min-score cannot
+  discriminate; dedup-seconds 60 → 300 is the effective rate control. Score formula rework
+  is a known follow-up.
+- **Bug fixed**: `/topic/absorption` was published TWICE per event — by the orchestrator
+  (correct keys `score`/`delta`) and by `OrderFlowCorrelationService` (mismatched keys
+  `absorptionScore`/`aggressiveDelta` → blank duplicate rows in the UI). The correlation
+  listener is now log-only.
 
 ## Named WTX override preset `top-train-Z35` + zone-entry overrides (2026-06-10)
 

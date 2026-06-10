@@ -190,6 +190,29 @@ public class OrderFlowProperties {
         public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
         public long getDeltaThreshold() { return deltaThreshold; }
         public void setDeltaThreshold(long v) { this.deltaThreshold = v; }
+
+        /**
+         * Per-instrument minimum score for an absorption event to be DISPLAYED
+         * (WebSocket /topic/absorption + REST history). Internal consumers
+         * (distribution chaining, quant gates, persistence) are NOT filtered.
+         * Calibrated 2026-06-10 from 14 days of prod score percentiles, targeting
+         * ~5-15 displayed events/day per instrument (raw emission was ~1100/day on MNQ).
+         */
+        private Map<String, Double> minDisplayScore = new HashMap<>(Map.of(
+            "MNQ", 80.0,  // ≈ P99 → ~11/day
+            "MCL", 30.0,  // ~7/day
+            "MGC", 30.0,  // ~3/day
+            "E6", 30.0    // ~7/day
+        ));
+
+        public Map<String, Double> getMinDisplayScore() { return minDisplayScore; }
+        public void setMinDisplayScore(Map<String, Double> v) { this.minDisplayScore = v; }
+
+        /** Display threshold for an instrument; 0 (no filter) when not configured. */
+        public double minDisplayScoreFor(String instrument) {
+            Double v = minDisplayScore.get(instrument);
+            return v != null ? v : 0.0;
+        }
     }
 
     /** Institutional distribution / accumulation detector. MNQ-tuned defaults. */
@@ -219,10 +242,18 @@ public class OrderFlowProperties {
     /** Aggressive momentum burst detector (inverse of absorption). MNQ-tuned defaults. */
     public static class Momentum {
         private boolean enabled = true;
-        /** Sigmoid-scale threshold: score ∈ [0,1]. 0.55 ≈ "two factors above baseline". */
-        private double scoreThreshold = 0.55;
-        /** MNQ: 40% ATR minimum filters 1-2 tick noise on a 15-25 pt ATR. */
-        private double minPriceMoveFractionOfAtr = 0.4;
+        /**
+         * Sigmoid-scale threshold: score ∈ [0,1]. Recalibrated 2026-06-10: at 0.55 MNQ
+         * fired 0-2/day (median emitted score 0.59 → half of all fires sat in
+         * [0.55, 0.59], i.e. high density just under the cutoff). 0.50 targets ~3-10/day.
+         */
+        private double scoreThreshold = 0.50;
+        /**
+         * Minimum |price move| as a fraction of ATR before scoring. Lowered 0.3 → 0.2
+         * (2026-06-10): on a 5-10s window, 30% of a 15-25pt MNQ ATR rejected nearly
+         * every burst candidate before scoring even ran.
+         */
+        private double minPriceMoveFractionOfAtr = 0.2;
         /** Minimum ATR-distance from last same-direction fire before re-firing. */
         private double atrDistanceThreshold = 0.5;
         /** Safety rate cap: max fires per rolling 60-second window (both sides combined). */
@@ -250,8 +281,13 @@ public class OrderFlowProperties {
         private int momentumWindowMinutes = 10;
         private int mirrorWindowMinutes = 20;
         private int cooldownMinutes = 5;
-        /** Minimum confidence (0-100) for a cycle signal to be exposed (REST history + WebSocket). State machine is unaffected. */
-        private int minConfidence = 70;
+        /**
+         * Minimum confidence (0-100) for a cycle signal to be exposed (REST history +
+         * WebSocket). State machine is unaffected. Recalibrated 2026-06-10: prod
+         * confidences cluster at 51-53 (P90 = 53) with rare spikes >90 — at 70 the
+         * panel was empty (~1 event/14 days); 55 surfaces the genuine tail.
+         */
+        private int minConfidence = 55;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -352,6 +388,27 @@ public class OrderFlowProperties {
         public void setDedupSeconds(int v) { this.dedupSeconds = v; }
         public double getMinScore() { return minScore; }
         public void setMinScore(double v) { this.minScore = v; }
+
+        /**
+         * Per-instrument minimum score for a spoofing event to be DISPLAYED
+         * (WebSocket /topic/spoofing + REST history). Detection/persistence unfiltered.
+         * Calibrated 2026-06-10 from prod percentiles (MNQ raw ≈ 200/day → ~18/day at 35).
+         */
+        private Map<String, Double> minDisplayScore = new HashMap<>(Map.of(
+            "MNQ", 35.0,
+            "MCL", 20.0,
+            "MGC", 20.0,
+            "E6", 20.0
+        ));
+
+        public Map<String, Double> getMinDisplayScore() { return minDisplayScore; }
+        public void setMinDisplayScore(Map<String, Double> v) { this.minDisplayScore = v; }
+
+        /** Display threshold for an instrument; 0 (no filter) when not configured. */
+        public double minDisplayScoreFor(String instrument) {
+            Double v = minDisplayScore.get(instrument);
+            return v != null ? v : 0.0;
+        }
     }
 
     /**

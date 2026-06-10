@@ -91,16 +91,22 @@ public class OrderFlowHistoryService {
     @Transactional(readOnly = true)
     public List<AbsorptionEventView> recentAbsorptions(Instrument instrument, int limit) {
         int capped = clampLimit(limit);
+        // Display calibration: history mirrors the WS filter — only events above the
+        // per-instrument display score (raw emission is ~1100/day on MNQ).
+        double minScore = properties.getAbsorption().minDisplayScoreFor(instrument.name());
         List<AbsorptionEventEntity> rows =
-            absorptionRepository.findByInstrumentOrderByTimestampDesc(instrument, PageRequest.of(0, capped));
+            absorptionRepository.findByInstrumentAndAbsorptionScoreGreaterThanEqualOrderByTimestampDesc(
+                instrument, minScore, PageRequest.of(0, capped));
         return rows.stream().map(OrderFlowHistoryService::toView).toList();
     }
 
     @Transactional(readOnly = true)
     public List<SpoofingEventView> recentSpoofings(Instrument instrument, int limit) {
         int capped = clampLimit(limit);
+        double minScore = properties.getSpoofing().minDisplayScoreFor(instrument.name());
         List<SpoofingEventEntity> rows =
-            spoofingRepository.findByInstrumentOrderByTimestampDesc(instrument, PageRequest.of(0, capped));
+            spoofingRepository.findByInstrumentAndSpoofScoreGreaterThanEqualOrderByTimestampDesc(
+                instrument, minScore, PageRequest.of(0, capped));
         return rows.stream().map(OrderFlowHistoryService::toView).toList();
     }
 
