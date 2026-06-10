@@ -25,4 +25,7 @@ public interface JpaSpoofingEventRepository extends JpaRepository<SpoofingEventE
      * Use {@link Pageable} to cap the result count (e.g. {@code PageRequest.of(0, 20)}).
      */
     List<SpoofingEventEntity> findByInstrumentOrderByTimestampDesc(Instrument instrument, Pageable pageable);
+
+    List<SpoofingEventEntity> findByInstrumentAndSpoofScoreGreaterThanEqualOrderByTimestampDesc(
+            Instrument instrument, double minScore, Pageable pageable);
 }

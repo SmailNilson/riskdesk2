@@ -25,4 +25,7 @@ public interface JpaAbsorptionEventRepository extends JpaRepository<AbsorptionEv
      * Use {@link Pageable} to cap the result count (e.g. {@code PageRequest.of(0, 20)}).
      */
     List<AbsorptionEventEntity> findByInstrumentOrderByTimestampDesc(Instrument instrument, Pageable pageable);
+
+    List<AbsorptionEventEntity> findByInstrumentAndAbsorptionScoreGreaterThanEqualOrderByTimestampDesc(
+            Instrument instrument, double minScore, Pageable pageable);
 }

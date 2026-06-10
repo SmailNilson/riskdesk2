@@ -939,18 +939,23 @@ public class OrderFlowOrchestrator {
                 AbsorptionSignal s = signal.get();
                 eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, now));
 
-                Map<String, Object> eventPayload = new LinkedHashMap<>();
-                eventPayload.put("instrument", instrument.name());
-                eventPayload.put("side", s.side().name());
-                eventPayload.put("absorptionType", s.absorptionType() != null ? s.absorptionType().name() : null);
-                eventPayload.put("explanation", s.explanation());
-                eventPayload.put("score", s.absorptionScore());
-                eventPayload.put("delta", s.aggressiveDelta());
-                eventPayload.put("priceMove", priceMovePoints);
-                eventPayload.put("signedPriceMove", signedPriceMovePoints);
-                eventPayload.put("atr", atr);
-                eventPayload.put("timestamp", now.toString());
-                messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
+                // Display calibration: only events above the per-instrument display score
+                // reach the UI topic. Internal consumers (distribution chaining, quant
+                // gates, persistence) keep seeing every AbsorptionDetected event.
+                if (s.absorptionScore() >= properties.getAbsorption().minDisplayScoreFor(instrument.name())) {
+                    Map<String, Object> eventPayload = new LinkedHashMap<>();
+                    eventPayload.put("instrument", instrument.name());
+                    eventPayload.put("side", s.side().name());
+                    eventPayload.put("absorptionType", s.absorptionType() != null ? s.absorptionType().name() : null);
+                    eventPayload.put("explanation", s.explanation());
+                    eventPayload.put("score", s.absorptionScore());
+                    eventPayload.put("delta", s.aggressiveDelta());
+                    eventPayload.put("priceMove", priceMovePoints);
+                    eventPayload.put("signedPriceMove", signedPriceMovePoints);
+                    eventPayload.put("atr", atr);
+                    eventPayload.put("timestamp", now.toString());
+                    messagingTemplate.convertAndSend("/topic/absorption", eventPayload);
+                }
 
                 // Feed the distribution detector (Detector 1)
                 if (properties.getDistribution().isEnabled()) {
