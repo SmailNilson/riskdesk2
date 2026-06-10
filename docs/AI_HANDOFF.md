@@ -14,9 +14,12 @@ traded as front. Two new opt-in params on `POST /api/candles/backfill/{inst}/{tf
   `CONTFUT`): at every past date the bars come from the contract that was front-month
   at that date (TradingView-style stitching, done by IBKR). New port method
   `HistoricalDataProvider.fetchContinuousHistoryRange` (default 0), implemented in
-  `IbGatewayHistoricalProvider` via `IbGatewayContractResolver.continuousContract`
-  (pure construction, never cached — CONTFUT is historical-only, no live/orders).
-  Candles are tagged `contract_month = "CONT"` for provenance.
+  `IbGatewayHistoricalProvider` via `IbGatewayContractResolver.resolveContinuous`:
+  the CONTFUT spec is probed variant-by-variant (with/without tradingClass ×
+  includeExpired) against `reqContractDetails` — gateway builds differ in what they
+  acknowledge, and a blind spec surfaces as silent empty historical responses. The
+  first acknowledged contract is cached (own cache — CONTFUT is historical-only,
+  never used for live/orders). Candles are tagged `contract_month = "CONT"`.
 - `replace=true` — purges the stored window (`CandleRepositoryPort.deleteRange`,
   closed range, scoped to the pair) so a polluted window is re-sourced instead of
   being kept by the idempotent skip. The purge is **lazy** (fires on the first

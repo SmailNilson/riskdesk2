@@ -330,29 +330,70 @@ public class IbGatewayContractResolver {
         };
     }
 
+    private final Map<Instrument, Contract> continuousCache = new ConcurrentHashMap<>();
+
     /**
-     * Builds the IBKR <em>continuous-futures</em> contract (secType {@code CONTFUT}) for an
+     * Resolves the IBKR <em>continuous-futures</em> contract (secType {@code CONTFUT}) for an
      * instrument. IBKR stitches the series itself: at every past date the bars come from the
      * contract that was actually front-month at that date — the TradingView-style continuous
      * series. Historical-data only: a CONTFUT contract cannot back live subscriptions or orders,
-     * so this is intentionally NOT cached in {@link #resolve}'s front-month cache.
+     * so it lives in its own cache, never in {@link #resolve}'s front-month cache.
+     *
+     * <p>Gateway builds differ in which CONTFUT spec they acknowledge (with/without tradingClass,
+     * with/without includeExpired), so the spec is probed against {@code reqContractDetails}
+     * variant-by-variant and the first acknowledged contract wins — a blind spec would instead
+     * surface as silent empty historical responses.</p>
      */
-    public Optional<Contract> continuousContract(Instrument instrument) {
+    public Optional<Contract> resolveContinuous(Instrument instrument) {
         if (!instrument.isExchangeTradedFuture()) {
             return Optional.empty();
         }
-        Contract contract = switch (instrument) {
-            case MCL -> buildQuery("MCL", "NYMEX", "USD", null, "MCL");
-            case MGC -> buildQuery("MGC", "COMEX", "USD", null, "MGC");
-            case MNQ -> buildQuery("MNQ", "CME", "USD", null, "MNQ");
-            case E6  -> buildQuery("EUR", "CME", "USD", null, "6E");
-            default  -> null;
-        };
-        if (contract == null) {
-            return Optional.empty();
+        Contract cached = continuousCache.get(instrument);
+        if (cached != null) {
+            return Optional.of(cached);
         }
-        contract.secType(SecType.CONTFUT);
-        return Optional.of(contract);
+        List<Contract> candidates = continuousQueries(instrument);
+        for (Contract candidate : candidates) {
+            List<ContractDetails> details = nativeClient.requestContractDetails(candidate);
+            if (details.isEmpty()) {
+                continue;
+            }
+            Contract resolved = details.get(0).contract();
+            if (resolved.exchange() == null || resolved.exchange().isBlank()) {
+                resolved.exchange(candidate.exchange()); // historical requests need a routing exchange
+            }
+            log.info("CONTFUT resolved for {}: conid={}, exchange={}, tradingClass={}, includeExpired={}",
+                instrument, resolved.conid(), resolved.exchange(), resolved.tradingClass(), candidate.includeExpired());
+            continuousCache.put(instrument, resolved);
+            return Optional.of(resolved);
+        }
+        log.warn("No CONTFUT contract resolved for {} — the gateway rejected all {} spec variants",
+            instrument, candidates.size());
+        return Optional.empty();
+    }
+
+    /** CONTFUT spec variants, most → least specific. */
+    private List<Contract> continuousQueries(Instrument instrument) {
+        return switch (instrument) {
+            case MCL -> contfutVariants("MCL", "NYMEX", "MCL");
+            case MGC -> contfutVariants("MGC", "COMEX", "MGC");
+            case MNQ -> contfutVariants("MNQ", "CME", "MNQ");
+            case E6  -> contfutVariants("EUR", "CME", "6E");
+            default  -> List.of();
+        };
+    }
+
+    private List<Contract> contfutVariants(String symbol, String exchange, String tradingClass) {
+        List<Contract> variants = new java.util.ArrayList<>();
+        for (String tc : new String[]{tradingClass, null}) {
+            for (boolean includeExpired : new boolean[]{true, false}) {
+                Contract c = buildQuery(symbol, exchange, "USD", null, tc);
+                c.secType(SecType.CONTFUT);
+                c.includeExpired(includeExpired);
+                variants.add(c);
+            }
+        }
+        return variants;
     }
 
     private Contract buildQuery(String symbol,

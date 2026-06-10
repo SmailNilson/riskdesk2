@@ -48,7 +48,7 @@ class IbGatewayHistoricalProviderContinuousTest {
         contfut.secType(SecType.CONTFUT);
         contfut.symbol("MNQ");
         contfut.exchange("CME");
-        when(contractResolver.continuousContract(Instrument.MNQ)).thenReturn(Optional.of(contfut));
+        when(contractResolver.resolveContinuous(Instrument.MNQ)).thenReturn(Optional.of(contfut));
 
         // One bar at the window's lower bound — the backward walk stops after the first chunk.
         Bar bar = new Bar(FROM.getEpochSecond(), 101.0, 99.0, 100.0, 100.5,
@@ -70,7 +70,7 @@ class IbGatewayHistoricalProviderContinuousTest {
     @Test
     void continuousRange_isZeroWhenNoContfutContract() {
         IbGatewayHistoricalProvider provider = new IbGatewayHistoricalProvider(nativeClient, contractResolver);
-        when(contractResolver.continuousContract(Instrument.MNQ)).thenReturn(Optional.empty());
+        when(contractResolver.resolveContinuous(Instrument.MNQ)).thenReturn(Optional.empty());
 
         int total = provider.fetchContinuousHistoryRange(Instrument.MNQ, "1m", FROM, TO, c -> { });
 
