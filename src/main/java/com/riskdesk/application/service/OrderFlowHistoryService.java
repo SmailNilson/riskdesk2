@@ -9,6 +9,7 @@ import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaWallEpisodeRepository;
 import com.riskdesk.infrastructure.persistence.entity.AbsorptionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
@@ -16,6 +17,7 @@ import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.IcebergEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.SpoofingEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.WallEpisodeEntity;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
@@ -26,6 +28,7 @@ import com.riskdesk.application.dto.DistributionEventView;
 import com.riskdesk.application.dto.IcebergEventView;
 import com.riskdesk.application.dto.MomentumEventView;
 import com.riskdesk.application.dto.SpoofingEventView;
+import com.riskdesk.application.dto.WallEpisodeView;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -57,6 +60,7 @@ public class OrderFlowHistoryService {
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
     private final JpaFootprintBarRepository footprintBarRepository;
+    private final JpaWallEpisodeRepository wallEpisodeRepository;
     private final OrderFlowProperties properties;
     private final ObjectMapper objectMapper;
 
@@ -67,6 +71,7 @@ public class OrderFlowHistoryService {
                                    JpaMomentumEventRepository momentumRepository,
                                    JpaCycleEventRepository cycleRepository,
                                    JpaFootprintBarRepository footprintBarRepository,
+                                   JpaWallEpisodeRepository wallEpisodeRepository,
                                    OrderFlowProperties properties,
                                    ObjectMapper objectMapper) {
         this.icebergRepository = icebergRepository;
@@ -76,8 +81,18 @@ public class OrderFlowHistoryService {
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
         this.footprintBarRepository = footprintBarRepository;
+        this.wallEpisodeRepository = wallEpisodeRepository;
         this.properties = properties;
         this.objectMapper = objectMapper;
+    }
+
+    /** Most recent closed wall episodes (UC-OF-012) for an instrument, newest first. */
+    @Transactional(readOnly = true)
+    public List<WallEpisodeView> recentWallEpisodes(Instrument instrument, int limit) {
+        int capped = clampLimit(limit);
+        List<WallEpisodeEntity> rows =
+            wallEpisodeRepository.findByInstrumentOrderByTimestampDesc(instrument, PageRequest.of(0, capped));
+        return rows.stream().map(OrderFlowHistoryService::toView).toList();
     }
 
     @Transactional(readOnly = true)
@@ -182,6 +197,22 @@ public class OrderFlowHistoryService {
     }
 
     // -- Mapping helpers (entity -> presentation DTO) ---------------------------
+
+    private static WallEpisodeView toView(WallEpisodeEntity e) {
+        return new WallEpisodeView(
+            e.getInstrument().name(),
+            e.getTimestamp(),
+            e.getSide(),
+            e.getPrice(),
+            e.getInitialSize(),
+            e.getMaxSize(),
+            e.getLastSize(),
+            e.getFirstSeenAt(),
+            e.getDurationSeconds(),
+            e.getOutcome(),
+            e.getEndDistanceTicks()
+        );
+    }
 
     private static IcebergEventView toView(IcebergEventEntity e) {
         return new IcebergEventView(

@@ -859,6 +859,39 @@ export interface CycleEventHistory {
   completedAt: string | null;
 }
 
+// ── Wall Tracker (GET /api/order-flow/walls/{instrument}) — UC-OF-012 ─────────
+/** A wall currently flagged in the book (live episode, no outcome yet). */
+export interface ActiveWall {
+  side: 'BID' | 'ASK';
+  price: number;
+  size: number;
+  maxSize: number;
+  firstSeenAt: string;
+  ageSeconds: number;
+  distanceTicks: number | null;
+}
+
+/** A closed wall episode: full lifecycle with outcome. */
+export interface WallEpisodeHistory {
+  instrument: string;
+  timestamp: string; // when the episode was finalized
+  side: 'BID' | 'ASK';
+  price: number;
+  initialSize: number;
+  maxSize: number;
+  lastSize: number;
+  firstSeenAt: string;
+  durationSeconds: number;
+  outcome: 'CONSUMED' | 'PULLED' | 'FADED' | 'OUT_OF_RANGE';
+  endDistanceTicks: number;
+}
+
+export interface WallTrackerSnapshot {
+  instrument: string;
+  active: ActiveWall[];
+  recent: WallEpisodeHistory[];
+}
+
 // ── Order Flow Depth (GET /api/order-flow/depth/{instrument}) ──────────────────
 export interface TickBarDto {
   instrument: string;
@@ -1057,6 +1090,9 @@ export const api = {
   // Tick chart bars (oldest first; last element may be the in-progress bar).
   getTickBars: (instrument: string, limit = 200) =>
     get<TickBarDto[]>(`/api/order-flow/tick-bars/${instrument}?limit=${limit}`),
+  // Wall traceability: live walls + recent closed episodes with outcome.
+  getWallTracker: (instrument: string, limit = 30) =>
+    get<WallTrackerSnapshot>(`/api/order-flow/walls/${instrument}?limit=${limit}`),
   // ── Order Flow history (last N persisted events, newest first) ──────────
   getIcebergEvents: (instrument: string, limit = 20) =>
     get<IcebergEventHistory[]>(`/api/order-flow/iceberg/${instrument}?limit=${limit}`),

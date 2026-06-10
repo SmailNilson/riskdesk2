@@ -14,6 +14,7 @@ import {
 } from '@/app/hooks/useOrderFlow';
 import { useQuantStream } from '@/app/hooks/useQuantStream';
 import DepthBookWidget from './DepthBookWidget';
+import WallTrackerPanel from './WallTrackerPanel';
 import { api } from '@/app/lib/api';
 import QuantTelemetryDashboard, { INSTRUMENT_THRESHOLDS } from './quant/QuantTelemetryDashboard';
 import { QUANT_INSTRUMENTS, type QuantInstrument } from './quant/types';
@@ -671,6 +672,17 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
             instrument={selectedInstrument}
             depthData={depthData.get(selectedInstrument)}
           />
+        </div>
+      )}
+
+      {/* Section 2a-bis: Wall Tracker — traceability of large resting orders */}
+      {selectedInstrument && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+            Wall Tracker — {selectedInstrument}
+            <span className="text-zinc-600 normal-case tracking-normal"> (≥5× avg level)</span>
+          </h4>
+          <WallTrackerPanel instrument={selectedInstrument} />
         </div>
       )}
 

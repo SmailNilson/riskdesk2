@@ -2,6 +2,36 @@
 
 Last updated: 2026-06-10
 
+## Wall Tracker — traceability of large resting orders (UC-OF-012, 2026-06-10)
+
+User goal: trace the big walls seen in the DOM ("WALL" flag, >5× avg level size) —
+where they appear, how big they grow, and how they end. New components:
+
+- **Domain** `WallTracker` (pure, per-instrument) consumes `DepthMetrics` ladder
+  snapshots — NOT the raw `WallEvent` stream, whose per-index flagging flickers on
+  book shifts. Episodes are keyed by tick-rounded price with a 5s grace window
+  (re-flag within grace = same episode) and a 3s minimum lifetime (drops flicker).
+- **Outcomes** on close: `CONSUMED` (same-side best ended ≤1 tick from the level or
+  through it — price reached the wall), `PULLED` (remnant ≤25% of max size while
+  price still away → spoof suspect), `FADED` (size still resting, just below the
+  relative threshold), `OUT_OF_RANGE` (scrolled beyond the visible 10 levels).
+- **Application** `WallTrackingService` polls 1s (`riskdesk.order-flow.wall-tracker.*`),
+  publishes `WallEpisodeClosed` → persisted in `order_flow_wall_episodes` (90d purge,
+  same retention job). REST: `GET /api/order-flow/walls/{instrument}` → `{active, recent}`.
+- **Frontend** `WallTrackerPanel` (Order Flow panel, under the Order Book): live walls
+  + history with outcome badges; REST poll 5s, no new WS topic.
+
+## Tick chart — selectable 1000/2000-tick bars + SMC overlay (2026-06-10)
+
+- Bar-size selector on `TickChart` (base 200 MNQ / 100 MCL, plus 1k/2k): larger sizes
+  are merged client-side from base bars grouped on absolute `seq` — identical
+  boundaries to a native N-tick aggregator, no WS change. Backend ring buffer and
+  REST clamp raised 300/500 → 3000 (`riskdesk.order-flow.tick-chart.max-bars`).
+- SMC overlay (default on, `SMC` toggle): price lines for the 3 nearest active order
+  blocks + Strong H/L + Premium/EQ/Discount, sourced from the Dashboard's
+  `IndicatorSnapshot` prop (selected timeframe, 30s poll) — guarded against
+  instrument-switch lag via `snapshot.instrument`.
+
 ## Candle backfill — continuous contract (CONTFUT) + replace mode (2026-06-10)
 
 The deep range backfill previously reconstructed past windows from the **current** front
