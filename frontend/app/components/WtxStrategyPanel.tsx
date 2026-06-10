@@ -8,6 +8,7 @@ import {
   updateWtxAutoExecution,
   updateWtxSwingBiasFilter,
   updateWtxOrderQty,
+  updateWtxSessionFilter,
   updateWtxTelegramNotifications,
   updateWtxIndicatorParams,
   updateWtxSl,
@@ -403,6 +404,7 @@ export default function WtxStrategyPanel({ instrument, timeframe, displayName, l
   const [profileBusy, setProfileBusy] = useState(false);
   const [autoExecBusy, setAutoExecBusy] = useState(false);
   const [swingBiasBusy, setSwingBiasBusy] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(false);
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [qtyBusy, setQtyBusy] = useState(false);
   const [qtyDraft, setQtyDraft] = useState<string>('');
@@ -454,6 +456,17 @@ export default function WtxStrategyPanel({ instrument, timeframe, displayName, l
       if (updated) setState(updated);
     } finally {
       setSwingBiasBusy(false);
+    }
+  }, [instrument, timeframe, state]);
+
+  const onToggleSession = useCallback(async () => {
+    if (!state) return;
+    setSessionBusy(true);
+    try {
+      const updated = await updateWtxSessionFilter(instrument, timeframe, !state.sessionFilterEnabled);
+      if (updated) setState(updated);
+    } finally {
+      setSessionBusy(false);
     }
   }, [instrument, timeframe, state]);
 
@@ -779,6 +792,24 @@ export default function WtxStrategyPanel({ instrument, timeframe, displayName, l
                 busy={swingBiasBusy}
                 onToggle={onToggleSwingBias}
               />
+              <button
+                type="button"
+                onClick={onToggleSession}
+                disabled={sessionBusy}
+                aria-pressed={state.sessionFilterEnabled}
+                title={
+                  state.sessionFilterEnabled
+                    ? 'Filtre session actif — les nouvelles entrées sont bloquées de 03:00 à 08:00 ET (les sorties restent gérées). Cliquer pour trader 24h/24 sur ce panneau.'
+                    : 'Filtre session inactif — ce panneau trade 24h/24. Cliquer pour bloquer les entrées de 03:00 à 08:00 ET.'
+                }
+                className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                  state.sessionFilterEnabled
+                    ? 'border-violet-600/70 bg-violet-950/40 text-violet-300 hover:bg-violet-950/60'
+                    : 'border-zinc-700 text-zinc-400 hover:border-violet-700 hover:text-violet-300'
+                }`}
+              >
+                Session : {state.sessionFilterEnabled ? 'ON' : 'OFF'}
+              </button>
             </div>
           )}
 

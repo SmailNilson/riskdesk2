@@ -1855,6 +1855,12 @@ export interface WtxStrategyStateView {
   signalPeriod: number;
   /** Effective initial-stop ATR multiple (slAtrMult). */
   slAtrMult: number;
+  /**
+   * Effective session entry filter for this panel (global gate + per-panel override). When true,
+   * NEW entries are blocked inside the configured weak-session window (03:00-08:00 ET); exits
+   * always run. Toggled at runtime via the Session button on the panel.
+   */
+  sessionFilterEnabled: boolean;
   /** Entry price of the open position; null when FLAT. */
   entryPrice: number | null;
   /** Contracts held on the open position; 0 when FLAT. */
@@ -1971,6 +1977,17 @@ export async function updateWtxOrderQty(instrument: string, timeframe: string, q
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ qty }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Per-panel session entry filter override: true/false forces the gate on/off (window stays global). */
+export async function updateWtxSessionFilter(instrument: string, timeframe: string, enabled: boolean): Promise<WtxStrategyStateView | null> {
+  const res = await fetch(`${BASE}/api/wtx/state/${instrument}/${timeframe}/session-filter`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
   });
   if (!res.ok) return null;
   return res.json();
