@@ -275,6 +275,24 @@ public class WtxStrategyController {
                         "known", List.of("top-train-z35", "clear"))));
     }
 
+    /**
+     * Configured variant panels (parallel named signals, e.g. {@code top-train-Z35} on MNQ 10m
+     * under panel key {@code 10m-z35}). The frontend renders one panel per variant below the
+     * legacy WTX panel; every per-panel endpoint above accepts the {@code panelKey} as its
+     * {@code timeframe} path variable.
+     */
+    @GetMapping("/variants")
+    public ResponseEntity<List<Map<String, Object>>> getVariants() {
+        return ResponseEntity.ok(wtxStrategyService.getVariants().stream()
+                .map(v -> Map.<String, Object>of(
+                        "name", v.name(),
+                        "instrument", v.instrument(),
+                        "baseTimeframe", v.baseTimeframe(),
+                        "preset", v.preset(),
+                        "panelKey", v.panelKey()))
+                .toList());
+    }
+
     /** Parse an optional whole-number field; null/absent → null (clear override). Throws on malformed/out-of-range. */
     private static Integer optInt(Map<String, Object> body, String key, int min, int max) {
         Object raw = body.get(key);

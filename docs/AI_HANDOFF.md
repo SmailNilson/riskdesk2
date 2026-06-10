@@ -22,8 +22,26 @@ To make it activatable per panel without touching the global config:
 - `wtx_param_overrides` gains nullable columns (`nsc`, `nsv`, `use_compra1`, `use_venta1`) —
   Hibernate ddl-auto extends the table in place.
 
+**Variant panels — the `top-train-Z35` SIGNAL runs in PARALLEL with the legacy panel.** The
+preset is not just an override you can apply to the legacy panel: `riskdesk.wtx.variants[...]`
+declares parallel named signals. Each variant rides the SAME closed candles as its base timeframe
+but keeps its own state / signal history / overrides under a short **panel key** (`10m-z35`,
+≤10 chars — the override table's timeframe column length). Wiring:
+- `WtxStrategyService.onCandleClosed` → `processPanel(event, panelKey)` runs once for the legacy
+  panel (key == timeframe, bit-for-bit legacy behaviour) then once per matching variant. Candle
+  data / enrichment always read the BASE timeframe; identity (state, signals, WS topics,
+  overrides) uses the panel key. A variant's base config = global + its named preset; stored
+  per-panel overrides still apply on top (the panel stays tunable from the UI).
+- `forceCloseAll`, `WtxDailyResetScheduler` and `WtxDefaultProfileBootstrap` (BASELINE→HTF) all
+  cover variant panels. Auto-execution defaults OFF like any fresh panel → paper by default.
+- `GET /api/wtx/variants` lists configured variants (served as `WtxVariantView` — presentation
+  must not touch the infrastructure config type, ArchUnit enforces it). Every per-panel endpoint
+  accepts the panel key as its `{timeframe}` path variable.
+- Frontend: `Dashboard.tsx` renders a `WtxStrategyPanel` with `displayName="top-train-Z35"` and
+  `timeframe="10m-z35"` just below the legacy WTX panels for MNQ (amber header = variant).
+
 **Caveats**: the preset is in-sample-selected (mars-avril) with one OOS window (mai-juin, bullish);
-the study assumed no slippage and qty=1. Intended path: apply on a paper MNQ 10m panel
+the study assumed no slippage and qty=1. Intended path: let the variant panel run on paper
 (auto-execution OFF) and compare against the deployed config on forward data before any live use.
 
 ## Deep 1m range backfill + cursor-paginated range read (2026-06-09)

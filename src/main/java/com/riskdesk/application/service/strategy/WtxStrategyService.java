@@ -106,9 +106,58 @@ public class WtxStrategyService {
         return eff;
     }
 
-    /** Global config with this panel's frontend overrides applied (n1/n2/signalPeriod/slAtrMult/zone). */
+    /**
+     * Base config for a panel BEFORE its stored per-panel override: the global config for a
+     * legacy panel, or global + the variant's named preset for a variant panel (e.g.
+     * {@code top-train-Z35} on panel key {@code 10m-z35}). Stored overrides still apply on top,
+     * so the operator can tweak a variant panel from the UI like any other.
+     */
+    private WtxConfig baseConfigFor(String instrument, String panelKey) {
+        WtxConfig base = properties.toConfig();
+        return variantFor(instrument, panelKey)
+                .flatMap(v -> WtxParamOverride.preset(v.getPreset()))
+                .map(preset -> applyOverrides(base, preset))
+                .orElse(base);
+    }
+
+    /** The configured variant behind this panel key, if any. */
+    private Optional<WtxStrategyProperties.Variant> variantFor(String instrument, String panelKey) {
+        return variants().stream()
+                .filter(v -> v.getInstrument().equals(instrument) && v.getPanelKey().equals(panelKey))
+                .findFirst();
+    }
+
+    /** Timeframe whose CANDLES feed this panel — the base timeframe for a variant, else the key itself. */
+    private String dataTimeframe(String instrument, String panelKey) {
+        return variantFor(instrument, panelKey)
+                .map(WtxStrategyProperties.Variant::getBaseTimeframe)
+                .orElse(panelKey);
+    }
+
+    /** Configured variant panels — internal, null-safe view of the properties list. */
+    private List<WtxStrategyProperties.Variant> variants() {
+        List<WtxStrategyProperties.Variant> variants = properties.getVariants();
+        return variants == null ? List.of() : variants;
+    }
+
+    /**
+     * Transport-friendly view of a configured variant panel — keeps the presentation layer off
+     * the infrastructure config type (hexagonal rule: presentation ↛ infrastructure).
+     */
+    public record WtxVariantView(String name, String instrument, String baseTimeframe,
+                                 String preset, String panelKey) {}
+
+    /** Configured variant panels (name, instrument, base timeframe, preset, panel key). Never null. */
+    public List<WtxVariantView> getVariants() {
+        return variants().stream()
+                .map(v -> new WtxVariantView(v.getName(), v.getInstrument(), v.getBaseTimeframe(),
+                        v.getPreset(), v.getPanelKey()))
+                .toList();
+    }
+
+    /** Panel's base config (global, or global+preset for a variant) with its stored overrides applied. */
     public WtxConfig effectiveConfig(String instrument, String timeframe) {
-        return applyOverrides(properties.toConfig(), paramOverridePort.load(instrument, timeframe));
+        return applyOverrides(baseConfigFor(instrument, timeframe), paramOverridePort.load(instrument, timeframe));
     }
 
     private void publishWtxEvent(WtxSignal signal, BigDecimal price) {
@@ -122,16 +171,36 @@ public class WtxStrategyService {
 
     @EventListener
     public void onCandleClosed(CandleClosed event) {
-        WtxConfig config = properties.toConfig();
-        if (!config.instruments().contains(event.instrument())) return;
-        if (!config.timeframes().contains(event.timeframe())) return;
+        WtxConfig global = properties.toConfig();
+        // Legacy panel — identity == data timeframe, bit-for-bit the historical behaviour.
+        if (global.instruments().contains(event.instrument())
+                && global.timeframes().contains(event.timeframe())) {
+            processPanel(event, event.timeframe());
+        }
+        // Variant panels riding the same closed candle (e.g. top-train-Z35 on MNQ 10m → key 10m-z35):
+        // same candle data, but their own state / signals / overrides under the panel key, and a
+        // base config seeded from the variant's named preset.
+        for (WtxStrategyProperties.Variant variant : variants()) {
+            if (variant.getInstrument().equals(event.instrument())
+                    && variant.getBaseTimeframe().equals(event.timeframe())) {
+                processPanel(event, variant.getPanelKey());
+            }
+        }
+    }
 
+    /**
+     * Evaluate one panel for a closed candle. {@code panelKey} is the panel's IDENTITY (state,
+     * signal history, overrides, WS topics); candle data always comes from the event's (base)
+     * timeframe. For legacy panels {@code panelKey == event.timeframe()}.
+     */
+    private void processPanel(CandleClosed event, String panelKey) {
         String instrumentName = event.instrument();
 
-        // Apply this panel's frontend overrides (n1/n2/signalPeriod/slAtrMult) on top of the global
-        // config. From here on `config` is the EFFECTIVE config — the WaveTrend construction and the
-        // trailing-exit evaluator below both read from it, so overrides take effect with no further wiring.
-        config = applyOverrides(config, paramOverridePort.load(instrumentName, event.timeframe()));
+        // Panel base config (global, or global+preset for a variant) with the panel's stored
+        // overrides applied. From here on `config` is the EFFECTIVE config — the WaveTrend
+        // construction and the trailing-exit evaluator below both read from it.
+        WtxConfig config = applyOverrides(baseConfigFor(instrumentName, panelKey),
+                paramOverridePort.load(instrumentName, panelKey));
 
         Instrument instrument;
         try {
@@ -153,8 +222,8 @@ public class WtxStrategyService {
         WaveTrendResult prev = WtxBarEvaluator.prev(results);
         WaveTrendResult curr = WtxBarEvaluator.curr(results);
 
-        WtxStrategyState state = statePort.load(instrumentName, event.timeframe())
-                .orElseGet(() -> WtxStrategyState.initial(instrumentName, event.timeframe(),
+        WtxStrategyState state = statePort.load(instrumentName, panelKey)
+                .orElseGet(() -> WtxStrategyState.initial(instrumentName, panelKey,
                         properties.getInitialEquity()));
 
         // ── 0. Settle any optimistic close P&L against execution-row truth (roll back an unfilled close,
@@ -183,7 +252,7 @@ public class WtxStrategyService {
             WtxTrailingExitEvaluator.Decision exit =
                     WtxTrailingExitEvaluator.evaluate(state, currentCandle, config);
             if (exit.shouldExit()) {
-                state = applyExit(state, instrument, exit, event, profile);
+                state = applyExit(state, instrument, exit, event, panelKey, profile);
             } else {
                 state = state.withTrailing(exit.updatedBestFavorablePrice(), exit.updatedTrailingStopPrice());
             }
@@ -206,7 +275,7 @@ public class WtxStrategyService {
 
         // Re-evaluate per direction after detecting it
         Optional<WtxSignal> prelim = WtxBarEvaluator.evaluate(
-                prev, curr, config, state, event.timestamp(), event.timeframe(), null, null);
+                prev, curr, config, state, event.timestamp(), panelKey, null, null);
 
         if (prelim.isPresent()) {
             WtxSignal probe = prelim.get();
@@ -227,7 +296,7 @@ public class WtxStrategyService {
 
         // ── 3. Final signal evaluation with filter decisions ──────────────────
         Optional<WtxSignal> maybeSignal = WtxBarEvaluator.evaluate(
-                prev, curr, config, state, event.timestamp(), event.timeframe(),
+                prev, curr, config, state, event.timestamp(), panelKey,
                 htfDecision, structureDecision);
 
         if (maybeSignal.isPresent()) {
@@ -248,7 +317,7 @@ public class WtxStrategyService {
                         enrichment.smcSwingBias(), state.currentPosition());
                 if (filtered != signal.suggestedAction()) {
                     log.info("WTX [{} {}] swing-bias filter: direction={} swingBias={} action {} -> {}",
-                            instrumentName, event.timeframe(), signal.direction(),
+                            instrumentName, panelKey, signal.direction(),
                             enrichment.smcSwingBias(), signal.suggestedAction(), filtered);
                     filterRewroteToClose =
                             filtered == WtxAction.CLOSE_LONG || filtered == WtxAction.CLOSE_SHORT;
@@ -288,7 +357,7 @@ public class WtxStrategyService {
                     if (routing.outcome() == WtxRoutingOutcome.ROUTED_FLATTEN_ONLY) {
                         state = closePosition(preActionState, instrument, currentCandle.getClose());
                         log.warn("WTX [{} {}] reverse flattened only — virtual state corrected to FLAT "
-                                + "(open leg skipped for margin)", instrumentName, event.timeframe());
+                                + "(open leg skipped for margin)", instrumentName, panelKey);
                     } else if (routing.outcome() == WtxRoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT) {
                         // The bridge skipped the open: a prior entry order is still resting unfilled at
                         // the broker. No order was sent, so revert the optimistically-applied action —
@@ -296,7 +365,7 @@ public class WtxStrategyService {
                         // at its (pre-action) side, not the never-opened new side.
                         state = preActionState;
                         log.warn("WTX [{} {}] open/reverse skipped — prior entry still in flight; virtual "
-                                + "state kept at pre-action side", instrumentName, event.timeframe());
+                                + "state kept at pre-action side", instrumentName, panelKey);
                     }
                 }
             }
@@ -339,7 +408,7 @@ public class WtxStrategyService {
             if (WtxHtfBiasExitEvaluator.shouldExit(state.currentPosition(), bias)) {
                 WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                         ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
-                WtxSignal biasExit = buildCloseSignal(state, event.timeframe(), closeAction,
+                WtxSignal biasExit = buildCloseSignal(state, panelKey, closeAction,
                         "HTF_BIAS_EXIT:" + bias.name(), WtxExitType.HTF_BIAS, event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity (same ordering
                 // invariant as applyExit() / MAX_LOSS_HALT — withFlat clears entryQty to 0 otherwise).
@@ -359,7 +428,7 @@ public class WtxStrategyService {
                 ws.convertAndSend("/topic/wtx-signals", toWsPayload(biasExit, state));
                 publishWtxEvent(biasExit, currentCandle.getClose());
                 log.info("WTX [{} {}] HTF-bias early exit — pos={} bias={} closed",
-                        instrumentName, event.timeframe(), posBeforeSignal, bias);
+                        instrumentName, panelKey, posBeforeSignal, bias);
             }
         }
 
@@ -372,7 +441,7 @@ public class WtxStrategyService {
             if (state.currentPosition() != WtxPosition.FLAT) {
                 WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
                         ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
-                WtxSignal haltSignal = buildCloseSignal(state, event.timeframe(), closeAction,
+                WtxSignal haltSignal = buildCloseSignal(state, panelKey, closeAction,
                         "MAX_LOSS_HALT", WtxExitType.MAX_LOSS, event.timestamp());
                 // Route BEFORE flattening so the bridge submits the full open quantity to IBKR.
                 WtxRoutingResult haltRouting =
@@ -411,48 +480,58 @@ public class WtxStrategyService {
         publishState(state, config);
     }
 
-    /** Called by the NY close scheduler — closes all open WTX positions across every timeframe. */
+    /** Called by the NY close scheduler — closes all open WTX positions across every panel (variants included). */
     public void forceCloseAll(String reason) {
         WtxConfig config = properties.toConfig();
         for (String instrumentName : config.instruments()) {
             for (String timeframe : config.timeframes()) {
-                statePort.load(instrumentName, timeframe).ifPresent(state -> {
-                    if (state.currentPosition() != WtxPosition.FLAT) {
-                        try {
-                            Instrument instrument = Instrument.valueOf(instrumentName);
-                            List<Candle> candles = candlePort.findRecentCandles(instrument, timeframe, 1);
-                            BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
-                                    : candles.get(0).getClose();
-                            WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
-                                    ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
-                            WtxSignal forceCloseSignal = buildCloseSignal(state, timeframe, closeAction,
-                                    "FORCE_CLOSE:" + reason, WtxExitType.FORCE_CLOSE, java.time.Instant.now());
-                            // Route to IBKR with the pre-close state so the open quantity is preserved.
-                            WtxRoutingResult fcRouting =
-                                    routeToExecution(forceCloseSignal, state, exitPrice);
-                            forceCloseSignal = forceCloseSignal.withRouting(fcRouting);
-                            // Prior entry still resting unfilled → keep the position (no flatten sent).
-                            WtxStrategyState closed = skippedEntryInFlight(fcRouting)
-                                    ? state
-                                    : closePosition(state, instrument, exitPrice);
-                            BigDecimal fcRealizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
-                            if (fcRealizedDelta.signum() != 0) {
-                                forceCloseSignal = forceCloseSignal.withRealizedPnl(fcRealizedDelta);
-                            }
-                            forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
-                            historyPort.save(forceCloseSignal);
-                            statePort.save(closed);
-                            ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
-                            publishWtxEvent(forceCloseSignal, exitPrice);
-                            log.info("WTX [{} {}] force-closed — {}", instrumentName, timeframe, reason);
-                            publishState(closed, config);
-                        } catch (Exception e) {
-                            log.error("WTX force-close failed for {} {}", instrumentName, timeframe, e);
-                        }
-                    }
-                });
+                forceClosePanel(instrumentName, timeframe, timeframe, reason, config);
             }
         }
+        // Variant panels hold their own positions — they must flatten at the NY close too.
+        for (WtxStrategyProperties.Variant variant : variants()) {
+            forceClosePanel(variant.getInstrument(), variant.getPanelKey(), variant.getBaseTimeframe(),
+                    reason, config);
+        }
+    }
+
+    private void forceClosePanel(String instrumentName, String panelKey, String dataTimeframe,
+                                 String reason, WtxConfig config) {
+        statePort.load(instrumentName, panelKey).ifPresent(state -> {
+            if (state.currentPosition() != WtxPosition.FLAT) {
+                try {
+                    Instrument instrument = Instrument.valueOf(instrumentName);
+                    List<Candle> candles = candlePort.findRecentCandles(instrument, dataTimeframe, 1);
+                    BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
+                            : candles.get(0).getClose();
+                    WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                            ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                    WtxSignal forceCloseSignal = buildCloseSignal(state, panelKey, closeAction,
+                            "FORCE_CLOSE:" + reason, WtxExitType.FORCE_CLOSE, java.time.Instant.now());
+                    // Route to IBKR with the pre-close state so the open quantity is preserved.
+                    WtxRoutingResult fcRouting =
+                            routeToExecution(forceCloseSignal, state, exitPrice);
+                    forceCloseSignal = forceCloseSignal.withRouting(fcRouting);
+                    // Prior entry still resting unfilled → keep the position (no flatten sent).
+                    WtxStrategyState closed = skippedEntryInFlight(fcRouting)
+                            ? state
+                            : closePosition(state, instrument, exitPrice);
+                    BigDecimal fcRealizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
+                    if (fcRealizedDelta.signum() != 0) {
+                        forceCloseSignal = forceCloseSignal.withRealizedPnl(fcRealizedDelta);
+                    }
+                    forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
+                    historyPort.save(forceCloseSignal);
+                    statePort.save(closed);
+                    ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
+                    publishWtxEvent(forceCloseSignal, exitPrice);
+                    log.info("WTX [{} {}] force-closed — {}", instrumentName, panelKey, reason);
+                    publishState(closed, config);
+                } catch (Exception e) {
+                    log.error("WTX force-close failed for {} {}", instrumentName, panelKey, e);
+                }
+            }
+        });
     }
 
     public Optional<WtxStrategyState> getState(String instrument, String timeframe) {
@@ -616,8 +695,9 @@ public class WtxStrategyService {
     public String currentRegime(String instrument, String timeframe) {
         try {
             Instrument inst = Instrument.valueOf(instrument);
+            // Variant panels have no candles under their own key — read the base timeframe's data.
             List<Candle> candles = new java.util.ArrayList<>(
-                    candlePort.findRecentCandles(inst, timeframe, 220));
+                    candlePort.findRecentCandles(inst, dataTimeframe(instrument, timeframe), 220));
             java.util.Collections.reverse(candles); // chronological (oldest → newest)
             if (candles.size() < 210) return null;   // need EMA200 + a little warm-up
             BigDecimal ema9 = new EMAIndicator(9).current(candles);
@@ -658,8 +738,8 @@ public class WtxStrategyService {
 
     private WtxStrategyState applyExit(WtxStrategyState state, Instrument instrument,
                                        WtxTrailingExitEvaluator.Decision exit, CandleClosed event,
-                                       WtxProfile profile) {
-        WtxSignal exitSignal = buildCloseSignal(state, event.timeframe(), exit.exitAction(),
+                                       String panelKey, WtxProfile profile) {
+        WtxSignal exitSignal = buildCloseSignal(state, panelKey, exit.exitAction(),
                 exit.reason().name(), WtxExitType.fromExitReason(exit.reason()), event.timestamp());
         // Route to IBKR BEFORE flattening so the bridge sees the open quantity.
         // (closePosition → withFlat clears entryQty to 0, which would shrink the IBKR close to 1 contract.)

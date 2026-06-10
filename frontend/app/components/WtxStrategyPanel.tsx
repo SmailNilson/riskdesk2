@@ -389,11 +389,14 @@ function SignalCard({ sig }: { sig: WtxSignalView }) {
 
 interface Props {
   instrument: string;
+  /** Panel key — the data timeframe for legacy panels ("5m"/"10m"), or a variant key ("10m-z35"). */
   timeframe: string;
+  /** Optional display label for variant panels (e.g. "top-train-Z35"); legacy panels omit it. */
+  displayName?: string;
   liveSignals: WtxSignalView[];
 }
 
-export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }: Props) {
+export default function WtxStrategyPanel({ instrument, timeframe, displayName, liveSignals }: Props) {
   const [state, setState] = useState<WtxStrategyStateView | null>(null);
   const [signals, setSignals] = useState<WtxSignalView[]>([]);
   const [collapsed, setCollapsed] = useState(false);
@@ -611,7 +614,9 @@ export default function WtxStrategyPanel({ instrument, timeframe, liveSignals }:
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-cyan-300">WTX STRATEGY</span>
+          <span className={`text-xs font-semibold ${displayName ? 'text-amber-300' : 'text-cyan-300'}`}>
+            {displayName ? `WTX · ${displayName}` : 'WTX STRATEGY'}
+          </span>
           <span className="text-[10px] text-zinc-500">{instrument} · {timeframe}</span>
         </div>
         <div className="flex items-center gap-2">

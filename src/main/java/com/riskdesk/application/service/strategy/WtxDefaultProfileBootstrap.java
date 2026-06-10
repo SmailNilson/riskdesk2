@@ -43,22 +43,34 @@ public class WtxDefaultProfileBootstrap {
         if (properties.getHtfDefaultInstruments() == null) return;
         for (String instrument : properties.getHtfDefaultInstruments()) {
             for (String timeframe : properties.getTimeframes()) {
-                try {
-                    WtxStrategyState state = statePort.load(instrument, timeframe)
-                            .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe,
-                                    properties.getInitialEquity()));
-                    WtxProfile current = state.activeProfile();
-                    // Only upgrade the untouched BASELINE default — never stomp a manual choice.
-                    if (current == null || current == WtxProfile.BASELINE) {
-                        statePort.save(state.withProfile(WtxProfile.HTF));
-                        log.info("WTX [{} {}] default profile set to HTF (was {})",
-                                instrument, timeframe, current);
-                    }
-                } catch (Exception e) {
-                    log.warn("WTX default-profile bootstrap failed for {} {}: {}",
-                            instrument, timeframe, e.getMessage());
-                }
+                upgradeBaselineToHtf(instrument, timeframe);
             }
+        }
+        // Variant panels (e.g. top-train-Z35 under "10m-z35") need the HTF profile too — their
+        // presets were validated WITH the 1h bias filter active.
+        if (properties.getVariants() == null) return;
+        for (WtxStrategyProperties.Variant variant : properties.getVariants()) {
+            if (properties.getHtfDefaultInstruments().contains(variant.getInstrument())) {
+                upgradeBaselineToHtf(variant.getInstrument(), variant.getPanelKey());
+            }
+        }
+    }
+
+    private void upgradeBaselineToHtf(String instrument, String timeframe) {
+        try {
+            WtxStrategyState state = statePort.load(instrument, timeframe)
+                    .orElseGet(() -> WtxStrategyState.initial(instrument, timeframe,
+                            properties.getInitialEquity()));
+            WtxProfile current = state.activeProfile();
+            // Only upgrade the untouched BASELINE default — never stomp a manual choice.
+            if (current == null || current == WtxProfile.BASELINE) {
+                statePort.save(state.withProfile(WtxProfile.HTF));
+                log.info("WTX [{} {}] default profile set to HTF (was {})",
+                        instrument, timeframe, current);
+            }
+        } catch (Exception e) {
+            log.warn("WTX default-profile bootstrap failed for {} {}: {}",
+                    instrument, timeframe, e.getMessage());
         }
     }
 }

@@ -291,6 +291,16 @@ export default function Dashboard() {
         >
           <WtxStrategyPanel instrument={instrument} timeframe="5m" liveSignals={wtxSignals} />
           <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
+          {/* Variant signal top-train-Z35 — backend-configured (riskdesk.wtx.variants) MNQ-10m
+              parallel panel: zone-only entries ±35, WaveTrend 5/14/2, SL 4.0×ATR, key "10m-z35". */}
+          {instrument === 'MNQ' && (
+            <WtxStrategyPanel
+              instrument={instrument}
+              timeframe="10m-z35"
+              displayName="top-train-Z35"
+              liveSignals={wtxSignals}
+            />
+          )}
           <WtxRsiStrategyPanel
             instrument={instrument}
             timeframe="5m"
