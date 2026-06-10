@@ -6,6 +6,8 @@ import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
+import com.riskdesk.domain.orderflow.model.TickBar;
+import com.riskdesk.domain.orderflow.port.TickBarPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.application.dto.AbsorptionEventView;
 import com.riskdesk.application.dto.CycleEventView;
@@ -38,15 +40,18 @@ public class OrderFlowController {
     private final ObjectProvider<OrderFlowOrchestrator> orchestratorProvider;
     private final ObjectProvider<TickDataPort> tickDataPortProvider;
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
+    private final ObjectProvider<TickBarPort> tickBarPortProvider;
     private final OrderFlowHistoryService historyService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
                                 ObjectProvider<MarketDepthPort> depthPortProvider,
+                                ObjectProvider<TickBarPort> tickBarPortProvider,
                                 OrderFlowHistoryService historyService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
+        this.tickBarPortProvider = tickBarPortProvider;
         this.historyService = historyService;
     }
 
@@ -144,6 +149,28 @@ public class OrderFlowController {
             }
             result.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : null);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/tick-bars/{instrument}?limit=200
+     * Constant-tick-count bars for the tick chart, oldest first; the final element
+     * is the in-progress bar (complete=false) when trades have accumulated.
+     */
+    @GetMapping("/tick-bars/{instrument}")
+    public ResponseEntity<?> getTickBars(
+            @PathVariable String instrument,
+            @RequestParam(name = "limit", required = false, defaultValue = "200") int limit) {
+        TickBarPort tickBarPort = tickBarPortProvider.getIfAvailable();
+        if (tickBarPort == null) {
+            return ResponseEntity.ok(List.of());
+        }
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 500));
+            return ResponseEntity.ok(bars);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }

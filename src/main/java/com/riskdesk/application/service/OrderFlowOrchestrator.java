@@ -20,6 +20,8 @@ import com.riskdesk.domain.orderflow.model.FlashCrashEvaluation;
 import com.riskdesk.domain.orderflow.model.FlashCrashInput;
 import com.riskdesk.domain.orderflow.model.FlashCrashThresholds;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
+import com.riskdesk.domain.orderflow.model.TickBar;
+import com.riskdesk.domain.orderflow.port.TickBarPort;
 import com.riskdesk.domain.orderflow.model.IcebergSignal;
 import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
@@ -87,6 +89,7 @@ public class OrderFlowOrchestrator {
     private final TickByTickClient tickByTickClient;
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
     private final ObjectProvider<FootprintPort> footprintPortProvider;
+    private final ObjectProvider<TickBarPort> tickBarPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final CandleRepositoryPort candleRepository;
     private final FlashCrashConfigPort flashCrashConfig;
@@ -165,6 +168,7 @@ public class OrderFlowOrchestrator {
                                   TickByTickClient tickByTickClient,
                                   ObjectProvider<MarketDepthPort> depthPortProvider,
                                   ObjectProvider<FootprintPort> footprintPortProvider,
+                                  ObjectProvider<TickBarPort> tickBarPortProvider,
                                   ApplicationEventPublisher eventPublisher,
                                   CandleRepositoryPort candleRepository,
                                   FlashCrashConfigPort flashCrashConfig) {
@@ -178,6 +182,7 @@ public class OrderFlowOrchestrator {
         this.tickByTickClient = tickByTickClient;
         this.depthPortProvider = depthPortProvider;
         this.footprintPortProvider = footprintPortProvider;
+        this.tickBarPortProvider = tickBarPortProvider;
         this.eventPublisher = eventPublisher;
         this.candleRepository = candleRepository;
         this.flashCrashConfig = flashCrashConfig;
@@ -1107,6 +1112,35 @@ public class OrderFlowOrchestrator {
                 messagingTemplate.convertAndSend("/topic/depth", payload);
             } catch (Exception e) {
                 // ignore — instrument may not have depth
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // WebSocket publication — /topic/tick-bars
+    // -------------------------------------------------------------------------
+
+    /**
+     * Publishes the tail of each instrument's tick chart (last completed bar + the
+     * in-progress bar) every 2 seconds. The frontend merges by {@code seq}, so a
+     * bar that completed between two pushes is delivered by the next one.
+     */
+    @Scheduled(fixedDelay = 2_000, initialDelay = 25_000)
+    public void publishTickBars() {
+        TickBarPort tickBarPort = tickBarPortProvider.getIfAvailable();
+        if (tickBarPort == null) return;
+
+        for (Instrument instrument : Instrument.exchangeTradedFutures()) {
+            try {
+                List<TickBar> tail = tickBarPort.recentBars(instrument, 3);
+                if (tail.isEmpty()) continue;
+
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("instrument", instrument.name());
+                payload.put("bars", tail);
+                messagingTemplate.convertAndSend("/topic/tick-bars", payload);
+            } catch (Exception e) {
+                // ignore — instrument may not have tick data
             }
         }
     }

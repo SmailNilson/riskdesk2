@@ -3,7 +3,9 @@ package com.riskdesk.infrastructure.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Configuration properties for the Order Flow subsystem.
@@ -25,6 +27,7 @@ public class OrderFlowProperties {
     private Iceberg iceberg = new Iceberg();
     private Spoofing spoofing = new Spoofing();
     private FlashCrash flashCrash = new FlashCrash();
+    private TickChart tickChart = new TickChart();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -50,6 +53,8 @@ public class OrderFlowProperties {
     public void setSpoofing(Spoofing spoofing) { this.spoofing = spoofing; }
     public FlashCrash getFlashCrash() { return flashCrash; }
     public void setFlashCrash(FlashCrash flashCrash) { this.flashCrash = flashCrash; }
+    public TickChart getTickChart() { return tickChart; }
+    public void setTickChart(TickChart tickChart) { this.tickChart = tickChart; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -364,5 +369,25 @@ public class OrderFlowProperties {
         public void setWindowSeconds(int v) { this.windowSeconds = v; }
         public int getVolumeHistorySize() { return volumeHistorySize; }
         public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
+    }
+
+    /** Tick chart: constant-tick-count bars built from classified trades. */
+    public static class TickChart {
+        /** Bar size (trades per bar) for instruments not in the per-instrument map. */
+        private int defaultTicksPerBar = 200;
+        /** Per-instrument bar sizes; MCL trades far less than MNQ so its bars are smaller. */
+        private Map<String, Integer> ticksPerBar = new HashMap<>(Map.of(
+            "MNQ", 200,
+            "MCL", 100
+        ));
+        /** Completed bars kept per instrument (ring buffer). */
+        private int maxBars = 300;
+
+        public int getDefaultTicksPerBar() { return defaultTicksPerBar; }
+        public void setDefaultTicksPerBar(int v) { this.defaultTicksPerBar = v; }
+        public Map<String, Integer> getTicksPerBar() { return ticksPerBar; }
+        public void setTicksPerBar(Map<String, Integer> v) { this.ticksPerBar = v; }
+        public int getMaxBars() { return maxBars; }
+        public void setMaxBars(int v) { this.maxBars = v; }
     }
 }

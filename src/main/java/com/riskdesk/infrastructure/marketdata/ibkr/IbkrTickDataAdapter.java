@@ -26,6 +26,7 @@ public class IbkrTickDataAdapter implements TickDataPort {
 
     private final ConcurrentHashMap<Instrument, TickByTickAggregator> aggregators = new ConcurrentHashMap<>();
     private final IbkrFootprintAdapter footprintAdapter;
+    private final IbkrTickBarAdapter tickBarAdapter;
     private final OrderFlowProperties orderFlowProperties;
 
     /** Last trade price per instrument — the reference for the trade-to-trade tick rule (L2). */
@@ -41,8 +42,11 @@ public class IbkrTickDataAdapter implements TickDataPort {
     /** Total classified ticks across all instruments — the gap vs raw ticks = UNCLASSIFIED drops. */
     private final AtomicLong classifiedTicks = new AtomicLong(0);
 
-    public IbkrTickDataAdapter(IbkrFootprintAdapter footprintAdapter, OrderFlowProperties orderFlowProperties) {
+    public IbkrTickDataAdapter(IbkrFootprintAdapter footprintAdapter,
+                               IbkrTickBarAdapter tickBarAdapter,
+                               OrderFlowProperties orderFlowProperties) {
         this.footprintAdapter = footprintAdapter;
+        this.tickBarAdapter = tickBarAdapter;
         this.orderFlowProperties = orderFlowProperties;
     }
 
@@ -150,6 +154,7 @@ public class IbkrTickDataAdapter implements TickDataPort {
         // Route to footprint aggregator for per-price-level volume profiling
         if (resolved != TickByTickAggregator.TickClassification.UNCLASSIFIED) {
             footprintAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
+            tickBarAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
         }
     }
 
