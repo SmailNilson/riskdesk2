@@ -26,6 +26,8 @@ class WtxParamOverridePresetTest {
         assertEquals(0, BigDecimal.valueOf(-35).compareTo(p.nsv()));
         assertEquals(Boolean.FALSE, p.useCompra1());
         assertEquals(Boolean.FALSE, p.useVenta1());
+        // The winning run was session-OFF — the preset must carry it (legacy panels keep the global filter).
+        assertEquals(Boolean.FALSE, p.sessionFilterEnabled());
         assertFalse(p.isEmpty());
     }
 
@@ -47,8 +49,10 @@ class WtxParamOverridePresetTest {
     void isEmpty_requiresEveryFieldNull() {
         assertTrue(WtxParamOverride.NONE.isEmpty());
         assertFalse(new WtxParamOverride(null, null, null, null,
-                BigDecimal.valueOf(35), null, null, null).isEmpty());
+                BigDecimal.valueOf(35), null, null, null, null).isEmpty());
         assertFalse(new WtxParamOverride(null, null, null, null,
-                null, null, Boolean.FALSE, null).isEmpty());
+                null, null, Boolean.FALSE, null, null).isEmpty());
+        assertFalse(new WtxParamOverride(null, null, null, null,
+                null, null, null, null, Boolean.FALSE).isEmpty());
     }
 }

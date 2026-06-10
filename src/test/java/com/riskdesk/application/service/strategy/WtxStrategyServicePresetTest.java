@@ -46,8 +46,12 @@ class WtxStrategyServicePresetTest {
 
     private final FakeOverridePort overridePort = new FakeOverridePort();
 
-    @SuppressWarnings("unchecked")
     private WtxStrategyService service() {
+        return service(WtxConfig.defaults());
+    }
+
+    @SuppressWarnings("unchecked")
+    private WtxStrategyService service(WtxConfig globalConfig) {
         WtxStrategyStatePort statePort = mock(WtxStrategyStatePort.class);
         WtxSignalHistoryPort historyPort = mock(WtxSignalHistoryPort.class);
         CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
@@ -59,7 +63,7 @@ class WtxStrategyServicePresetTest {
         WtxClosePnlSettler settler = mock(WtxClosePnlSettler.class);
         WtxPositionReconciler reconciler = mock(WtxPositionReconciler.class);
 
-        lenient().when(properties.toConfig()).thenReturn(WtxConfig.defaults());
+        lenient().when(properties.toConfig()).thenReturn(globalConfig);
         lenient().when(properties.getInitialEquity()).thenReturn(BigDecimal.valueOf(10_000));
         lenient().when(statePort.load(anyString(), anyString())).thenReturn(Optional.empty());
         lenient().when(historyPort.findRecent(anyString(), anyString(), anyInt())).thenReturn(List.of());
@@ -116,6 +120,22 @@ class WtxStrategyServicePresetTest {
         assertEquals(0, new BigDecimal("3.5").compareTo(stored.slAtrMult()));
         assertEquals(0, BigDecimal.valueOf(-35).compareTo(stored.nsv()));
         assertEquals(Boolean.FALSE, stored.useVenta1());
+    }
+
+    @Test
+    void preset_disablesTheSessionFilter_forThisPanelOnly() {
+        // Global config WITH the 03:00-08:00 ET entry block (the prod shape).
+        WtxStrategyService svc = service(WtxConfig.defaults().withSessionFilter(true, 180, 480));
+        svc.applyPreset("MNQ", "10m-z35", WtxParamOverride.TOP_TRAIN_Z35);
+
+        // The preset carries the validated session-OFF shape for ITS panel...
+        org.junit.jupiter.api.Assertions.assertFalse(
+                svc.effectiveConfig("MNQ", "10m-z35").sessionFilterEnabled(),
+                "preset panel must trade around the clock (validated shape)");
+        // ...while the legacy panel keeps the global protection.
+        org.junit.jupiter.api.Assertions.assertTrue(
+                svc.effectiveConfig("MNQ", "10m").sessionFilterEnabled(),
+                "legacy panel must keep the global session block");
     }
 
     @Test

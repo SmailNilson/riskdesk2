@@ -103,6 +103,12 @@ public class WtxStrategyService {
                     ov.useCompra1() != null ? ov.useCompra1() : eff.useCompra1(),
                     ov.useVenta1() != null ? ov.useVenta1() : eff.useVenta1());
         }
+        // Per-panel session-filter toggle (boundaries stay global) — lets the top-train-Z35 variant
+        // trade around the clock (its validated shape) while legacy panels keep the 03:00-08:00 ET block.
+        if (ov.sessionFilterEnabled() != null) {
+            eff = eff.withSessionFilter(ov.sessionFilterEnabled(),
+                    eff.sessionBlockStartMinEt(), eff.sessionBlockEndMinEt());
+        }
         return eff;
     }
 
@@ -627,9 +633,9 @@ public class WtxStrategyService {
     public WtxStrategyState updateIndicatorParams(String instrument, String timeframe,
                                                   Integer n1, Integer n2, Integer signalPeriod) {
         WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
-        // Preserve the SL and zone overrides — this endpoint only edits the WaveTrend periods.
+        // Preserve the SL, zone and session overrides — this endpoint only edits the WaveTrend periods.
         WtxParamOverride next = new WtxParamOverride(n1, n2, signalPeriod, cur.slAtrMult(),
-                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1());
+                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1(), cur.sessionFilterEnabled());
         paramOverridePort.save(instrument, timeframe, next);
         log.info("WTX [{} {}] indicator params override -> n1={} n2={} signalPeriod={}",
                 instrument, timeframe, n1, n2, signalPeriod);
@@ -645,9 +651,9 @@ public class WtxStrategyService {
      */
     public WtxStrategyState updateSlAtrMult(String instrument, String timeframe, BigDecimal slAtrMult) {
         WtxParamOverride cur = paramOverridePort.load(instrument, timeframe);
-        // Preserve the period and zone overrides — this endpoint only edits the SL multiple.
+        // Preserve the period, zone and session overrides — this endpoint only edits the SL multiple.
         WtxParamOverride next = new WtxParamOverride(cur.n1(), cur.n2(), cur.signalPeriod(), slAtrMult,
-                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1());
+                cur.nsc(), cur.nsv(), cur.useCompra1(), cur.useVenta1(), cur.sessionFilterEnabled());
         paramOverridePort.save(instrument, timeframe, next);
         log.info("WTX [{} {}] SL ATR-mult override -> {}", instrument, timeframe, slAtrMult);
         WtxStrategyState state = statePort.load(instrument, timeframe)
@@ -907,6 +913,7 @@ public class WtxStrategyService {
         payload.put("nsc", config.nsc());
         payload.put("nsv", config.nsv());
         payload.put("zoneOnlyEntries", !config.useCompra1() && !config.useVenta1());
+        payload.put("sessionFilterEnabled", config.sessionFilterEnabled());
         payload.put("entryPrice", state.entryPrice());
         payload.put("entryQty", state.entryQty());
         payload.put("stopLoss", WtxTrailingExitEvaluator.currentStop(state, config));

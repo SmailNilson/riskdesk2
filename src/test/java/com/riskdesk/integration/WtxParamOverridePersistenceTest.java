@@ -39,6 +39,7 @@ class WtxParamOverridePersistenceTest {
         assertEquals(0, WtxParamOverride.TOP_TRAIN_Z35.nsv().compareTo(reloaded.nsv()));
         assertEquals(Boolean.FALSE, reloaded.useCompra1());
         assertEquals(Boolean.FALSE, reloaded.useVenta1());
+        assertEquals(Boolean.FALSE, reloaded.sessionFilterEnabled());
     }
 
     @Test
