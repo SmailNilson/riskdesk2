@@ -54,6 +54,9 @@ public class WtxParamOverrideEntity {
     private Boolean useVenta1;
 
     @Column
+    private Boolean sessionFilterEnabled;
+
+    @Column
     private Instant updatedAt;
 
     public WtxParamOverrideEntity() {}
@@ -86,6 +89,9 @@ public class WtxParamOverrideEntity {
     public void setUseCompra1(Boolean useCompra1) { this.useCompra1 = useCompra1; }
 
     public Boolean getUseVenta1() { return useVenta1; }
+
+    public Boolean getSessionFilterEnabled() { return sessionFilterEnabled; }
+    public void setSessionFilterEnabled(Boolean sessionFilterEnabled) { this.sessionFilterEnabled = sessionFilterEnabled; }
     public void setUseVenta1(Boolean useVenta1) { this.useVenta1 = useVenta1; }
 
     public Instant getUpdatedAt() { return updatedAt; }

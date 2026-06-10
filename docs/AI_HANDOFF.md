@@ -11,8 +11,11 @@ over the full window). Shape: WaveTrend **5/14/2**, initial stop **4.0×ATR** (S
 entries **only on crosses inside the ±35 zone** (`useCompra1/useVenta1=false`, `nsc/nsv=±35`).
 
 To make it activatable per panel without touching the global config:
-- `WtxParamOverride` gained four nullable fields — `nsc`, `nsv`, `useCompra1`, `useVenta1` — plus
-  the named preset constant `TOP_TRAIN_Z35` and a `preset(name)` resolver (`"clear"` → `NONE`).
+- `WtxParamOverride` gained five nullable fields — `nsc`, `nsv`, `useCompra1`, `useVenta1`,
+  `sessionFilterEnabled` — plus the named preset constant `TOP_TRAIN_Z35` and a `preset(name)`
+  resolver (`"clear"` → `NONE`). `sessionFilterEnabled=false` in the preset disables the
+  03:00-08:00 ET entry block for THIS panel only (the winning run was session-OFF; legacy panels
+  keep the global protection; block boundaries stay global; the NY force-close still applies).
 - `WtxConfig.withSignalZone(...)` wither; `WtxStrategyService.applyOverrides` applies the zone
   fields; the partial panel edits (`updateIndicatorParams`, `updateSlAtrMult`) now **preserve**
   the zone override instead of wiping it.
