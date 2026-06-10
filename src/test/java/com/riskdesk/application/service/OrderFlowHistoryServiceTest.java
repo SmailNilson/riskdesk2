@@ -7,6 +7,7 @@ import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
@@ -56,7 +57,9 @@ class OrderFlowHistoryServiceTest {
                 mock(JpaDistributionEventRepository.class),
                 momentumRepo,
                 cycleRepo,
-                properties);
+                mock(JpaFootprintBarRepository.class),
+                properties,
+                new com.fasterxml.jackson.databind.ObjectMapper());
     }
 
     // ─── Bug 1: Momentum age cutoff ───────────────────────────────────────

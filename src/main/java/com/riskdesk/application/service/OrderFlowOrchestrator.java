@@ -19,6 +19,7 @@ import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.FlashCrashEvaluation;
 import com.riskdesk.domain.orderflow.model.FlashCrashInput;
 import com.riskdesk.domain.orderflow.model.FlashCrashThresholds;
+import com.riskdesk.domain.orderflow.event.FootprintBarClosed;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.domain.orderflow.model.TickBar;
 import com.riskdesk.domain.orderflow.port.TickBarPort;
@@ -38,6 +39,7 @@ import com.riskdesk.domain.orderflow.service.IcebergDetector;
 import com.riskdesk.domain.orderflow.service.InstitutionalDistributionDetector;
 import com.riskdesk.domain.orderflow.service.SpoofingDetector;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.event.EventListener;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayContractResolver;
 import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
@@ -1152,23 +1154,48 @@ public class OrderFlowOrchestrator {
     // -------------------------------------------------------------------------
 
     /**
-     * Publishes current footprint bar snapshot to WebSocket every 5 seconds
-     * for each instrument with real tick data flowing.
+     * Publishes footprint bars to WebSocket every 5 seconds. First sweeps idle bars
+     * whose clock window elapsed without a rolling tick — the adapter publishes each
+     * as a {@code FootprintBarClosed} event (persistence) and the final bar state is
+     * pushed here so the frontend shows the completed bar; then the current
+     * in-progress bar of each instrument with tick data is pushed.
      */
     @Scheduled(fixedDelay = 5_000, initialDelay = 20_000)
     public void publishFootprintData() {
         FootprintPort footprintPort = footprintPortProvider.getIfAvailable();
         if (footprintPort == null) return;
 
+        try {
+            // Closed bars reach /topic/footprint via the FootprintBarClosed listener below.
+            footprintPort.closeElapsedBars(Instant.now());
+        } catch (Exception e) {
+            log.debug("Footprint idle-close sweep failed: {}", e.getMessage());
+        }
+
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
             try {
-                Optional<FootprintBar> bar = footprintPort.currentBar(instrument, "5m");
+                Optional<FootprintBar> bar = footprintPort.currentBar(instrument);
                 if (bar.isEmpty()) continue;
 
                 messagingTemplate.convertAndSend("/topic/footprint", bar.get());
             } catch (Exception e) {
                 // ignore — instrument may not have footprint data
             }
+        }
+    }
+
+    /**
+     * Pushes every closed footprint bar (tick-driven roll-over or idle sweep) to the
+     * frontend so the completed bar's final state is rendered before the next
+     * in-progress snapshot replaces it. Persistence is handled separately by
+     * {@code OrderFlowEventPersistenceService}.
+     */
+    @EventListener
+    public void onFootprintBarClosed(FootprintBarClosed event) {
+        try {
+            messagingTemplate.convertAndSend("/topic/footprint", event.bar());
+        } catch (Exception e) {
+            log.debug("Footprint closed-bar publish failed: {}", e.getMessage());
         }
     }
 

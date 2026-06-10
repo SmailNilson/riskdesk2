@@ -3,6 +3,7 @@ package com.riskdesk.application.service;
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
 import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
+import com.riskdesk.domain.orderflow.event.FootprintBarClosed;
 import com.riskdesk.domain.orderflow.event.IcebergDetected;
 import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
 import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
@@ -12,6 +13,7 @@ import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.IcebergSignal;
 import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
+import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
@@ -27,7 +29,10 @@ import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.FlashCrashEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.IcebergEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.SpoofingEventEntity;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.model.Instrument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
@@ -62,6 +67,7 @@ public class OrderFlowEventPersistenceService {
     private final JpaDistributionEventRepository distributionRepository;
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
+    private final ObjectMapper objectMapper;
 
     public OrderFlowEventPersistenceService(JpaAbsorptionEventRepository absorptionRepository,
                                             JpaSpoofingEventRepository spoofingRepository,
@@ -70,7 +76,8 @@ public class OrderFlowEventPersistenceService {
                                             JpaFootprintBarRepository footprintBarRepository,
                                             JpaDistributionEventRepository distributionRepository,
                                             JpaMomentumEventRepository momentumRepository,
-                                            JpaCycleEventRepository cycleRepository) {
+                                            JpaCycleEventRepository cycleRepository,
+                                            ObjectMapper objectMapper) {
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
         this.icebergRepository = icebergRepository;
@@ -79,6 +86,7 @@ public class OrderFlowEventPersistenceService {
         this.distributionRepository = distributionRepository;
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Async
@@ -235,6 +243,39 @@ public class OrderFlowEventPersistenceService {
             flashCrashRepository.save(entity);
         } catch (Exception e) {
             log.warn("Failed to persist flash crash event for {}: {}", event.instrument(), e.getMessage());
+        }
+    }
+
+    /**
+     * Persists each closed footprint bar (UC-OF-011). The per-bucket volume profile is
+     * serialized to JSON; the (instrument, timeframe, barTimestamp) unique constraint
+     * makes re-publication idempotent.
+     */
+    @Async
+    @EventListener
+    @Transactional
+    public void onFootprintBarClosed(FootprintBarClosed event) {
+        try {
+            FootprintBar bar = event.bar();
+            Instrument instrument = Instrument.valueOf(bar.instrument());
+            Instant barTimestamp = Instant.ofEpochSecond(bar.barTimestamp());
+            if (footprintBarRepository.findByInstrumentAndTimeframeAndBarTimestamp(
+                    instrument, bar.timeframe(), barTimestamp).isPresent()) {
+                return;
+            }
+            String profileJson = objectMapper.writeValueAsString(bar.levels().values());
+            footprintBarRepository.save(new FootprintBarEntity(
+                    instrument,
+                    bar.timeframe(),
+                    barTimestamp,
+                    bar.pocPrice(),
+                    bar.totalBuyVolume(),
+                    bar.totalSellVolume(),
+                    bar.totalDelta(),
+                    profileJson
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to persist footprint bar for {}: {}", event.bar().instrument(), e.getMessage());
         }
     }
 

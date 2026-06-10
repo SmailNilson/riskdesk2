@@ -7,15 +7,23 @@ import com.riskdesk.domain.orderflow.model.FootprintLevel;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 
 /**
- * Pure domain service that accumulates classified trade ticks into footprint bars.
- * NOT a Spring bean — instantiated per instrument by the infrastructure adapter.
+ * Pure domain service that accumulates classified trade ticks into clock-aligned
+ * footprint bars. NOT a Spring bean — instantiated per instrument by the
+ * infrastructure adapter.
  *
- * <p>Each tick is rounded to the instrument's tick size and its volume is attributed
- * to either the buy (aggressive buyer at ask) or sell (aggressive seller at bid) side
- * at that price level.</p>
+ * <p>Bars are aligned to the wall clock: a tick at 14:07 with a 10-minute bar
+ * belongs to the 14:00–14:10 bar. When a tick arrives in a new bar window, the
+ * previous bar is closed and returned to the caller (tick-driven close); for idle
+ * periods, {@link #closeIfElapsed} closes a bar whose window has fully passed.</p>
+ *
+ * <p>Prices are binned into buckets of {@code bucketSize} (e.g. 5.00 points for MNQ,
+ * 0.05 for MCL — typically a multiple of the instrument's tick size). A trade is
+ * attributed to the bucket whose lower bound it falls into: bucket = floor(price /
+ * bucketSize) * bucketSize.</p>
  *
  * <p>Thread safety: external callers must synchronize if used from multiple threads.</p>
  */
@@ -24,49 +32,104 @@ public class FootprintAggregator {
     private static final double IMBALANCE_RATIO = 3.0;
 
     private final Instrument instrument;
-    private final double tickSize;
+    private final double bucketSize;
+    private final int barSeconds;
+    private final String timeframeLabel;
 
-    // price -> {buyVol, sellVol}
+    // bucket lower bound -> {buyVol, sellVol}
     private final TreeMap<Double, long[]> currentBarLevels = new TreeMap<>();
+    /** Epoch seconds of the current bar's open, aligned to barSeconds. -1 = no bar yet. */
+    private long currentBarOpen = -1;
 
-    public FootprintAggregator(Instrument instrument, double tickSize) {
-        if (tickSize <= 0) {
-            throw new IllegalArgumentException("tickSize must be positive, got: " + tickSize);
+    public FootprintAggregator(Instrument instrument, double bucketSize, int barSeconds) {
+        if (bucketSize <= 0) {
+            throw new IllegalArgumentException("bucketSize must be positive, got: " + bucketSize);
+        }
+        if (barSeconds <= 0) {
+            throw new IllegalArgumentException("barSeconds must be positive, got: " + barSeconds);
         }
         this.instrument = instrument;
-        this.tickSize = tickSize;
+        this.bucketSize = bucketSize;
+        this.barSeconds = barSeconds;
+        this.timeframeLabel = barSeconds % 3600 == 0
+            ? (barSeconds / 3600) + "h"
+            : (barSeconds / 60) + "m";
     }
 
     /**
-     * Records a classified trade tick into the current bar.
+     * Records a classified trade tick.
      *
      * @param price          the trade price
      * @param size           the number of contracts
      * @param classification "BUY" or "SELL" (anything else is ignored)
-     * @param timestamp      the tick timestamp (not stored, available for future extensions)
+     * @param timestamp      the tick's trade timestamp (determines its bar)
+     * @return the previous bar, closed because this tick opened a new bar window;
+     *         empty otherwise
      */
-    public void onTick(double price, long size, String classification, Instant timestamp) {
-        if (size <= 0) return;
-        if (!"BUY".equals(classification) && !"SELL".equals(classification)) return;
+    public Optional<FootprintBar> onTick(double price, long size, String classification, Instant timestamp) {
+        if (size <= 0) return Optional.empty();
+        if (!"BUY".equals(classification) && !"SELL".equals(classification)) return Optional.empty();
 
-        double roundedPrice = roundToTickSize(price);
-        long[] volumes = currentBarLevels.computeIfAbsent(roundedPrice, k -> new long[2]);
+        long alignedOpen = Math.floorDiv(timestamp.getEpochSecond(), barSeconds) * barSeconds;
 
+        Optional<FootprintBar> closed = Optional.empty();
+        if (currentBarOpen >= 0 && alignedOpen > currentBarOpen) {
+            if (!currentBarLevels.isEmpty()) {
+                closed = Optional.of(snapshot());
+            }
+            currentBarLevels.clear();
+        }
+        if (currentBarOpen < 0 || alignedOpen > currentBarOpen) {
+            currentBarOpen = alignedOpen;
+        }
+        // A late tick from an already-closed bar (alignedOpen < currentBarOpen) is rare
+        // (out-of-order delivery); it is attributed to the current bar rather than dropped.
+
+        double bucket = bucketFor(price);
+        long[] volumes = currentBarLevels.computeIfAbsent(bucket, k -> new long[2]);
         if ("BUY".equals(classification)) {
             volumes[0] += size;
         } else {
             volumes[1] += size;
         }
+        return closed;
     }
 
     /**
-     * Creates an immutable snapshot of the current bar state.
-     *
-     * @param barTimestamp epoch seconds of the candle open
-     * @param timeframe   the bar timeframe (e.g. "5m", "1m")
-     * @return the footprint bar with computed POC and imbalance flags
+     * Closes the current bar if its window has fully elapsed (no tick has rolled it
+     * over — quiet market). Returns the closed bar, or empty if the bar is still
+     * in progress or has no data.
      */
-    public FootprintBar snapshot(long barTimestamp, String timeframe) {
+    public Optional<FootprintBar> closeIfElapsed(Instant now) {
+        if (currentBarOpen < 0 || currentBarLevels.isEmpty()) return Optional.empty();
+        if (now.getEpochSecond() < currentBarOpen + barSeconds) return Optional.empty();
+        FootprintBar bar = snapshot();
+        currentBarLevels.clear();
+        currentBarOpen = -1;
+        return Optional.of(bar);
+    }
+
+    /**
+     * Immutable snapshot of the current in-progress bar, or empty when no tick has
+     * been recorded in the current bar window.
+     */
+    public Optional<FootprintBar> currentBar() {
+        if (currentBarOpen < 0 || currentBarLevels.isEmpty()) return Optional.empty();
+        return Optional.of(snapshot());
+    }
+
+    /**
+     * Returns true if the aggregator has any tick data for the current bar.
+     */
+    public boolean hasData() {
+        return !currentBarLevels.isEmpty();
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
+    private FootprintBar snapshot() {
         Map<Double, FootprintLevel> levels = new LinkedHashMap<>();
         long totalBuy = 0;
         long totalSell = 0;
@@ -94,8 +157,8 @@ public class FootprintAggregator {
 
         return new FootprintBar(
             instrument.name(),
-            timeframe,
-            barTimestamp,
+            timeframeLabel,
+            currentBarOpen,
             Map.copyOf(levels),
             pocPrice,
             totalBuy,
@@ -105,25 +168,14 @@ public class FootprintAggregator {
     }
 
     /**
-     * Clears accumulated tick data for the next bar.
+     * Lower bound of the price bucket this trade falls into. The small epsilon guards
+     * against floating-point representation pushing an exact bucket boundary down
+     * (e.g. 29005.0 / 5.0 = 5800.999999... must still bucket to 29005, not 29000);
+     * the result is normalized to 6 decimals so equal buckets produce identical keys.
      */
-    public void reset() {
-        currentBarLevels.clear();
-    }
-
-    /**
-     * Returns true if the aggregator has any tick data for the current bar.
-     */
-    public boolean hasData() {
-        return !currentBarLevels.isEmpty();
-    }
-
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
-
-    private double roundToTickSize(double price) {
-        return Math.round(price / tickSize) * tickSize;
+    private double bucketFor(double price) {
+        long bucketIndex = (long) Math.floor(price / bucketSize + 1e-9);
+        return Math.round(bucketIndex * bucketSize * 1e6) / 1e6;
     }
 
     /**

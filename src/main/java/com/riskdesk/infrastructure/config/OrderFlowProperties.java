@@ -28,6 +28,7 @@ public class OrderFlowProperties {
     private Spoofing spoofing = new Spoofing();
     private FlashCrash flashCrash = new FlashCrash();
     private TickChart tickChart = new TickChart();
+    private Footprint footprint = new Footprint();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -55,6 +56,8 @@ public class OrderFlowProperties {
     public void setFlashCrash(FlashCrash flashCrash) { this.flashCrash = flashCrash; }
     public TickChart getTickChart() { return tickChart; }
     public void setTickChart(TickChart tickChart) { this.tickChart = tickChart; }
+    public Footprint getFootprint() { return footprint; }
+    public void setFootprint(Footprint footprint) { this.footprint = footprint; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -389,5 +392,30 @@ public class OrderFlowProperties {
         public void setTicksPerBar(Map<String, Integer> v) { this.ticksPerBar = v; }
         public int getMaxBars() { return maxBars; }
         public void setMaxBars(int v) { this.maxBars = v; }
+    }
+
+    /** Footprint chart bars (UC-OF-011): clock-aligned bars of classified tick volume per price bucket. */
+    public static class Footprint {
+        /** Bar duration in minutes, aligned to the wall clock (10 → 14:00, 14:10, …). */
+        private int barMinutes = 10;
+        /**
+         * Per-instrument price bucket size (points). A trade is attributed to the bucket
+         * whose lower bound it falls into. Instruments not listed fall back to their
+         * native tick size — which is usually far too granular for reading a footprint
+         * (MNQ at 0.25 produces hundreds of one-lot levels).
+         */
+        private Map<String, Double> bucketSize = new HashMap<>(Map.of(
+            "MNQ", 5.0,   // 20 ticks
+            "MCL", 0.05   // 5 ticks
+        ));
+        /** Max bars returned by the history endpoint. */
+        private int historyMaxBars = 50;
+
+        public int getBarMinutes() { return barMinutes; }
+        public void setBarMinutes(int v) { this.barMinutes = v; }
+        public Map<String, Double> getBucketSize() { return bucketSize; }
+        public void setBucketSize(Map<String, Double> v) { this.bucketSize = v; }
+        public int getHistoryMaxBars() { return historyMaxBars; }
+        public void setHistoryMaxBars(int v) { this.historyMaxBars = v; }
     }
 }

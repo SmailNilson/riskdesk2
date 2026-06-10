@@ -5,15 +5,21 @@ import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
 import com.riskdesk.infrastructure.persistence.entity.AbsorptionEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.IcebergEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.SpoofingEventEntity;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.riskdesk.domain.orderflow.model.FootprintBar;
+import com.riskdesk.domain.orderflow.model.FootprintLevel;
 import com.riskdesk.application.dto.AbsorptionEventView;
 import com.riskdesk.application.dto.CycleEventView;
 import com.riskdesk.application.dto.DistributionEventView;
@@ -26,7 +32,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Application service that exposes persisted order-flow events (iceberg, absorption,
@@ -48,7 +56,9 @@ public class OrderFlowHistoryService {
     private final JpaDistributionEventRepository distributionRepository;
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
+    private final JpaFootprintBarRepository footprintBarRepository;
     private final OrderFlowProperties properties;
+    private final ObjectMapper objectMapper;
 
     public OrderFlowHistoryService(JpaIcebergEventRepository icebergRepository,
                                    JpaAbsorptionEventRepository absorptionRepository,
@@ -56,14 +66,18 @@ public class OrderFlowHistoryService {
                                    JpaDistributionEventRepository distributionRepository,
                                    JpaMomentumEventRepository momentumRepository,
                                    JpaCycleEventRepository cycleRepository,
-                                   OrderFlowProperties properties) {
+                                   JpaFootprintBarRepository footprintBarRepository,
+                                   OrderFlowProperties properties,
+                                   ObjectMapper objectMapper) {
         this.icebergRepository = icebergRepository;
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
         this.distributionRepository = distributionRepository;
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
+        this.footprintBarRepository = footprintBarRepository;
         this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional(readOnly = true)
@@ -116,6 +130,44 @@ public class OrderFlowHistoryService {
             cycleRepository.findByInstrumentAndConfidenceGreaterThanEqualOrderByTimestampDesc(
                 instrument, minConfidence, PageRequest.of(0, capped));
         return rows.stream().map(OrderFlowHistoryService::toView).toList();
+    }
+
+    /**
+     * Most recent closed footprint bars for an instrument, newest first. The per-bucket
+     * profile is rebuilt from the persisted JSON; bars whose profile fails to parse are
+     * returned with an empty level map rather than dropped.
+     */
+    @Transactional(readOnly = true)
+    public List<FootprintBar> recentFootprintBars(Instrument instrument, int limit) {
+        int capped = Math.min(Math.max(limit, 1), properties.getFootprint().getHistoryMaxBars());
+        List<FootprintBarEntity> rows =
+            footprintBarRepository.findByInstrumentOrderByBarTimestampDesc(instrument, PageRequest.of(0, capped));
+        return rows.stream().map(this::toBar).toList();
+    }
+
+    private FootprintBar toBar(FootprintBarEntity e) {
+        Map<Double, FootprintLevel> levels = new LinkedHashMap<>();
+        try {
+            if (e.getProfileJson() != null && !e.getProfileJson().isBlank()) {
+                List<FootprintLevel> parsed = objectMapper.readValue(
+                    e.getProfileJson(), new TypeReference<List<FootprintLevel>>() {});
+                for (FootprintLevel level : parsed) {
+                    levels.put(level.price(), level);
+                }
+            }
+        } catch (Exception ex) {
+            // tolerate malformed legacy rows — headline metrics below remain valid
+        }
+        return new FootprintBar(
+            e.getInstrument().name(),
+            e.getTimeframe(),
+            e.getBarTimestamp().getEpochSecond(),
+            levels,
+            e.getPocPrice(),
+            e.getTotalBuyVolume(),
+            e.getTotalSellVolume(),
+            e.getTotalDelta()
+        );
     }
 
     private static int clampLimit(int limit) {
