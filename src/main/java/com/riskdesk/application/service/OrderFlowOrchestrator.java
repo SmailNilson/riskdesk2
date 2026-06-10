@@ -402,9 +402,11 @@ public class OrderFlowOrchestrator {
                 continue;
             }
 
-            long ageSec = lastData == null ? -1 : (now - lastData.toEpochMilli()) / 1000;
-            log.warn("Depth freshness watchdog: {} frozen ({}s since last update) — cancelling + re-subscribing",
-                     instrument, ageSec);
+            String age = lastData == null
+                ? "no update since subscribe"
+                : (now - lastData.toEpochMilli()) / 1000 + "s since last update";
+            log.warn("Depth freshness watchdog: {} frozen ({}) — cancelling + re-subscribing",
+                     instrument, age);
             nativeClient.unsubscribeDepth(instrument);
             subscribedDepth.remove(instrument);
             depthSubscribedAt.remove(instrument);
@@ -1229,26 +1231,43 @@ public class OrderFlowOrchestrator {
                 continue;
             }
 
+            // Error code 200 ("No security definition") means the subscription contract itself is
+            // invalid — typically the resolver's provisional synthetic (conId=0) seeded while the
+            // gateway was unreachable. The maxStrikes backoff below targets a frozen TWS, where
+            // re-subscribing is futile; a bad contract is the opposite case: each eviction goes
+            // through resolve(), which retries the real resolution and eventually heals. So a bad
+            // contract never backs off permanently (churn stays bounded by allowResubscribe).
+            String lastErr = tickByTickClient.lastError(instrument);
+            boolean badContract = lastErr != null && lastErr.contains("code 200");
+
             // Backoff: stop churning once re-subscription has repeatedly failed to revive the feed.
-            if (deltaStaleStrikes.getOrDefault(instrument, 0) >= maxStrikes) continue;
+            if (!badContract && deltaStaleStrikes.getOrDefault(instrument, 0) >= maxStrikes) continue;
             // Shared rate cap — bounds reqId churn across all watchdog loops.
             if (!tickByTickClient.allowResubscribe(instrument)) continue;
 
-            long ageSec = lastClassified == null ? -1 : (now - lastClassified.toEpochMilli()) / 1000;
-            log.warn("Delta freshness watchdog: {} no classified tick for {}s — evicting for re-subscription",
-                     instrument, ageSec);
+            String age = lastClassified == null
+                ? "never (no classified tick since subscribe)"
+                : (now - lastClassified.toEpochMilli()) / 1000 + "s";
+            log.warn("Delta freshness watchdog: {} no classified tick for {} — evicting for re-subscription",
+                     instrument, age);
             tickByTickClient.cancelTickByTick(instrument);
             evictTickState(instrument);
             evictedAny = true;
 
             int strikes = deltaStaleStrikes.merge(instrument, 1, Integer::sum);
-            if (strikes >= maxStrikes) {
-                String err = tickByTickClient.lastError(instrument);
-                boolean competing = err != null && (err.contains("10197") || err.toLowerCase().contains("competing"));
+            if (strikes == maxStrikes) {
+                boolean competing = lastErr != null && (lastErr.contains("10197") || lastErr.toLowerCase().contains("competing"));
+                String hint;
+                if (badContract) {
+                    hint = " BAD CONTRACT (code 200): subscription contract not recognized by IBKR — "
+                         + "waiting for contract re-resolution (no backoff).";
+                } else if (competing) {
+                    hint = " COMPETING SESSION (10197): another session holds the tick line — close it or change the tick clientId.";
+                } else {
+                    hint = " Manual IB Gateway restart may be required.";
+                }
                 log.error("Delta freshness watchdog: {} stale {}x in a row — re-subscription not recovering.{}",
-                          instrument, strikes,
-                          competing ? " COMPETING SESSION (10197): another session holds the tick line — close it or change the tick clientId."
-                                    : " Manual IB Gateway restart may be required.");
+                          instrument, strikes, hint);
             }
         }
 

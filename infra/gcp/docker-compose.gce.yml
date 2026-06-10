@@ -60,7 +60,10 @@ services:
       - /var/lib/riskdesk/ibkr-settings:/home/ibgateway/tws_settings
       - /var/log/riskdesk/ibkr:/home/ibgateway/logs
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost ${IBKR_API_PORT:-4003} || exit 1"]
+      # The gateway image ships without `nc` — the old check always failed with
+      # "nc: not found", leaving the container permanently "unhealthy". Only bash
+      # is available in the image, so probe the API port via /dev/tcp instead.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/${IBKR_API_PORT:-4003}' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
