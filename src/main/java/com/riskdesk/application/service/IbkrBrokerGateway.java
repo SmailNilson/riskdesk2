@@ -29,4 +29,15 @@ public interface IbkrBrokerGateway {
     default BrokerOrderLookup findOrder(String requestedAccountId, String orderRef) {
         return BrokerOrderLookup.unavailable();
     }
+
+    /**
+     * Cancels a working broker order by its IBKR order id (the {@code ibkrOrderId} persisted on the
+     * execution row at submit time). Returns the broker's first cancel feedback ({@code Cancelled} /
+     * {@code PendingCancel} / {@code CancelRequested}); the row itself is finalized asynchronously by
+     * the {@code Cancelled} orderStatus callback through {@code ExecutionFillTrackingService}.
+     * Default: unsupported (gateway has no order cancellation).
+     */
+    default String cancelOrder(int ibkrOrderId) {
+        throw new UnsupportedOperationException(backendName() + " does not support order cancellation");
+    }
 }

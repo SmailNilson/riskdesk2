@@ -7,6 +7,7 @@ import com.ib.client.Decimal;
 import com.ib.client.Execution;
 import com.ib.client.ExecutionFilter;
 import com.ib.client.Order;
+import com.ib.client.OrderCancel;
 import com.ib.client.OrderState;
 import com.ib.client.OrderStatus;
 import com.ib.client.OrderType;
@@ -981,6 +982,78 @@ public class IbGatewayNativeClient {
                 brokerMsg != null ? brokerMsg : error.get(),
                 detail,
                 brokerOrderId);
+    }
+
+    /**
+     * Cancels a working order by its IBKR order id (the {@code ibkrOrderId} persisted on the
+     * execution row at submit time). Fire-and-confirm: waits up to {@code orderTimeout()} for the
+     * broker's first cancel feedback, but the row's lifecycle is NOT mutated here — the authoritative
+     * {@code Cancelled} orderStatus callback flows through {@code ExecutionFillTrackingService},
+     * which finalizes the row to CANCELLED (same path as an EOD-expired DAY order).
+     *
+     * <p>IBKR reports a successful cancel as error code 202 ("Order Canceled") on the cancel
+     * handler — treated as success here, not a failure. An explicit non-202 error (e.g. 161
+     * "Cannot cancel, order is already filled") throws so the caller can surface it.</p>
+     *
+     * @return the first cancel status reported by the broker ({@code Cancelled} / {@code
+     *         PendingCancel} / …), or {@code "CancelRequested"} when the ack window elapsed without
+     *         explicit feedback (the fill tracker still reconciles the row asynchronously).
+     */
+    public String cancelOrderById(int ibkrOrderId) {
+        if (ibkrOrderId <= 0) {
+            throw new IllegalArgumentException("ibkrOrderId must be > 0");
+        }
+        if (!ensureConnected()) {
+            throw new IllegalStateException("IB Gateway native API is not connected.");
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> status = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+
+        ApiController.IOrderCancelHandler handler = new ApiController.IOrderCancelHandler() {
+            @Override
+            public void orderStatus(String orderStatus) {
+                status.compareAndSet(null, orderStatus == null || orderStatus.isBlank()
+                    ? "CancelRequested" : orderStatus);
+                latch.countDown();
+            }
+
+            @Override
+            public void handle(int errorCode, String errorMsg) {
+                // 202 = "Order Canceled" — IBKR surfaces the SUCCESSFUL cancel through the error
+                // callback. Anything else (161 already-filled, 135 unknown id, …) is a real failure.
+                if (errorCode == 202) {
+                    status.compareAndSet(null, "Cancelled");
+                } else {
+                    error.compareAndSet(null, "IBKR cancel rejected (code=" + errorCode + "): "
+                        + (errorMsg == null || errorMsg.isBlank() ? "no detail" : errorMsg));
+                }
+                latch.countDown();
+            }
+        };
+
+        synchronized (orderPlacementLock) {
+            controller.cancelOrder(ibkrOrderId, new OrderCancel(), handler);
+        }
+
+        try {
+            latch.await(orderTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            try {
+                controller.removeOrderCancelHandler(handler);
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (error.get() != null) {
+            throw new IllegalStateException(error.get());
+        }
+        String result = status.get() != null ? status.get() : "CancelRequested";
+        log.info("IB Gateway cancel requested for order {} — broker says: {}", ibkrOrderId, result);
+        return result;
     }
 
 

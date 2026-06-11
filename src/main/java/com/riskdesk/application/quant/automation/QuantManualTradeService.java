@@ -82,10 +82,14 @@ public class QuantManualTradeService {
 
         validatePlanGeometry(req.direction(), entryPrice, req.stopLoss(), req.takeProfit1());
 
-        String brokerAccount = autoArmProps.getBrokerAccountId();
+        // Per-request account (chart trading passes the account selected in the IBKR panel) with
+        // the auto-arm config as fallback for the legacy ticket flow.
+        String brokerAccount = req.brokerAccountId() != null && !req.brokerAccountId().isBlank()
+            ? req.brokerAccountId()
+            : autoArmProps.getBrokerAccountId();
         if (brokerAccount == null || brokerAccount.isBlank()) {
             throw new IllegalStateException(
-                "riskdesk.quant.auto-arm.broker-account-id is required to place manual trades");
+                "a brokerAccountId (request) or riskdesk.quant.auto-arm.broker-account-id is required to place manual trades");
         }
 
         Instant now = clock.instant();
@@ -116,7 +120,11 @@ public class QuantManualTradeService {
             instrument, req.direction(), entryType, persisted.getNormalizedEntryPrice(),
             persisted.getVirtualStopLoss(), persisted.getVirtualTakeProfit(), quantity, persisted.getId());
 
-        if (entryType == ManualEntryType.MARKET) {
+        // MARKET always goes straight to the broker. A LIMIT goes straight too when the caller
+        // asks for it (chart trading: one click = one resting order at IBKR) — the legacy two-step
+        // flow (create PENDING, then POST /api/mentor/executions/{id}/submit-entry) stays the
+        // default for backward compatibility.
+        if (entryType == ManualEntryType.MARKET || Boolean.TRUE.equals(req.submitImmediately())) {
             return executionManagerService.submitEntryOrder(new SubmitEntryOrderCommand(
                 persisted.getId(),
                 now,
@@ -159,16 +167,15 @@ public class QuantManualTradeService {
     }
 
     public enum ManualDirection {
-        LONG("BUY"), SHORT("SELL");
+        LONG, SHORT;
 
-        private final String action;
-
-        ManualDirection(String action) {
-            this.action = action;
-        }
-
+        /**
+         * Broker-side action token persisted on the execution row. MUST be "LONG"/"SHORT" — the
+         * gateway maps the token with {@code "SHORT"||"SELL" → SELL, else BUY}, so the previous
+         * "BUY"/"SELL" convention sent every manual/auto-arm SHORT to IBKR as a BUY.
+         */
         public String action() {
-            return action;
+            return name();
         }
     }
 
@@ -183,7 +190,15 @@ public class QuantManualTradeService {
         BigDecimal stopLoss,
         BigDecimal takeProfit1,
         BigDecimal takeProfit2,
-        Integer quantity
+        Integer quantity,
+        String brokerAccountId,
+        Boolean submitImmediately
     ) {
+        /** Legacy 7-arg shape (pre chart-trading) — used by existing tests/callers. */
+        public ManualTradeRequest(ManualDirection direction, ManualEntryType entryType, BigDecimal entryPrice,
+                                  BigDecimal stopLoss, BigDecimal takeProfit1, BigDecimal takeProfit2,
+                                  Integer quantity) {
+            this(direction, entryType, entryPrice, stopLoss, takeProfit1, takeProfit2, quantity, null, null);
+        }
     }
 }

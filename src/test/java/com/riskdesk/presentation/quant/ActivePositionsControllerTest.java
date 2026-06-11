@@ -84,6 +84,36 @@ class ActivePositionsControllerTest {
         assertThat(response.getBody().status()).isEqualTo(ExecutionStatus.CLOSED);
     }
 
+    @Test
+    void cancel_entry_returns_updated_view() {
+        ActivePositionView resting = sampleView(ExecutionStatus.ENTRY_SUBMITTED);
+        when(service.cancelEntry(42L, "tester")).thenReturn(Optional.of(resting));
+
+        ResponseEntity<ActivePositionView> response = controller.cancelEntry(42L, "tester");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody().status()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void cancel_entry_unknown_id_returns_404() {
+        when(service.cancelEntry(99L, "tester")).thenReturn(Optional.empty());
+
+        ResponseEntity<ActivePositionView> response = controller.cancelEntry(99L, "tester");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @Test
+    void cancel_entry_with_fills_returns_409() {
+        when(service.cancelEntry(42L, "tester"))
+            .thenThrow(new IllegalStateException("has fills — use close"));
+
+        ResponseEntity<ActivePositionView> response = controller.cancelEntry(42L, "tester");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    }
+
     private static ActivePositionView sampleView(ExecutionStatus status) {
         return new ActivePositionView(
             42L,

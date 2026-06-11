@@ -166,6 +166,27 @@ If a change touches several layers:
 - if a required build dependency is not published to Maven Central, vendor it in a repo-local Maven repository so Docker and CI builds stay reproducible
 - GCE deploy workflows must use a named, least-privileged deploy user with explicit passwordless `sudo`; do not hardcode direct `root` SSH access in CI
 
+### Execution Row Action-Token Rule
+
+- `trade_executions.action` MUST store the broker-side token `"LONG"` / `"SHORT"` — never
+  `"BUY"` / `"SELL"`. The gateway maps `"SHORT"` (and, defensively, legacy `"SELL"`) to
+  `Action.SELL` and everything else to `Action.BUY`, so a `"SELL"`-token row submitted to the
+  broker historically became a BUY (real bug, fixed 2026-06-11).
+- View DTOs (`ActivePositionView`, `AutoArmStatusResponse`) may keep tolerating both tokens
+  for display, but no new writer may persist `"BUY"`/`"SELL"`.
+
+### Operator Close / Cancel Rule
+
+- An operator-facing "close" on a broker-known execution row MUST route a `CLOSE`/`FLATTEN`
+  intent through the unified `OrderRouter` — never mark `EXIT_SUBMITTED` locally without a
+  broker order (that strands the live position; only `SKIPPED_IBKR_DISABLED` environments may
+  fall back to the local mark).
+- An unfilled resting entry is CANCELLED at the broker (`cancelOrderById` by `ibkrOrderId`),
+  never "closed" — a reducing order against an unfilled entry is naked once the entry fills.
+- After a broker cancel request, the row's CANCELLED transition belongs to the broker's
+  `Cancelled` callback (`ExecutionFillTrackingService`), not to the requesting service — a
+  cancel raced by a fill must still resolve to ACTIVE.
+
 ### Frontend Workflow Rule
 
 When extending Mentor behavior in the UI:

@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   ColorType,
@@ -10,15 +10,20 @@ import {
   IPriceLine,
   ISeriesApi,
   LineStyle,
+  MouseEventParams,
   UTCTimestamp,
 } from 'lightweight-charts';
 import { TickBar, useOrderFlow } from '@/app/hooks/useOrderFlow';
-import { api, IndicatorSnapshot } from '@/app/lib/api';
+import { useActivePositions } from '@/app/hooks/useActivePositions';
+import { api, ActivePositionView, IndicatorSnapshot } from '@/app/lib/api';
 
 interface TickChartProps {
   selectedInstrument?: string;
   /** Dashboard's indicator snapshot — supplies SMC levels for the overlay. */
   snapshot?: IndicatorSnapshot | null;
+  /** IBKR account selected in the portfolio panel — target of chart-trading orders.
+   *  Falls back server-side to riskdesk.quant.auto-arm.broker-account-id when null. */
+  brokerAccountId?: string | null;
 }
 
 /** Base bars kept client-side for re-aggregation (matches backend ring buffer). */
@@ -27,6 +32,34 @@ const MAX_BASE_BARS = 3000;
 const MAX_RENDERED_BARS = 300;
 /** User-selectable bar sizes offered on top of the per-instrument base size. */
 const EXTRA_BAR_SIZES = [1000, 2000];
+
+/** Tick size / display decimals / default SL-TP offsets (in points) per instrument.
+ *  SL/TP pre-fill the ticket only — the operator edits them before confirming. */
+const INSTRUMENT_META: Record<string, { tick: number; decimals: number; slOffset: number; tpOffset: number }> = {
+  MNQ: { tick: 0.25, decimals: 2, slOffset: 10, tpOffset: 15 },
+  MCL: { tick: 0.01, decimals: 2, slOffset: 0.25, tpOffset: 0.4 },
+  MGC: { tick: 0.1, decimals: 1, slOffset: 3, tpOffset: 4.5 },
+  E6: { tick: 0.00005, decimals: 5, slOffset: 0.002, tpOffset: 0.003 },
+};
+
+const TERMINAL_STATUSES = new Set(['CLOSED', 'CANCELLED', 'REJECTED', 'FAILED']);
+/** Entry not (fully) at the broker yet — the action is CANCEL, not close. */
+const RESTING_STATUSES = new Set(['PENDING_ENTRY_SUBMISSION', 'ENTRY_SUBMITTED']);
+
+function roundToTick(price: number, tick: number, decimals: number): number {
+  return Number((Math.round(price / tick) * tick).toFixed(decimals));
+}
+
+function num(v: number | string | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+interface PendingTicket {
+  direction: 'LONG' | 'SHORT';
+  price: number;
+}
 
 /**
  * Re-aggregates base tick bars into larger constant-tick-count bars by grouping
@@ -104,6 +137,15 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  * blocks, strong/weak highs/lows and premium/discount/equilibrium, sourced from
  * the Dashboard's indicator snapshot (selected timeframe, 30s poll).
  *
+ * Chart trading (TRADE toggle, off by default): when armed, a click on the chart
+ * opens a context menu quoting the clicked price (tick-rounded); choosing
+ * Acheter/Vendre opens a confirmation ticket (price / qty / SL / TP editable)
+ * which submits a real IBKR order through POST /api/quant/manual-trade
+ * (submitImmediately). Working orders and the live position are drawn as price
+ * lines fed by /topic/positions; the rows under the chart cancel a resting entry
+ * (broker cancel) or flatten a live position (unified-router marketable close).
+ * SL/TP lines are VIRTUAL — informative levels, not broker bracket orders.
+ *
  * Data: REST seed (/api/order-flow/tick-bars) + live merge from /topic/tick-bars
  * (handled in useOrderFlow, keyed by bar seq).
  *
@@ -111,21 +153,37 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  * close within the same second on a busy tape, so times are de-duplicated by
  * bumping +1s when needed (label drift of a few seconds is acceptable here).
  */
-function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
+function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartProps) {
   const { tickBars } = useOrderFlow();
+  const { positions, close, cancelEntry, refresh } = useActivePositions();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const deltaSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const smcLinesRef = useRef<IPriceLine[]>([]);
+  const tradeLinesRef = useRef<IPriceLine[]>([]);
   const lastCloseRef = useRef<number | null>(null);
   const [seedBars, setSeedBars] = useState<TickBar[]>([]);
   const [barSize, setBarSize] = useState<number | null>(null); // null = base size
   const [showSmc, setShowSmc] = useState(true);
 
+  // ── Chart-trading state ──────────────────────────────────────────────
+  const [tradeArmed, setTradeArmed] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; price: number } | null>(null);
+  const [ticket, setTicket] = useState<PendingTicket | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  /** Two-step inline confirm for cancel/close row buttons: executionId pending confirmation. */
+  const [confirmAction, setConfirmAction] = useState<number | null>(null);
+
+  const meta = selectedInstrument ? INSTRUMENT_META[selectedInstrument] : undefined;
+
   // REST seed on instrument switch (the WS tail only carries the last bars).
   useEffect(() => {
     setBarSize(null); // base size differs per instrument — reset the selector
+    setMenu(null);
+    setTicket(null);
+    setConfirmAction(null);
     if (!selectedInstrument) { setSeedBars([]); return; }
     let cancelled = false;
     api.getTickBars(selectedInstrument, MAX_BASE_BARS).then(bars => {
@@ -160,6 +218,12 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
   }, [baseBars, baseSize, effectiveSize]);
 
   const lastBar = bars.length > 0 ? bars[bars.length - 1] : null;
+
+  /** Open (non-terminal) executions on the displayed instrument — drives lines + action rows. */
+  const openPositions = useMemo(
+    () => positions.filter(p => p.instrument === selectedInstrument && !TERMINAL_STATUSES.has(p.status)),
+    [positions, selectedInstrument],
+  );
 
   // Chart lifecycle
   useEffect(() => {
@@ -210,6 +274,7 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
       candleSeriesRef.current = null;
       deltaSeriesRef.current = null;
       smcLinesRef.current = [];
+      tradeLinesRef.current = [];
     };
   }, []);
 
@@ -288,6 +353,86 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
     add(snapshot.discountZoneBottom, '#22c55e80', LineStyle.Dotted, 'Discount');
   }, [showSmc, snapshot, selectedInstrument]);
 
+  // Trading overlay — entry / SL / TP price lines for working orders and the live
+  // position on this instrument, fed by /topic/positions (5s heartbeat + on change).
+  useEffect(() => {
+    const candles = candleSeriesRef.current;
+    if (!candles) return;
+    for (const line of tradeLinesRef.current) candles.removePriceLine(line);
+    tradeLinesRef.current = [];
+
+    const add = (price: number | null, color: string, style: LineStyle, width: 1 | 2, title: string) => {
+      if (price == null) return;
+      tradeLinesRef.current.push(candles.createPriceLine({
+        price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title,
+      }));
+    };
+
+    for (const p of openPositions) {
+      const entry = num(p.entryPrice);
+      const qty = p.quantity ?? 1;
+      const long = p.direction === 'LONG';
+      if (RESTING_STATUSES.has(p.status)) {
+        add(entry, '#f59e0b', LineStyle.Dashed, 1,
+          `${long ? 'BUY' : 'SELL'} LMT ${qty}`);
+      } else {
+        const pnl = num(p.pnlDollars);
+        add(entry, long ? '#10b981' : '#ef4444', LineStyle.Solid, 2,
+          `${p.direction} ${qty}${pnl != null ? ` ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}$` : ''}`);
+        add(num(p.stopLoss), '#ef4444', LineStyle.Dotted, 1, 'SL');
+        add(num(p.takeProfit1), '#10b981', LineStyle.Dotted, 1, 'TP');
+      }
+    }
+  }, [openPositions]);
+
+  // Chart-trading click capture — armed only while the TRADE toggle is on.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candles = candleSeriesRef.current;
+    if (!chart || !candles || !tradeArmed || !selectedInstrument || !meta) return;
+    const handler = (param: MouseEventParams) => {
+      if (!param.point) return;
+      const raw = candles.coordinateToPrice(param.point.y);
+      if (raw == null) return;
+      const price = roundToTick(Number(raw), meta.tick, meta.decimals);
+      if (!Number.isFinite(price) || price <= 0) return;
+      setTicket(null);
+      setMenu({ x: param.point.x, y: param.point.y, price });
+    };
+    chart.subscribeClick(handler);
+    return () => chart.unsubscribeClick(handler);
+  }, [tradeArmed, selectedInstrument, meta]);
+
+  // Auto-clear the toast.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Reset a pending inline confirm after a few seconds without the second click.
+  useEffect(() => {
+    if (confirmAction == null) return;
+    const t = setTimeout(() => setConfirmAction(null), 4000);
+    return () => clearTimeout(t);
+  }, [confirmAction]);
+
+  const handleRowAction = useCallback(async (p: ActivePositionView) => {
+    if (confirmAction !== p.executionId) {
+      setConfirmAction(p.executionId);
+      return;
+    }
+    setConfirmAction(null);
+    const resting = RESTING_STATUSES.has(p.status);
+    const result = resting ? await cancelEntry(p.executionId) : await close(p.executionId);
+    if (result) {
+      setNotice({ kind: 'ok', text: resting ? 'Annulation envoyée au broker' : 'Clôture envoyée au broker' });
+    } else {
+      setNotice({ kind: 'err', text: resting ? 'Annulation refusée — voir Active Positions' : 'Clôture refusée — voir Active Positions' });
+    }
+    void refresh();
+  }, [confirmAction, cancelEntry, close, refresh]);
+
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/60">
@@ -322,6 +467,19 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
           >
             SMC
           </button>
+          {meta && (
+            <button
+              onClick={() => { setTradeArmed(v => !v); setMenu(null); setTicket(null); }}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                tradeArmed
+                  ? 'bg-amber-900/70 text-amber-300 ring-1 ring-amber-600/60'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
+              }`}
+              title="Mode trading : un clic sur le chart propose un ordre Achat/Vente au prix cliqué (confirmation requise avant envoi IBKR)"
+            >
+              TRADE
+            </button>
+          )}
           {bars.length > 0 && (
             <span className="text-[10px] text-zinc-600">{bars.length} bars</span>
           )}
@@ -338,7 +496,7 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
           </div>
         )}
       </div>
-      <div className="p-1">
+      <div className="p-1 relative">
         {/* Keep the container mounted so the chart instance survives empty states. */}
         <div ref={containerRef} className={`w-full ${bars.length === 0 ? 'hidden' : ''}`} />
         {bars.length === 0 && (
@@ -348,6 +506,242 @@ function TickChart({ selectedInstrument, snapshot }: TickChartProps) {
               : 'Select an instrument'}
           </div>
         )}
+
+        {/* Click-to-trade context menu */}
+        {menu && meta && selectedInstrument && (
+          <>
+            <div className="absolute inset-0 z-10" onClick={() => setMenu(null)} />
+            <div
+              className="absolute z-20 rounded border border-zinc-700 bg-zinc-900 shadow-lg text-[11px] overflow-hidden"
+              style={{
+                left: Math.min(menu.x + 8, (containerRef.current?.clientWidth ?? 300) - 170),
+                top: Math.max(menu.y - 30, 4),
+              }}
+            >
+              <button
+                className="block w-full text-left px-3 py-1.5 text-emerald-300 hover:bg-emerald-900/40 font-medium"
+                onClick={() => { setTicket({ direction: 'LONG', price: menu.price }); setMenu(null); }}
+              >
+                Acheter LMT @ {menu.price.toFixed(meta.decimals)}
+              </button>
+              <button
+                className="block w-full text-left px-3 py-1.5 text-red-300 hover:bg-red-900/40 font-medium border-t border-zinc-800"
+                onClick={() => { setTicket({ direction: 'SHORT', price: menu.price }); setMenu(null); }}
+              >
+                Vendre LMT @ {menu.price.toFixed(meta.decimals)}
+              </button>
+              <button
+                className="block w-full text-left px-3 py-1 text-zinc-500 hover:text-zinc-300 border-t border-zinc-800"
+                onClick={() => setMenu(null)}
+              >
+                Annuler
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Order ticket — the confirmation step before anything reaches IBKR */}
+        {ticket && meta && selectedInstrument && (
+          <TradeTicket
+            instrument={selectedInstrument}
+            meta={meta}
+            ticket={ticket}
+            brokerAccountId={brokerAccountId ?? null}
+            submitting={submitting}
+            onCancel={() => setTicket(null)}
+            onSubmit={async (payload) => {
+              setSubmitting(true);
+              try {
+                const result = await api.submitManualTrade(selectedInstrument, payload);
+                setNotice({
+                  kind: 'ok',
+                  text: `Ordre ${payload.direction === 'LONG' ? 'ACHAT' : 'VENTE'} ${payload.entryType} envoyé — statut ${result.status}`,
+                });
+                setTicket(null);
+                void refresh();
+              } catch (err) {
+                setNotice({ kind: 'err', text: err instanceof Error ? err.message : 'Envoi refusé' });
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+          />
+        )}
+
+        {/* Toast */}
+        {notice && (
+          <div className={`absolute top-2 left-1/2 -translate-x-1/2 z-30 px-3 py-1 rounded text-[11px] font-medium shadow ${
+            notice.kind === 'ok' ? 'bg-emerald-900/90 text-emerald-200' : 'bg-red-900/90 text-red-200'
+          }`}>
+            {notice.text}
+          </div>
+        )}
+      </div>
+
+      {/* Open orders / position rows for this instrument */}
+      {openPositions.length > 0 && (
+        <div className="border-t border-zinc-800/60 divide-y divide-zinc-800/40">
+          {openPositions.map(p => {
+            const resting = RESTING_STATUSES.has(p.status);
+            const entry = num(p.entryPrice);
+            const pnl = num(p.pnlDollars);
+            const confirming = confirmAction === p.executionId;
+            return (
+              <div key={p.executionId} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                  p.direction === 'LONG' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-red-900/50 text-red-300'
+                }`}>
+                  {p.direction} {p.quantity ?? 1}
+                </span>
+                <span className={`text-[10px] ${resting ? 'text-amber-400' : 'text-zinc-400'}`}>
+                  {resting ? `ordre ${p.status === 'PENDING_ENTRY_SUBMISSION' ? 'en préparation' : 'au broker'}` : p.status}
+                </span>
+                <span className="text-zinc-300">
+                  @ {entry != null && meta ? entry.toFixed(meta.decimals) : '—'}
+                </span>
+                {!resting && pnl != null && (
+                  <span className={pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                    {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}$
+                  </span>
+                )}
+                <span className="flex-1" />
+                <button
+                  onClick={() => void handleRowAction(p)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                    confirming
+                      ? 'bg-red-700 text-white'
+                      : resting
+                        ? 'bg-zinc-800 text-amber-300 hover:bg-amber-900/50'
+                        : 'bg-zinc-800 text-red-300 hover:bg-red-900/50'
+                  }`}
+                >
+                  {confirming ? 'Confirmer ?' : resting ? 'Annuler' : 'Fermer'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Confirmation ticket. Pre-fills SL/TP at per-instrument default offsets from the
+ * clicked price — the operator can edit every field before the order is sent. The
+ * SL/TP are persisted as VIRTUAL levels (drawn on the chart, no broker brackets);
+ * exits remain operator-driven (Fermer) in this slice.
+ */
+function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, onCancel, onSubmit }: {
+  instrument: string;
+  meta: { tick: number; decimals: number; slOffset: number; tpOffset: number };
+  ticket: PendingTicket;
+  brokerAccountId: string | null;
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: import('@/app/components/quant/types').ManualTradeRequest) => Promise<void>;
+}) {
+  const long = ticket.direction === 'LONG';
+  const [entryType, setEntryType] = useState<'LIMIT' | 'MARKET'>('LIMIT');
+  const [price, setPrice] = useState(ticket.price.toFixed(meta.decimals));
+  const [qty, setQty] = useState('1');
+  const [sl, setSl] = useState(
+    roundToTick(long ? ticket.price - meta.slOffset : ticket.price + meta.slOffset, meta.tick, meta.decimals).toFixed(meta.decimals),
+  );
+  const [tp, setTp] = useState(
+    roundToTick(long ? ticket.price + meta.tpOffset : ticket.price - meta.tpOffset, meta.tick, meta.decimals).toFixed(meta.decimals),
+  );
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const entryPrice = Number(price);
+    const stopLoss = Number(sl);
+    const takeProfit = Number(tp);
+    const quantity = Math.max(1, Math.floor(Number(qty) || 1));
+    if (entryType === 'LIMIT' && (!Number.isFinite(entryPrice) || entryPrice <= 0)) {
+      setLocalError('Prix limite invalide'); return;
+    }
+    if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
+      setLocalError('SL / TP invalides'); return;
+    }
+    const ref = entryType === 'LIMIT' ? entryPrice : ticket.price;
+    if (long && (stopLoss >= ref || takeProfit <= ref)) {
+      setLocalError('LONG : SL doit être sous le prix, TP au-dessus'); return;
+    }
+    if (!long && (stopLoss <= ref || takeProfit >= ref)) {
+      setLocalError('SHORT : SL doit être au-dessus du prix, TP en dessous'); return;
+    }
+    setLocalError(null);
+    await onSubmit({
+      direction: ticket.direction,
+      entryType,
+      entryPrice: entryType === 'LIMIT' ? entryPrice : null,
+      stopLoss,
+      takeProfit1: takeProfit,
+      takeProfit2: null,
+      quantity,
+      brokerAccountId,
+      submitImmediately: true,
+    });
+  };
+
+  const inputCls = 'w-full bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-[11px] text-zinc-200 focus:outline-none focus:border-zinc-500';
+
+  return (
+    <div className="absolute top-2 right-2 z-20 w-52 rounded border border-zinc-700 bg-zinc-900 shadow-xl p-2.5 text-[11px]">
+      <div className={`font-semibold mb-1.5 ${long ? 'text-emerald-300' : 'text-red-300'}`}>
+        {long ? 'ACHAT' : 'VENTE'} {instrument}
+        <span className="text-zinc-500 font-normal"> · {brokerAccountId ?? 'compte par défaut'}</span>
+      </div>
+      <div className="flex gap-1 mb-1.5">
+        {(['LIMIT', 'MARKET'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setEntryType(t)}
+            className={`flex-1 py-0.5 rounded text-[10px] font-medium ${
+              entryType === t ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            {t === 'LIMIT' ? 'LMT' : 'MKT'}
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 mb-1.5">
+        <label className="text-zinc-500">
+          Prix
+          <input value={price} onChange={e => setPrice(e.target.value)} disabled={entryType === 'MARKET'}
+            className={`${inputCls} ${entryType === 'MARKET' ? 'opacity-40' : ''}`} />
+        </label>
+        <label className="text-zinc-500">
+          Qté
+          <input value={qty} onChange={e => setQty(e.target.value)} className={inputCls} />
+        </label>
+        <label className="text-zinc-500">
+          SL (virtuel)
+          <input value={sl} onChange={e => setSl(e.target.value)} className={inputCls} />
+        </label>
+        <label className="text-zinc-500">
+          TP (virtuel)
+          <input value={tp} onChange={e => setTp(e.target.value)} className={inputCls} />
+        </label>
+      </div>
+      <p className="text-[10px] text-zinc-600 mb-1.5">
+        SL/TP virtuels : tracés sur le chart, pas d&apos;ordres bracket broker — sortie via « Fermer ».
+      </p>
+      {localError && <p className="text-[10px] text-red-400 mb-1.5">{localError}</p>}
+      <div className="flex gap-1.5">
+        <button
+          onClick={() => void submit()}
+          disabled={submitting}
+          className={`flex-1 py-1 rounded font-semibold text-[11px] disabled:opacity-50 ${
+            long ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-red-700 hover:bg-red-600 text-white'
+          }`}
+        >
+          {submitting ? 'Envoi…' : `Confirmer ${long ? 'ACHAT' : 'VENTE'}`}
+        </button>
+        <button onClick={onCancel} className="px-2 py-1 rounded bg-zinc-800 text-zinc-400 hover:text-zinc-200 text-[11px]">
+          Annuler
+        </button>
       </div>
     </div>
   );
