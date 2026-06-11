@@ -7,6 +7,8 @@ import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationPublisher;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationStatus;
+import com.riskdesk.domain.quant.simulation.QuantSimExitPolicy;
+import com.riskdesk.domain.quant.simulation.QuantSimStopMode;
 import com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -14,7 +16,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -45,14 +50,24 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p><b>Exit rules</b> (whichever triggers first):
  * <ul>
- *   <li>Pattern action seen from the trade direction flips to {@code AVOID} →
- *       {@link Quant7GatesSimulationStatus#CLOSED_FLOW_AVOID} at live price.</li>
- *   <li>Live price crosses the configured TP1/TP2 offset →
+ *   <li>Live price crosses the configured SL / TP1 / TP2 offset →
+ *       {@link Quant7GatesSimulationStatus#CLOSED_SL} /
  *       {@link Quant7GatesSimulationStatus#CLOSED_TP1} /
  *       {@link Quant7GatesSimulationStatus#CLOSED_TP2}.</li>
- *   <li>Live price crosses the configured SL offset →
- *       {@link Quant7GatesSimulationStatus#CLOSED_SL}.</li>
+ *   <li>Pattern action flips to {@code AVOID} for the trade direction —
+ *       handled per the configured {@link QuantSimExitPolicy} (ignored under
+ *       {@code SLTP_ONLY}, profit-gated under {@code FLOW_AVOID_IN_PROFIT},
+ *       immediate under legacy {@code FLOW_AVOID}).</li>
+ *   <li>EOD flat — open rows are flattened at the live price ahead of the
+ *       17:00 ET CME break ({@link Quant7GatesSimulationStatus#CLOSED_EOD})
+ *       and fresh entries are blocked in the run-up window.</li>
  * </ul>
+ *
+ * <p>Entry additionally requires HTF trend alignment (1h EMA20/50 by default)
+ * when {@code riskdesk.quant.sim.htf-filter-enabled} is on, and SL/TP offsets
+ * are ATR-sized under {@link QuantSimStopMode#ATR}. The policy bundle was
+ * calibrated on the first 863 recorded trades — see
+ * {@code docs/AI_HANDOFF.md} ("Quant 7-Gates exit recalibration").
  *
  * <p>The service is driven from {@code QuantGateService.scan(...)} after the
  * pattern + price are resolved, so the harness sees the exact same data the
@@ -70,10 +85,21 @@ public class Quant7GatesSimulationService {
     static final String TAG_ABS_BULL = "[ABS BULL ACTIVE]";
     static final String TAG_ABS_BEAR = "[ABS BEAR ACTIVE]";
 
+    /** ET zone for the EOD-flat / entry-blackout windows (DST-aware, never hardcoded UTC hours). */
+    private static final ZoneId ET = ZoneId.of("America/New_York");
+
+    /** End of the EOD windows — the CME break ends and a fresh session opens at 18:00 ET. */
+    private static final LocalTime SESSION_REOPEN_ET = LocalTime.of(18, 0);
+
     private final ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider;
     private final ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider;
     private final ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider;
+    private final QuantSimProperties props;
+    private final ObjectProvider<QuantSimMarketContext> marketContextProvider;
     private final AtomicLong sequence = new AtomicLong(1);
+
+    /** Injectable clock so the ET-window logic is testable (incl. DST cases). */
+    private Clock clock = Clock.systemUTC();
 
     /**
      * Open + closed simulations bucketed by instrument. Closed entries are
@@ -85,7 +111,8 @@ public class Quant7GatesSimulationService {
 
     /**
      * Backward-compatible constructor (pre Auto-IBKR). Wires the execution bridge
-     * to a no-op provider so unit tests that omit it stay paper-only.
+     * to a no-op provider so unit tests that omit it stay paper-only. Runs the
+     * LEGACY policy bundle (immediate flow-AVOID, fixed offsets, no HTF/EOD).
      */
     public Quant7GatesSimulationService(
             ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
@@ -93,14 +120,30 @@ public class Quant7GatesSimulationService {
         this(publisherProvider, repositoryProvider, new EmptyObjectProvider<>());
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    /**
+     * Backward-compatible constructor (pre exit-policy recalibration). Runs the
+     * LEGACY policy bundle so pre-existing tests keep their semantics.
+     */
     public Quant7GatesSimulationService(
             ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
             ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider,
             ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider) {
+        this(publisherProvider, repositoryProvider, bridgeProvider,
+            QuantSimProperties.legacyDefaults(), new EmptyObjectProvider<>());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public Quant7GatesSimulationService(
+            ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
+            ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider,
+            ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider,
+            QuantSimProperties props,
+            ObjectProvider<QuantSimMarketContext> marketContextProvider) {
         this.publisherProvider = publisherProvider;
         this.repositoryProvider = repositoryProvider;
         this.bridgeProvider = bridgeProvider;
+        this.props = props;
+        this.marketContextProvider = marketContextProvider;
     }
 
     /**
@@ -150,10 +193,30 @@ public class Quant7GatesSimulationService {
         if (snapshot == null || snapshot.price() == null) return;
         double livePrice = snapshot.price();
         String liveSource = snapshot.priceSource() == null ? "" : snapshot.priceSource();
-        Instant now = Instant.now();
+        Instant now = Instant.now(clock);
+
+        List<Quant7GatesSimulation> rows = bucket(instrument);
+
+        // 0) EOD flat — ahead of the 17:00 ET CME break every open row is
+        //    flattened at the live price (mirrors the Auto-IBKR force-close so
+        //    the paper row and its live mirror resolve together) and no fresh
+        //    entry is considered until the 18:00 ET reopen.
+        if (props.isEodFlatEnabled() && inEtWindow(now, props.getEodFlatFrom())) {
+            for (int i = 0; i < rows.size(); i++) {
+                Quant7GatesSimulation sim = rows.get(i);
+                if (!sim.isOpen()) continue;
+                Quant7GatesSimulation closed = sim.close(livePrice, liveSource, now,
+                    "EOD flat — pre-break 17:00 ET", Quant7GatesSimulationStatus.CLOSED_EOD);
+                rows.set(i, closed);
+                publish(closed);
+                persist(closed);
+                routeClose(closed);
+            }
+            capClosedHistory(instrument);
+            return;
+        }
 
         // 1) Process exits on currently-open simulations.
-        List<Quant7GatesSimulation> rows = bucket(instrument);
         for (int i = 0; i < rows.size(); i++) {
             Quant7GatesSimulation sim = rows.get(i);
             if (!sim.isOpen()) continue;
@@ -174,11 +237,26 @@ public class Quant7GatesSimulationService {
             }
         }
 
-        // 2) Consider opening a fresh simulation on either side.
-        tryOpen(instrument, snapshot, pattern, Quant7GatesSimulation.Direction.LONG, livePrice, now);
-        tryOpen(instrument, snapshot, pattern, Quant7GatesSimulation.Direction.SHORT, livePrice, now);
+        // 2) Consider opening a fresh simulation on either side — unless we are
+        //    inside the pre-break entry blackout.
+        boolean entryBlocked = props.isEodFlatEnabled() && inEtWindow(now, props.getEntryBlackoutFrom());
+        if (!entryBlocked) {
+            tryOpen(instrument, snapshot, pattern, Quant7GatesSimulation.Direction.LONG, livePrice, now);
+            tryOpen(instrument, snapshot, pattern, Quant7GatesSimulation.Direction.SHORT, livePrice, now);
+        }
 
         capClosedHistory(instrument);
+    }
+
+    /**
+     * True when {@code now}, projected to ET wall-clock, falls in
+     * {@code [from, 18:00)} — the run-up to the CME break plus the break
+     * itself. DST is handled by the zone projection; weekends naturally fall
+     * outside because no scan ticks arrive without market data.
+     */
+    private static boolean inEtWindow(Instant now, LocalTime from) {
+        LocalTime et = now.atZone(ET).toLocalTime();
+        return !et.isBefore(from) && et.isBefore(SESSION_REOPEN_ET);
     }
 
     private void tryOpen(Instrument instrument,
@@ -190,18 +268,40 @@ public class Quant7GatesSimulationService {
         if (!isEntryQualified(pattern, direction)) return;
         if (hasOpen(instrument, direction)) return;
 
-        double sl;
-        double tp1;
-        double tp2;
-        if (direction == Quant7GatesSimulation.Direction.LONG) {
-            sl = snapshot.suggestedSL_LONG();
-            tp1 = snapshot.suggestedTP1_LONG();
-            tp2 = snapshot.suggestedTP2_LONG();
-        } else {
-            sl = snapshot.suggestedSL();
-            tp1 = snapshot.suggestedTP1();
-            tp2 = snapshot.suggestedTP2();
+        QuantSimMarketContext ctx = marketContextProvider == null
+            ? null : marketContextProvider.getIfAvailable();
+
+        // HTF trend filter — fail-closed: a counter-trend (or unverifiable)
+        // entry is skipped. Calibration showed counter-trend entries ran
+        // -0.29R/trade while HTF-aligned ones ran +0.32R/trade.
+        if (props.isHtfFilterEnabled()) {
+            Boolean aligned = ctx == null ? null : ctx.htfAligned(instrument, direction);
+            if (aligned == null || !aligned) {
+                log.debug("quant-sim entry skipped instr={} dir={} — HTF filter (aligned={})",
+                    instrument, direction, aligned);
+                return;
+            }
         }
+
+        double slOffset = QuantSnapshot.SL_OFFSET;
+        double tp1Offset = QuantSnapshot.TP1_OFFSET;
+        double tp2Offset = QuantSnapshot.TP2_OFFSET;
+        if (props.getStopMode() == QuantSimStopMode.ATR && ctx != null) {
+            Double atr = ctx.atr(instrument);
+            if (atr != null && atr > 0) {
+                slOffset = props.getSlAtrMult() * atr;
+                tp1Offset = props.getTp1AtrMult() * atr;
+                tp2Offset = props.getTp2AtrMult() * atr;
+            } else {
+                // Fixed fallback keeps the harness alive on a cold candle store,
+                // but it is MNQ-scaled — log so the operator sees the degradation.
+                log.warn("quant-sim ATR unavailable instr={} — falling back to fixed offsets", instrument);
+            }
+        }
+        double sign = direction == Quant7GatesSimulation.Direction.LONG ? 1.0 : -1.0;
+        double sl = livePrice - sign * slOffset;
+        double tp1 = livePrice + sign * tp1Offset;
+        double tp2 = livePrice + sign * tp2Offset;
 
         Quant7GatesSimulation opened = new Quant7GatesSimulation(
             sequence.getAndIncrement(),
@@ -262,18 +362,33 @@ public class Quant7GatesSimulationService {
             }
         }
 
-        // Flow flipped to AVOID for the active side → harness exit.
-        if (pattern != null) {
+        // Flow flipped to AVOID for the active side → harness exit, governed by
+        // the configured policy. SLTP_ONLY ignores the flip (calibration showed
+        // the immediate exit closed 79% of trades in a ~2-minute churn);
+        // FLOW_AVOID_IN_PROFIT only locks in gains, never realises a loss early.
+        if (props.getExitPolicy() != QuantSimExitPolicy.SLTP_ONLY && pattern != null) {
             PatternAnalysis.TradeBias bias = dir == Quant7GatesSimulation.Direction.LONG
                 ? PatternAnalysis.TradeBias.LONG
                 : PatternAnalysis.TradeBias.SHORT;
             PatternAnalysis.Action act = pattern.actionFor(bias);
             if (act == PatternAnalysis.Action.AVOID) {
-                String why = "flow AVOID — " + pattern.label();
-                return sim.close(livePrice, liveSource, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
+                double signedPts = dir == Quant7GatesSimulation.Direction.LONG
+                    ? livePrice - sim.entryPrice()
+                    : sim.entryPrice() - livePrice;
+                boolean honour = props.getExitPolicy() == QuantSimExitPolicy.FLOW_AVOID
+                    || (props.getExitPolicy() == QuantSimExitPolicy.FLOW_AVOID_IN_PROFIT && signedPts > 0);
+                if (honour) {
+                    String why = "flow AVOID — " + pattern.label();
+                    return sim.close(livePrice, liveSource, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
+                }
             }
         }
         return null;
+    }
+
+    /** Test-only hook — pins the clock so the ET EOD/blackout windows are reproducible. */
+    synchronized void setClockForTesting(Clock clock) {
+        this.clock = clock;
     }
 
     /**

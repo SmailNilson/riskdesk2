@@ -1415,7 +1415,8 @@ export interface Quant7GatesSimulationView {
     | 'CLOSED_FLOW_AVOID'
     | 'CLOSED_TP1'
     | 'CLOSED_TP2'
-    | 'CLOSED_SL';
+    | 'CLOSED_SL'
+    | 'CLOSED_EOD';
   exitPrice: number | null;
   /** Origin of the latest priced reading (mark-to-market while OPEN, close price once resolved). */
   exitPriceSource: string;

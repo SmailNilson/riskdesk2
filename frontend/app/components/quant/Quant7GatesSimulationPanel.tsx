@@ -55,7 +55,7 @@ export default function Quant7GatesSimulationPanel() {
           </span>
         </div>
         <div className="text-[10px] text-slate-500 font-mono">
-          Entry: Abs Bull/Bear · Δ Confirmed · flow TRADE · HIGH conf — Exit: flow AVOID / SL / TP
+          Entry: Abs Bull/Bear · Δ Confirmed · flow TRADE · HIGH conf · HTF 1h — Exit: SL / TP (ATR) / EOD flat
         </div>
       </header>
 
@@ -342,6 +342,7 @@ function statusToneFor(status: Quant7GatesSimulationView['status']): string {
     case 'CLOSED_TP2':        return 'border-emerald-600 bg-emerald-950/40 text-emerald-200';
     case 'CLOSED_SL':         return 'border-rose-700 bg-rose-950/30 text-rose-300';
     case 'CLOSED_FLOW_AVOID': return 'border-slate-600 bg-slate-900/60 text-slate-300';
+    case 'CLOSED_EOD':        return 'border-sky-700 bg-sky-950/30 text-sky-300';
   }
 }
 
