@@ -2,6 +2,56 @@
 
 Last updated: 2026-06-11
 
+## MNQ candle contract-month fix — 10m/1h/4h re-backfilled with H6 (2026-06-11)
+
+**Why.** The PLAYBOOK MNQ 10m backtest study (PR #450, section "PLAYBOOK MNQ 10m — Round 3")
+found stored 10m vs 1m MNQ closes disagreeing by the quarterly futures basis pre-April 2026
+(~250 pts ≈ 9× the 10m ATR in January, → ~0 by April), invalidating every cross-timeframe
+backtest on that window.
+
+**Diagnosis (prod riskdesk-prod-v2, via REST only).**
+- The **1m series was correct all along**: front-month H6 (202603) with healthy volume
+  (~5–15k/min RTH) until **2026-03-12 00:00:00 UTC**, then M6 (202606). That switch is the
+  CME-conventional equity roll date (Thursday, 8 days before the Mar 20 expiry) and shows as a
+  one-bar +210 pt jump with volume collapsing to single digits (M6 was still thin on Mar 12–13;
+  it became volume-dominant on Mar 16).
+- **10m, 1h, 4h and 1d were M6 (202606) for their entire pre-roll history** — prices a carry
+  basis above the 1m and back-month volumes (tens per bar in January, single digits earlier).
+  Consistent with a deep backfill run after the March roll using the default contract walk,
+  which fetched the whole window from the then-front M6 (M6 has thin data going back a year+,
+  so the expired-contract walk never engaged). Contaminated spans found: 10m since Jan 5 2026,
+  1h since Jun 20 2025, 4h since Jan 14 2025, 1d since Mar 24 2025. **5m has no pre-April data
+  at all.** From Mar 12 2026 onward all timeframes were already (correctly) M6.
+- The known 1m volume undercount (see PR #413 era; live-built candles only) does **not** affect
+  Jan–Mar 1m rows — they are backfill-sourced with IBKR-correct volumes, so no 1m re-backfill
+  was needed.
+
+**Fix applied (2026-06-11, prod).** Explicit-contract replace backfills, window
+`2026-01-01T00:00:00Z → 2026-03-11T23:59:59Z`, `contractMonth=202603`, `replace=true`:
+- `POST /api/candles/backfill/MNQ/10m?...` → 6 726 saved, 6 450 purged
+- `POST /api/candles/backfill/MNQ/1h?...`  → 1 121 saved, 1 121 purged
+- `POST /api/candles/backfill/MNQ/4h?...`  → 342 saved, 341 purged
+
+Mar 12 → Apr 1 was deliberately left untouched (already correct M6). The roll boundary at
+Mar 12 00:00 UTC now appears identically in all fixed timeframes (e.g. 10m closes
+24 787.25 → 24 968.75 across the boundary, matching the 1m).
+
+**Validation.** Every higher-TF close compared to the last 1m close inside the same bar over
+the full Jan 1 – Mar 31 window: 10m (8 658 bars), 1h (1 443) and 4h (440) all agree with the
+1m to **max |diff| = 0.75 pt, zero bars > 5 pts**; January volumes are now front-month scale
+(10m median 4 773/bar vs ~tens before). Caveat for future validators: IBKR 4h bars are
+session-aligned — the 20:00 UTC bar ends at the 22:00 UTC Globex halt and a fresh bar opens
+at 23:00 UTC — so compare against the next bar's start, not a naive +4h.
+
+**Still wrong / follow-ups:**
+1. **1d Jan 1 – Mar 11 2026 is still M6** — the same fix command was permission-blocked in
+   this session. To fix: `POST /api/candles/backfill/MNQ/1d?from=2026-01-01T00:00:00Z&to=2026-03-11T23:59:59Z&contractMonth=202603&replace=true&async=true`.
+2. **Pre-Jan-2026 1h/4h/1d history is thin M6 back-month junk** (volumes 0–1, back to
+   Jun 2025 / Jan 2025 / Mar 2025 respectively). Out of scope here; purge it or re-backfill
+   per-quarter with the historically correct contracts (Z5 = 202512 until ~Dec 11 2025, etc.).
+3. Pre-April cross-timeframe backtests (PR #450 Round 3 `filterConsistent` workaround) can be
+   re-run on the corrected data — the 10m/1m basis artefact is gone.
+
 ## PLAYBOOK confirmation-entry profile MNQ_10M_CONFIRMATION (2026-06-11)
 
 Implements the backtest-validated confirmation mechanism (PR #450 rounds 3–4, below)
