@@ -2,6 +2,41 @@
 
 Last updated: 2026-06-11
 
+## PLAYBOOK confirmation-entry profile MNQ_10M_CONFIRMATION (2026-06-11)
+
+Implements the backtest-validated confirmation mechanism (PR #450 rounds 3–4, below)
+as an armable Playbook execution profile. **Paper-only by design** (`executable=false`)
+until forward validation completes.
+
+**Mechanism** (domain: `ConfirmationEntryPlanner`): when the playbook detects an SMC
+zone, the entry is a **STOP at the zone exit** — LONG buy-stop at `zoneHigh`, SHORT
+sell-stop at `zoneLow` — instead of the legacy passive limit inside the zone (which
+fills while the zone is failing — adverse selection on the LONG side). A
+pending setup **cancels if price first breaks the far side of the zone by 0.5×ATR**
+(never buy the reclaim of a broken zone). Exits are ATR brackets: SL 1.5×ATR,
+TP 2.25×ATR (R:R 1.5). Gates: score ≥5; LONGs only inside RTH (09:30–16:00 ET),
+SHORTs inside the extended day window (08:00–17:00 ET, both DST-aware via
+`TradingSessionResolver`); zone dedup — one attempt per zone/direction (skip while a
+same-direction sim is open, and for 2h within 0.3×ATR of a prior attempt).
+
+**Wiring:**
+- `PlaybookDecision` gains nullable `entryType` (`LIMIT`/`STOP`) + `invalidationPrice`
+  (new columns `entry_type`, `invalidation_price` via ddl-auto).
+- `PlaybookAutomationService.onCandleClosed` builds a confirmation decision (plan
+  fields overridden, verdict prefixed `CONFIRMATION —`) when the profile is armed;
+  legacy path untouched otherwise.
+- `TradeSimulationService` honors STOP plans: trigger on break-through (high≥entry
+  for longs), pre-fill invalidation → `CANCELLED`, no `MISSED` state; LIMIT plans
+  byte-identical (regression-pinned in `StopEntrySimulationTest`).
+- Arming guard generalized: profiles declare their scope (`supportsScope`) — the old
+  "non-legacy profiles are MGC 10m only" rule is gone.
+
+**To start the paper validation:**
+`PUT /api/playbook/automation/MNQ/10m {"armedProfile":"MNQ_10M_CONFIRMATION"}`
+(paper stays on by default; Auto-IBKR remains blocked by `executable=false`).
+Re-assess after 4–6 weeks via `GET /api/playbook/automation/MNQ/10m/decisions` —
+confirmation rows carry `entryType=STOP`.
+
 ## PLAYBOOK MNQ 10m — full-pipeline 1m backtest: no edge found (2026-06-11)
 
 **Why.** The PLAYBOOK MNQ 10m automation showed 30% WR / −$4,234 / PF 0.16 on its last

@@ -135,8 +135,17 @@ public class PlaybookAutomationService {
         }
 
         PriceSnapshot price = currentPrice(instrument);
-        PlaybookDecision candidate = buildDecision(
-            event.instrument(), event.timeframe(), event.timestamp(), evaluation, price);
+        PlaybookDecision candidate;
+        if (state.armedProfile() == PlaybookExecutionProfile.MNQ_10M_CONFIRMATION) {
+            candidate = buildConfirmationDecision(
+                event.instrument(), event.timeframe(), event.timestamp(), instrument, evaluation, price);
+            if (candidate == null) {
+                return; // a confirmation gate failed (score/session/zone/ATR) or the zone is deduped
+            }
+        } else {
+            candidate = buildDecision(
+                event.instrument(), event.timeframe(), event.timestamp(), evaluation, price);
+        }
 
         boolean existing = decisionRepository.findByDecisionKey(candidate.decisionKey()).isPresent();
         PlaybookDecision decision = decisionRepository.createIfAbsent(candidate);
@@ -179,9 +188,9 @@ public class PlaybookAutomationService {
         PlaybookExecutionProfile profile = armedProfile == null
             ? null
             : PlaybookExecutionProfile.parseOrDefault(armedProfile);
-        if (profile != null && profile != PlaybookExecutionProfile.LEGACY
-            && (!"MGC".equalsIgnoreCase(current.instrument()) || !"10m".equalsIgnoreCase(current.timeframe()))) {
-            throw new IllegalArgumentException("non-legacy PLAYBOOK profiles are only available for MGC 10m");
+        if (profile != null && !profile.supportsScope(current.instrument(), current.timeframe())) {
+            throw new IllegalArgumentException(
+                profile.name() + " cannot be armed on " + current.instrument() + " " + current.timeframe());
         }
         if (profile != null && profile.benchmarkOnly()) {
             throw new IllegalArgumentException("1R profile is benchmark-only and cannot be armed");
@@ -474,6 +483,102 @@ public class PlaybookAutomationService {
         row.setUpdatedAt(Instant.now());
         TradeExecutionRecord saved = executionRepository.save(row);
         return decision.withRouting(outcome, shortMsg, saved.getId());
+    }
+
+    /** Zone dedup window for confirmation decisions: one attempt per zone per direction. */
+    private static final java.time.Duration CONFIRMATION_ZONE_COOLDOWN = java.time.Duration.ofHours(2);
+    private static final BigDecimal CONFIRMATION_ZONE_TOLERANCE_ATR = new BigDecimal("0.3");
+
+    /**
+     * Builds a confirmation-entry decision (STOP at the zone exit, ATR brackets,
+     * invalidation level) for the {@link PlaybookExecutionProfile#MNQ_10M_CONFIRMATION}
+     * profile, or {@code null} when a planner gate fails or the zone was already
+     * attempted (open sim with same direction, or same-direction decision within
+     * {@code CONFIRMATION_ZONE_COOLDOWN} at an entry within 0.3×ATR).
+     */
+    private PlaybookDecision buildConfirmationDecision(String instrumentName,
+                                                       String timeframe,
+                                                       Instant candleTs,
+                                                       Instrument instrument,
+                                                       PlaybookEvaluation evaluation,
+                                                       PriceSnapshot price) {
+        SetupCandidate setup = evaluation.bestSetup();
+        String direction = evaluation.filters().tradeDirection().name();
+        BigDecimal atr = playbookService.computeAtr(instrument, timeframe);
+        var planOpt = com.riskdesk.domain.playbook.automation.ConfirmationEntryPlanner.plan(
+            direction,
+            evaluation.checklistScore(),
+            setup.zoneHigh(),
+            setup.zoneLow(),
+            atr,
+            candleTs);
+        if (planOpt.isEmpty()) {
+            return null;
+        }
+        var plan = planOpt.get();
+
+        if (confirmationZoneAlreadyAttempted(instrumentName, timeframe, direction, plan.entryPrice(), atr, candleTs)) {
+            return null;
+        }
+
+        String setupIdentity = buildSetupIdentity(instrumentName, timeframe, candleTs, setup, direction);
+        String key = "playbook:" + setupIdentity;
+        return new PlaybookDecision(
+            null,
+            key,
+            instrumentName,
+            timeframe,
+            setupIdentity,
+            setup.type().name(),
+            setup.zoneName(),
+            direction,
+            evaluation.checklistScore(),
+            truncate("CONFIRMATION — " + evaluation.verdict(), 250),
+            plan.entryPrice(),
+            plan.stopLoss(),
+            plan.takeProfit(),
+            null,
+            plan.rrRatio(),
+            BigDecimal.valueOf(evaluation.plan().riskPercent()).setScale(6, RoundingMode.HALF_UP),
+            evaluation.lateEntry(),
+            price.source(),
+            price.timestamp(),
+            candleTs,
+            Instant.now(),
+            null,
+            null,
+            null,
+            PlaybookDecision.ENTRY_TYPE_STOP,
+            plan.invalidationPrice());
+    }
+
+    private boolean confirmationZoneAlreadyAttempted(String instrument,
+                                                     String timeframe,
+                                                     String direction,
+                                                     BigDecimal entry,
+                                                     BigDecimal atr,
+                                                     Instant now) {
+        BigDecimal tolerance = atr.multiply(CONFIRMATION_ZONE_TOLERANCE_ATR);
+        Instant cooldownFloor = now.minus(CONFIRMATION_ZONE_COOLDOWN);
+        for (PlaybookDecision prev : recentDecisions(instrument, timeframe, 20)) {
+            if (!direction.equalsIgnoreCase(prev.direction())) {
+                continue;
+            }
+            boolean open = simulationFor(prev)
+                .map(sim -> sim.simulationStatus() == TradeSimulationStatus.PENDING_ENTRY
+                    || sim.simulationStatus() == TradeSimulationStatus.ACTIVE)
+                .orElse(false);
+            if (open) {
+                return true;
+            }
+            if (prev.entryPrice() != null
+                && prev.createdAt() != null
+                && prev.createdAt().isAfter(cooldownFloor)
+                && prev.entryPrice().subtract(entry).abs().compareTo(tolerance) <= 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private PlaybookDecision buildDecision(String instrument,
