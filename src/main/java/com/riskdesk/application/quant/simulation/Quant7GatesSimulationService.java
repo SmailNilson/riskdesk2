@@ -261,6 +261,46 @@ public class Quant7GatesSimulationService {
         return !et.isBefore(from) && et.isBefore(SESSION_REOPEN_ET);
     }
 
+    /**
+     * Fast exit path — SL/TP-only evaluation on a live price push (~3 s
+     * market-data poll), between the 60 s gate scans. Caps the exit overshoot
+     * to one poll interval: sim #903 closed 93 pts past its SL because the
+     * price crossed the level and kept running inside a single 60 s window
+     * (2026-06-11 squeeze).
+     *
+     * <p>Deliberately NOT here: entries and the flow-AVOID policy (both need
+     * a fresh pattern, which only the scan computes) and the EOD flat (a
+     * session-window concern the scan already resolves within a minute).
+     * Open rows that don't close are marked-to-market so the panel P&amp;L
+     * is live at the poll cadence. No-op when no row is open for the
+     * instrument — the common case, and the reason this path stays cheap.
+     */
+    public synchronized void onPriceTick(Instrument instrument, double livePrice, String liveSource, Instant now) {
+        if (instrument == null || !Double.isFinite(livePrice) || livePrice <= 0.0) return;
+        List<Quant7GatesSimulation> rows = byInstrument.get(instrument);
+        if (rows == null || rows.isEmpty()) return;
+        Instant ts = now != null ? now : Instant.now(clock);
+        String source = liveSource == null ? "" : liveSource;
+        boolean closedAny = false;
+        for (int i = 0; i < rows.size(); i++) {
+            Quant7GatesSimulation sim = rows.get(i);
+            if (!sim.isOpen()) continue;
+            Quant7GatesSimulation closed = checkSlTp(sim, livePrice, source, ts);
+            if (closed != null) {
+                rows.set(i, closed);
+                publish(closed);
+                persist(closed);
+                routeClose(closed);
+                closedAny = true;
+            } else {
+                Quant7GatesSimulation mtm = sim.markToMarket(livePrice, source);
+                rows.set(i, mtm);
+                publish(mtm);
+            }
+        }
+        if (closedAny) capClosedHistory(instrument);
+    }
+
     private void tryOpen(Instrument instrument,
                           QuantSnapshot snapshot,
                           PatternAnalysis pattern,
@@ -336,33 +376,9 @@ public class Quant7GatesSimulationService {
                                               String liveSource,
                                               PatternAnalysis pattern,
                                               Instant now) {
+        Quant7GatesSimulation closedOnLevel = checkSlTp(sim, livePrice, liveSource, now);
+        if (closedOnLevel != null) return closedOnLevel;
         Quant7GatesSimulation.Direction dir = sim.direction();
-
-        // SL/TP first — they reflect the trade-plan exits the dashboard shows.
-        // The exit-price-source on close mirrors the CURRENT snapshot feed so
-        // a fallback-driven close on a live-entry row is still labelled
-        // correctly for the operator.
-        if (dir == Quant7GatesSimulation.Direction.LONG) {
-            if (livePrice <= sim.stopLoss()) {
-                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
-            }
-            if (livePrice >= sim.takeProfit2()) {
-                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
-            }
-            if (livePrice >= sim.takeProfit1()) {
-                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
-            }
-        } else {
-            if (livePrice >= sim.stopLoss()) {
-                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
-            }
-            if (livePrice <= sim.takeProfit2()) {
-                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
-            }
-            if (livePrice <= sim.takeProfit1()) {
-                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
-            }
-        }
 
         // Flow flipped to AVOID for the active side → harness exit, governed by
         // the configured policy. SLTP_ONLY ignores the flip (calibration showed
@@ -384,6 +400,41 @@ public class Quant7GatesSimulationService {
                     String why = "flow AVOID — " + pattern.label();
                     return sim.close(livePrice, liveSource, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
                 }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Pure SL/TP-level check — they reflect the trade-plan exits the dashboard
+     * shows. The exit-price-source on close mirrors the CURRENT feed so a
+     * fallback-driven close on a live-entry row is still labelled correctly
+     * for the operator. Shared by the 60 s scan path ({@link #maybeClose})
+     * and the ~3 s fast exit path ({@link #onPriceTick}).
+     */
+    private static Quant7GatesSimulation checkSlTp(Quant7GatesSimulation sim,
+                                                   double livePrice,
+                                                   String liveSource,
+                                                   Instant now) {
+        if (sim.direction() == Quant7GatesSimulation.Direction.LONG) {
+            if (livePrice <= sim.stopLoss()) {
+                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+            }
+            if (livePrice >= sim.takeProfit2()) {
+                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
+            }
+            if (livePrice >= sim.takeProfit1()) {
+                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
+            }
+        } else {
+            if (livePrice >= sim.stopLoss()) {
+                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+            }
+            if (livePrice <= sim.takeProfit2()) {
+                return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
+            }
+            if (livePrice <= sim.takeProfit1()) {
+                return sim.close(livePrice, liveSource, now, "TP1 hit", Quant7GatesSimulationStatus.CLOSED_TP1);
             }
         }
         return null;
