@@ -3,6 +3,7 @@ package com.riskdesk.presentation.quant;
 import com.riskdesk.application.quant.simulation.Quant7GatesSimulationService;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionProperties;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionState;
+import com.riskdesk.application.quant.simulation.QuantSimProperties;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.presentation.quant.dto.Quant7GatesSimulationResponse;
 import org.springframework.http.HttpStatus;
@@ -39,13 +40,16 @@ public class Quant7GatesSimulationController {
     private final Quant7GatesSimulationService service;
     private final QuantSimExecutionState execState;
     private final QuantSimExecutionProperties execProps;
+    private final QuantSimProperties simProps;
 
     public Quant7GatesSimulationController(Quant7GatesSimulationService service,
                                            QuantSimExecutionState execState,
-                                           QuantSimExecutionProperties execProps) {
+                                           QuantSimExecutionProperties execProps,
+                                           QuantSimProperties simProps) {
         this.service = service;
         this.execState = execState;
         this.execProps = execProps;
+        this.simProps = simProps;
     }
 
     @GetMapping
@@ -61,6 +65,20 @@ public class Quant7GatesSimulationController {
     @GetMapping("/stats")
     public StatsResponse stats() {
         Quant7GatesSimulationService.Stats s = service.stats();
+
+        // Per-instrument open counts — an instrument with only open rows must
+        // still appear in the breakdown.
+        Map<String, Integer> openByInstrument = new LinkedHashMap<>();
+        for (var open : service.listOpen()) {
+            openByInstrument.merge(open.instrument().name(), 1, Integer::sum);
+        }
+        Map<String, InstrumentStats> byInstrument = new LinkedHashMap<>();
+        service.statsByInstrument().forEach((name, st) -> byInstrument.put(name, new InstrumentStats(
+            st.closedCount(), st.wins(), st.losses(), st.winRatePct(),
+            st.netPoints(), st.netUsd(), openByInstrument.getOrDefault(name, 0))));
+        openByInstrument.forEach((name, count) -> byInstrument.computeIfAbsent(name,
+            k -> new InstrumentStats(0, 0, 0, null, 0.0, 0.0, count)));
+
         return new StatsResponse(
             s.closedCount(),
             s.wins(),
@@ -68,7 +86,9 @@ public class Quant7GatesSimulationController {
             s.winRatePct(),
             s.netPoints(),
             s.netUsd(),
-            service.listOpen().size()
+            service.listOpen().size(),
+            byInstrument,
+            simProps.getStatsSince()
         );
     }
 
@@ -123,8 +143,28 @@ public class Quant7GatesSimulationController {
     /** Master flag + allowlist + per-instrument toggle snapshot. */
     public record ExecStateResponse(boolean masterEnabled, List<String> allowlist, Map<String, Boolean> toggles) {}
 
-    /** Public-facing aggregate. {@code winRatePct} is null when no rows are decided yet. */
+    /**
+     * Public-facing aggregate. {@code winRatePct} is null when no rows are
+     * decided yet. {@code byInstrument} breaks the same numbers down per
+     * instrument (key = enum name, sorted) so each market is judged on its
+     * own P&amp;L. {@code statsSince} is the stats baseline — rows opened
+     * before it are excluded from every aggregate here (known-bad entry-data
+     * era, e.g. pre-delta-fix); null = full history.
+     */
     public record StatsResponse(
+        int closedCount,
+        int wins,
+        int losses,
+        Double winRatePct,
+        double netPoints,
+        double netUsd,
+        int openCount,
+        Map<String, InstrumentStats> byInstrument,
+        java.time.Instant statsSince
+    ) {}
+
+    /** Per-instrument slice of {@link StatsResponse}. */
+    public record InstrumentStats(
         int closedCount,
         int wins,
         int losses,

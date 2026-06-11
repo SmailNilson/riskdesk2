@@ -49,9 +49,9 @@ public class DefaultQuantSimMarketContext implements QuantSimMarketContext {
         Cached<Double> hit = atrCache.get(instrument);
         if (hit != null && now - hit.atMs() < CACHE_TTL_MS) return hit.value();
 
-        int period = props.getAtrPeriod();
+        int period = props.atrPeriod(instrument.name());
         List<Candle> recent = ascending(
-            candlePort.findRecentCandles(instrument, props.getAtrTimeframe(), period * 3 + 1));
+            candlePort.findRecentCandles(instrument, props.atrTimeframe(instrument.name()), period * 3 + 1));
         BigDecimal atr = AtrCalculator.compute(recent, period);
         Double value = atr == null ? null : atr.doubleValue();
         atrCache.put(instrument, new Cached<>(value, now));
@@ -74,11 +74,11 @@ public class DefaultQuantSimMarketContext implements QuantSimMarketContext {
 
     /** {@code []} = not computable; {@code [fastAboveSlow]} otherwise. */
     private boolean[] computeHtfState(Instrument instrument) {
-        int slow = props.getHtfEmaSlow();
+        int slow = props.htfEmaSlow(instrument.name());
         List<Candle> recent = ascending(
-            candlePort.findRecentCandles(instrument, props.getHtfTimeframe(), slow * 3));
+            candlePort.findRecentCandles(instrument, props.htfTimeframe(instrument.name()), slow * 3));
         if (recent.size() < slow + 1) return new boolean[0];
-        List<BigDecimal> fastSeries = new EMAIndicator(props.getHtfEmaFast()).calculate(recent);
+        List<BigDecimal> fastSeries = new EMAIndicator(props.htfEmaFast(instrument.name())).calculate(recent);
         List<BigDecimal> slowSeries = new EMAIndicator(slow).calculate(recent);
         if (fastSeries.isEmpty() || slowSeries.isEmpty()) return new boolean[0];
         BigDecimal fast = fastSeries.get(fastSeries.size() - 1);
