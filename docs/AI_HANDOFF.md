@@ -51,6 +51,33 @@ SL overshoot persists live); the replay engine resolves intrabar at the exact le
 Tightening the live loop (1m-candle extreme checks or resident broker stops) is a
 follow-up.
 
+## Quant per-scan flow log — `quant_scan_snapshots` (2026-06-11)
+
+The rolling delta window the gates consume was ephemeral (`TickDataPort`): no
+table held the delta/buy%/absorption state *as the gates saw it*, so gate-replay
+backtests and threshold sweeps ("what if G3 required Δ < −150?") were impossible —
+`tick_log` reconstruction cannot reproduce the live classifier state (BBO cache,
+tick-rule fallback, watchdog abstains from PR #413).
+
+- `QuantGateService.scan()` now appends one row per scan per instrument
+  (best-effort, outside the per-instrument lock, never breaks the scan) to
+  `quant_scan_snapshots` via `QuantScanSnapshotPort` →
+  `QuantScanSnapshotJpaAdapter`. **Non-signal scans are logged too** — a
+  signals-only log would be survivorship-biased for backtests.
+- Row = raw INPUTS (delta *as seen by gates* — null on stale-drop — plus
+  `deltaSource` provenance of the raw window, buy%, absorption window counts +
+  dominant side, dist/accu type+conf, cycle, price+source) and key OUTPUTS
+  (SHORT/LONG scores, pattern type/label/conf/action, per-gate verdicts as JSON).
+  The stale-drop case is distinguishable from "no window at all": `delta=null` +
+  `deltaSource!=null` vs both null.
+- Volume: ~4.3k rows/day for 3 instruments. Retention 90 days — purged by the
+  existing `OrderFlowEventPersistenceService` daily job alongside the event tables.
+- Read surface: `GET /api/quant/scan-log/{instrument}?from&to&limit` (newest
+  first, default last 2h, cap 5000).
+- Known limit: the log freezes the *current* window definition (5m rolling).
+  Threshold/entry-rule sweeps are now possible; changing the window length
+  itself still needs `tick_log` (30d).
+
 ## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
 
 The prod IB Gateway build rejects CONTFUT contracts with IBKR error 200 ("No security

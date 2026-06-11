@@ -76,6 +76,7 @@ public class QuantGateService {
     private final StructuralFilterEvaluator structuralEvaluator;
     private final org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider;
     private final org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider;
+    private final org.springframework.beans.factory.ObjectProvider<com.riskdesk.domain.quant.scanlog.QuantScanSnapshotPort> scanLogProvider;
 
     /** Tracks per-instrument the highest score we have already auto-advised on, so we only fire once per session. */
     private final java.util.Map<Instrument, Integer> autoAdviceFiredFor = new java.util.EnumMap<>(Instrument.class);
@@ -137,7 +138,10 @@ public class QuantGateService {
             new EmptyObjectProvider<>(), new EmptyObjectProvider<>());
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    /**
+     * Backward-compatible constructor (pre scan-log slice). Wires the scan-log
+     * provider to a no-op so tests that omit it skip persistence silently.
+     */
     public QuantGateService(AbsorptionPort absorptionPort,
                             DistributionPort distributionPort,
                             CyclePort cyclePort,
@@ -155,6 +159,31 @@ public class QuantGateService {
                             StructuralFilterEvaluator structuralEvaluator,
                             org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider,
                             org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider) {
+        this(absorptionPort, distributionPort, cyclePort, deltaPort, livePricePort,
+            statePort, notificationPort, historyStore, narrationService, sessionMemoryService,
+            advisorService, evaluator, indicatorsPort, strategyPort, structuralEvaluator,
+            autoArmServiceProvider, simulationServiceProvider, new EmptyObjectProvider<>());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public QuantGateService(AbsorptionPort absorptionPort,
+                            DistributionPort distributionPort,
+                            CyclePort cyclePort,
+                            DeltaPort deltaPort,
+                            LivePricePort livePricePort,
+                            QuantStatePort statePort,
+                            QuantNotificationPort notificationPort,
+                            QuantSnapshotHistoryStore historyStore,
+                            QuantSetupNarrationService narrationService,
+                            QuantSessionMemoryService sessionMemoryService,
+                            QuantAiAdvisorService advisorService,
+                            GateEvaluator evaluator,
+                            IndicatorsPort indicatorsPort,
+                            StrategyPort strategyPort,
+                            StructuralFilterEvaluator structuralEvaluator,
+                            org.springframework.beans.factory.ObjectProvider<QuantAutoArmService> autoArmServiceProvider,
+                            org.springframework.beans.factory.ObjectProvider<com.riskdesk.application.quant.simulation.Quant7GatesSimulationService> simulationServiceProvider,
+                            org.springframework.beans.factory.ObjectProvider<com.riskdesk.domain.quant.scanlog.QuantScanSnapshotPort> scanLogProvider) {
         this.absorptionPort = absorptionPort;
         this.distributionPort = distributionPort;
         this.cyclePort = cyclePort;
@@ -172,6 +201,7 @@ public class QuantGateService {
         this.structuralEvaluator = structuralEvaluator;
         this.autoArmServiceProvider = autoArmServiceProvider;
         this.simulationServiceProvider = simulationServiceProvider;
+        this.scanLogProvider = scanLogProvider;
     }
 
     /**
@@ -185,6 +215,8 @@ public class QuantGateService {
         QuantSnapshot result;
         QuantSetupNarrationService.NarrationResult narration;
         boolean shouldAdvise;
+        MarketSnapshot snap = null;
+        DeltaSnapshot rawDelta = null;
         ReentrantLock lock = lockFor(instrument);
         lock.lock();
         try {
@@ -206,7 +238,11 @@ public class QuantGateService {
 
             CompletableFuture.allOf(absF, distF, cycF, dltF, pxF).join();
 
-            MarketSnapshot snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
+            // Raw delta window kept for the scan log — buildSnapshot may null
+            // the delta on staleness, and recording WHICH happened (stale-drop
+            // vs no window at all) is exactly the diagnostic the log is for.
+            rawDelta = dltF.join().orElse(null);
+            snap = buildSnapshot(now, absF.join(), distF.join(), cycF.join(), dltF.join(), pxF.join());
 
             QuantState saved = statePort.load(instrument);
             GateEvaluator.Outcome outcome = evaluator.evaluate(snap, saved, instrument);
@@ -311,6 +347,21 @@ public class QuantGateService {
             }
         } catch (RuntimeException e) {
             log.warn("auto-arm onSnapshot failed instrument={}: {}", instrument, e.toString());
+        }
+
+        // Per-scan flow log — the durable delta/gates time series that enables
+        // gate-replay backtests and threshold sweeps (see QuantScanSnapshot).
+        // Outside the lock and best-effort: an insert hiccup must never break
+        // the scan, and the captured row is immutable.
+        try {
+            com.riskdesk.domain.quant.scanlog.QuantScanSnapshotPort scanLog =
+                scanLogProvider.getIfAvailable();
+            if (scanLog != null && snap != null) {
+                scanLog.save(com.riskdesk.domain.quant.scanlog.QuantScanSnapshot.from(
+                    snap, rawDelta, result, narration.pattern()));
+            }
+        } catch (RuntimeException e) {
+            log.warn("quant scan-log persist failed instrument={}: {}", instrument, e.toString());
         }
 
         logScan(instrument, result);
