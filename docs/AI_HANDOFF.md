@@ -21,6 +21,227 @@ level, so live results read systematically worse than backtest on fast moves.
 - Kill switch: `riskdesk.quant.sim.fast-exit-enabled=false` → scan-only exits (old behaviour).
 - Tests: `QuantSimFastExitTest` (tick SL/TP close at tick price, MTM without close, never
   opens, listener live-source gating + disable flag + VIX/null events).
+## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
+
+Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).
+Two residues remained in prod PostgreSQL and are now fixed via the same proven pattern
+(`POST /api/candles/backfill/MNQ/{tf}?from=&to=&contractMonth=YYYYMM&replace=true&async=true`,
+jobs run strictly sequentially, polled to `DONE`):
+
+1. **1d 2026-01-01 → 03-11 was still M6 (202606).** Re-backfilled with `contractMonth=202603`:
+   47 bars purged/replaced. Validated: daily volumes jumped 1.4k–19k → **1.27M–3.18M**
+   (front-month scale) and all sampled 1d closes (6/6 days across the window) sit inside that
+   trading day's 1m low–high range (the 1m series is the reference — H6 until 2026-03-12
+   00:00 UTC, M6 after).
+2. **Pre-2026 1h/4h/1d history was thin M6 back-month junk** (volumes 0–1 typical, avg 11–101).
+   **Decision: re-backfill per front-month window rather than purge** — IBKR still serves
+   expired 2025 contracts (~2-year retention), and correct deep HTF history feeds the 1h/4h
+   trend filters used by Quant/WTX backtests. Roll calendar used (CME equity roll = Thursday
+   8 days before 3rd-Friday expiry, switch at 00:00 UTC, matching the observed Mar 12 00:00 UTC
+   H6→M6 switch in 1m): H5=202503 → 2025-03-12, M5=202506 → 2025-06-11, U5=202509 → 2025-09-10,
+   Z5=202512 → 2025-12-10, H6=202603 → 2026-03-11. Windows re-backfilled (12 jobs, all `DONE`):
+   - **1d** from 2025-03-24 (M5/U5/Z5/H6): 196 junk rows → 196 correct bars, avg vol 101 → **1.52M**
+   - **1h** from 2025-06-20 (U5/Z5/H6): 1,713 junk rows → **3,151** bars (back-month junk was
+     sparse — many hours never traded), avg vol 11.5 → **61k**
+   - **4h** from 2025-01-14 (H5/M5/U5/Z5/H6): 1,038 junk rows → **1,736** bars, avg vol 25 → **217k**
+
+Post-checks: roll seams show the expected forward-basis jump (Sep 11 +236 pts, Dec 11 +205 pts)
+with thin first-overnight volume building through the roll day — correct stitched-series
+behaviour, not residual junk. The only remaining sub-10-volume bars are Thanksgiving-2025
+closure hours (legit). **The MNQ candle store is now contract-correct across every stored
+timeframe and the full stored history**; backtests may use pre-April windows on 1h/4h/1d
+without the back-month caveat. Caveat that remains: per-window series are per-contract
+(no back-adjustment), so price levels jump at each roll seam — indicators spanning a seam
+(e.g. long EMAs) see the basis step.
+
+## MNQ candle contract-month fix — 10m/1h/4h re-backfilled with H6 (2026-06-11)
+
+**Why.** The PLAYBOOK MNQ 10m backtest study (PR #450, section "PLAYBOOK MNQ 10m — Round 3")
+found stored 10m vs 1m MNQ closes disagreeing by the quarterly futures basis pre-April 2026
+(~250 pts ≈ 9× the 10m ATR in January, → ~0 by April), invalidating every cross-timeframe
+backtest on that window.
+
+**Diagnosis (prod riskdesk-prod-v2, via REST only).**
+- The **1m series was correct all along**: front-month H6 (202603) with healthy volume
+  (~5–15k/min RTH) until **2026-03-12 00:00:00 UTC**, then M6 (202606). That switch is the
+  CME-conventional equity roll date (Thursday, 8 days before the Mar 20 expiry) and shows as a
+  one-bar +210 pt jump with volume collapsing to single digits (M6 was still thin on Mar 12–13;
+  it became volume-dominant on Mar 16).
+- **10m, 1h, 4h and 1d were M6 (202606) for their entire pre-roll history** — prices a carry
+  basis above the 1m and back-month volumes (tens per bar in January, single digits earlier).
+  Consistent with a deep backfill run after the March roll using the default contract walk,
+  which fetched the whole window from the then-front M6 (M6 has thin data going back a year+,
+  so the expired-contract walk never engaged). Contaminated spans found: 10m since Jan 5 2026,
+  1h since Jun 20 2025, 4h since Jan 14 2025, 1d since Mar 24 2025. **5m has no pre-April data
+  at all.** From Mar 12 2026 onward all timeframes were already (correctly) M6.
+- The known 1m volume undercount (see PR #413 era; live-built candles only) does **not** affect
+  Jan–Mar 1m rows — they are backfill-sourced with IBKR-correct volumes, so no 1m re-backfill
+  was needed.
+
+**Fix applied (2026-06-11, prod).** Explicit-contract replace backfills, window
+`2026-01-01T00:00:00Z → 2026-03-11T23:59:59Z`, `contractMonth=202603`, `replace=true`:
+- `POST /api/candles/backfill/MNQ/10m?...` → 6 726 saved, 6 450 purged
+- `POST /api/candles/backfill/MNQ/1h?...`  → 1 121 saved, 1 121 purged
+- `POST /api/candles/backfill/MNQ/4h?...`  → 342 saved, 341 purged
+
+Mar 12 → Apr 1 was deliberately left untouched (already correct M6). The roll boundary at
+Mar 12 00:00 UTC now appears identically in all fixed timeframes (e.g. 10m closes
+24 787.25 → 24 968.75 across the boundary, matching the 1m).
+
+**Validation.** Every higher-TF close compared to the last 1m close inside the same bar over
+the full Jan 1 – Mar 31 window: 10m (8 658 bars), 1h (1 443) and 4h (440) all agree with the
+1m to **max |diff| = 0.75 pt, zero bars > 5 pts**; January volumes are now front-month scale
+(10m median 4 773/bar vs ~tens before). Caveat for future validators: IBKR 4h bars are
+session-aligned — the 20:00 UTC bar ends at the 22:00 UTC Globex halt and a fresh bar opens
+at 23:00 UTC — so compare against the next bar's start, not a naive +4h.
+
+**Still wrong / follow-ups:**
+1. **1d Jan 1 – Mar 11 2026 is still M6** — the same fix command was permission-blocked in
+   this session. To fix: `POST /api/candles/backfill/MNQ/1d?from=2026-01-01T00:00:00Z&to=2026-03-11T23:59:59Z&contractMonth=202603&replace=true&async=true`.
+2. **Pre-Jan-2026 1h/4h/1d history is thin M6 back-month junk** (volumes 0–1, back to
+   Jun 2025 / Jan 2025 / Mar 2025 respectively). Out of scope here; purge it or re-backfill
+   per-quarter with the historically correct contracts (Z5 = 202512 until ~Dec 11 2025, etc.).
+3. Pre-April cross-timeframe backtests (PR #450 Round 3 `filterConsistent` workaround) can be
+   re-run on the corrected data — the 10m/1m basis artefact is gone.
+
+## PLAYBOOK confirmation-entry profile MNQ_10M_CONFIRMATION (2026-06-11)
+
+Implements the backtest-validated confirmation mechanism (PR #450 rounds 3–4, below)
+as an armable Playbook execution profile. **Paper-only by design** (`executable=false`)
+until forward validation completes.
+
+**Mechanism** (domain: `ConfirmationEntryPlanner`): when the playbook detects an SMC
+zone, the entry is a **STOP at the zone exit** — LONG buy-stop at `zoneHigh`, SHORT
+sell-stop at `zoneLow` — instead of the legacy passive limit inside the zone (which
+fills while the zone is failing — adverse selection on the LONG side). A
+pending setup **cancels if price first breaks the far side of the zone by 0.5×ATR**
+(never buy the reclaim of a broken zone). Exits are ATR brackets: SL 1.5×ATR,
+TP 2.25×ATR (R:R 1.5). Gates: score ≥5; LONGs only inside RTH (09:30–16:00 ET),
+SHORTs inside the extended day window (08:00–17:00 ET, both DST-aware via
+`TradingSessionResolver`); zone dedup — one attempt per zone/direction (skip while a
+same-direction sim is open, and for 2h within 0.3×ATR of a prior attempt).
+
+**Wiring:**
+- `PlaybookDecision` gains nullable `entryType` (`LIMIT`/`STOP`) + `invalidationPrice`
+  (new columns `entry_type`, `invalidation_price` via ddl-auto).
+- `PlaybookAutomationService.onCandleClosed` builds a confirmation decision (plan
+  fields overridden, verdict prefixed `CONFIRMATION —`) when the profile is armed;
+  legacy path untouched otherwise.
+- `TradeSimulationService` honors STOP plans: trigger on break-through (high≥entry
+  for longs), pre-fill invalidation → `CANCELLED`, no `MISSED` state; LIMIT plans
+  byte-identical (regression-pinned in `StopEntrySimulationTest`).
+- Arming guard generalized: profiles declare their scope (`supportsScope`) — the old
+  "non-legacy profiles are MGC 10m only" rule is gone.
+
+**To start the paper validation:**
+`PUT /api/playbook/automation/MNQ/10m {"armedProfile":"MNQ_10M_CONFIRMATION"}`
+(paper stays on by default; Auto-IBKR remains blocked by `executable=false`).
+Re-assess after 4–6 weeks via `GET /api/playbook/automation/MNQ/10m/decisions` —
+confirmation rows carry `entryType=STOP`.
+
+## PLAYBOOK MNQ 10m — full-pipeline 1m backtest: no edge found (2026-06-11)
+
+**Why.** The PLAYBOOK MNQ 10m automation showed 30% WR / −$4,234 / PF 0.16 on its last
+100 paper decisions. A replay backtest was built to diagnose the losses and test fixes
+(min-R:R gate, 1h EMA20/50 HTF filter, per-zone dedup, score≥6 threshold, entry style).
+
+**Harness.** `src/test/java/com/riskdesk/backtest/PlaybookBacktestHarnessTest.java`
+(auto-skips when data files are absent). Phase A re-runs the REAL production pipeline
+(`IndicatorService` snapshot → `PlaybookService` → `PlaybookEvaluator`) bar-by-bar over
+stored 10m candles (Jan 5 → Jun 11 2026, 13,490 decisions) — validated 1:1 against the
+live decision log (103 vs 100 decisions on the Jun 10–11 window, same directions/scores/
+entries). Phase B simulates each decision on stored 1m candles with the exact
+`TradeSimulationService` rules (1h PENDING_ENTRY timeout, MISSED, pessimistic
+same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
+`/api/candles/MNQ/{tf}/range` into `/tmp` (override with `-Dpb.data.dir`).
+
+**Verdicts (realistic portfolio mode, max 1 concurrent position, 1152 configs):**
+- Baseline: **−$30,853 net / 5.5 months** (WR 19%, PF 0.42). The dashboard's −$68k
+  over-counts by letting the same zone open overlapping sims every 10m candle.
+- The recommended filters are **loss reducers, not edge creators**: best non-inverted
+  combo (MID entry, score≥5, HTF 1h, skip-late) lands at ≈ $0 net. HTF is the
+  strongest single filter.
+- Best overall config: **inverted signal + ATR exits (1.5×SL / 2.25×TP) + HTF**:
+  +$1,558 net, PF 1.20, WR 42% — positive but fragile (April dominates, 3/6 positive
+  months). Not tradeable as-is.
+- **Trailing stop never engages on PLAYBOOK sims**: the 1h entry timeout means a fill
+  never has the 15 five-minute bars `computeAtrAtActivation` needs → ATR is null →
+  trailing skipped. Live PLAYBOOK P&L is pure fixed SL/TP.
+
+**Methodology traps documented for future backtests:**
+1. Without per-zone dedup the same zone re-signals every candle → 5–10 overlapping
+   sims ride one move → fake +$200k. Always also evaluate one-position-at-a-time.
+2. Inverting a limit-entry signal turns the entry into a STOP order: fill =
+   `max(entry, bar open)` for longs — `priceInZone` setups are already in-the-money
+   and would otherwise fill at impossible below-market prices (fake +$300k / 85% WR).
+
+**Round 2 (session / setup / direction / ATR-multiplier / break-even dimensions):**
+- The ONLY structurally positive family is **SHORT-only + 1h HTF bear alignment +
+  ATR exits** — 86/144 neighboring configs positive (median +$400), so it is not an
+  isolated grid spike. The LONG side of the playbook is worthless under every exit
+  scheme tested (10/144 positive, median −$9,275): MNQ bull legs do not retest the
+  zones the engine draws. PLAN exits under identical filters stay negative (median
+  −$168) — the ATR exit geometry is causally necessary, same conclusion as the
+  Quant 7-Gates recalibration (PR #441).
+- **Champion config**: MID entry, score≥5, HTF 1h, zone dedup, skip-late, SHORT-only,
+  RTH session, ATR exits SL 2.0× / TP 3.0× → 56 resolved trades, **WR 60.7%,
+  +$5,252 net / 5.5 months, PF 2.05, maxDD $1,262**, top day 24% of P&L. Highest-WR
+  strong variant: same + BREAK_RETEST-only → WR 65.6%, PF 2.76, +$4,104 (n=32).
+- Round-1's inverted-signal hope did NOT survive refinement (median −$1,771 across
+  288 inverted configs once session/ATR variants are scrutinized).
+- Caveats before any live use: n is small (56 trades), profits concentrate in
+  bear-regime months (Mar, Jun) by construction of the HTF+SHORT filter, and the
+  config was selected from an 864-config search — forward-paper it first.
+
+**Round 3 — CRITICAL DATA ARTIFACT + LONG confirmation mechanism:**
+- **Stored 10m and 1m MNQ candles disagree by the quarterly contract basis before
+  the March 2026 roll** (~250 pts ≈ 9 ATR in January, decaying to ~0 by April) —
+  one timeframe was deep-backfilled with a different contract month than the
+  other. Every cross-timeframe simulation over Jan–Feb is invalid (March partly);
+  the harness now drops decisions whose plan entry sits >3 ATR from the 1m open
+  (`filterConsistent`, 4,701 of 13,490 decisions dropped). **Prod data needs a
+  consistent-contract re-backfill before any backtest uses pre-April history.**
+- This artifact had poisoned round-2's directional conclusions: on CLEAN data the
+  LONG side is NOT worthless. Corrected verdicts (Apr–Jun window, portfolio mode):
+  - Baseline playbook: −$2,828 (mildly negative, not −$31k).
+  - Best limit-based config is now BIDIRECTIONAL: MID score≥5 + HTF + dedup +
+    skip-late + ATR(2.0/3.0) exits + RTH → 198 resolved, **WR 50.5%, +$7,916 net,
+    PF 1.51, maxDD $1,224**, 4/5 positive months, top day 16%.
+- **LONG confirmation-entry study** (`runLongMechanismStudy`): instead of the
+  passive limit inside the zone, arm a **buy-stop at zoneHigh** (BREAKOUT) or
+  require touch-then-reclaim (RECLAIM_TOP/MID), cancel if price breaks
+  zoneLow − 0.5×ATR before triggering ("never buy the reclaim of a broken zone").
+  Result on clean data: **273/288 LONG configs positive (95%)**; champion
+  BREAKOUT + ATR(2.0/3.0), no HTF needed: 265 resolved, WR 47.5%, **+$7,402 net,
+  PF 1.38, maxDD $1,489**, top day 17%, and June (a −5.3% month) stayed positive —
+  the invalidation guard self-filters bear regimes. SHORT mirror (sell-stop at
+  zoneLow) also improves on the limit version: +$9,170, WR 52.2%, PF 1.76 (NO_ON).
+- Caveat: the clean window is only ~2.5 months and Apr–May was strongly bullish —
+  forward-paper before live, and re-run after the data re-backfill.
+
+**Round 4 — full-window revalidation after the contract re-backfill (2026-06-11):**
+- The prod re-backfill landed (10m/1h/4h re-filled with H6 through Mar 11, validated
+  to ≤0.75 pt vs 1m; see the playbook-mnq-backtest-verdicts memory / PR #452 for
+  details). Phase A was recomputed on the repaired 10m series: 13,757 decisions,
+  consistency gate now drops only 49 (vs 4,701) — all 5.5 months are simulable.
+- **Baseline playbook, portfolio mode, repaired data: +$4,413** (WR 44.1%, PF 1.23).
+  The raw signal stream is mildly positive one-position-at-a-time; the heavy losses
+  shown on the dashboard come from the overlapping-sims convention and a bad recent
+  live stretch, not from a uniformly worthless signal.
+- **LONG confirmation champion (full window)**: BREAKOUT buy-stop at zoneHigh +
+  zone-broken invalidation + ATR(1.5/2.25) exits + RTH + score≥5, arm 3h →
+  n=296, WR 45.6%, **+$4,955 net, PF 1.30, maxDD $1,341, top day 14%,
+  5/6 positive months** (Jan, Mar, Jun positive — chop AND bear months; only
+  Feb −$510). HTF optional (htf=Y variant: PF 1.35). BREAKOUT family: 74/96
+  configs positive, median +$1,626.
+- **SHORT mirror champion (full window)**: BREAKOUT sell-stop at zoneLow +
+  ATR(1.5/2.25) + NO_ON session + score≥5 → n=315, WR 47.0%, **+$9,515 net,
+  PF 1.46, maxDD $1,215**, top day 19%.
+- Same exits, same mechanism, both sides: a dual-side deployment (LONG RTH +
+  SHORT NO_ON) totals ≈ +$14.5k/5.5 months per micro contract. The
+  previous limit-entry champions hold but are weaker and more concentrated
+  (top configs' best-day share 70%+) — the confirmation-entry mechanism is the
+  better implementation candidate.
 
 ## Quant 7-Gates: per-instrument sim policy + per-instrument stats (2026-06-11)
 
