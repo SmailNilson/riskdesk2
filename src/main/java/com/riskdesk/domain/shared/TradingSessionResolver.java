@@ -25,6 +25,11 @@ public final class TradingSessionResolver {
     public static final ZoneId CME_ZONE = ZoneId.of("America/New_York");
     public static final LocalTime CME_SESSION_CLOSE = LocalTime.of(17, 0);
 
+    /** US cash-equity Regular Trading Hours open (09:30 ET, DST-aware). */
+    public static final LocalTime RTH_OPEN = LocalTime.of(9, 30);
+    /** US cash-equity Regular Trading Hours close (16:00 ET, DST-aware). */
+    public static final LocalTime RTH_CLOSE = LocalTime.of(16, 0);
+
     /**
      * Daily CME Globex maintenance windows (America/New_York, DST-aware).
      * <ul>
@@ -88,6 +93,35 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    /**
+     * Returns {@code true} if the timestamp falls within US Regular Trading Hours:
+     * Monday–Friday 09:30–16:00 ET (DST-aware). Used as the session anchor selector
+     * for the session-anchored CVD (RTH anchor inside this window, Globex-day outside).
+     */
+    public static boolean isWithinRth(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) return false;
+        LocalTime t = zdt.toLocalTime();
+        return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
+    }
+
+    /**
+     * Returns the most recent RTH open (09:30 ET) at or before the given timestamp,
+     * as a UTC {@link Instant}. If the timestamp is before 09:30 ET on its calendar
+     * day, the anchor is 09:30 ET of the previous calendar day. Intended to be used
+     * together with {@link #isWithinRth(Instant)} — callers anchor RTH-scoped state
+     * only while inside the RTH window.
+     */
+    public static Instant rthSessionStart(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        LocalDate date = zdt.toLocalDate();
+        if (zdt.toLocalTime().isBefore(RTH_OPEN)) {
+            date = date.minusDays(1);
+        }
+        return date.atTime(RTH_OPEN).atZone(CME_ZONE).toInstant();
     }
 
     /**

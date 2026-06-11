@@ -12,12 +12,25 @@ import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
 export interface OrderFlowMetrics {
   instrument: string;
   delta: number;
+  // Session-anchored CVD: signed volume since the RTH open (09:30 ET) when inside RTH,
+  // else since the Globex daily session start (17:00 ET). No longer the 5-min window delta.
   cumulativeDelta: number;
+  // Which anchor the CVD is running from: 'RTH' | 'GLOBEX'.
+  cvdAnchor?: string;
   buyVolume: number;
   sellVolume: number;
   buyRatioPct: number;
   deltaTrend: string;
   source: string;
+  // Speed of tape: trades/sec over trailing 5s / 30s windows, z-scored against a
+  // rolling ~30-min baseline. tapeRatio5s = current 5s speed vs the baseline mean.
+  tapeSpeed5s?: number;
+  tapeSpeed30s?: number;
+  tapeZ5s?: number;
+  tapeZ30s?: number;
+  tapeRatio5s?: number;
+  // Net signed volume of flagged big prints over the last 5 minutes.
+  bigPrintDelta5m?: number;
   // ISO timestamp of the last real tick in the window — drives the STALE badge.
   dataTimestamp?: string;
   // Server-authoritative staleness flag (L4). When present the client prefers it over the
@@ -25,6 +38,26 @@ export interface OrderFlowMetrics {
   serverStale?: boolean;
   // Feed health: REAL_TICKS | REAL_TICKS_TICKRULE | STARVED | DEGRADED_NOT_SUBSCRIBED.
   feedHealth?: string;
+}
+
+export interface CvdDivergenceEvent {
+  instrument: string;
+  type: 'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE';
+  prevPivotPrice: number;
+  newPivotPrice: number;
+  prevPivotCvd: number;
+  newPivotCvd: number;
+  pivotTimestamp: string;
+  timestamp: string;
+}
+
+export interface BigPrintEvent {
+  instrument: string;
+  price: number;
+  size: number;
+  side: 'BUY' | 'SELL';
+  percentile: number;
+  timestamp: string;
 }
 
 export interface BookLevel {
@@ -223,6 +256,8 @@ export function useOrderFlow() {
   const [distributionEvents, setDistributionEvents] = useState<DistributionEvent[]>([]);
   const [momentumEvents, setMomentumEvents] = useState<MomentumEvent[]>([]);
   const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
+  const [cvdDivergenceEvents, setCvdDivergenceEvents] = useState<CvdDivergenceEvent[]>([]);
+  const [bigPrintEvents, setBigPrintEvents] = useState<BigPrintEvent[]>([]);
   const [perfectSetups, setPerfectSetups] = useState<Map<string, PerfectSetupSignal>>(new Map());
   const [connected, setConnected] = useState(false);
 
@@ -317,6 +352,16 @@ export function useOrderFlow() {
           setCycleEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
         });
 
+        client.subscribe('/topic/cvd-divergence', (msg: IMessage) => {
+          const event: CvdDivergenceEvent = JSON.parse(msg.body);
+          setCvdDivergenceEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
+
+        client.subscribe('/topic/big-prints', (msg: IMessage) => {
+          const event: BigPrintEvent = JSON.parse(msg.body);
+          setBigPrintEvents(prev => [event, ...prev].slice(0, MAX_EVENTS));
+        });
+
         client.subscribe('/topic/perfect-setup', (msg: IMessage) => {
           const signal: PerfectSetupSignal = JSON.parse(msg.body);
           setPerfectSetups(prev => {
@@ -353,6 +398,8 @@ export function useOrderFlow() {
     distributionEvents,
     momentumEvents,
     cycleEvents,
+    cvdDivergenceEvents,
+    bigPrintEvents,
     perfectSetups,
     connected,
   };

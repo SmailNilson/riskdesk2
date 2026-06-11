@@ -1,5 +1,7 @@
 package com.riskdesk.domain.marketdata.port;
 
+import com.riskdesk.domain.marketdata.model.SessionCvd;
+import com.riskdesk.domain.marketdata.model.TapeSpeed;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.model.Instrument;
 
@@ -65,5 +67,22 @@ public interface TickDataPort {
     /** Total number of classified (BUY/SELL) ticks received — the gap vs raw ticks = dropped (L3). */
     default long classifiedTicksReceived() {
         return 0L;
+    }
+
+    /**
+     * Session-anchored CVD for this instrument (RTH anchor inside 09:30–16:00 ET, else
+     * Globex-day anchor) — see {@link SessionCvd}. Empty when no tick data exists.
+     * Read-only; never mutates aggregation state.
+     */
+    default Optional<SessionCvd> sessionCvd(Instrument instrument) {
+        return Optional.empty();
+    }
+
+    /**
+     * Speed of tape (prints/sec, contracts/sec) over the trailing {@code windowSeconds}.
+     * Empty when no tick data exists. Read-only; never mutates aggregation state.
+     */
+    default Optional<TapeSpeed> tapeSpeed(Instrument instrument, long windowSeconds) {
+        return Optional.empty();
     }
 }

@@ -30,6 +30,9 @@ public class OrderFlowProperties {
     private TickChart tickChart = new TickChart();
     private Footprint footprint = new Footprint();
     private WallTracker wallTracker = new WallTracker();
+    private Cvd cvd = new Cvd();
+    private Tape tape = new Tape();
+    private BigPrint bigPrint = new BigPrint();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -61,6 +64,12 @@ public class OrderFlowProperties {
     public void setFootprint(Footprint footprint) { this.footprint = footprint; }
     public WallTracker getWallTracker() { return wallTracker; }
     public void setWallTracker(WallTracker wallTracker) { this.wallTracker = wallTracker; }
+    public Cvd getCvd() { return cvd; }
+    public void setCvd(Cvd cvd) { this.cvd = cvd; }
+    public Tape getTape() { return tape; }
+    public void setTape(Tape tape) { this.tape = tape; }
+    public BigPrint getBigPrint() { return bigPrint; }
+    public void setBigPrint(BigPrint bigPrint) { this.bigPrint = bigPrint; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -488,6 +497,66 @@ public class OrderFlowProperties {
         public void setTicksPerBar(Map<String, Integer> v) { this.ticksPerBar = v; }
         public int getMaxBars() { return maxBars; }
         public void setMaxBars(int v) { this.maxBars = v; }
+    }
+
+    /**
+     * Session-anchored CVD divergence detector (UC-OF-CVD): swing-pivot divergences
+     * between 1m price closes and the session CVD, published on {@code /topic/cvd-divergence}.
+     */
+    public static class Cvd {
+        private boolean enabled = true;
+        /** Confirmed bars on each side of a swing pivot (5 left / 5 right). */
+        private int pivotBars = 5;
+        /** Minimum |CVD difference| (contracts) between the two pivots — filters flat-CVD noise. */
+        private long minCvdSwing = 200;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getPivotBars() { return pivotBars; }
+        public void setPivotBars(int v) { this.pivotBars = v; }
+        public long getMinCvdSwing() { return minCvdSwing; }
+        public void setMinCvdSwing(long v) { this.minCvdSwing = v; }
+    }
+
+    /**
+     * Speed of tape (trade-intensity z-score): trades/sec over trailing 5s and 30s windows,
+     * z-scored against a rolling 30-min baseline sampled every 5s by the orchestrator pass.
+     * Published in the {@code /topic/order-flow} payload.
+     */
+    public static class Tape {
+        private boolean enabled = true;
+        /** Z-score at or above which the tape counts as a burst (frontend amber; red at z≥3). */
+        private double burstZ = 2.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getBurstZ() { return burstZ; }
+        public void setBurstZ(double v) { this.burstZ = v; }
+    }
+
+    /**
+     * Big-print detector (UC-OF-BIGPRINT): flags AllLast prints at or above the rolling
+     * size-distribution percentile (with an absolute floor), publishes events on
+     * {@code /topic/big-prints} (rate-limited 1/sec/instrument) and a 5-min signed
+     * big-print delta in the {@code /topic/order-flow} payload.
+     */
+    public static class BigPrint {
+        private boolean enabled = true;
+        /** Distribution percentile a print must reach to be flagged (0..1]. */
+        private double percentile = 0.99;
+        /** Absolute floor (contracts) — guards thin tape where the percentile collapses. */
+        private int minSize = 10;
+        /** Rolling window (minutes) of the print-size distribution. */
+        private int windowMinutes = 30;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getPercentile() { return percentile; }
+        public void setPercentile(double v) { this.percentile = v; }
+        public int getMinSize() { return minSize; }
+        public void setMinSize(int v) { this.minSize = v; }
+        public int getWindowMinutes() { return windowMinutes; }
+        public void setWindowMinutes(int v) { this.windowMinutes = v; }
     }
 
     /** Footprint chart bars (UC-OF-011): clock-aligned bars of classified tick volume per price bucket. */
