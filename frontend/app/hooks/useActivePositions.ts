@@ -28,6 +28,8 @@ export interface UseActivePositionsResult {
   error: string | null;
   /** Triggers a market close for the given execution id. */
   close: (executionId: number) => Promise<ActivePositionView | null>;
+  /** Cancels an unfilled entry order (resting limit) for the given execution id. */
+  cancelEntry: (executionId: number) => Promise<ActivePositionView | null>;
   /** Forces a REST refresh — useful after a manual action that the WS may not echo immediately. */
   refresh: () => Promise<void>;
   /** True when the STOMP connection is up. */
@@ -131,5 +133,23 @@ export function useActivePositions(): UseActivePositionsResult {
     []
   );
 
-  return { positions, loading, error, close, refresh, connected };
+  const cancelEntry = useCallback(
+    async (executionId: number): Promise<ActivePositionView | null> => {
+      try {
+        const result = await api.cancelEntryActivePosition(executionId);
+        // Optimistic local update — the WS frame (and the broker's Cancelled echo) overwrite us.
+        setPositions((prev) =>
+          prev.map((p) => (p.executionId === executionId ? result : p))
+        );
+        return result;
+      } catch (err) {
+        console.warn('cancelEntryActivePosition failed', err);
+        setError(err instanceof Error ? err.message : 'cancel failed');
+        return null;
+      }
+    },
+    []
+  );
+
+  return { positions, loading, error, close, cancelEntry, refresh, connected };
 }

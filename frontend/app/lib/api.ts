@@ -1368,6 +1368,11 @@ export const api = {
     get<ActivePositionView[]>(`/api/quant/positions/active`),
   closeActivePosition: (executionId: number) =>
     post<ActivePositionView>(`/api/quant/positions/${executionId}/close`, {}),
+  // Cancels an entry order that has not filled: local cancel for PENDING rows, real
+  // broker cancel (by ibkrOrderId) for a resting ENTRY_SUBMITTED limit. The row is
+  // finalized to CANCELLED by the broker's Cancelled callback, echoed on /topic/positions.
+  cancelEntryActivePosition: (executionId: number) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/cancel-entry`, {}),
 
   // ── Quant manual trade ticket (PR #306) ────────────────────────────────
   // Backend: com.riskdesk.presentation.quant.QuantManualTradeController

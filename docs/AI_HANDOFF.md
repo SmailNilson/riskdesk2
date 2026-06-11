@@ -2,6 +2,51 @@
 
 Last updated: 2026-06-11
 
+## Chart trading MVP — click-to-trade sur le Tick Chart (2026-06-11)
+
+**Feature.** `TickChart.tsx` gains a `TRADE` toggle (off by default). When armed, a click on
+the chart opens a context menu quoting the clicked price (tick-rounded via
+`series.coordinateToPrice`); Acheter/Vendre opens a confirmation ticket (price / qty / SL / TP
+editable, LMT or MKT) which submits a real IBKR order through the existing
+`POST /api/quant/manual-trade/{instrument}` with the new `submitImmediately=true` flag.
+Working orders + live position + virtual SL/TP are drawn as price lines fed by
+`/topic/positions` (`useActivePositions`, also newly exposing `cancelEntry`); rows under the
+chart cancel a resting entry or flatten the live position with an inline two-click confirm.
+Dashboard passes `selectedIbkrAccountId` → ticket → `ManualTradeRequest.brokerAccountId`
+(server falls back to `riskdesk.quant.auto-arm.broker-account-id`).
+
+**Backend changes (the real substance — two safety holes closed + one critical bug):**
+1. **Broker order cancellation now exists.** `IbGatewayNativeClient.cancelOrderById(int)`
+   (ApiController.cancelOrder + IOrderCancelHandler; IBKR code 202 = success), surfaced via
+   `IbkrBrokerGateway.cancelOrder` (default: unsupported) → `IbkrOrderService.cancelOrder` →
+   `ActivePositionsService.cancelEntry` → `POST /api/quant/positions/{id}/cancel-entry`.
+   The row is NOT finalized synchronously: the broker's `Cancelled` callback
+   (`ExecutionFillTrackingService`) owns the CANCELLED transition, so a cancel raced by a
+   fill still resolves to ACTIVE.
+2. **Panel/chart close now reaches the broker.** `ActivePositionsService.closePosition` used
+   to mark broker-known rows `EXIT_SUBMITTED` locally WITHOUT submitting any IBKR order —
+   stranding the live position (app/broker drift). It now routes a FLATTEN `TradeIntent`
+   through the unified `DefaultOrderRouter` (broker-truth reconciliation, marketable exit
+   pricing, stuck-close re-fire). `SKIPPED_IBKR_DISABLED` keeps the legacy local mark (tests /
+   IBKR-less envs); `ENTRY_SUBMITTED` unfilled delegates to the broker cancel;
+   per-click idempotency key `panel-close:{id}:{epochMilli}`.
+3. **Action-token bug fixed (would have sent SHORTs as BUYs).** Rows persisted by
+   `QuantManualTradeService` / `QuantAutoArmService` stored `action="BUY"/"SELL"`, but the
+   gateway maps `"SHORT" → SELL, else BUY` — so a manual/auto-arm **SHORT submitted to IBKR
+   became a BUY**. Unnoticed because no UI called these endpoints yet. Both now persist
+   `"LONG"/"SHORT"` (`ManualDirection.action()`, `AutoArmDirection.action()`), and the gateway
+   defensively maps `"SELL"` → SELL for any legacy rows.
+
+**Known limitations (Phase 2 candidates):** no price-modify of a resting order (drag) — cancel
++ re-place; `ENTRY_PARTIALLY_FILLED` can neither cancel (409 "use close") nor flatten (router
+in-flight guard) — rare on 1-lot micros; SL/TP of manual rows are VIRTUAL display levels —
+no walker executes them (exits are operator-driven), no broker brackets (by design, matches
+WTX); `useActivePositions` in TickChart opens a second SockJS connection.
+
+**Tests.** `ActivePositionsServiceTest` (14, router-mocked FLATTEN capture, cancel matrix),
+`ActivePositionsControllerTest` (+3 cancel-entry), `QuantManualTradeServiceTest` (+2,
+LONG/SHORT tokens), `QuantAutoArmServiceTest` token update. `HexagonalArchitectureTest` green.
+
 ## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
 
 Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).

@@ -319,6 +319,22 @@ Current behavior:
 - Slice 3b (next) will add startup reconciliation: query IBKR open/completed orders and reconcile against dangling `trade_executions` rows from prior runs.
 - Slice 3c (future) will add bracket orders — submit SL + TP once entry fills, monitor and close.
 
+### Chart trading / Active Positions surface (2026-06-11)
+
+- `POST /api/quant/manual-trade/{instrument}` accepts `brokerAccountId` (falls back to
+  `riskdesk.quant.auto-arm.broker-account-id`) and `submitImmediately` (LIMIT goes straight to
+  IBKR instead of resting as PENDING awaiting a separate submit-entry call)
+- `POST /api/quant/positions/{id}/close` routes a FLATTEN through the unified `OrderRouter`
+  for broker-known rows (marketable exit, broker-truth reconcile, stuck-close re-fire);
+  unfilled `ENTRY_SUBMITTED` rows delegate to the broker cancel instead
+- `POST /api/quant/positions/{id}/cancel-entry` cancels an unfilled entry: local cancel for
+  PENDING rows, real broker cancel (`IbGatewayNativeClient.cancelOrderById`, IBKR code 202 =
+  success) for a resting limit; the `Cancelled` callback finalizes the row
+- Frontend: `TickChart.tsx` `TRADE` toggle → click on chart → Acheter/Vendre context menu →
+  confirmation ticket → `submitManualTrade(submitImmediately)`; order/position/SL/TP price
+  lines from `/topic/positions`; cancel/flatten rows under the chart (two-click confirm).
+  SL/TP of manual rows are VIRTUAL display levels — no walker, no broker brackets.
+
 ## Operational Commands
 
 ### Compile backend

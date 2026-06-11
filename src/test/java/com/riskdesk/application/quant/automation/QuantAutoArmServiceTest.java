@@ -85,7 +85,7 @@ class QuantAutoArmServiceTest {
         assertThat(rec.getStatus()).isEqualTo(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         assertThat(rec.getTriggerSource()).isEqualTo(ExecutionTriggerSource.QUANT_AUTO_ARM);
         assertThat(rec.getInstrument()).isEqualTo("MNQ");
-        assertThat(rec.getAction()).isEqualTo("SELL"); // SHORT → SELL
+        assertThat(rec.getAction()).isEqualTo("SHORT"); // broker-side token; gateway maps SHORT → SELL
         assertThat(rec.getMentorSignalReviewId()).isNull();
         // Both AutoArmFiredEvent and AutoArmStateChangedEvent(ARMED) get published.
         assertThat(publisher.events).hasSize(2);

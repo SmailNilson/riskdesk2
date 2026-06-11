@@ -71,7 +71,7 @@ class QuantManualTradeServiceTest {
         TradeExecutionRecord placed = service.place(Instrument.MNQ, req, "operator");
 
         assertThat(placed.getId()).isNotNull();
-        assertThat(placed.getAction()).isEqualTo("BUY");
+        assertThat(placed.getAction()).isEqualTo("LONG");
         assertThat(placed.getInstrument()).isEqualTo("MNQ");
         assertThat(placed.getStatus()).isEqualTo(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         assertThat(placed.getTriggerSource()).isEqualTo(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
@@ -100,10 +100,42 @@ class QuantManualTradeServiceTest {
         assertThat(result.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
         assertThat(repo.created).hasSize(1);
         TradeExecutionRecord created = repo.created.get(0);
-        assertThat(created.getAction()).isEqualTo("SELL");
+        assertThat(created.getAction()).isEqualTo("SHORT");
         assertThat(created.getQuantity()).isEqualTo(2);
         assertThat(created.getNormalizedEntryPrice()).isEqualByComparingTo("20100.00");
         verify(executionManager, times(1)).submitEntryOrder(any(SubmitEntryOrderCommand.class));
+    }
+
+    @Test
+    void place_limit_with_submit_immediately_submits_to_broker() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.LIMIT,
+            new BigDecimal("20000.00"), new BigDecimal("19975.00"),
+            new BigDecimal("20040.00"), null, 1, null, true
+        );
+        TradeExecutionRecord submitted = new TradeExecutionRecord();
+        submitted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        when(executionManager.submitEntryOrder(any(SubmitEntryOrderCommand.class))).thenReturn(submitted);
+
+        TradeExecutionRecord result = service.place(Instrument.MNQ, req, "chart");
+
+        assertThat(result.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+        verify(executionManager, times(1)).submitEntryOrder(any(SubmitEntryOrderCommand.class));
+    }
+
+    @Test
+    void place_uses_request_broker_account_over_auto_arm_config() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.SHORT, ManualEntryType.LIMIT,
+            new BigDecimal("20100.00"), new BigDecimal("20125.00"),
+            new BigDecimal("20060.00"), null, 1, "DU7654321", null
+        );
+
+        TradeExecutionRecord placed = service.place(Instrument.MNQ, req, "chart");
+
+        assertThat(placed.getBrokerAccountId()).isEqualTo("DU7654321");
+        assertThat(placed.getAction()).isEqualTo("SHORT");
+        verify(executionManager, never()).submitEntryOrder(any());
     }
 
     @Test

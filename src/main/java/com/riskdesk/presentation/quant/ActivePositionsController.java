@@ -24,6 +24,9 @@ import java.util.Optional;
  *   <li>{@code POST /api/quant/positions/{executionId}/close} — request a
  *       close. Idempotent: closing an already-terminal row returns the
  *       existing terminal view.</li>
+ *   <li>{@code POST /api/quant/positions/{executionId}/cancel-entry} — cancel an
+ *       entry order that has not filled (local cancel for PENDING rows, real broker
+ *       cancel for a resting ENTRY_SUBMITTED limit). 409 when fills exist.</li>
  * </ul>
  *
  * <p>Live updates after the initial load come through {@code /topic/positions}
@@ -57,6 +60,20 @@ public class ActivePositionsController {
                 .orElseGet(() -> ResponseEntity.notFound().build());
         } catch (IllegalStateException e) {
             log.warn("Close rejected for execution {} — {}", executionId, e.getMessage());
+            return ResponseEntity.status(409).build();
+        }
+    }
+
+    @PostMapping("/{executionId}/cancel-entry")
+    public ResponseEntity<ActivePositionView> cancelEntry(@PathVariable Long executionId,
+                                                          @RequestHeader(value = "X-Requested-By", required = false) String requestedBy) {
+        try {
+            Optional<ActivePositionView> result = activePositionsService.cancelEntry(executionId, requestedBy);
+            return result
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (IllegalStateException e) {
+            log.warn("Cancel-entry rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
         }
     }
