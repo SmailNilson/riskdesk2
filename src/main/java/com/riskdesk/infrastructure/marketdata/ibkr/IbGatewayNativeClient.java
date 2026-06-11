@@ -1244,6 +1244,11 @@ public class IbGatewayNativeClient {
         synchronized (streamingLock) {
             if (depthSubscriptions.containsKey(key)) return;
 
+            // Fresh snapshot incoming (INSERTs at positions 0..N-1) — drop any stale
+            // levels from a previous subscription/connection/contract first, or thin
+            // snapshots merge into phantom deep levels from the old price regime.
+            depthAdapter.clearBook(instrument);
+
             DepthSubscription subscription = new DepthSubscription(instrument);
             controller.reqDeepMktData(contract, numRows, false, subscription);
             depthSubscriptions.put(key, subscription);
@@ -1276,6 +1281,12 @@ public class IbGatewayNativeClient {
                         log.warn("cancelDeepMktData failed for {}: {}", instrument, e.getMessage());
                     }
                     it.remove();
+                    // Empty the book during the gap: an honest "depth unavailable" beats
+                    // serving the frozen pre-cancel ladder as if it were live.
+                    IbkrMarketDepthAdapter adapter = depthAdapter;
+                    if (adapter != null) {
+                        adapter.clearBook(instrument);
+                    }
                     log.info("IB Gateway market depth cancelled for {} (will re-subscribe)", instrument);
                 }
             }
@@ -1451,6 +1462,11 @@ public class IbGatewayNativeClient {
         managedAccounts = List.of();
         streamingSubscriptions.clear();
         streamingQuoteSubscriptions.clear();
+        // Without this, resubscribeAll's DEPTH branch short-circuits on the stale
+        // pre-disconnect key in subscribeDepth and NO reqDeepMktData is ever re-sent
+        // after a reconnect — the book stays frozen until the freshness watchdog
+        // independently forces a cancel/resubscribe minutes later.
+        depthSubscriptions.clear();
         // Slice 3a — drop stale fill-tracking handler refs so they re-attach on reconnect.
         tradeReportHandlerRef = null;
         fillTrackingOrderHandler = null;

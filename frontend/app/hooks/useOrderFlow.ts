@@ -47,6 +47,10 @@ export interface DepthMetrics {
   asks?: BookLevel[];
   // ISO timestamp of the last real L2 update — drives the STALE badge.
   dataTimestamp?: string;
+  // Server-authoritative staleness (age vs the depth-watchdog threshold) — the
+  // ladder must never render a frozen book as live.
+  ageSeconds?: number | null;
+  serverStale?: boolean;
 }
 
 export interface AbsorptionEvent {

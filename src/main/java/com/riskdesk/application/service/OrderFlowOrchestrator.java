@@ -833,7 +833,10 @@ public class OrderFlowOrchestrator {
         int dedupSec = properties.getIceberg().getDedupSeconds();
         for (IcebergSignal s : signals) {
             if (s.icebergScore() < minScore) continue;
-            String key = "ICE|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            // Dedup in price SPACE (N-tick buckets), not per exact tick — one physical
+            // order flickering across adjacent levels must share a single dedup key.
+            double bucket = tickSize * Math.max(1, properties.getIceberg().getDedupPriceTicks());
+            String key = "ICE|" + s.side() + "|" + Math.round(s.priceLevel() / bucket);
             if (icebergGate.shouldEmit(instrument, key, now, dedupSec)) {
                 eventPublisher.publishEvent(new IcebergDetected(instrument, s, now));
             }
@@ -852,7 +855,9 @@ public class OrderFlowOrchestrator {
         int dedupSec = properties.getSpoofing().getDedupSeconds();
         for (SpoofingSignal s : signals) {
             if (s.spoofScore() < minScore) continue;
-            String key = "SPF|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            // Dedup in price SPACE (N-tick buckets) — see the iceberg twin above.
+            double bucket = tickSize * Math.max(1, properties.getSpoofing().getDedupPriceTicks());
+            String key = "SPF|" + s.side() + "|" + Math.round(s.priceLevel() / bucket);
             if (spoofingGate.shouldEmit(instrument, key, now, dedupSec)) {
                 eventPublisher.publishEvent(new SpoofingDetected(instrument, s, now));
             }
@@ -1119,6 +1124,14 @@ public class OrderFlowOrchestrator {
                 String dataTs = d.timestamp() != null ? d.timestamp().toString() : null;
                 payload.put("dataTimestamp", dataTs);
                 payload.put("timestamp", dataTs != null ? dataTs : java.time.Instant.now().toString());
+                // Server-authoritative staleness: the frontend must never render a frozen
+                // ladder as live (the 3h "25-pt spread" incident). Threshold = the same
+                // freshness config that drives the depth watchdog.
+                long ageSec = d.timestamp() != null
+                    ? Math.max(0, java.time.Duration.between(d.timestamp(), java.time.Instant.now()).getSeconds())
+                    : Long.MAX_VALUE;
+                payload.put("ageSeconds", ageSec == Long.MAX_VALUE ? null : ageSec);
+                payload.put("serverStale", ageSec > properties.getFreshness().getDepthStalenessSeconds());
 
                 messagingTemplate.convertAndSend("/topic/depth", payload);
             } catch (Exception e) {
