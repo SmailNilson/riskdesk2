@@ -141,6 +141,53 @@ same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
   (top configs' best-day share 70%+) — the confirmation-entry mechanism is the
   better implementation candidate.
 
+## Quant 7-Gates: per-instrument sim policy + per-instrument stats (2026-06-11)
+
+The `riskdesk.quant.sim.*` paper-policy knobs were global; MNQ and MCL trade on very
+different volatility/flow profiles and their P&L was blended into one panel aggregate.
+
+- **Per-instrument config overrides** — `riskdesk.quant.sim.per-instrument.<INSTR>.<key>`
+  (e.g. `...per-instrument.MCL.sl-atr-mult=1.5`). Overridable keys: exit-policy, stop-mode,
+  atr-timeframe, atr-period, sl/tp1/tp2-atr-mult, htf-filter-enabled, htf-timeframe,
+  htf-ema-fast/slow. Unset keys inherit the global value (partial blocks are the expected
+  usage). EOD-flat / entry-blackout windows stay global — they are CME-session properties,
+  not instrument characteristics. Resolution lives in `QuantSimProperties.<key>(String
+  instrument)`; `Quant7GatesSimulationService` and `DefaultQuantSimMarketContext` resolve
+  per instrument at entry/exit time. **No per-instrument values are set yet** — validate a
+  candidate with `GET /api/quant/backtest/exits?instrument=...` before setting one.
+- **Per-instrument stats** — `Quant7GatesSimulationService.statsByInstrument()` +
+  `byInstrument` map on `GET /api/quant/simulations/stats` (each entry: closed/wins/losses/
+  WR/net pts/net USD/open count). The panel renders one compact per-instrument row under
+  the global strip (client-side grouping of the same rows, so slices always sum to the strip).
+- **Signals were already per-instrument** — each scan/gate evaluation is per instrument and
+  PR #445 made delta/abs thresholds per-instrument; this slice separates *policy* and *reporting*.
+- **Stats baseline** — `riskdesk.quant.sim.stats-since=2026-06-11T09:33:40Z` (the v1.11.126
+  prod boot, from `process.start.time`): rows OPENED before it ran on broken order-flow delta
+  (and the legacy FLOW_AVOID exit), so they are excluded from every aggregate — global,
+  per-instrument, and the panel strip (the hook fetches `statsSince` from `/stats` and filters
+  client-side with the same openedAt rule). History rows stay visible in the list. Keyed on
+  `openedAt`, not `closedAt`: the ENTRY decision is what consumed bad data. Clear the key to
+  re-include the full history.
+- Tests: `Quant7GatesSimulationServicePolicyTest` (override resolution incl. partial
+  inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check,
+  stats-since baseline exclusion).
+## WTX — session ON par défaut pour tout panneau auto-trade (2026-06-11)
+
+Politique actée: tout signal avec auto-exécution démarre session ON (blocage des entrées
+03:00-08:00 ET, fenêtre globale), désactivable par panneau via le bouton Session (#439).
+Fondement: l'étude pleine période sur données front réelles (jan→juin) a renversé le verdict
+session-OFF de la sélection d'origine (mars→juin) — ON garde ~le même net (+$9,980 vs +$9,768)
+avec un maxDD ÷3.5 ($1,614 vs $5,639) et survit aux mois sans direction jamais vus par la
+sélection. Changements:
+- `WtxParamOverride.TOP_TRAIN_Z35.sessionFilterEnabled`: FALSE → null (hérite du global, qui
+  est ON). Ré-appliquer le preset ne désactive plus la session; le bouton reste l'opt-out.
+- Fix vue REST: `WtxStrategyController.toStateView`/`defaultStateView` exposent maintenant
+  `sessionFilterEnabled` (effectif) — sans quoi le bouton Session affichait toujours OFF même
+  moteur ON (bug d'affichage de #439, le moteur n'était pas affecté).
+- Côté prod, le panneau Z35 a été basculé ON à chaud via l'endpoint (override DB session=true);
+  la config zone du panneau vient du preset déclaré dans application.properties (variants[0]),
+  pas de la ligne DB — les colonnes NULL de la ligne d'override sont normales.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
