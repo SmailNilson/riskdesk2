@@ -56,6 +56,32 @@ same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
   bear-regime months (Mar, Jun) by construction of the HTF+SHORT filter, and the
   config was selected from an 864-config search — forward-paper it first.
 
+**Round 3 — CRITICAL DATA ARTIFACT + LONG confirmation mechanism:**
+- **Stored 10m and 1m MNQ candles disagree by the quarterly contract basis before
+  the March 2026 roll** (~250 pts ≈ 9 ATR in January, decaying to ~0 by April) —
+  one timeframe was deep-backfilled with a different contract month than the
+  other. Every cross-timeframe simulation over Jan–Feb is invalid (March partly);
+  the harness now drops decisions whose plan entry sits >3 ATR from the 1m open
+  (`filterConsistent`, 4,701 of 13,490 decisions dropped). **Prod data needs a
+  consistent-contract re-backfill before any backtest uses pre-April history.**
+- This artifact had poisoned round-2's directional conclusions: on CLEAN data the
+  LONG side is NOT worthless. Corrected verdicts (Apr–Jun window, portfolio mode):
+  - Baseline playbook: −$2,828 (mildly negative, not −$31k).
+  - Best limit-based config is now BIDIRECTIONAL: MID score≥5 + HTF + dedup +
+    skip-late + ATR(2.0/3.0) exits + RTH → 198 resolved, **WR 50.5%, +$7,916 net,
+    PF 1.51, maxDD $1,224**, 4/5 positive months, top day 16%.
+- **LONG confirmation-entry study** (`runLongMechanismStudy`): instead of the
+  passive limit inside the zone, arm a **buy-stop at zoneHigh** (BREAKOUT) or
+  require touch-then-reclaim (RECLAIM_TOP/MID), cancel if price breaks
+  zoneLow − 0.5×ATR before triggering ("never buy the reclaim of a broken zone").
+  Result on clean data: **273/288 LONG configs positive (95%)**; champion
+  BREAKOUT + ATR(2.0/3.0), no HTF needed: 265 resolved, WR 47.5%, **+$7,402 net,
+  PF 1.38, maxDD $1,489**, top day 17%, and June (a −5.3% month) stayed positive —
+  the invalidation guard self-filters bear regimes. SHORT mirror (sell-stop at
+  zoneLow) also improves on the limit version: +$9,170, WR 52.2%, PF 1.76 (NO_ON).
+- Caveat: the clean window is only ~2.5 months and Apr–May was strongly bullish —
+  forward-paper before live, and re-run after the data re-backfill.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with

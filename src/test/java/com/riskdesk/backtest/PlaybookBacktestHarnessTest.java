@@ -501,7 +501,7 @@ class PlaybookBacktestHarnessTest {
             }
             sims.add(s);
         }
-        return aggregate(cfg, sims);
+        return aggregate(cfg.label(), sims);
     }
 
     /** Realistic account: strictly one position at a time, processed chronologically. */
@@ -520,10 +520,10 @@ class PlaybookBacktestHarnessTest {
             sims.add(s);
             last = s;
         }
-        return aggregate(cfg, sims);
+        return aggregate(cfg.label(), sims);
     }
 
-    private Result aggregate(Config cfg, List<Sim> sims) {
+    private Result aggregate(String label, List<Sim> sims) {
         int w = 0, l = 0, miss = 0, canc = 0, rev = 0, tmo = 0, open = 0;
         double pnl = 0, grossW = 0, grossL = 0, equity = 0, peak = 0, maxDd = 0;
         int resolved = 0;
@@ -566,10 +566,205 @@ class PlaybookBacktestHarnessTest {
         double topDay = daily.values().stream().mapToDouble(Math::abs).max().orElse(0);
         double topDayShare = Math.abs(pnl) < 1 ? 0 : topDay / Math.abs(pnl);
         int posMonths = (int) monthly.values().stream().filter(v -> v > 0).count();
-        return new Result(cfg.label(), sims.size(), sims.size(), w, l, miss, canc, rev, tmo, open,
+        return new Result(label, sims.size(), sims.size(), w, l, miss, canc, rev, tmo, open,
             wr, pnl, pnl - resolved * FRICTION, pf,
             w == 0 ? 0 : grossW / w, l == 0 ? 0 : -grossL / l, maxDd,
             topDayShare, posMonths, monthly.size(), monthly);
+    }
+
+    /**
+     * Cross-series consistency gate. The stored 10m and 1m series come from
+     * different contract months before the March 2026 roll (quarterly basis up
+     * to ~250 pts / ~9 ATR, decaying to zero at the roll) — likely a deep
+     * re-backfill of one timeframe with the then-front contract. Simulating a
+     * 10m-frame plan against a 1m tape from another contract is meaningless,
+     * so drop every decision whose plan entry sits more than 3 ATR away from
+     * the 1m open at decision time.
+     */
+    private static List<DecisionRec> filterConsistent(List<DecisionRec> decisions, long[] t1, double[] o1) {
+        List<DecisionRec> ok = new ArrayList<>(decisions.size());
+        int dropped = 0;
+        for (DecisionRec d : decisions) {
+            int i = firstIndexGeq(t1, d.decisionTime());
+            if (i >= t1.length) { dropped++; continue; }
+            double px = o1[i];
+            if (Math.abs(px - d.entry()) > 3 * Math.max(d.atr(), 1.0)) { dropped++; continue; }
+            ok.add(d);
+        }
+        System.out.printf("consistency gate: kept %d decisions, dropped %d (10m/1m contract-basis mismatch)%n",
+            ok.size(), dropped);
+        return ok;
+    }
+
+    // ── LONG mechanism study: confirmation entries on SMC zones ──────────────
+
+    /**
+     * The passive limit-at-zone entry is structurally broken on the LONG side
+     * (fills instantly into downside momentum, 20% WR — see AI_HANDOFF). This
+     * study tests confirmation-style entries anchored on the SAME zones:
+     *   BREAKOUT     — buy-stop at zoneHigh armed at decision time
+     *   RECLAIM_TOP  — price must first touch the zone (zoneHigh), then buy-stop
+     *                  at zoneHigh: retest → reclaim confirmation
+     *   RECLAIM_MID  — deeper touch required (zone midpoint) before the reclaim
+     * Zone invalidation: pending setups cancel when price breaks zoneLow − 0.5×ATR
+     * (the zone failed — never buy the reclaim of a broken zone). SHORT mirror
+     * configs are run as a control group.
+     */
+    public record MechConfig(String mech, String exit, double slMult, double tpMult,
+                             boolean htf, String sess, int minScore, int armHours, String dir) {
+        String label() {
+            String ex = "ATR".equals(exit)
+                ? String.format("ATR(%.1f/%.2f)", slMult, tpMult)
+                : String.format("STRUCT(R%.1f)", tpMult);
+            return String.format("mech=%s exit=%s htf=%s sess=%s score>=%d arm=%dh dir=%s",
+                mech, ex, htf ? "Y" : "n", sess, minScore, armHours, dir);
+        }
+    }
+
+    private Sim buildMechSim(DecisionRec d, MechConfig mc) {
+        if (d.score() < mc.minScore()) return null;
+        if (!mc.dir().equals(d.dir())) return null;
+        if (!inSession(d.decisionTime(), mc.sess())) return null;
+        if (d.zoneHigh() <= 0 || d.zoneLow() <= 0 || d.zoneHigh() <= d.zoneLow()) return null;
+        if (d.atr() <= 0) return null;
+        boolean isShort = "SHORT".equals(d.dir());
+        if (mc.htf() && d.ema20h() != null && d.ema50h() != null) {
+            boolean aligned = isShort ? d.ema20h() < d.ema50h() : d.ema20h() > d.ema50h();
+            if (!aligned) return null;
+        }
+        double trigger = isShort ? d.zoneLow() : d.zoneHigh();
+        // sl/tp are set at fill time by walkMech; entry holds the trigger level
+        return new Sim(d, trigger, Double.NaN, Double.NaN, Double.NaN, Double.NaN, isShort, isShort);
+    }
+
+    private void walkMech(Sim s, MechConfig mc, long[] t1, double[] o1, double[] h1, double[] l1) {
+        long start = s.d.decisionTime();
+        int i = firstIndexGeq(t1, start);
+        long deadline = start + mc.armHours() * 3_600L;
+        boolean isLong = !s.isShort;
+        double zoneHigh = s.d.zoneHigh(), zoneLow = s.d.zoneLow(), atr = s.d.atr();
+        double mid = (zoneHigh + zoneLow) / 2;
+        double touchLevel = "RECLAIM_MID".equals(mc.mech()) ? mid : (isLong ? zoneHigh : zoneLow);
+        double trigger = s.entry;
+        double invalid = isLong ? zoneLow - 0.5 * atr : zoneHigh + 0.5 * atr;
+        boolean touched = "BREAKOUT".equals(mc.mech());
+        boolean active = false;
+        for (; i < t1.length; i++) {
+            long t = t1[i];
+            double op = o1[i], hi = h1[i], lo = l1[i];
+            if (!active) {
+                if (t > deadline) { s.status = St.CANCELLED; s.resolveTime = t; return; }
+                if (isLong ? lo <= invalid : hi >= invalid) { s.status = St.CANCELLED; s.resolveTime = t; return; }
+                if (!touched) {
+                    boolean touch = isLong ? lo <= touchLevel : hi >= touchLevel;
+                    if (!touch) continue;
+                    touched = true;
+                    // same-bar reclaim is only knowable when the bar OPENED in the touch
+                    // region (touch precedes trigger chronologically); otherwise arm next bar
+                    boolean openInside = isLong ? op <= touchLevel : op >= touchLevel;
+                    if (!openInside) continue;
+                }
+                boolean trig = isLong ? hi >= trigger : lo <= trigger;
+                if (!trig) continue;
+                active = true;
+                s.fillTime = t;
+                s.fillPrice = isLong ? Math.max(trigger, op) : Math.min(trigger, op); // stop order: never better than market
+                if ("ATR".equals(mc.exit())) {
+                    s.sl = isLong ? s.fillPrice - mc.slMult() * atr : s.fillPrice + mc.slMult() * atr;
+                    s.tp = isLong ? s.fillPrice + mc.tpMult() * atr : s.fillPrice - mc.tpMult() * atr;
+                } else { // STRUCT: stop behind the zone, target in R-multiples
+                    s.sl = isLong ? zoneLow - 0.3 * atr : zoneHigh + 0.3 * atr;
+                    double risk = Math.abs(s.fillPrice - s.sl);
+                    if (risk <= 0) { s.status = St.CANCELLED; s.resolveTime = t; return; }
+                    s.tp = isLong ? s.fillPrice + mc.tpMult() * risk : s.fillPrice - mc.tpMult() * risk;
+                }
+                boolean stop = isLong ? lo <= s.sl : hi >= s.sl;
+                boolean target = isLong ? hi >= s.tp : lo <= s.tp;
+                if (stop) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return; } // pessimistic
+                if (target) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return; }
+                continue;
+            }
+            boolean stop = isLong ? lo <= s.sl : hi >= s.sl;
+            boolean target = isLong ? hi >= s.tp : lo <= s.tp;
+            if (stop) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return; }
+            if (target) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return; }
+        }
+        s.status = active ? St.OPEN : St.CANCELLED;
+    }
+
+    private Result simulateMechPortfolio(List<DecisionRec> decisions, MechConfig mc,
+                                         long[] t1, double[] o1, double[] h1, double[] l1) {
+        List<Sim> sims = new ArrayList<>();
+        Sim last = null;
+        for (DecisionRec d : decisions) {
+            Sim s = buildMechSim(d, mc);
+            if (s == null) continue;
+            long now = d.decisionTime();
+            if (last != null && last.openAt(now)) continue;        // K=1
+            if (zoneCooldownBlocked(sims, d, s.entry, now)) continue; // zone dedup always on
+            walkMech(s, mc, t1, o1, h1, l1);
+            sims.add(s);
+            last = s;
+        }
+        return aggregate(mc.label(), sims);
+    }
+
+    @Test
+    void runLongMechanismStudy() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            new File(F_1M).exists() && new File(F_DECISIONS).exists(),
+            "candle/decision data files not present — skipping");
+        List<Bar> b1m = loadBars(F_1M);
+        List<DecisionRec> decisions = M.readValue(new File(F_DECISIONS), new TypeReference<>() {});
+        System.out.printf("mechanism study: %d decisions, %d 1m bars%n", decisions.size(), b1m.size());
+
+        long[] t1 = b1m.stream().mapToLong(Bar::t).toArray();
+        double[] o1 = b1m.stream().mapToDouble(Bar::o).toArray();
+        double[] h1 = b1m.stream().mapToDouble(Bar::h).toArray();
+        double[] l1 = b1m.stream().mapToDouble(Bar::l).toArray();
+        decisions = filterConsistent(decisions, t1, o1);
+
+        record Exit(String style, double sl, double tp) {}
+        List<Result> results = new ArrayList<>();
+        for (String dir : List.of("LONG", "SHORT"))
+            for (String mech : List.of("BREAKOUT", "RECLAIM_TOP", "RECLAIM_MID"))
+                for (Exit ex : List.of(new Exit("ATR", 1.5, 2.25), new Exit("ATR", 2.0, 3.0),
+                                       new Exit("STRUCT", 0, 1.5), new Exit("STRUCT", 0, 2.0)))
+                    for (boolean htf : List.of(false, true))
+                        for (String sess : List.of("ALL", "RTH", "NO_ON"))
+                            for (int score : List.of(4, 5))
+                                for (int arm : List.of(1, 3)) {
+                                    MechConfig mc = new MechConfig(mech, ex.style(), ex.sl(), ex.tp(),
+                                        htf, sess, score, arm, dir);
+                                    results.add(simulateMechPortfolio(decisions, mc, t1, o1, h1, l1));
+                                }
+
+        results.sort(Comparator.comparingDouble(Result::netPnl).reversed());
+        for (String dir : List.of("LONG", "SHORT")) {
+            System.out.println("\n=== " + dir + " — TOP 15 by net PnL (min 25 resolved) ===");
+            results.stream()
+                .filter(r -> r.label().endsWith("dir=" + dir))
+                .filter(r -> r.wins() + r.losses() + r.timeout() >= 25)
+                .limit(15)
+                .forEach(r -> System.out.println(fmt(r)));
+        }
+        System.out.println("\nLONG family stats (min 25 resolved):");
+        var longs = results.stream()
+            .filter(r -> r.label().endsWith("dir=LONG") && r.wins() + r.losses() + r.timeout() >= 25)
+            .toList();
+        long pos = longs.stream().filter(r -> r.netPnl() > 0).count();
+        System.out.printf("  %d configs, %d positive (%.0f%%)%n", longs.size(), pos,
+            longs.isEmpty() ? 0 : 100.0 * pos / longs.size());
+
+        System.out.println("\nMonthly PnL of top-3 LONG configs:");
+        results.stream()
+            .filter(r -> r.label().endsWith("dir=LONG"))
+            .filter(r -> r.wins() + r.losses() + r.timeout() >= 25)
+            .limit(3)
+            .forEach(r -> System.out.println("  " + r.label() + " -> " + r.monthlyPnl()));
+
+        M.writerWithDefaultPrettyPrinter().writeValue(new File(DIR + "/pb_bt_results_mech.json"), results);
+        System.out.println("\nfull results: " + DIR + "/pb_bt_results_mech.json");
     }
 
     // ── entry point ───────────────────────────────────────────────────────────
@@ -602,6 +797,8 @@ class PlaybookBacktestHarnessTest {
         double[] h1 = b1m.stream().mapToDouble(Bar::h).toArray();
         double[] l1 = b1m.stream().mapToDouble(Bar::l).toArray();
         double[] c1 = b1m.stream().mapToDouble(Bar::c).toArray();
+
+        decisions = filterConsistent(decisions, t1, o1);
 
         Config baseline = new Config("MID", 4, 0, false, false, false, 0);
         Result baseRaw = simulate(decisions, baseline, t1, o1, h1, l1, c1);
