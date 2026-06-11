@@ -82,6 +82,30 @@ same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
 - Caveat: the clean window is only ~2.5 months and Apr–May was strongly bullish —
   forward-paper before live, and re-run after the data re-backfill.
 
+**Round 4 — full-window revalidation after the contract re-backfill (2026-06-11):**
+- The prod re-backfill landed (10m/1h/4h re-filled with H6 through Mar 11, validated
+  to ≤0.75 pt vs 1m; see the playbook-mnq-backtest-verdicts memory / PR #452 for
+  details). Phase A was recomputed on the repaired 10m series: 13,757 decisions,
+  consistency gate now drops only 49 (vs 4,701) — all 5.5 months are simulable.
+- **Baseline playbook, portfolio mode, repaired data: +$4,413** (WR 44.1%, PF 1.23).
+  The raw signal stream is mildly positive one-position-at-a-time; the heavy losses
+  shown on the dashboard come from the overlapping-sims convention and a bad recent
+  live stretch, not from a uniformly worthless signal.
+- **LONG confirmation champion (full window)**: BREAKOUT buy-stop at zoneHigh +
+  zone-broken invalidation + ATR(1.5/2.25) exits + RTH + score≥5, arm 3h →
+  n=296, WR 45.6%, **+$4,955 net, PF 1.30, maxDD $1,341, top day 14%,
+  5/6 positive months** (Jan, Mar, Jun positive — chop AND bear months; only
+  Feb −$510). HTF optional (htf=Y variant: PF 1.35). BREAKOUT family: 74/96
+  configs positive, median +$1,626.
+- **SHORT mirror champion (full window)**: BREAKOUT sell-stop at zoneLow +
+  ATR(1.5/2.25) + NO_ON session + score≥5 → n=315, WR 47.0%, **+$9,515 net,
+  PF 1.46, maxDD $1,215**, top day 19%.
+- Same exits, same mechanism, both sides: a dual-side deployment (LONG RTH +
+  SHORT NO_ON) totals ≈ +$14.5k/5.5 months per micro contract. The
+  previous limit-entry champions hold but are weaker and more concentrated
+  (top configs' best-day share 70%+) — the confirmation-entry mechanism is the
+  better implementation candidate.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
