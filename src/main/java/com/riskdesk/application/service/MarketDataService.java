@@ -34,7 +34,10 @@ import java.util.concurrent.TimeUnit;
  * Polls the configured MarketDataProvider every N seconds.
  * – Updates open position P&L via PositionService.
  * – Pushes price ticks to WebSocket /topic/prices.
- * – Accumulates 10m and 1h OHLCV candles and persists them via CandleRepositoryPort.
+ * – Accumulates intraday OHLCV candles (1m..4h) and persists them via CandleRepositoryPort.
+ *   OHLC comes from price updates; volume comes from {@link #onLiveVolumeUpdate} — true traded
+ *   contracts derived from IBKR's session-cumulative VOLUME tick, the same scale as IBKR
+ *   historical bars. Volume is never inferred from the number of price updates.
  * – Publishes MarketPriceUpdated and CandleClosed domain events.
  * – Falls back to the latest stored IBKR-backed candle close from the database when IBKR is unavailable.
  */
@@ -75,6 +78,12 @@ public class MarketDataService implements StreamingPriceListener {
     private final Map<Instrument, Instant>       lastTimestamp = new ConcurrentHashMap<>();
     private final Map<Instrument, String>        lastSource   = new ConcurrentHashMap<>();
     private final Map<CandleKey, CandleAccumulator> accumulators = new ConcurrentHashMap<>();
+    /**
+     * Traded volume that arrived for a period whose accumulator does not exist yet (volume
+     * ticks can precede the first price tick of a bar). Claimed when the accumulator for
+     * that exact period is created; replaced when a newer period starts.
+     */
+    private final Map<CandleKey, PendingVolume>  pendingVolume = new ConcurrentHashMap<>();
     private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
@@ -359,11 +368,11 @@ public class MarketDataService implements StreamingPriceListener {
         CandleAccumulator[] closed = {null};
         accumulators.compute(key, (k, acc) -> {
             if (acc == null) {
-                return new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price);
+                return newAccumulator(key, instrument, timeframe, contractMonth, periodStart, price);
             }
             if (acc.periodStart.isBefore(periodStart)) {
                 closed[0] = acc;
-                return new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price);
+                return newAccumulator(key, instrument, timeframe, contractMonth, periodStart, price);
             }
             acc.update(price);
             return acc;
@@ -378,6 +387,52 @@ public class MarketDataService implements StreamingPriceListener {
             eventPublisher.publishEvent(new CandleClosed(instrument.name(), timeframe, periodStart));
         }
     }
+
+    /**
+     * Creates the accumulator for a fresh period, claiming any traded volume that arrived
+     * before the period's first price tick. Must be called inside {@code accumulators.compute}
+     * for the same key so the claim is serialized with {@link #onLiveVolumeUpdate}.
+     */
+    private CandleAccumulator newAccumulator(CandleKey key, Instrument instrument, String timeframe,
+                                             String contractMonth, Instant periodStart, BigDecimal price) {
+        CandleAccumulator acc = new CandleAccumulator(instrument, timeframe, contractMonth, periodStart, price);
+        PendingVolume pending = pendingVolume.remove(key);
+        if (pending != null && pending.periodStart().equals(periodStart)) {
+            acc.addVolume(pending.volume());
+        }
+        return acc;
+    }
+
+    /**
+     * Routes a traded-volume increment (contracts, from the exchange's cumulative session
+     * counter) into the open bar of every timeframe. Volume for a period whose bar has not
+     * opened yet (no price tick) is stashed and claimed at bar creation; volume lagging just
+     * past a bar roll is attributed to the open bar so totals are preserved.
+     */
+    @Override
+    public void onLiveVolumeUpdate(Instrument instrument, long volumeDelta, Instant timestamp) {
+        if (volumeDelta <= 0) return;
+        if (!TradingSessionResolver.isMarketOpen(timestamp, instrument)) return;
+        if (isDuringMaintenanceWindow(instrument, timestamp)) return;
+
+        for (String tf : TIMEFRAMES.keySet()) {
+            CandleKey key       = new CandleKey(instrument, tf);
+            Instant periodStart = truncateToPeriod(timestamp, TIMEFRAMES.get(tf));
+            accumulators.compute(key, (k, acc) -> {
+                if (acc != null && !acc.periodStart.isBefore(periodStart)) {
+                    acc.addVolume(volumeDelta);
+                } else {
+                    pendingVolume.merge(key, new PendingVolume(periodStart, volumeDelta), (cur, fresh) ->
+                        cur.periodStart().equals(periodStart)
+                            ? new PendingVolume(periodStart, cur.volume() + fresh.volume())
+                            : fresh);
+                }
+                return acc;
+            });
+        }
+    }
+
+    private record PendingVolume(Instant periodStart, long volume) {}
 
     private static Instant truncateToPeriod(Instant ts, long periodMinutes) {
         if (periodMinutes >= 1440) {
@@ -409,6 +464,7 @@ public class MarketDataService implements StreamingPriceListener {
                 flushed++;
             }
         }
+        pendingVolume.keySet().removeIf(key -> key.instrument() == instrument);
         lastPrice.remove(instrument);
         lastTimestamp.remove(instrument);
         lastSource.remove(instrument);
@@ -429,7 +485,8 @@ public class MarketDataService implements StreamingPriceListener {
         BigDecimal high;
         BigDecimal low;
         BigDecimal close;
-        long volume = 1;
+        /** True traded contracts via {@link #addVolume} — NEVER a count of price updates. */
+        long volume = 0;
 
         CandleAccumulator(Instrument instrument, String timeframe, String contractMonth,
                           Instant periodStart, BigDecimal firstPrice) {
@@ -447,7 +504,10 @@ public class MarketDataService implements StreamingPriceListener {
             if (price.compareTo(high) > 0) high  = price;
             if (price.compareTo(low)  < 0) low   = price;
             close = price;
-            volume++;
+        }
+
+        void addVolume(long delta) {
+            volume += delta;
         }
 
         Candle build() {

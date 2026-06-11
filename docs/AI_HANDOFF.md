@@ -2,6 +2,45 @@
 
 Last updated: 2026-06-11
 
+## Live candle volume fix + candle upsert (2026-06-11)
+
+Production diagnosis: LIVE-built 1m candles under-reported volume ~10× (variable 5–17×) vs
+IBKR backfill — MNQ daily 1m volume 2.6–3.7M (backfilled Jun 3–5) vs 144k–363k (live-built
+Jun 8–10) — so two volume scales coexisted in `candles`. Root cause: `MarketDataService`'s
+inner `CandleAccumulator` set `volume = 1` at bar open and `volume++` per price update —
+counting **debounced price events** (100ms debounce + same-price skip), not contracts.
+
+Fix (PR claude/frosty-sammet-5c46b9):
+
+- **Volume source = IBKR session-cumulative `TickType.VOLUME` deltas.** The existing
+  `reqTopMktData` streaming subscription already received them; `StreamingPriceSubscription.tickSize`
+  was a no-op. It now computes per-update deltas (`IbGatewayNativeClient.volumeDelta`: first
+  reading = baseline only, counter going backwards = Globex session reset → new reading is the
+  delta) and pushes them through the new `StreamingPriceListener.onLiveVolumeUpdate` default
+  method (domain port, Spring-free). This covers **all 4 streamed futures** — the AllLast
+  tick-by-tick stream only covers MNQ/MCL. Cumulative deltas also self-heal: volume missed
+  during a quiet stream lands in the next delta, so hourly/daily sums match the exchange.
+- **`MarketDataService`** routes deltas into the open bar of every intraday timeframe
+  (gated on market-open + maintenance window, same as prices). Volume arriving before a bar's
+  first price tick is stashed (`pendingVolume`, claimed at bar creation); volume lagging just
+  past a roll goes to the open bar (totals preserved). Price updates no longer touch volume —
+  a bar with no volume ticks closes at volume 0. Pending volume is flushed on rollover.
+- **Candle writes are upserts** on `(instrument, timeframe, timestamp)` in
+  `JpaCandleRepositoryAdapter` (natural-key id adoption + one range query per batch group +
+  `DataIntegrityViolationException` retry). Fixes the boot race: the startup gap-fill read its
+  high-water mark, then the live writer closed bars before `saveAll` flushed → 11
+  `uk_candle_instrument_tf_ts` violations at boot, each aborting an entire gap-fill batch.
+- Tests: `MarketDataServiceTest` (delta accumulation, pending claim, zero-volume honesty),
+  `JpaCandleUpsertTest`, `IbGatewayNativeClientVolumeDeltaTest`.
+
+**Post-deploy validation:** let one full hour build live, then
+`SELECT date_trunc('hour', timestamp), SUM(volume) FROM candles WHERE instrument='MNQ' AND timeframe='1m' GROUP BY 1`,
+re-backfill the same hour via `POST /api/candles/backfill-range` with `replace=true`, and compare
+(expect agreement within a few %; also cross-check footprint bar volume for the same window).
+**Historical repair:** live-built rows from before this fix (e.g. Jun 8–10) are still at the
+wrong scale — re-source them with the range backfill in `replace` mode. Until then, do NOT
+normalize tick-vs-candle volume across that window.
+
 ## Depth flow signals + DOM heatmap (2026-06-11)
 
 Continuous L2 signals computed from the existing 500ms `DepthMetrics` snapshots —
