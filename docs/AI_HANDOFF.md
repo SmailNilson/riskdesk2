@@ -2,6 +2,25 @@
 
 Last updated: 2026-06-11
 
+## Quant 7-Gates: ~3 s fast exit path (SL/TP between scans) (2026-06-11)
+
+Sim #903 (SHORT MNQ) closed 93 pts past its SL (-272.5 pts vs the planned ~-180): exits
+were only evaluated by the 60 s gate scan, and the 2026-06-11 squeeze ran +128 pts inside
+one scan window (17:30 1m candle: O 29087 → H 29215). The backtest replay fills AT the SL
+level, so live results read systematically worse than backtest on fast moves.
+
+- `QuantSimFastExitListener` (`@EventListener` on `MarketPriceUpdated`, the existing ~3 s
+  poll + debounced IBKR pushes) → `Quant7GatesSimulationService.onPriceTick`: SL/TP-only
+  check on open rows + mark-to-market publish. No new thread, no new state; no-op when no
+  row is open. Closes overshoot at most one poll interval now.
+- **Provenance guard**: `MarketPriceUpdated` is ALSO published for FALLBACK_DB/STALE prices
+  and carries no source — the listener re-reads via `LivePricePort` and only acts on
+  `LIVE_PUSH`/`LIVE_PROVIDER`. Fallback-priced exits stay on the 60 s scan, as before.
+- Deliberately NOT on the fast path: entries, flow-AVOID (need a fresh pattern from the
+  scan) and EOD flat (scan resolves it within a minute). `checkSlTp` is shared by both paths.
+- Kill switch: `riskdesk.quant.sim.fast-exit-enabled=false` → scan-only exits (old behaviour).
+- Tests: `QuantSimFastExitTest` (tick SL/TP close at tick price, MTM without close, never
+  opens, listener live-source gating + disable flag + VIX/null events).
 ## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
 
 Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).
