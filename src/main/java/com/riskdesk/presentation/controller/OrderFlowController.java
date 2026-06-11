@@ -1,5 +1,6 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.service.DepthFlowService;
 import com.riskdesk.application.service.OrderFlowHistoryService;
 import com.riskdesk.application.service.OrderFlowOrchestrator;
 import com.riskdesk.application.service.VolumeProfileService;
@@ -48,6 +49,7 @@ public class OrderFlowController {
     private final OrderFlowHistoryService historyService;
     private final WallTrackingService wallTrackingService;
     private final VolumeProfileService volumeProfileService;
+    private final DepthFlowService depthFlowService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
@@ -55,7 +57,8 @@ public class OrderFlowController {
                                 ObjectProvider<TickBarPort> tickBarPortProvider,
                                 OrderFlowHistoryService historyService,
                                 WallTrackingService wallTrackingService,
-                                VolumeProfileService volumeProfileService) {
+                                VolumeProfileService volumeProfileService,
+                                DepthFlowService depthFlowService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
@@ -63,6 +66,7 @@ public class OrderFlowController {
         this.historyService = historyService;
         this.wallTrackingService = wallTrackingService;
         this.volumeProfileService = volumeProfileService;
+        this.depthFlowService = depthFlowService;
     }
 
     /**
@@ -212,6 +216,31 @@ public class OrderFlowController {
             result.put("active", active);
             result.put("recent", historyService.recentWallEpisodes(inst, limit));
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/depth-flow/{instrument}
+     * Continuous depth-flow signals computed from successive 500ms book snapshots:
+     * OFI (Cont-Kukanov-Stoikov, 1s/10s/EMA-60s + z-score), queue imbalance +
+     * micro-price offset, liquidity vacuum state and pull/stack net flow.
+     * {@code available=false} when the feed is stale or the analyzer is still priming.
+     */
+    @GetMapping("/depth-flow/{instrument}")
+    public ResponseEntity<?> getDepthFlow(@PathVariable String instrument) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            return depthFlowService.latest(inst)
+                .<ResponseEntity<?>>map(m -> {
+                    Map<String, Object> body = new LinkedHashMap<>();
+                    body.put("available", true);
+                    body.putAll(DepthFlowService.payload(m));
+                    return ResponseEntity.ok(body);
+                })
+                .orElseGet(() -> ResponseEntity.ok(
+                    Map.of("instrument", inst.name(), "available", false)));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }

@@ -15,6 +15,8 @@ import {
   BigPrintEvent,
 } from '@/app/hooks/useOrderFlow';
 import DepthBookWidget from './DepthBookWidget';
+import DepthFlowStrip from './DepthFlowStrip';
+import DepthHeatmap from './DepthHeatmap';
 import WallTrackerPanel from './WallTrackerPanel';
 import { api } from '@/app/lib/api';
 import QuantTelemetryDashboard from './quant/QuantTelemetryDashboard';
@@ -519,6 +521,7 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
   const {
     orderFlowData,
     depthData,
+    depthFlowData,
     absorptionEvents,
     spoofingEvents,
     icebergEvents,
@@ -531,6 +534,7 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
   } = useOrderFlow();
 
   const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(true);
 
   // Heartbeat: re-render every 5s so the STALE badge appears/updates even when the feed
   // is frozen and no new WebSocket messages arrive to trigger a render.
@@ -797,6 +801,57 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
           <DepthBookWidget
             instrument={selectedInstrument}
             depthData={depthData.get(selectedInstrument)}
+          />
+        </div>
+      )}
+
+      {/* Section 2a-2: Depth Heatmap — Bookmap-style movie of the last 20 min of book */}
+      {selectedInstrument && (
+        showHeatmap ? (
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <h4 className="text-[10px] uppercase tracking-wider text-zinc-500">
+                Heatmap (20 min) — {selectedInstrument}
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowHeatmap(false)}
+                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] border border-zinc-700 text-zinc-300 hover:text-white transition-colors font-mono"
+              >
+                Collapse
+              </button>
+            </div>
+            <DepthHeatmap
+              instrument={selectedInstrument}
+              depthData={depthData.get(selectedInstrument)}
+            />
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-400 font-mono bg-zinc-800/40 rounded-lg p-2 border border-zinc-800/50">
+            <span className="text-zinc-500 font-semibold uppercase tracking-wider">
+              Heatmap (20 min) — {selectedInstrument}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowHeatmap(true)}
+              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] border border-zinc-700 text-zinc-300 hover:text-white transition-colors font-mono"
+            >
+              📈 Expand Heatmap
+            </button>
+          </div>
+        )
+      )}
+
+      {/* Section 2a-3: Depth Flow — continuous DOM signals (OFI / queue / vacuum / pull-stack) */}
+      {selectedInstrument && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+            Depth Flow — {selectedInstrument}
+            <span className="text-zinc-600 normal-case tracking-normal"> (OFI · queue · vacuum · pull/stack)</span>
+          </h4>
+          <DepthFlowStrip
+            instrument={selectedInstrument}
+            metrics={depthFlowData.get(selectedInstrument)}
           />
         </div>
       )}

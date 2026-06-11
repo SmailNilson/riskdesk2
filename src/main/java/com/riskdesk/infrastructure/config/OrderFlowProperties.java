@@ -30,6 +30,7 @@ public class OrderFlowProperties {
     private TickChart tickChart = new TickChart();
     private Footprint footprint = new Footprint();
     private WallTracker wallTracker = new WallTracker();
+    private DepthFlow depthFlow = new DepthFlow();
     private Cvd cvd = new Cvd();
     private Tape tape = new Tape();
     private BigPrint bigPrint = new BigPrint();
@@ -65,6 +66,8 @@ public class OrderFlowProperties {
     public void setFootprint(Footprint footprint) { this.footprint = footprint; }
     public WallTracker getWallTracker() { return wallTracker; }
     public void setWallTracker(WallTracker wallTracker) { this.wallTracker = wallTracker; }
+    public DepthFlow getDepthFlow() { return depthFlow; }
+    public void setDepthFlow(DepthFlow depthFlow) { this.depthFlow = depthFlow; }
     public Cvd getCvd() { return cvd; }
     public void setCvd(Cvd cvd) { this.cvd = cvd; }
     public Tape getTape() { return tape; }
@@ -181,6 +184,72 @@ public class OrderFlowProperties {
         public void setPulledRemnantRatio(double v) { this.pulledRemnantRatio = v; }
         public long getMinSize() { return minSize; }
         public void setMinSize(long v) { this.minSize = v; }
+    }
+
+    /**
+     * Continuous depth-flow signals (OFI, queue imbalance, liquidity vacuum, pull/stack)
+     * computed from successive 500ms {@code DepthMetrics} snapshots by the per-instrument
+     * {@code DepthFlowAnalyzer}. Defaults are tuned for MNQ's thin micro book.
+     */
+    public static class DepthFlow {
+        private boolean enabled = true;
+        /** Evaluation cadence — matches the /topic/depth publication cadence (500ms). */
+        private long evalIntervalMs = 500;
+        /**
+         * Snapshots older than this (and evaluation gaps wider than this) reset the analyzer —
+         * flow is never computed across a frozen-feed gap.
+         */
+        private double staleGapSeconds = 10.0;
+        /**
+         * Combined best-level mass (qb+qa) below which queue imbalance is flagged not
+         * meaningful. 10 contracts ≈ a normal MNQ RTH best level; overnight the book is
+         * thinner and a 1-vs-3 lot "imbalance" is pure noise.
+         */
+        private long minQueueMass = 10;
+        /** Queue imbalance EMA time constant (~3s — Stoikov's micro-price horizon). */
+        private double imbalanceEmaSeconds = 3.0;
+        /**
+         * Per-level resting-size change at/below this (contracts) is ignored by pull/stack —
+         * 1-2 lot flicker is retail/MM noise on MNQ.
+         */
+        private long noiseFloorContracts = 2;
+        /** Side depth below this fraction of its rolling baseline = depletion candidate (0.4). */
+        private double vacuumDepletionRatio = 0.4;
+        /** The opposite side must hold at/above this fraction of its baseline for a vacuum (0.7). */
+        private double vacuumHoldRatio = 0.7;
+        /** Both sides below this fraction of baseline = THIN (overall withdrawal). */
+        private double thinRatio = 0.5;
+        /** A depletion candidate must persist this long before VACUUM_BID/ASK is flagged (3s). */
+        private double vacuumPersistenceSeconds = 3.0;
+        /** |z| of the 10s OFI sum at/above this sets the ofiExtreme flag (UI amber; red ≥3). */
+        private double ofiZFlagThreshold = 2.0;
+        /** Rolling window for the depth baselines and the OFI z distribution (5 min). */
+        private double baselineWindowSeconds = 300.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public long getEvalIntervalMs() { return evalIntervalMs; }
+        public void setEvalIntervalMs(long v) { this.evalIntervalMs = v; }
+        public double getStaleGapSeconds() { return staleGapSeconds; }
+        public void setStaleGapSeconds(double v) { this.staleGapSeconds = v; }
+        public long getMinQueueMass() { return minQueueMass; }
+        public void setMinQueueMass(long v) { this.minQueueMass = v; }
+        public double getImbalanceEmaSeconds() { return imbalanceEmaSeconds; }
+        public void setImbalanceEmaSeconds(double v) { this.imbalanceEmaSeconds = v; }
+        public long getNoiseFloorContracts() { return noiseFloorContracts; }
+        public void setNoiseFloorContracts(long v) { this.noiseFloorContracts = v; }
+        public double getVacuumDepletionRatio() { return vacuumDepletionRatio; }
+        public void setVacuumDepletionRatio(double v) { this.vacuumDepletionRatio = v; }
+        public double getVacuumHoldRatio() { return vacuumHoldRatio; }
+        public void setVacuumHoldRatio(double v) { this.vacuumHoldRatio = v; }
+        public double getThinRatio() { return thinRatio; }
+        public void setThinRatio(double v) { this.thinRatio = v; }
+        public double getVacuumPersistenceSeconds() { return vacuumPersistenceSeconds; }
+        public void setVacuumPersistenceSeconds(double v) { this.vacuumPersistenceSeconds = v; }
+        public double getOfiZFlagThreshold() { return ofiZFlagThreshold; }
+        public void setOfiZFlagThreshold(double v) { this.ofiZFlagThreshold = v; }
+        public double getBaselineWindowSeconds() { return baselineWindowSeconds; }
+        public void setBaselineWindowSeconds(double v) { this.baselineWindowSeconds = v; }
     }
 
     /** Tick data logging (persistence for calibration). */
