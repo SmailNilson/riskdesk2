@@ -2,6 +2,7 @@ package com.riskdesk.presentation.controller;
 
 import com.riskdesk.application.service.OrderFlowHistoryService;
 import com.riskdesk.application.service.OrderFlowOrchestrator;
+import com.riskdesk.application.service.VolumeProfileService;
 import com.riskdesk.application.service.WallTrackingService;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
@@ -46,19 +47,22 @@ public class OrderFlowController {
     private final ObjectProvider<TickBarPort> tickBarPortProvider;
     private final OrderFlowHistoryService historyService;
     private final WallTrackingService wallTrackingService;
+    private final VolumeProfileService volumeProfileService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
                                 ObjectProvider<MarketDepthPort> depthPortProvider,
                                 ObjectProvider<TickBarPort> tickBarPortProvider,
                                 OrderFlowHistoryService historyService,
-                                WallTrackingService wallTrackingService) {
+                                WallTrackingService wallTrackingService,
+                                VolumeProfileService volumeProfileService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
         this.tickBarPortProvider = tickBarPortProvider;
         this.historyService = historyService;
         this.wallTrackingService = wallTrackingService;
+        this.volumeProfileService = volumeProfileService;
     }
 
     /**
@@ -208,6 +212,26 @@ public class OrderFlowController {
             result.put("active", active);
             result.put("recent", historyService.recentWallEpisodes(inst, limit));
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/volume-profile/{instrument}
+     * Session volume profile (UC-OF-015): current RTH session (POC/VAH/VAL, 70% value
+     * area), prior session, overnight Globex session and the naked-POC ladder.
+     * Recomputed from internal 1m candles at most once per minute (server-side cache).
+     */
+    @GetMapping("/volume-profile/{instrument}")
+    public ResponseEntity<?> getVolumeProfile(@PathVariable String instrument) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            if (inst.isSynthetic()) {
+                return ResponseEntity.badRequest().body(
+                    Map.of("error", "Volume profile is not available for synthetic instruments"));
+            }
+            return ResponseEntity.ok(volumeProfileService.getProfile(inst));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }

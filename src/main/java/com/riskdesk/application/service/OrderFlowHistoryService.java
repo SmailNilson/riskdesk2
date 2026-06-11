@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.domain.orderflow.model.FootprintLevel;
+import com.riskdesk.domain.orderflow.service.FootprintImbalanceCalculator;
 import com.riskdesk.application.dto.AbsorptionEventView;
 import com.riskdesk.application.dto.CycleEventView;
 import com.riskdesk.application.dto.DistributionEventView;
@@ -35,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -166,19 +168,30 @@ public class OrderFlowHistoryService {
         return rows.stream().map(this::toBar).toList();
     }
 
-    private FootprintBar toBar(FootprintBarEntity e) {
+    FootprintBar toBar(FootprintBarEntity e) {
         Map<Double, FootprintLevel> levels = new LinkedHashMap<>();
+        List<FootprintLevel> sorted = List.of();
         try {
             if (e.getProfileJson() != null && !e.getProfileJson().isBlank()) {
                 List<FootprintLevel> parsed = objectMapper.readValue(
                     e.getProfileJson(), new TypeReference<List<FootprintLevel>>() {});
-                for (FootprintLevel level : parsed) {
+                sorted = parsed.stream()
+                    .sorted(Comparator.comparingDouble(FootprintLevel::price))
+                    .toList();
+                for (FootprintLevel level : sorted) {
                     levels.put(level.price(), level);
                 }
             }
         } catch (Exception ex) {
             // tolerate malformed legacy rows — headline metrics below remain valid
         }
+        // Bar-level analysis is recomputed from the persisted level flags. Rows persisted
+        // before the diagonal upgrade carry no diagonal flags (deserialized as false), so
+        // their stacked zones are simply empty; unfinished-auction flags only need volumes
+        // and therefore work for old rows too. The bucket size is the instrument's CURRENT
+        // configured size — rows persisted under a different size cannot stack (adjacency
+        // check fails), which is the safe behaviour.
+        double bucketSize = footprintBucketSizeFor(e.getInstrument());
         return new FootprintBar(
             e.getInstrument().name(),
             e.getTimeframe(),
@@ -187,8 +200,21 @@ public class OrderFlowHistoryService {
             e.getPocPrice(),
             e.getTotalBuyVolume(),
             e.getTotalSellVolume(),
-            e.getTotalDelta()
+            e.getTotalDelta(),
+            FootprintImbalanceCalculator.stackedZones(sorted, bucketSize, true),
+            FootprintImbalanceCalculator.stackedZones(sorted, bucketSize, false),
+            FootprintImbalanceCalculator.unfinishedHigh(sorted),
+            FootprintImbalanceCalculator.unfinishedLow(sorted)
         );
+    }
+
+    /** Mirrors {@code IbkrFootprintAdapter}: configured bucket size or native tick size. */
+    private double footprintBucketSizeFor(Instrument instrument) {
+        Double configured = properties.getFootprint().getBucketSize().get(instrument.name());
+        if (configured != null && configured > 0) {
+            return configured;
+        }
+        return instrument.getTickSize().doubleValue();
     }
 
     private static int clampLimit(int limit) {

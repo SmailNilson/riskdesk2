@@ -37,6 +37,56 @@ Three pro order-flow tools added on the classified AllLast tick stream (research
   shows CVD session, tape gauge, big-print 5m delta, "DIV ▲/▼ il y a Xm" badge (10 min),
   and a "Big Prints" feed (8 rows). `OrderFlowOrchestrator` ctor gained
   `ObjectProvider<BigPrintPort>`.
+## Session volume profile + footprint diagonal imbalance (UC-OF-015, 2026-06-11)
+
+Two pro order-flow upgrades for MNQ trading (gap analysis vs Sierra/Bookmap-class
+tooling):
+
+**A. Session volume profile (POC / VAH / VAL, 70% VA) + naked POCs.**
+- New pure domain calculator `SessionVolumeProfileCalculator`
+  (`domain/engine/indicators/`): distributes each 1m candle's volume across its
+  high–low range proportionally (uniform-across-ticks approximation) instead of the
+  legacy typical-price binning of `VolumeProfileCalculator` (which is unchanged and
+  still feeds Mentor/IndicatorSnapshot). Same 70% outward VA expansion. Also hosts the
+  pure naked-POC ladder logic (`nakedPocs`): a session POC is naked while no later
+  session's range touched it (developing session range acts as a toucher).
+- `TradingSessionResolver` gained RTH helpers: `rthStart/rthEnd(LocalDate)`,
+  `rthSessionDate(Instant)`, `previousRthDate`, `isWithinRth`, `overnightStart`
+  (18:00 ET Globex reopen, Sunday for Monday sessions) — all DST-aware, fixed-instant
+  tested (EDT/EST/spring-forward).
+- `VolumeProfileService` (application): current RTH session (developing flag), prior
+  session, overnight Globex session, naked-POC ladder (lookback default 10 sessions);
+  per-instrument cache, recompute at most once per
+  `riskdesk.order-flow.volume-profile.cache-seconds` (60). 1m candles from PostgreSQL
+  only. Injectable `Clock` for tests.
+- REST: `GET /api/order-flow/volume-profile/{instrument}` (400 for DXY/synthetic).
+  No WS topic. Config: `riskdesk.order-flow.volume-profile.*` (bucket-size MNQ 1.0,
+  MCL 0.05).
+- Frontend: `Chart.tsx` "VP" toggle (next to SMC/MTF) draws price lines — developing
+  POC solid amber, prior pPOC violet / pVAH+pVAL grey dashed, naked POCs dotted
+  violet `nPOC <date>` (prior session's own POC deduped). 60s poll inside Chart.
+
+**B. Footprint diagonal imbalance (industry standard) + finer MNQ buckets.**
+- The old per-level `imbalance` flag compared buy vs sell at the SAME price — not the
+  pro signal. It is kept (deprecated) in `FootprintLevel` for persisted-JSON
+  backward compat. New per-level flags: `diagonalBuyImbalance` (buy(P) ≥ ratio ×
+  sell(P − 1 bucket)) and `diagonalSellImbalance` (sell(P) ≥ ratio × buy(P + 1
+  bucket)); missing neighbour = 0; the LARGER cell of the pair must be ≥
+  `min-cell-volume` (MNQ 20, MCL 5) so 4-vs-1 never flags. Ratio default 3.0.
+- Bar-level additions on `FootprintBar`: `stackedBuyZones`/`stackedSellZones`
+  (≥3 consecutive bucket-adjacent flags, `{fromPrice,toPrice,buckets}`) and
+  `unfinishedHigh`/`unfinishedLow` (extreme bucket traded on both sides).
+- Pure logic lives in `FootprintImbalanceCalculator` (domain), shared by the live
+  `FootprintAggregator` (new 5-arg ctor; 3-arg keeps defaults) and by
+  `OrderFlowHistoryService.toBar`, which recomputes zones/unfinished from persisted
+  level JSON — old rows without the new fields parse fine (flags default false,
+  zones empty; unfinished works since it only needs volumes).
+- **`riskdesk.order-flow.footprint.bucket-size.MNQ` changed 5.0 → 2.0 points (8
+  ticks)** — research consensus 4–10 ticks/row for NQ-class; bars persisted before
+  the change have 5-point buckets (zones suppressed on them by the adjacency check).
+- Frontend `FootprintChart.tsx`: emerald/red cell borders for diagonal flags, row
+  band tint for stacked zones (+ header zone counters ⊞/⊟), ▲/▼ unfinished-auction
+  markers (also in the closed-bar history strip).
 
 ## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
 

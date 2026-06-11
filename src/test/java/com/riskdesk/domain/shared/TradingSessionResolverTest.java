@@ -306,4 +306,85 @@ class TradingSessionResolverTest {
         assertFalse(TradingSessionResolver.isMarketOpen(saturday, Instrument.MNQ));
     }
 
+    // -- RTH / overnight session windows (UC-OF-015) ----------------------------
+
+    @Test
+    void rthWindow_summerEDT_isUtcMinus4() {
+        // 2026-07-15 (EDT): 09:30 ET = 13:30 UTC, 16:00 ET = 20:00 UTC
+        LocalDate date = LocalDate.of(2026, 7, 15);
+        assertEquals(Instant.parse("2026-07-15T13:30:00Z"), TradingSessionResolver.rthStart(date));
+        assertEquals(Instant.parse("2026-07-15T20:00:00Z"), TradingSessionResolver.rthEnd(date));
+    }
+
+    @Test
+    void rthWindow_winterEST_isUtcMinus5() {
+        // 2026-01-15 (EST): 09:30 ET = 14:30 UTC, 16:00 ET = 21:00 UTC
+        LocalDate date = LocalDate.of(2026, 1, 15);
+        assertEquals(Instant.parse("2026-01-15T14:30:00Z"), TradingSessionResolver.rthStart(date));
+        assertEquals(Instant.parse("2026-01-15T21:00:00Z"), TradingSessionResolver.rthEnd(date));
+    }
+
+    @Test
+    void rthWindow_dstSpringForwardDay_followsEasternClock() {
+        // DST spring forward: 2026-03-08 02:00 EST -> 03:00 EDT. RTH that Monday 03-09
+        // must use the new offset (-4): 09:30 ET = 13:30 UTC.
+        LocalDate monday = LocalDate.of(2026, 3, 9);
+        assertEquals(Instant.parse("2026-03-09T13:30:00Z"), TradingSessionResolver.rthStart(monday));
+        // The Friday before (03-06) is still EST: 09:30 ET = 14:30 UTC.
+        LocalDate friday = LocalDate.of(2026, 3, 6);
+        assertEquals(Instant.parse("2026-03-06T14:30:00Z"), TradingSessionResolver.rthStart(friday));
+    }
+
+    @Test
+    void rthSessionDate_duringRth_returnsToday() {
+        // Wed 2026-04-15 10:00 ET (EDT) = 14:00 UTC
+        assertEquals(LocalDate.of(2026, 4, 15),
+            TradingSessionResolver.rthSessionDate(Instant.parse("2026-04-15T14:00:00Z")));
+    }
+
+    @Test
+    void rthSessionDate_preMarket_returnsPreviousWeekday() {
+        // Wed 2026-04-15 08:00 ET = 12:00 UTC — before 09:30, previous session is Tuesday
+        assertEquals(LocalDate.of(2026, 4, 14),
+            TradingSessionResolver.rthSessionDate(Instant.parse("2026-04-15T12:00:00Z")));
+        // Monday pre-market rolls back across the weekend to Friday
+        assertEquals(LocalDate.of(2026, 4, 10),
+            TradingSessionResolver.rthSessionDate(Instant.parse("2026-04-13T12:00:00Z")));
+    }
+
+    @Test
+    void rthSessionDate_weekend_rollsBackToFriday() {
+        // Saturday 2026-04-11 12:00 ET
+        assertEquals(LocalDate.of(2026, 4, 10),
+            TradingSessionResolver.rthSessionDate(Instant.parse("2026-04-11T16:00:00Z")));
+    }
+
+    @Test
+    void previousRthDate_skipsWeekend() {
+        assertEquals(LocalDate.of(2026, 4, 10),
+            TradingSessionResolver.previousRthDate(LocalDate.of(2026, 4, 13))); // Mon -> Fri
+        assertEquals(LocalDate.of(2026, 4, 14),
+            TradingSessionResolver.previousRthDate(LocalDate.of(2026, 4, 15))); // Wed -> Tue
+    }
+
+    @Test
+    void isWithinRth_boundaries() {
+        LocalDate date = LocalDate.of(2026, 4, 15);
+        assertTrue(TradingSessionResolver.isWithinRth(
+            TradingSessionResolver.rthStart(date), date)); // open inclusive
+        assertFalse(TradingSessionResolver.isWithinRth(
+            TradingSessionResolver.rthEnd(date), date));   // close exclusive
+        assertFalse(TradingSessionResolver.isWithinRth(
+            TradingSessionResolver.rthStart(date).minusSeconds(1), date));
+    }
+
+    @Test
+    void overnightStart_isPreviousCalendarDayGlobexReopen() {
+        // Tuesday RTH 2026-04-14: overnight opens Monday 18:00 ET = 22:00 UTC (EDT)
+        assertEquals(Instant.parse("2026-04-13T22:00:00Z"),
+            TradingSessionResolver.overnightStart(LocalDate.of(2026, 4, 14)));
+        // Monday RTH: overnight opens SUNDAY 18:00 ET — the weekly Globex reopen
+        assertEquals(Instant.parse("2026-04-12T22:00:00Z"),
+            TradingSessionResolver.overnightStart(LocalDate.of(2026, 4, 13)));
+    }
 }

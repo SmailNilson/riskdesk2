@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useOrderFlow, FootprintBar, FootprintLevel } from '@/app/hooks/useOrderFlow';
+import { useOrderFlow, FootprintBar, FootprintLevel, ImbalanceZone } from '@/app/hooks/useOrderFlow';
 import { api, isFootprintBar } from '@/app/lib/api';
 
 function barTimeLabel(barTimestamp: number): string {
@@ -25,8 +25,22 @@ function HistoryStrip({ bars }: { bars: FootprintBar[] }) {
             <span className="w-16 text-right text-amber-400/80" title="Point of Control">
               {b.pocPrice.toFixed(2)}
             </span>
+            <span className="w-8 text-center">
+              {b.unfinishedHigh && <span className="text-cyan-400" title="Unfinished auction (high)">▲</span>}
+              {b.unfinishedLow && <span className="text-fuchsia-400" title="Unfinished auction (low)">▼</span>}
+            </span>
             <span className="flex-1 text-right text-zinc-600">
               B:{b.totalBuyVolume} S:{b.totalSellVolume}
+              {(b.stackedBuyZones?.length ?? 0) > 0 && (
+                <span className="ml-1 text-emerald-400" title="Stacked buy imbalance zone(s)">
+                  ⊞{b.stackedBuyZones!.length}
+                </span>
+              )}
+              {(b.stackedSellZones?.length ?? 0) > 0 && (
+                <span className="ml-1 text-red-400" title="Stacked sell imbalance zone(s)">
+                  ⊟{b.stackedSellZones!.length}
+                </span>
+              )}
             </span>
           </div>
         ))}
@@ -39,15 +53,30 @@ interface FootprintChartProps {
   selectedInstrument?: string;
 }
 
-function LevelRow({ level, maxVolume }: { level: FootprintLevel; maxVolume: number }) {
+function inZone(price: number, zones: ImbalanceZone[] | undefined): boolean {
+  if (!zones || zones.length === 0) return false;
+  return zones.some(z => price >= z.fromPrice - 1e-9 && price <= z.toPrice + 1e-9);
+}
+
+function LevelRow({ level, maxVolume, stackedBuy, stackedSell }: {
+  level: FootprintLevel;
+  maxVolume: number;
+  stackedBuy: boolean;
+  stackedSell: boolean;
+}) {
   const totalVol = level.buyVolume + level.sellVolume;
   const buyPct = totalVol > 0 ? (level.buyVolume / totalVol) * 100 : 0;
   const barWidth = maxVolume > 0 ? (totalVol / maxVolume) * 100 : 0;
 
   return (
-    <div className="flex items-center gap-1 text-[10px] font-mono h-5">
-      {/* Sell volume */}
-      <div className="w-12 text-right text-red-400">
+    <div className={`flex items-center gap-1 text-[10px] font-mono h-5 ${
+      stackedBuy ? 'bg-emerald-500/10' : stackedSell ? 'bg-red-500/10' : ''
+    }`}>
+      {/* Sell volume — red right-border = diagonal sell imbalance at this level */}
+      <div
+        className={`w-12 text-right ${level.diagonalSellImbalance ? 'text-red-300 font-bold border-r-2 border-red-500 pr-0.5' : 'text-red-400'}`}
+        title={level.diagonalSellImbalance ? 'Diagonal sell imbalance (vs buy 1 bucket higher)' : undefined}
+      >
         {level.sellVolume > 0 ? level.sellVolume : ''}
       </div>
 
@@ -72,14 +101,13 @@ function LevelRow({ level, maxVolume }: { level: FootprintLevel; maxVolume: numb
         }`}>
           {level.delta !== 0 ? (level.delta > 0 ? `+${level.delta}` : level.delta) : ''}
         </span>
-        {/* Imbalance indicator */}
-        {level.imbalance && (
-          <div className="absolute right-0.5 top-0.5 w-1.5 h-1.5 rounded-full bg-yellow-400" title="Imbalance 3:1" />
-        )}
       </div>
 
-      {/* Buy volume */}
-      <div className="w-12 text-left text-emerald-400">
+      {/* Buy volume — emerald left-border = diagonal buy imbalance at this level */}
+      <div
+        className={`w-12 text-left ${level.diagonalBuyImbalance ? 'text-emerald-300 font-bold border-l-2 border-emerald-500 pl-0.5' : 'text-emerald-400'}`}
+        title={level.diagonalBuyImbalance ? 'Diagonal buy imbalance (vs sell 1 bucket lower)' : undefined}
+      >
         {level.buyVolume > 0 ? level.buyVolume : ''}
       </div>
 
@@ -111,13 +139,31 @@ function FootprintBarView({ bar }: { bar: FootprintBar }) {
         <div className="w-16 text-right">PRICE</div>
       </div>
 
+      {/* Unfinished auction at the high: both sides traded at the top bucket */}
+      {bar.unfinishedHigh && (
+        <div className="flex items-center justify-end gap-1 text-[9px] text-cyan-400 pr-1"
+             title="Unfinished auction at the high — both sides traded at the extreme; price often revisits">
+          ▲ unfinished high
+        </div>
+      )}
+
       {sorted.map(level => (
         <LevelRow
           key={level.price}
           level={level}
           maxVolume={maxVolume}
+          stackedBuy={inZone(level.price, bar.stackedBuyZones)}
+          stackedSell={inZone(level.price, bar.stackedSellZones)}
         />
       ))}
+
+      {/* Unfinished auction at the low */}
+      {bar.unfinishedLow && (
+        <div className="flex items-center justify-end gap-1 text-[9px] text-fuchsia-400 pr-1"
+             title="Unfinished auction at the low — both sides traded at the extreme; price often revisits">
+          ▼ unfinished low
+        </div>
+      )}
     </div>
   );
 }
@@ -162,6 +208,8 @@ export default function FootprintChart({ selectedInstrument }: FootprintChartPro
   const totalSell = bar?.totalSellVolume ?? 0;
   const poc = bar?.pocPrice;
   const levelCount = bar ? Object.keys(bar.levels).length : 0;
+  const stackedBuyCount = bar?.stackedBuyZones?.length ?? 0;
+  const stackedSellCount = bar?.stackedSellZones?.length ?? 0;
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
@@ -176,6 +224,16 @@ export default function FootprintChart({ selectedInstrument }: FootprintChartPro
           )}
         </div>
         <div className="flex items-center gap-3 text-[10px]">
+          {stackedBuyCount > 0 && (
+            <span className="text-emerald-400" title="Stacked buy imbalance zones (≥3 consecutive diagonal flags)">
+              ⊞ {stackedBuyCount}
+            </span>
+          )}
+          {stackedSellCount > 0 && (
+            <span className="text-red-400" title="Stacked sell imbalance zones (≥3 consecutive diagonal flags)">
+              ⊟ {stackedSellCount}
+            </span>
+          )}
           {poc != null && (
             <span className="text-amber-400" title="Point of Control">
               POC {poc.toFixed(2)}

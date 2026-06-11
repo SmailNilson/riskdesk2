@@ -33,6 +33,7 @@ public class OrderFlowProperties {
     private Cvd cvd = new Cvd();
     private Tape tape = new Tape();
     private BigPrint bigPrint = new BigPrint();
+    private VolumeProfile volumeProfile = new VolumeProfile();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -70,6 +71,8 @@ public class OrderFlowProperties {
     public void setTape(Tape tape) { this.tape = tape; }
     public BigPrint getBigPrint() { return bigPrint; }
     public void setBigPrint(BigPrint bigPrint) { this.bigPrint = bigPrint; }
+    public VolumeProfile getVolumeProfile() { return volumeProfile; }
+    public void setVolumeProfile(VolumeProfile volumeProfile) { this.volumeProfile = volumeProfile; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -584,13 +587,33 @@ public class OrderFlowProperties {
          * whose lower bound it falls into. Instruments not listed fall back to their
          * native tick size — which is usually far too granular for reading a footprint
          * (MNQ at 0.25 produces hundreds of one-lot levels).
+         *
+         * <p>MNQ lowered 5.0 → 2.0 (8 ticks) on 2026-06-11: research consensus for
+         * NQ-class footprints is 4–10 ticks per row; 20-tick rows destroy diagonal
+         * imbalance resolution. Bars persisted before the change have 5-point buckets.</p>
          */
         private Map<String, Double> bucketSize = new HashMap<>(Map.of(
-            "MNQ", 5.0,   // 20 ticks
+            "MNQ", 2.0,   // 8 ticks
             "MCL", 0.05   // 5 ticks
         ));
         /** Max bars returned by the history endpoint. */
         private int historyMaxBars = 50;
+        /**
+         * Diagonal imbalance dominance ratio: buy at P vs sell one bucket lower (and
+         * mirrored for sells). 3.0 = 300%, the industry default.
+         */
+        private double imbalanceRatio = 3.0;
+        /**
+         * Per-instrument minimum-volume filter: the larger cell of the diagonal pair
+         * must hold at least this many contracts to flag (a 4-vs-1 pair must not).
+         * MCL is lower because micro crude tape volume is a fraction of MNQ's.
+         */
+        private Map<String, Long> minCellVolume = new HashMap<>(Map.of(
+            "MNQ", 20L,
+            "MCL", 5L
+        ));
+        /** Fallback minimum-volume filter for instruments without an explicit entry. */
+        private long defaultMinCellVolume = 20;
 
         public int getBarMinutes() { return barMinutes; }
         public void setBarMinutes(int v) { this.barMinutes = v; }
@@ -598,5 +621,54 @@ public class OrderFlowProperties {
         public void setBucketSize(Map<String, Double> v) { this.bucketSize = v; }
         public int getHistoryMaxBars() { return historyMaxBars; }
         public void setHistoryMaxBars(int v) { this.historyMaxBars = v; }
+        public double getImbalanceRatio() { return imbalanceRatio; }
+        public void setImbalanceRatio(double v) { this.imbalanceRatio = v; }
+        public Map<String, Long> getMinCellVolume() { return minCellVolume; }
+        public void setMinCellVolume(Map<String, Long> v) { this.minCellVolume = v; }
+        public long getDefaultMinCellVolume() { return defaultMinCellVolume; }
+        public void setDefaultMinCellVolume(long v) { this.defaultMinCellVolume = v; }
+
+        /** Minimum-volume filter for an instrument, falling back to the default. */
+        public long minCellVolumeFor(String instrument) {
+            Long v = minCellVolume.get(instrument);
+            return v != null ? v : defaultMinCellVolume;
+        }
+    }
+
+    /**
+     * Session volume profile (UC-OF-015): POC / VAH / VAL (70% value area) built from
+     * internal 1m candles per RTH session, plus the naked-POC ladder.
+     */
+    public static class VolumeProfile {
+        /**
+         * Per-instrument price bucket size (points) for the session histogram.
+         * Coarser than the footprint bucket — a session profile spans the whole
+         * day's range.
+         */
+        private Map<String, Double> bucketSize = new HashMap<>(Map.of(
+            "MNQ", 1.0,
+            "MCL", 0.05
+        ));
+        /** Fallback bucket size for instruments without an explicit entry. */
+        private double defaultBucketSize = 1.0;
+        /** How many completed RTH sessions the naked-POC scan walks back. */
+        private int nakedPocLookbackSessions = 10;
+        /** Profiles are recomputed at most once per this many seconds (per instrument). */
+        private int cacheSeconds = 60;
+
+        public Map<String, Double> getBucketSize() { return bucketSize; }
+        public void setBucketSize(Map<String, Double> v) { this.bucketSize = v; }
+        public double getDefaultBucketSize() { return defaultBucketSize; }
+        public void setDefaultBucketSize(double v) { this.defaultBucketSize = v; }
+        public int getNakedPocLookbackSessions() { return nakedPocLookbackSessions; }
+        public void setNakedPocLookbackSessions(int v) { this.nakedPocLookbackSessions = v; }
+        public int getCacheSeconds() { return cacheSeconds; }
+        public void setCacheSeconds(int v) { this.cacheSeconds = v; }
+
+        /** Bucket size for an instrument, falling back to the default. */
+        public double bucketSizeFor(String instrument) {
+            Double v = bucketSize.get(instrument);
+            return v != null && v > 0 ? v : defaultBucketSize;
+        }
     }
 }

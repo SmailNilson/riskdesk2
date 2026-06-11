@@ -131,7 +131,17 @@ export interface FootprintLevel {
   buyVolume: number;
   sellVolume: number;
   delta: number;
+  /** @deprecated same-price 3:1 flag — use the diagonal flags (pro convention) */
   imbalance: boolean;
+  diagonalBuyImbalance?: boolean;
+  diagonalSellImbalance?: boolean;
+}
+
+/** >= 3 consecutive buckets flagged with a diagonal imbalance on the same side. */
+export interface ImbalanceZone {
+  fromPrice: number;
+  toPrice: number;
+  buckets: number;
 }
 
 export interface TickBar {
@@ -161,6 +171,10 @@ export interface FootprintBar {
   totalBuyVolume: number;
   totalSellVolume: number;
   totalDelta: number;
+  stackedBuyZones?: ImbalanceZone[];
+  stackedSellZones?: ImbalanceZone[];
+  unfinishedHigh?: boolean;
+  unfinishedLow?: boolean;
 }
 
 export interface DistributionEvent {
