@@ -349,6 +349,21 @@ public class TickByTickClient {
         }
     }
 
+    /** How the tick ended up classified, for the sampled diagnostic log. */
+    private static String classificationVia(IbkrTickDataAdapter.TickResolution resolution,
+                                            IbkrTickDataAdapter adapter) {
+        if (adapter == null) return "ADAPTER_UNWIRED";
+        if (resolution.tickRule()) return "TICK_RULE";
+        return resolution.classification() == TickByTickAggregator.TickClassification.UNCLASSIFIED
+            ? "DROPPED" : "LEE_READY";
+    }
+
+    /** BBO provenance label, e.g. {@code BBO@120ms} / {@code QUOTE@45ms} / {@code NONE}. */
+    private static String bboLabel(String source, Instant bboAt) {
+        if (bboAt == null) return source;
+        return source + "@" + (System.currentTimeMillis() - bboAt.toEpochMilli()) + "ms";
+    }
+
     // -------------------------------------------------------------------------
     // Fix 3: Exception-safe EWrapper
     // -------------------------------------------------------------------------
@@ -372,7 +387,6 @@ public class TickByTickClient {
                 // Update watchdog timestamp
                 lastTickTime.put(reqId, System.currentTimeMillis());
 
-                // Log EVERY tick (for diagnosis — can reduce to DEBUG later)
                 SubscriptionInfo info = activeSubscriptions.get(reqId);
                 String instrument = info != null ? info.instrument().name() : "UNKNOWN";
 
@@ -389,6 +403,8 @@ public class TickByTickClient {
                 // trade-to-trade tick rule (L2) instead of dropping the tick as UNCLASSIFIED.
                 double bid = 0;
                 double ask = 0;
+                String bboSource = "NONE";
+                Instant bboAt = null;
                 if (info != null) {
                     IbGatewayNativeClient nc = nativeClient;
                     if (nc != null) {
@@ -399,6 +415,8 @@ public class TickByTickClient {
                             IbGatewayNativeClient.NativeMarketQuote q = bbo.get();
                             bid = q.bid() != null ? q.bid().doubleValue() : 0;
                             ask = q.ask() != null ? q.ask().doubleValue() : 0;
+                            bboSource = "BBO";
+                            bboAt = q.timestamp();
                         }
                         // 2) Dedicated quote subscription, if one exists (e.g. FX).
                         if (bid <= 0 || ask <= 0) {
@@ -407,22 +425,35 @@ public class TickByTickClient {
                                 IbGatewayNativeClient.NativeMarketQuote q = quote.get();
                                 if (bid <= 0) bid = q.bid() != null ? q.bid().doubleValue() : 0;
                                 if (ask <= 0) ask = q.ask() != null ? q.ask().doubleValue() : 0;
+                                bboSource = "QUOTE";
+                                bboAt = q.timestamp();
                             }
                         }
                         // 3) else bid=ask=0 → classifyTrade returns UNCLASSIFIED → tick-rule fallback.
                     }
 
-                    TickByTickAggregator.TickClassification classification =
+                    TickByTickAggregator.TickClassification quoteRuleClass =
                         IbkrTickDataAdapter.classifyTrade(price, bid, ask);
 
-                    if (count <= 20 || count % 100 == 0) {
-                        log.info("TICK #{} reqId={} {} price={} size={} bid={} ask={} class={} time={}",
-                                 count, reqId, instrument, price, sizeVal, bid, ask, classification, timestamp);
-                    }
-
+                    // Resolve BEFORE logging: the adapter applies the tick-rule fallback when the
+                    // quote rule can't classify (no BBO, or trade exactly at the BBO midpoint).
                     IbkrTickDataAdapter adapter = tickDataAdapter;
-                    if (adapter != null) {
-                        adapter.onTickByTickTrade(info.instrument(), price, sizeVal, classification, timestamp);
+                    IbkrTickDataAdapter.TickResolution resolution = adapter != null
+                        ? adapter.onTickByTickTrade(info.instrument(), price, sizeVal, quoteRuleClass, timestamp)
+                        : new IbkrTickDataAdapter.TickResolution(quoteRuleClass, false);
+
+                    // Sampled diagnostic log — class= is the classification the aggregator actually
+                    // consumed. Logging the raw quote-rule result here used to print
+                    // class=UNCLASSIFIED on every midpoint trade even though the tick was classified
+                    // downstream by the tick rule, which read as total classification failure in
+                    // production audits. via= says how it was classified; bbo= says which quote
+                    // cache supplied bid/ask and how old it was at classification time.
+                    if (count <= 20 || count % 100 == 0) {
+                        log.info("TICK #{} reqId={} {} price={} size={} bid={} ask={} class={} via={} bbo={} time={}",
+                                 count, reqId, instrument, price, sizeVal, bid, ask,
+                                 resolution.classification(),
+                                 classificationVia(resolution, adapter),
+                                 bboLabel(bboSource, bboAt), timestamp);
                     }
                 }
             } catch (Exception e) {

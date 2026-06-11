@@ -2,6 +2,40 @@
 
 Last updated: 2026-06-11
 
+## Tick log provenance fix + BBO circularity audit (2026-06-11)
+
+A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
+`bid=price−1tick / ask=price+1tick` while `/api/order-flow/status` showed ~100% ticks
+classified. Findings (verified against the deployed v1.11.125 via `/actuator/info`):
+
+- **Log artifact, fixed.** The line in `TickByTickClient.tickByTickAllLast` logged the raw
+  Lee-Ready quote-rule result BEFORE the adapter's tick-rule fallback (L2) ran, so any trade
+  printing exactly at the BBO midpoint logged `UNCLASSIFIED` even though it was classified
+  downstream. `IbkrTickDataAdapter.onTickByTickTrade` now returns a `TickResolution`
+  (consumed classification + tickRule flag) and the log is emitted AFTER resolution:
+  `class=` is what the aggregator consumed, `via=LEE_READY|TICK_RULE|DROPPED|ADAPTER_UNWIRED`
+  says how, `bbo=BBO@<age>ms|QUOTE@<age>ms|NONE` says which quote cache supplied bid/ask and
+  its age at classification time.
+- **No circular synthetic BBO in current code.** The pre-#413 path that synthesized
+  `bid = lastPrice − tickSize / ask = lastPrice + tickSize` (Lee-Ready against it is circular —
+  exactly the logged signature, MNQ tick = 0.25) was removed in PR #413; `latestStreamingBbo`
+  serves only real two-sided BID/ASK captures (`lastGoodBid/lastGoodAsk`, bounded by
+  `bbo-max-staleness-seconds=90`), the quote-sub fallback is real, and the final fallback is
+  `bid=ask=0` → tick rule, flagged per-tick.
+- **Residual midpoint pattern explained.** The cached BBO is read at tick *processing* time, so
+  in a one-tick-wide book an aggressive trade that wipes its level is classified against the
+  post-trade book (`bid=price−1t / ask=price+1t` → exact midpoint → tick rule). Near-systematic
+  in thin overnight Globex (the sampled `TICK #13–#19300` were the first ticks after the 00:04Z
+  deploy); during RTH quote-classified volume dominates and the window stamps `REAL_TICKS`.
+  This is honest: such ticks carry `tickRule=true` and degrade the window to
+  `REAL_TICKS_TICKRULE` when they exceed `1 − real-ticks-min-quote-fraction` of volume.
+- **Note:** `classifiedTicksReceived ≈ totalTicksReceived` is true by construction with the
+  tick-rule fallback enabled — it is NOT evidence that Lee-Ready is working; use the per-window
+  `source` (or the new `via=` log field) for that.
+- Tests: `IbkrTickDataAdapterTest` pins midpoint/missing/inverted-BBO → quote-rule UNCLASSIFIED,
+  tick-rule resolution + `TickResolution` contract, and REAL_TICKS vs REAL_TICKS_TICKRULE
+  window stamping honesty.
+
 ## Depth flow signals + DOM heatmap (2026-06-11)
 
 Continuous L2 signals computed from the existing 500ms `DepthMetrics` snapshots —

@@ -115,16 +115,28 @@ public class IbkrTickDataAdapter implements TickDataPort {
     }
 
     /**
+     * Final resolution of one trade tick: the classification actually fed to the aggregator and
+     * whether it came from the trade-to-trade tick rule ({@code tickRule=true}) or the Lee-Ready
+     * quote rule ({@code tickRule=false}). Returned to the caller so the per-tick diagnostic log
+     * reflects what was consumed, not the pre-fallback quote-rule result.
+     */
+    public record TickResolution(TickByTickAggregator.TickClassification classification,
+                                 boolean tickRule) {}
+
+    /**
      * Called by the IBKR native client when a tick-by-tick trade is received.
      * This method is thread-safe and can be called from the EReader thread.
      *
      * <p>When the quote-based Lee-Ready {@code classification} is UNCLASSIFIED (no fresh BBO/quote
-     * was available) and the tick-rule fallback is enabled, the trade is classified by its
-     * direction relative to the previous trade (uptick=BUY / downtick=SELL) and flagged
-     * {@code tickRule} so the window's source degrades to {@code REAL_TICKS_TICKRULE} rather than
-     * the tick being dropped — which previously zeroed delta in any no-quote period (L2).
+     * was available, or the trade printed exactly at the BBO midpoint) and the tick-rule fallback
+     * is enabled, the trade is classified by its direction relative to the previous trade
+     * (uptick=BUY / downtick=SELL) and flagged {@code tickRule} so the window's source degrades to
+     * {@code REAL_TICKS_TICKRULE} rather than the tick being dropped — which previously zeroed
+     * delta in any no-quote period (L2).
+     *
+     * @return the resolution the aggregator consumed (never null)
      */
-    public void onTickByTickTrade(Instrument instrument, double price, long size,
+    public TickResolution onTickByTickTrade(Instrument instrument, double price, long size,
                                    TickByTickAggregator.TickClassification classification,
                                    java.time.Instant timestamp) {
         TickByTickAggregator.TickClassification resolved = classification;
@@ -162,6 +174,8 @@ public class IbkrTickDataAdapter implements TickDataPort {
             tickBarAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
             bigPrintAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
         }
+
+        return new TickResolution(resolved, tickRule);
     }
 
     @Override
