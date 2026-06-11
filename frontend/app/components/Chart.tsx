@@ -16,7 +16,7 @@ import {
   LineStyle,
   Time,
 } from 'lightweight-charts';
-import { IndicatorSnapshot, api } from '@/app/lib/api';
+import { IndicatorSnapshot, VolumeProfileResponse, api } from '@/app/lib/api';
 import { breakerReferenceTime, relevantBreakerBlocks } from '@/app/lib/orderBlocks';
 import { PriceUpdate } from '@/app/hooks/useWebSocket';
 // useScrollBack removed — scroll-back feature deferred
@@ -122,6 +122,8 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
   const smcLinesRef    = useRef<any[]>([]);                        // Strong/Weak H/L price lines
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mtfLinesRef    = useRef<any[]>([]);                        // UC-SMC-005: D/W/M price lines
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const profileLinesRef = useRef<any[]>([]);                       // UC-OF-015: volume profile price lines
   const smcCanvasRef   = useRef<HTMLCanvasElement | null>(null);   // OB + FVG overlay canvas
   const drawSMCRef     = useRef<(() => void) | null>(null);        // current draw function
   const smcRedrawRaf1Ref = useRef<number | null>(null);
@@ -133,9 +135,11 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
   const allBarsRef = useRef<CandlestickData<Time>[]>([]);
 
   // ── Indicator visibility toggles ────────────────────────────────────────────
-  const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false });
+  const [vis, setVis]         = useState({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: false, profile: false });
   // UC-SMC-005: MTF levels toggle
   const [showMtf, setShowMtf] = useState(false);
+  // UC-OF-015: session volume profile (prior POC/VAH/VAL + naked POCs), polled at 60s
+  const [volumeProfile, setVolumeProfile] = useState<VolumeProfileResponse | null>(null);
   // UC-SMC-007: candle coloring by SMC trend
   const [smcCandleColor, setSmcCandleColor] = useState(false);
   // UC-SMC-006: SMC render mode controls
@@ -146,7 +150,7 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
 
   // Reset visibility + lastBarTime when chart is recreated (instrument / timeframe change)
   useEffect(() => {
-    setVis(prev => ({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: prev.smc }));
+    setVis(prev => ({ ema9: true, ema50: true, ema200: true, bb: true, wt: true, smc: prev.smc, profile: prev.profile }));
     setShowMtf(false);
     setSmcCandleColor(false);
     setSmcRenderMode('present');
@@ -436,6 +440,7 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
       wtChartRef.current    = null;
       smcLinesRef.current   = [];
       mtfLinesRef.current   = [];
+      profileLinesRef.current = [];
       drawSMCRef.current    = null;
       markersApiRef.current = null;
       cancelScheduledSmcRedraw();
@@ -449,6 +454,20 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
     }, 60_000);
     return () => window.clearInterval(id);
   }, [reloadSeries]);
+
+  // ── UC-OF-015: fetch session volume profile (60s poll — matches server cache) ──
+  useEffect(() => {
+    if (instrument === 'DXY') { setVolumeProfile(null); return; } // synthetic: no volume
+    let cancelled = false;
+    const load = () => {
+      api.getVolumeProfile(instrument)
+        .then(p => { if (!cancelled) setVolumeProfile(p && p.instrument ? p : null); })
+        .catch(() => { if (!cancelled) setVolumeProfile(null); });
+    };
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [instrument]);
 
   // ── Re-apply timezone formatter when timezone prop changes ─────────────────
   useEffect(() => {
@@ -745,6 +764,44 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, showMtf]);
 
+  // ── UC-OF-015: volume profile price lines (prior POC/VAH/VAL, dev POC, naked POCs) ──
+  useEffect(() => {
+    const series = candleRef.current;
+    if (!series) return;
+
+    // Remove previous profile lines (same cleanup pattern as SMC/MTF)
+    profileLinesRef.current.forEach(pl => { try { series.removePriceLine(pl); } catch {} });
+    profileLinesRef.current = [];
+
+    if (!vis.profile || !volumeProfile) return;
+
+    const addVp = (price: number | null | undefined, color: string, style: LineStyle, title: string, width: 1 | 2 = 1) => {
+      if (price == null) return;
+      profileLinesRef.current.push(series.createPriceLine({
+        price, color, lineWidth: width, lineStyle: style,
+        axisLabelVisible: true, title,
+      }));
+    };
+
+    // Current developing session POC — solid amber
+    if (volumeProfile.session?.developing) {
+      addVp(volumeProfile.session.poc, '#f59e0b', LineStyle.Solid, 'POC', 2);
+    }
+    // Prior session — violet POC, grey VAH/VAL, all dashed
+    const prior = volumeProfile.priorSession;
+    if (prior) {
+      addVp(prior.poc, '#a78bfa', LineStyle.Dashed, 'pPOC');
+      addVp(prior.vah, '#9ca3af', LineStyle.Dashed, 'pVAH');
+      addVp(prior.val, '#9ca3af', LineStyle.Dashed, 'pVAL');
+    }
+    // Naked POCs — dotted violet; skip the prior session's own POC (already pPOC)
+    for (const np of volumeProfile.nakedPocs ?? []) {
+      if (prior && np.date === prior.date) continue;
+      addVp(np.price, '#a78bfa99', LineStyle.Dotted, `nPOC ${np.date}`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [volumeProfile, vis.profile, lastBarTime]);
+
   // ── Append live tick to current candle bar ──────────────────────────────────
   useEffect(() => {
     if (!livePrice || !candleRef.current) return;
@@ -800,6 +857,15 @@ function Chart({ instrument, timeframe, timezone, theme, snapshot, livePrice }: 
             {/* UC-SMC-005: MTF levels toggle */}
             {snapshot.mtfLevels && (
               <Tag color="amber" label="MTF" active={showMtf} onClick={() => setShowMtf(v => !v)} />
+            )}
+            {/* UC-OF-015: session volume profile overlay (prior POC/VAH/VAL + naked POCs) */}
+            {volumeProfile && (
+              <Tag
+                color="purple"
+                label={`VP${volumeProfile.nakedPocs?.length ? ` n${volumeProfile.nakedPocs.length}` : ''}`}
+                active={vis.profile}
+                onClick={() => toggle('profile')}
+              />
             )}
             {/* UC-SMC-007: candle color by SMC trend */}
             <Tag

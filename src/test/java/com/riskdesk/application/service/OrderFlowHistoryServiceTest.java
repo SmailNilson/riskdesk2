@@ -11,7 +11,9 @@ import com.riskdesk.infrastructure.persistence.JpaFootprintBarRepository;
 import com.riskdesk.infrastructure.persistence.JpaIcebergEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
+import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.FootprintBarEntity;
 import com.riskdesk.infrastructure.persistence.entity.MomentumEventEntity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -193,5 +195,77 @@ class OrderFlowHistoryServiceTest {
         assertThat(result).hasSize(1);
         assertThat(result.get(0).confidence()).isEqualTo(85);
         assertThat(result.get(0).cycleType()).isEqualTo("BEARISH_CYCLE");
+    }
+
+    // ─── Footprint profileJson parsing tolerance (diagonal-imbalance upgrade) ──
+
+    private FootprintBarEntity barEntity(String profileJson) {
+        return new FootprintBarEntity(Instrument.MNQ, "10m",
+                Instant.parse("2026-05-02T13:00:00Z"), 21002.0, 60L, 20L, 40L, profileJson);
+    }
+
+    @Test
+    void toBar_oldRowWithoutDiagonalFields_parsesWithFlagsFalse() {
+        // Pre-upgrade JSON shape: no diagonal flags, no zones — must not break.
+        String legacyJson = "["
+                + "{\"price\":21000.0,\"buyVolume\":10,\"sellVolume\":5,\"delta\":5,\"imbalance\":false},"
+                + "{\"price\":21002.0,\"buyVolume\":50,\"sellVolume\":15,\"delta\":35,\"imbalance\":true}"
+                + "]";
+
+        FootprintBar bar = service.toBar(barEntity(legacyJson));
+
+        assertThat(bar.levels()).hasSize(2);
+        assertThat(bar.levels().get(21002.0).imbalance()).isTrue();
+        assertThat(bar.levels().get(21002.0).diagonalBuyImbalance()).isFalse();
+        assertThat(bar.levels().get(21002.0).diagonalSellImbalance()).isFalse();
+        assertThat(bar.stackedBuyZones()).isEmpty();
+        assertThat(bar.stackedSellZones()).isEmpty();
+        // unfinished flags only need volumes — computable for old rows too
+        assertThat(bar.unfinishedHigh()).isTrue();  // top bucket 21002: both sides traded
+        assertThat(bar.unfinishedLow()).isTrue();   // bottom bucket 21000: both sides traded
+        assertThat(bar.totalDelta()).isEqualTo(40);
+    }
+
+    @Test
+    void toBar_newRowWithDiagonalFields_rebuildsStackedZones() {
+        // Post-upgrade JSON (2.0-point MNQ buckets): three consecutive diagonal buy flags
+        String json = "["
+                + "{\"price\":21000.0,\"buyVolume\":0,\"sellVolume\":5,\"delta\":-5,\"imbalance\":true,"
+                + "\"diagonalBuyImbalance\":false,\"diagonalSellImbalance\":false},"
+                + "{\"price\":21002.0,\"buyVolume\":30,\"sellVolume\":5,\"delta\":25,\"imbalance\":true,"
+                + "\"diagonalBuyImbalance\":true,\"diagonalSellImbalance\":false},"
+                + "{\"price\":21004.0,\"buyVolume\":30,\"sellVolume\":5,\"delta\":25,\"imbalance\":true,"
+                + "\"diagonalBuyImbalance\":true,\"diagonalSellImbalance\":false},"
+                + "{\"price\":21006.0,\"buyVolume\":30,\"sellVolume\":0,\"delta\":30,\"imbalance\":true,"
+                + "\"diagonalBuyImbalance\":true,\"diagonalSellImbalance\":false}"
+                + "]";
+
+        FootprintBar bar = service.toBar(barEntity(json));
+
+        assertThat(bar.levels().get(21002.0).diagonalBuyImbalance()).isTrue();
+        assertThat(bar.stackedBuyZones()).hasSize(1);
+        assertThat(bar.stackedBuyZones().get(0).fromPrice()).isEqualTo(21002.0);
+        assertThat(bar.stackedBuyZones().get(0).toPrice()).isEqualTo(21006.0);
+        assertThat(bar.stackedBuyZones().get(0).buckets()).isEqualTo(3);
+        assertThat(bar.stackedSellZones()).isEmpty();
+    }
+
+    @Test
+    void toBar_malformedJson_keepsHeadlineMetrics() {
+        FootprintBar bar = service.toBar(barEntity("{not-json"));
+
+        assertThat(bar.levels()).isEmpty();
+        assertThat(bar.stackedBuyZones()).isEmpty();
+        assertThat(bar.unfinishedHigh()).isFalse();
+        assertThat(bar.pocPrice()).isEqualTo(21002.0);
+        assertThat(bar.totalBuyVolume()).isEqualTo(60);
+    }
+
+    @Test
+    void toBar_nullProfileJson_isTolerated() {
+        FootprintBar bar = service.toBar(barEntity(null));
+
+        assertThat(bar.levels()).isEmpty();
+        assertThat(bar.totalDelta()).isEqualTo(40);
     }
 }

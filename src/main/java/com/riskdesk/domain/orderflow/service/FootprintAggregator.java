@@ -6,6 +6,7 @@ import com.riskdesk.domain.orderflow.model.FootprintLevel;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -20,21 +21,29 @@ import java.util.TreeMap;
  * previous bar is closed and returned to the caller (tick-driven close); for idle
  * periods, {@link #closeIfElapsed} closes a bar whose window has fully passed.</p>
  *
- * <p>Prices are binned into buckets of {@code bucketSize} (e.g. 5.00 points for MNQ,
+ * <p>Prices are binned into buckets of {@code bucketSize} (e.g. 2.00 points for MNQ,
  * 0.05 for MCL — typically a multiple of the instrument's tick size). A trade is
  * attributed to the bucket whose lower bound it falls into: bucket = floor(price /
  * bucketSize) * bucketSize.</p>
+ *
+ * <p>Closed-bar snapshots carry diagonal imbalance flags, stacked-imbalance zones and
+ * unfinished-auction flags computed by {@link FootprintImbalanceCalculator}.</p>
  *
  * <p>Thread safety: external callers must synchronize if used from multiple threads.</p>
  */
 public class FootprintAggregator {
 
-    private static final double IMBALANCE_RATIO = 3.0;
+    private static final double DEFAULT_IMBALANCE_RATIO = 3.0;
+    private static final long DEFAULT_MIN_CELL_VOLUME = 20;
 
     private final Instrument instrument;
     private final double bucketSize;
     private final int barSeconds;
     private final String timeframeLabel;
+    /** Diagonal dominance ratio (3.0 = 300%). */
+    private final double imbalanceRatio;
+    /** Minimum contracts on the larger cell of the diagonal pair for it to flag. */
+    private final long minCellVolume;
 
     // bucket lower bound -> {buyVol, sellVol}
     private final TreeMap<Double, long[]> currentBarLevels = new TreeMap<>();
@@ -42,15 +51,25 @@ public class FootprintAggregator {
     private long currentBarOpen = -1;
 
     public FootprintAggregator(Instrument instrument, double bucketSize, int barSeconds) {
+        this(instrument, bucketSize, barSeconds, DEFAULT_IMBALANCE_RATIO, DEFAULT_MIN_CELL_VOLUME);
+    }
+
+    public FootprintAggregator(Instrument instrument, double bucketSize, int barSeconds,
+                               double imbalanceRatio, long minCellVolume) {
         if (bucketSize <= 0) {
             throw new IllegalArgumentException("bucketSize must be positive, got: " + bucketSize);
         }
         if (barSeconds <= 0) {
             throw new IllegalArgumentException("barSeconds must be positive, got: " + barSeconds);
         }
+        if (imbalanceRatio <= 1) {
+            throw new IllegalArgumentException("imbalanceRatio must be > 1, got: " + imbalanceRatio);
+        }
         this.instrument = instrument;
         this.bucketSize = bucketSize;
         this.barSeconds = barSeconds;
+        this.imbalanceRatio = imbalanceRatio;
+        this.minCellVolume = Math.max(0, minCellVolume);
         this.timeframeLabel = barSeconds % 3600 == 0
             ? (barSeconds / 3600) + "h"
             : (barSeconds / 60) + "m";
@@ -130,28 +149,24 @@ public class FootprintAggregator {
     // -------------------------------------------------------------------------
 
     private FootprintBar snapshot() {
+        List<FootprintLevel> enriched = FootprintImbalanceCalculator.computeLevels(
+            currentBarLevels, bucketSize, imbalanceRatio, minCellVolume);
+
         Map<Double, FootprintLevel> levels = new LinkedHashMap<>();
         long totalBuy = 0;
         long totalSell = 0;
         double pocPrice = 0;
         long pocVolume = 0;
 
-        for (Map.Entry<Double, long[]> entry : currentBarLevels.entrySet()) {
-            double price = entry.getKey();
-            long buyVol = entry.getValue()[0];
-            long sellVol = entry.getValue()[1];
-            long delta = buyVol - sellVol;
-            boolean imbalance = isImbalance(buyVol, sellVol);
+        for (FootprintLevel level : enriched) {
+            levels.put(level.price(), level);
+            totalBuy += level.buyVolume();
+            totalSell += level.sellVolume();
 
-            levels.put(price, new FootprintLevel(price, buyVol, sellVol, delta, imbalance));
-
-            totalBuy += buyVol;
-            totalSell += sellVol;
-
-            long totalVol = buyVol + sellVol;
+            long totalVol = level.buyVolume() + level.sellVolume();
             if (totalVol > pocVolume) {
                 pocVolume = totalVol;
-                pocPrice = price;
+                pocPrice = level.price();
             }
         }
 
@@ -163,7 +178,11 @@ public class FootprintAggregator {
             pocPrice,
             totalBuy,
             totalSell,
-            totalBuy - totalSell
+            totalBuy - totalSell,
+            FootprintImbalanceCalculator.stackedZones(enriched, bucketSize, true),
+            FootprintImbalanceCalculator.stackedZones(enriched, bucketSize, false),
+            FootprintImbalanceCalculator.unfinishedHigh(enriched),
+            FootprintImbalanceCalculator.unfinishedLow(enriched)
         );
     }
 
@@ -176,16 +195,5 @@ public class FootprintAggregator {
     private double bucketFor(double price) {
         long bucketIndex = (long) Math.floor(price / bucketSize + 1e-9);
         return Math.round(bucketIndex * bucketSize * 1e6) / 1e6;
-    }
-
-    /**
-     * Imbalance detection: one side dominates at 3:1 ratio or more.
-     */
-    private static boolean isImbalance(long buyVolume, long sellVolume) {
-        if (buyVolume == 0 && sellVolume == 0) return false;
-        if (sellVolume == 0) return buyVolume >= IMBALANCE_RATIO; // treat 0 as 1 effectively
-        if (buyVolume == 0) return sellVolume >= IMBALANCE_RATIO;
-        return buyVolume >= IMBALANCE_RATIO * sellVolume
-            || sellVolume >= IMBALANCE_RATIO * buyVolume;
     }
 }

@@ -49,10 +49,12 @@ class OrderFlowControllerTest {
     private final OrderFlowHistoryService historyService = mock(OrderFlowHistoryService.class);
     private final com.riskdesk.application.service.WallTrackingService wallTrackingService =
         mock(com.riskdesk.application.service.WallTrackingService.class);
+    private final com.riskdesk.application.service.VolumeProfileService volumeProfileService =
+        mock(com.riskdesk.application.service.VolumeProfileService.class);
 
     private final OrderFlowController controller = new OrderFlowController(
         orchestratorProvider, tickDataPortProvider, depthPortProvider, tickBarPortProvider,
-        historyService, wallTrackingService);
+        historyService, wallTrackingService, volumeProfileService);
 
     // ------------------------------------------------------------------ Iceberg
 

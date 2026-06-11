@@ -1,5 +1,6 @@
 package com.riskdesk.domain.orderflow.model;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -10,7 +11,11 @@ import java.util.Map;
  * <ul>
  *   <li>POC (Point of Control) — price level with highest total volume</li>
  *   <li>Total delta — net buy vs sell aggression across all levels</li>
- *   <li>Per-level imbalance — identifies where one side dominates 3:1</li>
+ *   <li>Per-level diagonal imbalances — the professional bid/ask footprint signal
+ *       (see {@link FootprintLevel})</li>
+ *   <li>Stacked imbalance zones — ≥ 3 consecutive buckets flagged on the same side</li>
+ *   <li>Unfinished auction — both sides traded at the bar's extreme (the auction did
+ *       not finish; price often revisits the level)</li>
  * </ul>
  */
 public record FootprintBar(
@@ -21,5 +26,18 @@ public record FootprintBar(
     double pocPrice,          // price level with highest total volume
     long totalBuyVolume,
     long totalSellVolume,
-    long totalDelta
-) {}
+    long totalDelta,
+    List<ImbalanceZone> stackedBuyZones,   // ≥3 consecutive diagonal buy imbalances
+    List<ImbalanceZone> stackedSellZones,  // ≥3 consecutive diagonal sell imbalances
+    boolean unfinishedHigh,   // top bucket traded on both sides — unfinished auction up
+    boolean unfinishedLow     // bottom bucket traded on both sides — unfinished auction down
+) {
+    /** Legacy 8-arg shape — no stacked zones, no unfinished-auction flags. */
+    public FootprintBar(String instrument, String timeframe, long barTimestamp,
+                        Map<Double, FootprintLevel> levels, double pocPrice,
+                        long totalBuyVolume, long totalSellVolume, long totalDelta) {
+        this(instrument, timeframe, barTimestamp, levels, pocPrice,
+             totalBuyVolume, totalSellVolume, totalDelta,
+             List.of(), List.of(), false, false);
+    }
+}
