@@ -2,6 +2,42 @@
 
 Last updated: 2026-06-11
 
+## WTX — live intrabar stop exits on 1m candles (2026-06-11)
+
+**Why.** Live WTX panels evaluated protective-stop exits only on the close of the PANEL
+timeframe bar (e.g. every 10m for `top-train-Z35`), while every validated backtest (Z35
+PF 1.58 etc.) replays exits on 1m candles. Observed on prod 2026-06-11: a short's SL
+(29027.24) was breached intrabar at 14:01 UTC (1m high 29043.50) but the exit row landed
+at 14:10:00Z with the order submitted ~9 min after the breach — the app books the SL
+level while the real fill happens at the panel-close market price (that day ~64 pts
+better, but unbounded worse if the move continues).
+
+**What changed** (`WtxStrategyService`):
+
+- **1m intrabar exit sweep**: on every closed `1m` `CandleClosed`, each panel of that
+  instrument (legacy timeframes + variants; a panel whose own data timeframe is 1m is
+  excluded) re-checks its OPEN position with the same `WtxTrailingExitEvaluator` against
+  the just-closed 1m candle. An exit goes through the existing `applyExit` path — routed
+  to IBKR before flattening, **booked at the STOP LEVEL** (backtest fill convention),
+  exit row stamped at the 1m bar's timestamp under the owning panel key.
+- **Trailing state advances per 1m**: MFE / ratcheted trailing stop update on every 1m
+  close via `withTrailing` (saved + published only when values actually change, so no
+  per-minute row/WS churn while flat or unchanged). `lastCandleTs` is NOT touched by the
+  sweep — day-change detection stays owned by the panel bar.
+- **Per-panel position lock**: panel-bar processing, the 1m sweep and the NY force-close
+  now serialize on a per-`(instrument, panelKey)` monitor, so a breach landing on the
+  same tick as the panel close can never exit twice (the panel path reloads state and
+  sees FLAT). Entry/signal evaluation is untouched — still panel-timeframe only.
+- The sweep never CREATES panel state, skips BASELINE profiles (no ATR exits), and reads
+  the panel's effective config (preset + overrides), so a variant's own SL multiple
+  (e.g. Z35 `slAtrMult 4.0`) drives its 1m stop.
+
+Tests: `WtxIntrabarExitTest` — 1m breach mid-10m-bar exits promptly at the SL level with
+SL-consistent realized P&L, no double exit when the 10m close carries the same breach,
+trailing MFE/stop ratchet on consecutive 1m closes, variant panel uses its preset stop,
+BASELINE not swept.
+
+
 ## Quant 7-Gates: ~3 s fast exit path (SL/TP between scans) (2026-06-11)
 
 Sim #903 (SHORT MNQ) closed 93 pts past its SL (-272.5 pts vs the planned ~-180): exits
