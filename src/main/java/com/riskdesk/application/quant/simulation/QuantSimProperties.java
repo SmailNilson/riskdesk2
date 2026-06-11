@@ -90,6 +90,16 @@ public class QuantSimProperties {
     private Map<String, InstrumentOverride> perInstrument = new LinkedHashMap<>();
 
     /**
+     * Fast exit path — when true, SL/TP exits are also evaluated on every
+     * live price push (~3 s market-data poll) via
+     * {@code QuantSimFastExitListener}, instead of only on the 60 s gate
+     * scan. Caps the SL/TP overshoot to one poll interval (sim #903 closed
+     * 93 pts past its SL inside one 60 s window during the 2026-06-11
+     * squeeze). Entries, flow-AVOID and EOD logic stay on the scan path.
+     */
+    private boolean fastExitEnabled = true;
+
+    /**
      * Stats baseline — rows OPENED before this instant are excluded from the
      * win-rate / P&amp;L aggregates (global and per-instrument). They stay in
      * the trade history; only the reported numbers ignore them. Used to cut
@@ -158,6 +168,9 @@ public class QuantSimProperties {
     public void setPerInstrument(Map<String, InstrumentOverride> perInstrument) {
         this.perInstrument = perInstrument == null ? new LinkedHashMap<>() : perInstrument;
     }
+
+    public boolean isFastExitEnabled() { return fastExitEnabled; }
+    public void setFastExitEnabled(boolean fastExitEnabled) { this.fastExitEnabled = fastExitEnabled; }
 
     public Instant getStatsSince() { return statsSince; }
     public void setStatsSince(Instant statsSince) { this.statsSince = statsSince; }

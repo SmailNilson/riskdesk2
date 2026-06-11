@@ -47,6 +47,62 @@ WTX); `useActivePositions` in TickChart opens a second SockJS connection.
 `ActivePositionsControllerTest` (+3 cancel-entry), `QuantManualTradeServiceTest` (+2,
 LONG/SHORT tokens), `QuantAutoArmServiceTest` token update. `HexagonalArchitectureTest` green.
 
+## WTX — live intrabar stop exits on 1m candles (2026-06-11)
+
+**Why.** Live WTX panels evaluated protective-stop exits only on the close of the PANEL
+timeframe bar (e.g. every 10m for `top-train-Z35`), while every validated backtest (Z35
+PF 1.58 etc.) replays exits on 1m candles. Observed on prod 2026-06-11: a short's SL
+(29027.24) was breached intrabar at 14:01 UTC (1m high 29043.50) but the exit row landed
+at 14:10:00Z with the order submitted ~9 min after the breach — the app books the SL
+level while the real fill happens at the panel-close market price (that day ~64 pts
+better, but unbounded worse if the move continues).
+
+**What changed** (`WtxStrategyService`):
+
+- **1m intrabar exit sweep**: on every closed `1m` `CandleClosed`, each panel of that
+  instrument (legacy timeframes + variants; a panel whose own data timeframe is 1m is
+  excluded) re-checks its OPEN position with the same `WtxTrailingExitEvaluator` against
+  the just-closed 1m candle. An exit goes through the existing `applyExit` path — routed
+  to IBKR before flattening, **booked at the STOP LEVEL** (backtest fill convention),
+  exit row stamped at the 1m bar's timestamp under the owning panel key.
+- **Trailing state advances per 1m**: MFE / ratcheted trailing stop update on every 1m
+  close via `withTrailing` (saved + published only when values actually change, so no
+  per-minute row/WS churn while flat or unchanged). `lastCandleTs` is NOT touched by the
+  sweep — day-change detection stays owned by the panel bar.
+- **Per-panel position lock**: panel-bar processing, the 1m sweep and the NY force-close
+  now serialize on a per-`(instrument, panelKey)` monitor, so a breach landing on the
+  same tick as the panel close can never exit twice (the panel path reloads state and
+  sees FLAT). Entry/signal evaluation is untouched — still panel-timeframe only.
+- The sweep never CREATES panel state, skips BASELINE profiles (no ATR exits), and reads
+  the panel's effective config (preset + overrides), so a variant's own SL multiple
+  (e.g. Z35 `slAtrMult 4.0`) drives its 1m stop.
+
+Tests: `WtxIntrabarExitTest` — 1m breach mid-10m-bar exits promptly at the SL level with
+SL-consistent realized P&L, no double exit when the 10m close carries the same breach,
+trailing MFE/stop ratchet on consecutive 1m closes, variant panel uses its preset stop,
+BASELINE not swept.
+
+
+## Quant 7-Gates: ~3 s fast exit path (SL/TP between scans) (2026-06-11)
+
+Sim #903 (SHORT MNQ) closed 93 pts past its SL (-272.5 pts vs the planned ~-180): exits
+were only evaluated by the 60 s gate scan, and the 2026-06-11 squeeze ran +128 pts inside
+one scan window (17:30 1m candle: O 29087 → H 29215). The backtest replay fills AT the SL
+level, so live results read systematically worse than backtest on fast moves.
+
+- `QuantSimFastExitListener` (`@EventListener` on `MarketPriceUpdated`, the existing ~3 s
+  poll + debounced IBKR pushes) → `Quant7GatesSimulationService.onPriceTick`: SL/TP-only
+  check on open rows + mark-to-market publish. No new thread, no new state; no-op when no
+  row is open. Closes overshoot at most one poll interval now.
+- **Provenance guard**: `MarketPriceUpdated` is ALSO published for FALLBACK_DB/STALE prices
+  and carries no source — the listener re-reads via `LivePricePort` and only acts on
+  `LIVE_PUSH`/`LIVE_PROVIDER`. Fallback-priced exits stay on the 60 s scan, as before.
+- Deliberately NOT on the fast path: entries, flow-AVOID (need a fresh pattern from the
+  scan) and EOD flat (scan resolves it within a minute). `checkSlTp` is shared by both paths.
+- Kill switch: `riskdesk.quant.sim.fast-exit-enabled=false` → scan-only exits (old behaviour).
+- Tests: `QuantSimFastExitTest` (tick SL/TP close at tick price, MTM without close, never
+  opens, listener live-source gating + disable flag + VIX/null events).
+
 ## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
 
 Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).
