@@ -50,6 +50,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
@@ -2001,6 +2002,14 @@ public class IbGatewayNativeClient {
         private volatile Double lastGoodAsk;
         private volatile Instant lastGoodBboAt = null;
 
+        /**
+         * Session-cumulative traded volume from {@code TickType.VOLUME} (a default tick on this
+         * {@code reqTopMktData} subscription). -1 until the first tick: that first reading is a
+         * baseline only — attributing the whole session-to-date figure to the current bar would
+         * massively over-count after a (re)connect mid-session.
+         */
+        private final AtomicLong cumulativeVolume = new AtomicLong(-1);
+
         /** Maximum spread-to-mid ratio for mid-price to be used as bestPrice fallback. */
         private static final double MAX_SPREAD_RATIO = 0.005; // 0.5%
         /** Seconds of silence before stale bid/ask quotes are cleared on the next tick. */
@@ -2074,7 +2083,14 @@ public class IbGatewayNativeClient {
 
         @Override
         public void tickSize(TickType tickType, Decimal size) {
-            // no-op
+            if ((tickType == TickType.VOLUME || tickType == TickType.DELAYED_VOLUME) && size != null) {
+                long newCumulative = size.longValue();
+                if (newCumulative < 0) return;
+                long delta = volumeDelta(cumulativeVolume.getAndSet(newCumulative), newCumulative);
+                if (delta > 0) {
+                    notifyVolumeListener(delta, Instant.now());
+                }
+            }
         }
 
         @Override
@@ -2173,6 +2189,29 @@ public class IbGatewayNativeClient {
                 log.debug("Price listener error for {}: {}", instrument, e.getMessage());
             }
         }
+
+        private void notifyVolumeListener(long volumeDelta, Instant timestamp) {
+            StreamingPriceListener listener = priceListener;
+            if (listener == null) return;
+            Instrument instrument = contractKeyToInstrument.get(subscriptionKey(contract));
+            if (instrument == null) return;
+            try {
+                listener.onLiveVolumeUpdate(instrument, volumeDelta, timestamp);
+            } catch (Exception e) {
+                log.debug("Volume listener error for {}: {}", instrument, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Increment between two readings of the exchange's session-cumulative volume counter.
+     * {@code previous < 0} means no baseline yet (first tick after subscribe) → 0. A counter
+     * that went backwards means the Globex session reset: the new reading IS the volume
+     * traded since the reset.
+     */
+    static long volumeDelta(long previous, long newCumulative) {
+        if (newCumulative < 0 || previous < 0) return 0;
+        return newCumulative >= previous ? newCumulative - previous : newCumulative;
     }
 
     private final class StreamingQuoteSubscription implements ApiController.ITopMktDataHandler {

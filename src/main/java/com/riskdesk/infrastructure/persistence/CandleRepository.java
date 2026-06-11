@@ -42,6 +42,10 @@ public interface CandleRepository extends JpaRepository<CandleEntity, Long> {
     List<CandleEntity> findByInstrumentAndTimeframeAndContractMonthOrderByTimestampDesc(
             Instrument instrument, String timeframe, String contractMonth, Pageable pageable);
 
+    /** Natural-key lookup backing the adapter's upsert (uk_candle_instrument_tf_ts). */
+    Optional<CandleEntity> findByInstrumentAndTimeframeAndTimestamp(
+            Instrument instrument, String timeframe, Instant timestamp);
+
     /** Bulk-deletes candles inside the closed range [from, to]; returns rows removed. */
     @Modifying
     @Query("DELETE FROM CandleEntity c WHERE c.instrument = :instrument AND c.timeframe = :timeframe"

@@ -117,6 +117,83 @@ class MarketDataServiceTest {
                         && "10m".equals(closed.timeframe())));
     }
 
+    @Test
+    void volume_isTradedContractsFromVolumeDeltas_notPriceUpdateCount() {
+        MarketDataService service = newService();
+
+        // Monday 2026-03-30 10:0xZ = 06:0x EDT — market open, outside the maintenance window.
+        Instant periodOne = Instant.parse("2026-03-30T10:04:00Z");
+        Instant periodTwo = Instant.parse("2026-03-30T10:15:00Z");
+
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("62.40"), periodOne);
+        service.onLiveVolumeUpdate(Instrument.MCL, 150L, periodOne);
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("62.80"), periodOne.plusSeconds(30));
+        service.onLiveVolumeUpdate(Instrument.MCL, 50L, periodOne.plusSeconds(60));
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("63.10"), periodTwo);
+
+        verify(candlePort, times(1)).save(argThat(candle ->
+                "10m".equals(candle.getTimeframe()) && candle.getVolume() == 200L));
+    }
+
+    @Test
+    void volume_arrivingBeforeFirstPriceOfBar_isClaimedWhenBarOpens() {
+        MarketDataService service = newService();
+
+        Instant periodOne = Instant.parse("2026-03-30T10:04:00Z");
+        Instant periodTwo = Instant.parse("2026-03-30T10:15:00Z");
+
+        // Volume tick precedes the bar's first price tick.
+        service.onLiveVolumeUpdate(Instrument.MCL, 75L, periodOne);
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("62.40"), periodOne.plusSeconds(5));
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("63.10"), periodTwo);
+
+        verify(candlePort, times(1)).save(argThat(candle ->
+                "10m".equals(candle.getTimeframe()) && candle.getVolume() == 75L));
+    }
+
+    @Test
+    void volume_isZeroWhenNoVolumeDeltasArrive_priceUpdatesDoNotInflateIt() {
+        MarketDataService service = newService();
+
+        Instant periodOne = Instant.parse("2026-03-30T10:04:00Z");
+        Instant periodTwo = Instant.parse("2026-03-30T10:15:00Z");
+
+        for (int i = 0; i < 25; i++) {
+            ReflectionTestUtils.invokeMethod(service, "accumulate",
+                    Instrument.MCL, "10m", new BigDecimal("62.40").add(BigDecimal.valueOf(i, 2)),
+                    periodOne.plusSeconds(i));
+        }
+        ReflectionTestUtils.invokeMethod(service, "accumulate",
+                Instrument.MCL, "10m", new BigDecimal("63.10"), periodTwo);
+
+        verify(candlePort, times(1)).save(argThat(candle ->
+                "10m".equals(candle.getTimeframe()) && candle.getVolume() == 0L));
+    }
+
+    private CandleRepositoryPort candlePort;
+
+    private MarketDataService newService() {
+        candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        when(contractRegistry.getContractMonth(any())).thenReturn(Optional.empty());
+        return new MarketDataService(
+            mock(MarketDataProvider.class),
+            mock(PositionService.class),
+            mock(AlertService.class),
+            mock(BehaviourAlertService.class),
+            candlePort,
+            contractRegistry,
+            mock(SimpMessagingTemplate.class),
+            mock(ApplicationEventPublisher.class),
+            mock(DxyMarketService.class)
+        );
+    }
+
     private static Candle candle(Instrument instrument, String timeframe, String timestamp, String close) {
         BigDecimal price = new BigDecimal(close);
         return new Candle(
