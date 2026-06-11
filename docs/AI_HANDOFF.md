@@ -2,6 +2,42 @@
 
 Last updated: 2026-06-11
 
+## PLAYBOOK MNQ 10m — full-pipeline 1m backtest: no edge found (2026-06-11)
+
+**Why.** The PLAYBOOK MNQ 10m automation showed 30% WR / −$4,234 / PF 0.16 on its last
+100 paper decisions. A replay backtest was built to diagnose the losses and test fixes
+(min-R:R gate, 1h EMA20/50 HTF filter, per-zone dedup, score≥6 threshold, entry style).
+
+**Harness.** `src/test/java/com/riskdesk/backtest/PlaybookBacktestHarnessTest.java`
+(auto-skips when data files are absent). Phase A re-runs the REAL production pipeline
+(`IndicatorService` snapshot → `PlaybookService` → `PlaybookEvaluator`) bar-by-bar over
+stored 10m candles (Jan 5 → Jun 11 2026, 13,490 decisions) — validated 1:1 against the
+live decision log (103 vs 100 decisions on the Jun 10–11 window, same directions/scores/
+entries). Phase B simulates each decision on stored 1m candles with the exact
+`TradeSimulationService` rules (1h PENDING_ENTRY timeout, MISSED, pessimistic
+same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
+`/api/candles/MNQ/{tf}/range` into `/tmp` (override with `-Dpb.data.dir`).
+
+**Verdicts (realistic portfolio mode, max 1 concurrent position, 1152 configs):**
+- Baseline: **−$30,853 net / 5.5 months** (WR 19%, PF 0.42). The dashboard's −$68k
+  over-counts by letting the same zone open overlapping sims every 10m candle.
+- The recommended filters are **loss reducers, not edge creators**: best non-inverted
+  combo (MID entry, score≥5, HTF 1h, skip-late) lands at ≈ $0 net. HTF is the
+  strongest single filter.
+- Best overall config: **inverted signal + ATR exits (1.5×SL / 2.25×TP) + HTF**:
+  +$1,558 net, PF 1.20, WR 42% — positive but fragile (April dominates, 3/6 positive
+  months). Not tradeable as-is.
+- **Trailing stop never engages on PLAYBOOK sims**: the 1h entry timeout means a fill
+  never has the 15 five-minute bars `computeAtrAtActivation` needs → ATR is null →
+  trailing skipped. Live PLAYBOOK P&L is pure fixed SL/TP.
+
+**Methodology traps documented for future backtests:**
+1. Without per-zone dedup the same zone re-signals every candle → 5–10 overlapping
+   sims ride one move → fake +$200k. Always also evaluate one-position-at-a-time.
+2. Inverting a limit-entry signal turns the entry into a STOP order: fill =
+   `max(entry, bar open)` for longs — `priceInZone` setups are already in-the-money
+   and would otherwise fill at impossible below-market prices (fake +$300k / 85% WR).
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
