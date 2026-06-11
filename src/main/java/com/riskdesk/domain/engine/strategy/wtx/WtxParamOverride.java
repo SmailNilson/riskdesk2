@@ -40,17 +40,22 @@ public record WtxParamOverride(
 
     /**
      * Named preset {@code top-train-Z35} — the zone-entry configuration that came out of the
-     * real-1m grid study (MNQ 10m, train mars-avril 2026 → OOS mai-juin 2026): WaveTrend 5/14/2,
-     * initial stop 4.0×ATR (SL_ONLY ride), entries only on crosses inside the ±35 zone
-     * (every-cross flags off), and the session entry filter OFF — the exact shape of the winning
-     * run (OOS ≈ +$6.6k / 54% win-rate at qty=1; session-ON scored ≈ half). The NY force-close
-     * still applies. In-sample-selected — paper-validate on live data before trusting it with
-     * real orders, especially overnight where slippage was not modelled.
+     * real-1m grid study (MNQ 10m): WaveTrend 5/14/2, initial stop 4.0×ATR (SL_ONLY ride),
+     * entries only on crosses inside the ±35 zone (every-cross flags off). The NY force-close
+     * still applies.
+     *
+     * <p>The session gate is deliberately NOT part of the preset (null = inherit the global
+     * config, which ships session ON). The original selection (mars→juin, pre-front-month-fix
+     * data) favoured session OFF, but the full-period study on real front data (jan→juin 2026)
+     * reversed that verdict: session ON keeps ~the same net (+$9,980 vs +$9,768) with maxDD ÷3.5
+     * ($1,614 vs $5,639) and survives the directionless winter months the selection never saw.
+     * Policy: auto-trading panels default to session ON; opt out per panel via the Session
+     * button (a per-panel {@code sessionFilterEnabled=false} override).</p>
      */
     public static final WtxParamOverride TOP_TRAIN_Z35 = new WtxParamOverride(
             5, 14, 2, new BigDecimal("4.0"),
             BigDecimal.valueOf(35), BigDecimal.valueOf(-35), Boolean.FALSE, Boolean.FALSE,
-            Boolean.FALSE);
+            null);
 
     /**
      * Resolve a named preset (case/whitespace-insensitive). {@code "clear"} (or {@code "none"})

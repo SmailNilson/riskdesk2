@@ -402,6 +402,9 @@ public class WtxStrategyController {
         view.put("nsc", eff.nsc());
         view.put("nsv", eff.nsv());
         view.put("zoneOnlyEntries", !eff.useCompra1() && !eff.useVenta1());
+        // Effective session entry gate (global config + this panel's override) — the panel's
+        // Session ON/OFF button reads this; without it the toggle always renders OFF.
+        view.put("sessionFilterEnabled", eff.sessionFilterEnabled());
         // Open-position summary (null/zero when FLAT). entryPrice / entryQty come straight from
         // state; "stopLoss" surfaces the live trailing-exit stop (initial ATR stop until the
         // trailing phase arms, then the ratcheted trailing level).
@@ -437,6 +440,7 @@ public class WtxStrategyController {
         view.put("nsc", eff.nsc());
         view.put("nsv", eff.nsv());
         view.put("zoneOnlyEntries", !eff.useCompra1() && !eff.useVenta1());
+        view.put("sessionFilterEnabled", eff.sessionFilterEnabled());
         view.put("entryPrice", null);
         view.put("entryQty", 0);
         view.put("stopLoss", null);
