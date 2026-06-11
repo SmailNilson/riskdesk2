@@ -11,13 +11,14 @@ all ~25 desktop panels in one column. Desktop (≥ `lg`) is unchanged.
   mirroring Tailwind's `lg` breakpoint. Returns `null` until the viewport is known, so
   neither panel tree mounts prematurely — a phone never mounts the desktop panels (and
   their WS subscriptions / polling), not even for one frame.
-- **Bottom tab bar** (6 tabs, only the active tab's panels are mounted):
-  Chart (= **TickChart**, not the heavy lightweight-charts `Chart`), Indic
-  (IndicatorPanel + DxyPanel), WTX (WTX · 5m, WTX · 10m, top-train-Z35 on MNQ), Quant
-  (Quant7GatesSimulationPanel), Playbook, Portf (IbkrPortfolioPanel).
-- **Deliberately desktop-only**: AlertsFeed, full Chart, OrderFlowPanel, FootprintChart,
-  FlashCrashPanel, BacktestPanel, CorrelationPanel, StrategyPanel, ExternalSetupPanel,
-  WtxRsiStrategyPanel, PerfectSetupPanel — none of them mount on mobile.
+- **Bottom tab bar** (5 tabs, only the active tab's panels are mounted):
+  Chart (= **TickChart**, not the heavy lightweight-charts `Chart`), WTX (WTX · 5m,
+  WTX · 10m, top-train-Z35 on MNQ), Quant (Quant7GatesSimulationPanel), Playbook,
+  Portf (IbkrPortfolioPanel).
+- **Deliberately desktop-only**: AlertsFeed, full Chart, IndicatorPanel, DxyPanel,
+  OrderFlowPanel, FootprintChart, FlashCrashPanel, BacktestPanel, CorrelationPanel,
+  StrategyPanel, ExternalSetupPanel, WtxRsiStrategyPanel, PerfectSetupPanel — none of
+  them mount on mobile.
 - **Header**: desktop control cluster is `hidden lg:flex`; mobile gets theme + a "⋯"
   overflow menu (timezone, purge, MarketableSettingsControl) and a dedicated full-width
   instrument/timeframe selector row with larger touch targets. Shared header widgets were

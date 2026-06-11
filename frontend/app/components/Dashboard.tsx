@@ -43,7 +43,6 @@ type Timeframe = typeof TIMEFRAMES[number];
     mobile, so its WS subscriptions and polling never start there. */
 const MOBILE_TABS = [
   { key: 'chart', icon: '📈', label: 'Chart' },
-  { key: 'indicators', icon: '📊', label: 'Indic' },
   { key: 'wtx', icon: '⚡', label: 'WTX' },
   { key: 'quant', icon: '🧪', label: 'Quant' },
   { key: 'playbook', icon: '🎯', label: 'Playbook' },
@@ -220,12 +219,6 @@ export default function Dashboard() {
           {mobileTab === 'chart' && (
             <TickChart selectedInstrument={instrument} snapshot={snapshot} />
           )}
-          {mobileTab === 'indicators' && (
-            <>
-              <IndicatorPanel snapshot={snapshot} currentPrice={prices[instrument]?.price ?? null} />
-              <DxyPanel />
-            </>
-          )}
           {mobileTab === 'wtx' && (
             <>
               <WtxStrategyPanel instrument={instrument} timeframe="5m" liveSignals={wtxSignals} />
@@ -264,7 +257,7 @@ export default function Dashboard() {
       {/* Mobile bottom tab bar */}
       {isMobile && (
         <nav className="fixed bottom-0 inset-x-0 z-40 bg-zinc-900 border-t border-zinc-800 pb-[env(safe-area-inset-bottom)]">
-          <div className="grid grid-cols-6">
+          <div className="grid grid-cols-5">
             {MOBILE_TABS.map(tab => (
               <button
                 key={tab.key}
