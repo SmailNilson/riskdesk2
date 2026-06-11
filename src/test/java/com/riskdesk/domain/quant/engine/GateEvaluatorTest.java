@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 /**
  * Behavioural specification of the 7-gate SHORT-setup evaluator. The cases
@@ -92,11 +93,11 @@ class GateEvaluatorTest {
     }
 
     @Test
-    @DisplayName("G5 conditional threshold: delta -600 + buy% 40 → ACCU seuil 75 (not 50)")
-    void g5Threshold_extremeBearishSignal_requires75() {
+    @DisplayName("G5 conditional threshold: delta -600 + buy% 40 → ACCU seuil 80 (base 60 + 20)")
+    void g5Threshold_extremeBearishSignal_requires80() {
         QuantState state = withDistHistory(baseState(), 70, 70);
-        // ACCU at 60% would block at standard threshold 50, but here delta is extreme
-        // so the threshold is bumped to 75 — this ACCU @60 should NOT block.
+        // ACCU at 60% would block at the base tier (60), but here delta is extreme
+        // so the threshold escalates to base+20 = 80 — this ACCU @60 should NOT block.
         MarketSnapshot ms = snap()
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
             .delta(-600.0).buyPct(40.0)
@@ -107,11 +108,11 @@ class GateEvaluatorTest {
         QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
 
         assertThat(snapOut.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isTrue();
-        assertThat(snapOut.gates().get(Gate.G5_ACCU_THRESHOLD).reason()).contains("75");
+        assertThat(snapOut.gates().get(Gate.G5_ACCU_THRESHOLD).reason()).contains("80");
     }
 
     @Test
-    @DisplayName("G5 conditional threshold: ACCU at 80 with extreme bearish → BLOCKS even at threshold 75")
+    @DisplayName("G5 conditional threshold: ACCU at 80 with extreme bearish → BLOCKS even at threshold 80")
     void g5Threshold_extremeBearishButHighAccu_blocks() {
         QuantState state = withDistHistory(baseState(), 70, 70);
         MarketSnapshot ms = snap()
@@ -124,6 +125,101 @@ class GateEvaluatorTest {
 
         assertThat(snapOut.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isFalse();
         assertThat(snapOut.gates().get(Gate.G5_ACCU_THRESHOLD).reason()).contains("BLOQUE");
+    }
+
+    // ── A/D veto recalibration (2026-06 event study) ────────────────────────
+
+    @Test
+    @DisplayName("G5 veto decay: fresh ACCU @65 blocks at base tier 60; same event aged 9 min does not")
+    void g5VetoDecay_freshBlocks_agedDoesNot() {
+        // delta -150 / buy% 49 → no escalation → base tier 60.
+        MarketSnapshot fresh = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-150.0).buyPct(49.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .dist("ACCUMULATION", 65).distTimestamp(NOW)
+            .build();
+        QuantSnapshot freshOut = evaluator.evaluate(fresh, baseState(), Instrument.MNQ).snapshot();
+        // age 0 → effective 65 ≥ 60 → blocks
+        assertThat(freshOut.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isFalse();
+
+        MarketSnapshot aged = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-150.0).buyPct(49.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .dist("ACCUMULATION", 65).distTimestamp(NOW.minusSeconds(540))
+            .build();
+        QuantSnapshot agedOut = evaluator.evaluate(aged, baseState(), Instrument.MNQ).snapshot();
+        // age 540s → effective = 65 × (1 - 540/600) = 6.5 < 60 → no longer vetoes
+        assertThat(agedOut.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isTrue();
+    }
+
+    @Test
+    @DisplayName("L5 veto decay: fresh DIST @65 blocks LONG at base tier 60; aged 9 min does not")
+    void l5VetoDecay_freshBlocks_agedDoesNot() {
+        MarketSnapshot fresh = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(150.0).buyPct(51.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 65).distTimestamp(NOW)
+            .build();
+        QuantSnapshot freshOut = evaluator.evaluate(fresh, baseState(), Instrument.MNQ).snapshot();
+        assertThat(freshOut.gates().get(Gate.L5_DIST_THRESHOLD).ok()).isFalse();
+
+        MarketSnapshot aged = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(150.0).buyPct(51.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 65).distTimestamp(NOW.minusSeconds(540))
+            .build();
+        QuantSnapshot agedOut = evaluator.evaluate(aged, baseState(), Instrument.MNQ).snapshot();
+        assertThat(agedOut.gates().get(Gate.L5_DIST_THRESHOLD).ok()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Veto decay is conservative: event with unknown timestamp keeps full strength")
+    void vetoDecay_nullTimestamp_noDecay() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-150.0).buyPct(49.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .dist("ACCUMULATION", 65)   // no distTimestamp
+            .build();
+        QuantSnapshot out = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot();
+        assertThat(out.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Custom config: raised veto base tier 70 lets a fresh ACCU @65 pass")
+    void customConfig_vetoBaseThreshold_respected() {
+        GateEvaluator custom = new GateEvaluator(new QuantGateConfig(
+            70.0, 600L, java.util.Map.of("MNQ", 100.0), 100.0, 48.0, 52.0));
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-150.0).buyPct(49.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .dist("ACCUMULATION", 65).distTimestamp(NOW)
+            .build();
+        QuantSnapshot out = custom.evaluate(ms, baseState(), Instrument.MNQ).snapshot();
+        assertThat(out.gates().get(Gate.G5_ACCU_THRESHOLD).ok()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Per-instrument delta gate: MCL uses ±40, MNQ keeps ±100; telemetry reports the resolved value")
+    void perInstrumentDeltaThreshold_resolved() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-50.0).buyPct(45.0)
+            .absFresh(0).absBull8(0).absBear8(0).absMaxScore(0)
+            .build();
+
+        QuantSnapshot mcl = evaluator.evaluate(ms, QuantState.reset(SESSION), Instrument.MCL).snapshot();
+        assertThat(mcl.gates().get(Gate.G3_DELTA_NEG).ok()).isTrue();    // -50 < -40
+        assertThat(mcl.telemetry().deltaThreshold()).isEqualTo(40.0);
+
+        QuantSnapshot mnq = evaluator.evaluate(ms, QuantState.reset(SESSION), Instrument.MNQ).snapshot();
+        assertThat(mnq.gates().get(Gate.G3_DELTA_NEG).ok()).isFalse();   // -50 > -100
+        assertThat(mnq.telemetry().deltaThreshold()).isEqualTo(100.0);
     }
 
     @Test
@@ -462,8 +558,8 @@ class GateEvaluatorTest {
     }
 
     @Test
-    @DisplayName("L5 conditional DIST threshold: delta +600 + buy% 60 → seuil 75 (DIST @60 PASS)")
-    void l5DistThreshold_extremeBullishSignal_requires75() {
+    @DisplayName("L5 conditional DIST threshold: delta +600 + buy% 60 → seuil 80 (DIST @60 PASS)")
+    void l5DistThreshold_extremeBullishSignal_requires80() {
         QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
         MarketSnapshot ms = snap()
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
@@ -474,11 +570,11 @@ class GateEvaluatorTest {
         QuantSnapshot snapOut = evaluator.evaluate(ms, state, Instrument.MNQ).snapshot();
 
         assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).ok()).isTrue();
-        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).reason()).contains("75");
+        assertThat(snapOut.gates().get(Gate.L5_DIST_THRESHOLD).reason()).contains("80");
     }
 
     @Test
-    @DisplayName("L5 DIST blocks LONG when DIST @80 with extreme bullish signal — threshold 75")
+    @DisplayName("L5 DIST blocks LONG when DIST @80 with extreme bullish signal — threshold 80")
     void l5DistThreshold_extremeBullishButHighDist_blocks() {
         QuantState state = QuantState.reset(SESSION).withMonitorStartPx(20_000.0);
         MarketSnapshot ms = snap()
@@ -539,7 +635,7 @@ class GateEvaluatorTest {
     @Test
     @DisplayName("G3 abstains (not a directional fail) when the delta feed is down")
     void g3_abstains_when_delta_unavailable() {
-        GateResult r = GateEvaluator.evaluateG3(null, java.util.List.of());
+        GateResult r = evaluator.evaluateG3(null, java.util.List.of(), 100.0);
         assertThat(r.ok()).isFalse();
         assertThat(r.abstain()).isTrue();
         assertThat(r.reason()).contains("ABSTAIN");
@@ -548,7 +644,7 @@ class GateEvaluatorTest {
     @Test
     @DisplayName("G3 with a real (non-passing) delta is a directional fail, not an abstain")
     void g3_directional_fail_is_not_abstain() {
-        GateResult r = GateEvaluator.evaluateG3(500.0, java.util.List.of()); // > threshold → fails
+        GateResult r = evaluator.evaluateG3(500.0, java.util.List.of(), 100.0); // > threshold → fails
         assertThat(r.ok()).isFalse();
         assertThat(r.abstain()).isFalse();
     }
@@ -556,9 +652,9 @@ class GateEvaluatorTest {
     @Test
     @DisplayName("G4/L3/L4 abstain on null input; deltaAvailable() reflects it")
     void delta_gates_abstain_and_snapshot_flags_unavailability() {
-        assertThat(GateEvaluator.evaluateG4(null).abstain()).isTrue();
-        assertThat(GateEvaluator.evaluateL3(null, java.util.List.of()).abstain()).isTrue();
-        assertThat(GateEvaluator.evaluateL4(null).abstain()).isTrue();
+        assertThat(evaluator.evaluateG4(null).abstain()).isTrue();
+        assertThat(evaluator.evaluateL3(null, java.util.List.of(), 100.0).abstain()).isTrue();
+        assertThat(evaluator.evaluateL4(null).abstain()).isTrue();
 
         // A full evaluation with no delta/buyPct → the snapshot reports delta unavailable.
         MarketSnapshot noDelta = snap()
@@ -603,6 +699,8 @@ class GateEvaluatorTest {
         assertThat(t.absorptionMinN8()).isEqualTo(8);
         assertThat(t.adType()).isEqualTo("DISTRIBUTION");
         assertThat(t.adConfidence()).isEqualTo(87);
+        // Linear age decay: 87 × (1 - 240/600) = 52.2 — what the L5 veto compared.
+        assertThat(t.adEffectiveConfidence()).isCloseTo(52.2, within(0.001));
         assertThat(t.adEventAgeSeconds()).isEqualTo(240L);
     }
 
@@ -657,12 +755,13 @@ class GateEvaluatorTest {
     @Test
     @DisplayName("Telemetry: ACCU veto blocks SHORT only — adShortBlocked true, adLongBlocked false")
     void telemetry_accuVeto_blocksShortOnly() {
-        // Extreme bearish context bumps the ACCU threshold to 75; ACCU @80 blocks G5.
+        // Extreme bearish context bumps the ACCU threshold to 80 (base 60 + 20);
+        // ACCU @85 aged 10s → effective 85 × (1 - 10/600) ≈ 83.58 ≥ 80 → blocks G5.
         MarketSnapshot ms = snap()
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
             .delta(-600.0).buyPct(40.0)
             .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
-            .dist("ACCUMULATION", 80).distTimestamp(NOW.minusSeconds(10))
+            .dist("ACCUMULATION", 85).distTimestamp(NOW.minusSeconds(10))
             .build();
 
         var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
@@ -670,18 +769,22 @@ class GateEvaluatorTest {
         assertThat(t.adType()).isEqualTo("ACCUMULATION");
         assertThat(t.adShortBlocked()).isTrue();
         assertThat(t.adLongBlocked()).isFalse();
-        assertThat(t.adAccuThreshold()).isEqualTo(75);
+        assertThat(t.adAccuThreshold()).isEqualTo(80);
+        assertThat(t.adConfidence()).isEqualTo(85);
+        assertThat(t.adEffectiveConfidence()).isCloseTo(85.0 * (1.0 - 10.0 / 600.0), within(0.001));
         assertThat(t.adEventAgeSeconds()).isEqualTo(10L);
     }
 
     @Test
     @DisplayName("Telemetry: DIST veto blocks LONG only — adLongBlocked true, adShortBlocked false")
     void telemetry_distVeto_blocksLongOnly() {
+        // Extreme bullish context bumps the DIST threshold to 80 (base 60 + 20);
+        // DIST @95 aged 90s → effective 95 × 0.85 = 80.75 ≥ 80 → blocks L5.
         MarketSnapshot ms = snap()
             .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
             .delta(600.0).buyPct(60.0)
             .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
-            .dist("DISTRIBUTION", 80).distTimestamp(NOW.minusSeconds(90))
+            .dist("DISTRIBUTION", 95).distTimestamp(NOW.minusSeconds(90))
             .build();
 
         var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
@@ -689,7 +792,9 @@ class GateEvaluatorTest {
         assertThat(t.adType()).isEqualTo("DISTRIBUTION");
         assertThat(t.adLongBlocked()).isTrue();
         assertThat(t.adShortBlocked()).isFalse();
-        assertThat(t.adDistThreshold()).isEqualTo(75);
+        assertThat(t.adDistThreshold()).isEqualTo(80);
+        assertThat(t.adConfidence()).isEqualTo(95);
+        assertThat(t.adEffectiveConfidence()).isCloseTo(80.75, within(0.001));
         assertThat(t.adEventAgeSeconds()).isEqualTo(90L);
     }
 
@@ -707,6 +812,7 @@ class GateEvaluatorTest {
 
         assertThat(t.adType()).isNull();
         assertThat(t.adConfidence()).isNull();
+        assertThat(t.adEffectiveConfidence()).isNull();
         assertThat(t.adEventAgeSeconds()).isNull();
         assertThat(t.adShortBlocked()).isFalse();
         assertThat(t.adLongBlocked()).isFalse();
@@ -718,7 +824,7 @@ class GateEvaluatorTest {
         java.util.Locale original = java.util.Locale.getDefault();
         try {
             java.util.Locale.setDefault(java.util.Locale.FRANCE);
-            GateResult g4 = GateEvaluator.evaluateG4(46.5);
+            GateResult g4 = evaluator.evaluateG4(46.5);
             assertThat(g4.reason()).contains("46.5").doesNotContain("46,5");
 
             GateResult g1 = GateEvaluator.evaluateG1(snap()

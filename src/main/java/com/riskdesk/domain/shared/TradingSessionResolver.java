@@ -209,6 +209,24 @@ public final class TradingSessionResolver {
     }
 
     /**
+     * Returns {@code true} when the timestamp falls inside US cash-equity
+     * Regular Trading Hours — <b>09:30–16:00 America/New_York</b> (DST-aware) —
+     * on a day the CME market is open. Everything else inside the Globex week
+     * is "ETH" (overnight / extended hours).
+     * <p>
+     * Used to scale order-flow thresholds: MNQ volume runs roughly 10–20×
+     * higher during RTH than overnight, so a single global delta threshold is
+     * either deaf overnight or hyperactive intraday. Callers (application
+     * layer) resolve the session here and pass adjusted thresholds into the
+     * domain detectors — never hardcode UTC hour boundaries.
+     */
+    public static boolean isRegularTradingHours(Instant timestamp) {
+        if (!isMarketOpen(timestamp)) return false;
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
+    }
+
+    /**
      * Returns {@code true} if the timestamp falls within an ICT kill zone:
      * London 02:00–05:00 ET, NY 08:30–11:00 ET.
      * Used to gate 5m alert evaluation.

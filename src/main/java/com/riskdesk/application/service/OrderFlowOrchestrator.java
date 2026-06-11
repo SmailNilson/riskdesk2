@@ -44,6 +44,7 @@ import com.riskdesk.domain.orderflow.service.FlashCrashFSM;
 import com.riskdesk.domain.orderflow.service.IcebergDetector;
 import com.riskdesk.domain.orderflow.service.InstitutionalDistributionDetector;
 import com.riskdesk.domain.orderflow.service.SpoofingDetector;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
@@ -111,6 +112,15 @@ public class OrderFlowOrchestrator {
     /** Transition-style de-dup gates so a re-scanned window doesn't re-emit the same signal. */
     private final RecentSignalGate icebergGate = new RecentSignalGate();
     private final RecentSignalGate spoofingGate = new RecentSignalGate();
+
+    /**
+     * Per-(instrument, side) emission gate for absorption events. The 10s
+     * absorption window is re-evaluated every 5s, so one 10-15s burst used to
+     * be seen by 2-3 overlapping windows, each publishing + persisting its own
+     * AbsorptionDetected (no dedup — unlike spoofing/iceberg). See
+     * {@link OrderFlowProperties.Absorption#getDedupSeconds()}.
+     */
+    private final RecentSignalGate absorptionGate = new RecentSignalGate();
 
     /** Per-instrument stateful flash-crash FSMs (NORMAL→INITIATING→…→REVERSING→NORMAL). */
     private final ConcurrentHashMap<Instrument, FlashCrashFSM> flashCrashFSMs = new ConcurrentHashMap<>();
@@ -556,7 +566,7 @@ public class OrderFlowOrchestrator {
             int absWindowSec = properties.getAbsorption().getWindowSeconds();
             Optional<TickAggregation> shortAgg = tickDataPort.recentAggregation(instrument, absWindowSec);
             if (shortAgg.isPresent()) {
-                evaluateAbsorption(instrument, shortAgg.get());
+                evaluateAbsorption(instrument, shortAgg.get(), java.time.Instant.now());
             }
 
             // Always tick cycle state machine (timeouts must run even on quiet windows).
@@ -948,7 +958,13 @@ public class OrderFlowOrchestrator {
         return total / (2.0 * rows);
     }
 
-    private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
+    /**
+     * Seam for deterministic testing: {@code now} is injected by the caller
+     * (the scheduled loop passes {@link Instant#now()}) so the absorption
+     * dedup gate and the RTH/ETH threshold resolution can be pinned to fixed
+     * instants in tests — mirrors {@code evaluateBookManipulation(Instant)}.
+     */
+    void evaluateAbsorption(Instrument instrument, TickAggregation agg, java.time.Instant now) {
         try {
             boolean absorptionEnabled = properties.getAbsorption().isEnabled();
             boolean momentumEnabled = properties.getMomentum().isEnabled();
@@ -962,7 +978,7 @@ public class OrderFlowOrchestrator {
                 return;
             }
 
-            double deltaThreshold = properties.getAbsorption().getDeltaThreshold();
+            double deltaThreshold = resolvedDeltaThreshold(now);
             // Maintain the rolling avgVolume baseline only when absorption is enabled.
             // Momentum doesn't depend on a normalised baseline the same way, so we feed it
             // the current totalVolume as a neutral fallback (its detector handles edge cases).
@@ -988,7 +1004,6 @@ public class OrderFlowOrchestrator {
 
             // Real ATR from cache (falls back to 1.0 only before first cache refresh)
             double atr = atrCache.getOrDefault(instrument, 1.0);
-            java.time.Instant now = java.time.Instant.now();
 
             // Absorption is only evaluated when its own toggle is on. Momentum is independent
             // and runs in the else branch below regardless of the absorption toggle.
@@ -1001,6 +1016,23 @@ public class OrderFlowOrchestrator {
 
             if (signal.isPresent()) {
                 AbsorptionSignal s = signal.get();
+
+                // Emission gate (multiply-counting audit fix): the detection window
+                // (10s) overlaps the 5s scheduling cadence, so the same physical
+                // burst is re-detected by 2-3 successive windows. Suppress a new
+                // AbsorptionDetected when the previous one for this (instrument,
+                // side) is younger than dedup-seconds (default = window-seconds ⇒
+                // only NON-overlapping windows emit). Suppression covers the whole
+                // pipeline: persistence, n8 counts, WS display AND the distribution
+                // detector feed. A sustained 30s burst still yields 3 events 10s
+                // apart (≤ the detector's 20s max gap), so genuine sustained
+                // absorption streaks keep firing.
+                int dedupSec = properties.getAbsorption().effectiveDedupSeconds();
+                String dedupKey = "ABS|" + s.side().name();
+                if (!absorptionGate.shouldEmit(instrument, dedupKey, now, dedupSec)) {
+                    return;
+                }
+
                 eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, now));
 
                 // Display calibration: only events above the per-instrument display score
@@ -1056,6 +1088,25 @@ public class OrderFlowOrchestrator {
             // Order flow evaluation is best-effort but log so we can debug stalls
             log.debug("evaluateAbsorption failed for {}: {}", instrument, e.toString());
         }
+    }
+
+    /**
+     * Session-aware delta threshold for the absorption + momentum detectors.
+     * MNQ volume runs 10-20× higher during RTH (09:30-16:00 ET) than overnight,
+     * so the single configured baseline is multiplied by
+     * {@code eth-threshold-multiplier} (default 0.4) outside RTH. The SAME
+     * resolved value feeds both {@code AbsorptionDetector} and
+     * {@code AggressiveMomentumDetector} (whose Javadoc baseline already reads
+     * "e.g. 100 RTH, 40 ETH"). Session resolution happens here, in the
+     * application layer, via {@link TradingSessionResolver} — the domain
+     * detectors stay session-unaware and no UTC hour is ever hardcoded.
+     */
+    private double resolvedDeltaThreshold(java.time.Instant now) {
+        double base = properties.getAbsorption().getDeltaThreshold();
+        if (!TradingSessionResolver.isRegularTradingHours(now)) {
+            base *= properties.getAbsorption().getEthThresholdMultiplier();
+        }
+        return base;
     }
 
     /**

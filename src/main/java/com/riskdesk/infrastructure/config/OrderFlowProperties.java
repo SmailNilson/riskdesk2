@@ -228,6 +228,38 @@ public class OrderFlowProperties {
         private int volumeHistorySize = 12;
         /** Baseline delta normaliser — score = (|delta|/deltaThreshold) × stability × (vol/avgVol). */
         private long deltaThreshold = 50;
+        /**
+         * Emission de-dup window (seconds) per (instrument, side): a new
+         * AbsorptionDetected is suppressed when the previous one for the same
+         * instrument+side was emitted less than this many seconds ago. The
+         * {@link #windowSeconds 10s detection window} is re-evaluated every 5s,
+         * so without this gate one 10-15s burst was multiply counted by 2-3
+         * overlapping windows — inflating the DB (~1100 rows/day on MNQ, mostly
+         * resampling noise), the quant n8 counts and the distribution detector's
+         * "3 consecutive events" streak (one micro-burst == instant streak).
+         * {@code null} (default) = use {@link #windowSeconds}, i.e. only
+         * non-overlapping windows emit. Expected effect on MNQ: raw emission
+         * drops ~2-3× (theoretical per-side ceiling at 10s = 8 640/day; observed
+         * bursts make the practical figure a few hundred/day).
+         * <p>
+         * Streak compatibility: the distribution detector requires 3 consecutive
+         * events ≤ 20s apart — with dedup at 10s a sustained 30s burst still
+         * yields 3 events 10s apart, so GENUINE sustained absorption still fires.
+         */
+        private Integer dedupSeconds;
+        /**
+         * Session multiplier applied to {@link #deltaThreshold} outside Regular
+         * Trading Hours (09:30-16:00 ET): MNQ volume runs 10-20× higher in RTH
+         * than overnight, so a single global threshold is either deaf overnight
+         * or hyperactive intraday. 0.4 mirrors the momentum detector's
+         * documented baseline ("e.g. 100 RTH, 40 ETH") and also scales the
+         * delta baseline fed to {@code AggressiveMomentumDetector} (the
+         * orchestrator passes the same resolved value to both). Session
+         * resolution happens in the application layer via
+         * {@code TradingSessionResolver} — the domain detectors stay
+         * session-unaware.
+         */
+        private double ethThresholdMultiplier = 0.4;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -237,13 +269,21 @@ public class OrderFlowProperties {
         public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
         public long getDeltaThreshold() { return deltaThreshold; }
         public void setDeltaThreshold(long v) { this.deltaThreshold = v; }
+        public Integer getDedupSeconds() { return dedupSeconds; }
+        public void setDedupSeconds(Integer v) { this.dedupSeconds = v; }
+        /** Effective de-dup window: configured value, or {@link #windowSeconds} when unset. */
+        public int effectiveDedupSeconds() { return dedupSeconds != null ? dedupSeconds : windowSeconds; }
+        public double getEthThresholdMultiplier() { return ethThresholdMultiplier; }
+        public void setEthThresholdMultiplier(double v) { this.ethThresholdMultiplier = v; }
 
         /**
          * Per-instrument minimum score for an absorption event to be DISPLAYED
          * (WebSocket /topic/absorption + REST history). Internal consumers
          * (distribution chaining, quant gates, persistence) are NOT filtered.
          * Calibrated 2026-06-10 from 14 days of prod score percentiles, targeting
-         * ~5-15 displayed events/day per instrument (raw emission was ~1100/day on MNQ).
+         * ~5-15 displayed events/day per instrument (raw emission was ~1100/day
+         * on MNQ — measured BEFORE the {@link #dedupSeconds} emission gate;
+         * expect the post-dedup raw rate to be ~2-3× lower).
          */
         private Map<String, Double> minDisplayScore = new HashMap<>(Map.of(
             "MNQ", 80.0,  // ≈ P99 → ~11/day
