@@ -34,6 +34,8 @@ public record PlaybookAutomationDecisionView(
     String priceSource,
     Instant priceTimestamp,
     Instant evaluatedCandleTs,
+    String entryType,
+    BigDecimal invalidationPrice,
     PlaybookAutomationProfitabilitySummaryView profitabilitySummary
 ) {
     public static PlaybookAutomationDecisionView from(PlaybookDecision decision,
@@ -72,6 +74,8 @@ public record PlaybookAutomationDecisionView(
             decision.priceSource(),
             decision.priceTimestamp(),
             decision.evaluatedCandleTs(),
+            decision.entryType(),
+            decision.invalidationPrice(),
             summary
         );
     }

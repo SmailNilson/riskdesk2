@@ -5,7 +5,14 @@ import java.util.Locale;
 public enum PlaybookExecutionProfile {
     LEGACY(true, false, false),
     MGC_10M_SCALP_0_5R(true, true, false),
-    MGC_10M_NORMAL_1R_BENCHMARK(false, false, true);
+    MGC_10M_NORMAL_1R_BENCHMARK(false, false, true),
+    /**
+     * Confirmation-entry profile for MNQ 10m (see {@link ConfirmationEntryPlanner}):
+     * STOP entry at the zone exit, zone-broken invalidation, ATR(1.5/2.25) brackets,
+     * direction-specific session gates. Paper-only until forward validation completes
+     * (executable=false) — backtest provenance in PR #450 / docs/AI_HANDOFF.md.
+     */
+    MNQ_10M_CONFIRMATION(false, false, false);
 
     private final boolean executable;
     private final boolean manualValidationRequired;
@@ -35,10 +42,28 @@ public enum PlaybookExecutionProfile {
         if (this == LEGACY) {
             return true;
         }
-        return decision != null
-            && "MGC".equalsIgnoreCase(decision.instrument())
-            && "10m".equalsIgnoreCase(decision.timeframe())
-            && "BREAK_RETEST".equalsIgnoreCase(decision.setupType());
+        if (decision == null) {
+            return false;
+        }
+        if (!supportsScope(decision.instrument(), decision.timeframe())) {
+            return false;
+        }
+        return switch (this) {
+            case MGC_10M_SCALP_0_5R, MGC_10M_NORMAL_1R_BENCHMARK ->
+                "BREAK_RETEST".equalsIgnoreCase(decision.setupType());
+            default -> true;
+        };
+    }
+
+    /** Whether this profile may be armed on the given instrument/timeframe pair. */
+    public boolean supportsScope(String instrument, String timeframe) {
+        return switch (this) {
+            case LEGACY -> true;
+            case MGC_10M_SCALP_0_5R, MGC_10M_NORMAL_1R_BENCHMARK ->
+                "MGC".equalsIgnoreCase(instrument) && "10m".equalsIgnoreCase(timeframe);
+            case MNQ_10M_CONFIRMATION ->
+                "MNQ".equalsIgnoreCase(instrument) && "10m".equalsIgnoreCase(timeframe);
+        };
     }
 
     public static PlaybookExecutionProfile parseOrDefault(String value) {

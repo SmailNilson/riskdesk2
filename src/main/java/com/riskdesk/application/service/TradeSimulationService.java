@@ -141,7 +141,7 @@ public class TradeSimulationService {
         return evaluateWithPlan(plan, currentSimState(audit), subsequentCandles);
     }
 
-    private SimulationResult evaluateWithPlan(TradePlan plan, SimState state, List<Candle> subsequentCandles) {
+    SimulationResult evaluateWithPlan(TradePlan plan, SimState state, List<Candle> subsequentCandles) { // package-private for tests
         if (plan == null) {
             return new SimulationResult(
                 TradeSimulationStatus.CANCELLED,
@@ -168,7 +168,15 @@ public class TradeSimulationService {
         for (int i = 0; i < orderedCandles.size(); i++) {
             Candle candle = orderedCandles.get(i);
             if (!active) {
-                if (isMissed(plan, candle)) {
+                // Stop-entry plans: the setup is invalidated (CANCELLED) when price first
+                // breaks the far side of the zone — never trade the reclaim of a broken zone.
+                if (plan.isStopEntry() && touchesInvalidation(plan, candle)) {
+                    fixedResult = new SimulationResult(TradeSimulationStatus.CANCELLED, null, candle.getTimestamp(), maxDrawdown);
+                    break;
+                }
+                // MISSED ("TP traded before entry") only exists for limit-style entries;
+                // a stop trigger sits between current price and the target by construction.
+                if (!plan.isStopEntry() && isMissed(plan, candle)) {
                     fixedResult = new SimulationResult(TradeSimulationStatus.MISSED, null, candle.getTimestamp(), maxDrawdown);
                     break;
                 }
@@ -655,7 +663,9 @@ public class TradeSimulationService {
             "LONG".equalsIgnoreCase(decision.direction()),
             decision.entryPrice(),
             decision.stopLoss(),
-            decision.takeProfit1()
+            decision.takeProfit1(),
+            decision.entryType(),
+            decision.invalidationPrice()
         );
     }
 
@@ -697,9 +707,24 @@ public class TradeSimulationService {
     }
 
     private boolean touchesEntry(TradePlan plan, Candle candle) {
+        if (plan.isStopEntry()) {
+            // Buy-stop fills when price rises to the trigger; sell-stop when it falls to it.
+            return plan.isLong()
+                ? candle.getHigh().compareTo(plan.entryPrice()) >= 0
+                : candle.getLow().compareTo(plan.entryPrice()) <= 0;
+        }
         return plan.isLong()
             ? candle.getLow().compareTo(plan.entryPrice()) <= 0
             : candle.getHigh().compareTo(plan.entryPrice()) >= 0;
+    }
+
+    private boolean touchesInvalidation(TradePlan plan, Candle candle) {
+        if (plan.invalidationPrice() == null) {
+            return false;
+        }
+        return plan.isLong()
+            ? candle.getLow().compareTo(plan.invalidationPrice()) <= 0
+            : candle.getHigh().compareTo(plan.invalidationPrice()) >= 0;
     }
 
     private boolean touchesStop(TradePlan plan, Candle candle) {
@@ -809,7 +834,7 @@ public class TradeSimulationService {
      * fields (unit tests still feed us those records). Decouples the
      * evaluation algorithm from which persistence view it's reading.
      */
-    private record SimState(
+    record SimState( // package-private for tests
         TradeSimulationStatus status,
         Instant activationTime,
         Instant resolutionTime,
@@ -855,7 +880,16 @@ public class TradeSimulationService {
         );
     }
 
-    private record TradePlan(boolean isLong, BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {
+    record TradePlan(boolean isLong, BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit,
+                     String entryType, BigDecimal invalidationPrice) {
+        TradePlan(boolean isLong, BigDecimal entryPrice, BigDecimal stopLoss, BigDecimal takeProfit) {
+            this(isLong, entryPrice, stopLoss, takeProfit, null, null);
+        }
+
+        /** STOP entries trigger when price breaks THROUGH the entry (confirmation plans). */
+        boolean isStopEntry() {
+            return PlaybookDecision.ENTRY_TYPE_STOP.equalsIgnoreCase(entryType);
+        }
     }
 
     public record SimulationResult(

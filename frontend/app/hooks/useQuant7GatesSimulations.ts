@@ -26,6 +26,16 @@ interface State {
   rows: Quant7GatesSimulationView[];
   /** Always non-null — derived locally from {@code rows} via {@code useMemo}. */
   stats: Quant7GatesSimulationStats;
+  /**
+   * Rows eligible for stats: OPEN rows plus closed rows opened at/after the
+   * server's stats baseline. Use THIS (not {@code rows}) for any derived
+   * aggregate so client numbers match the server's — rows from the
+   * known-bad entry-data era (pre-delta-fix) stay in {@code rows} for the
+   * history list but are excluded here.
+   */
+  statsRows: Quant7GatesSimulationView[];
+  /** Stats baseline epoch-ms from the server, or null (full history). */
+  statsSinceMs: number | null;
   connected: boolean;
 }
 
@@ -53,6 +63,7 @@ interface State {
 export function useQuant7GatesSimulations(): State {
   const [rows, setRows] = useState<Quant7GatesSimulationView[]>([]);
   const [connected, setConnected] = useState(false);
+  const [statsSinceMs, setStatsSinceMs] = useState<number | null>(null);
   /** Monotonic id assigned to every WS update so resync can skip overwriting fresher rows. */
   const lastWsUpdateIdRef = useRef<Map<number, number>>(new Map());
   const wsTickRef = useRef<number>(0);
@@ -110,6 +121,16 @@ export function useQuant7GatesSimulations(): State {
     // frame isn't clobbered by the slower HTTP response.
     void resyncFromServer();
 
+    // Stats baseline is server config (riskdesk.quant.sim.stats-since) — one
+    // fetch at mount is enough; it only changes on a redeploy.
+    api.getQuantSimulationStats()
+      .then(s => {
+        if (cancelled || !s.statsSince) return;
+        const t = Date.parse(s.statsSince);
+        if (Number.isFinite(t)) setStatsSinceMs(t);
+      })
+      .catch(err => console.warn('quant-sim stats baseline fetch failed', err));
+
     const client = new Client({
       webSocketFactory: () => new SockJS(WS_URL),
       reconnectDelay: 5000,
@@ -166,9 +187,32 @@ export function useQuant7GatesSimulations(): State {
     };
   }, [resyncFromServer]);
 
-  const stats = useMemo<Quant7GatesSimulationStats>(() => computeStats(rows), [rows]);
+  const statsRows = useMemo(
+    () => filterStatsRows(rows, statsSinceMs),
+    [rows, statsSinceMs],
+  );
+  const stats = useMemo<Quant7GatesSimulationStats>(() => computeStats(statsRows), [statsRows]);
 
-  return { rows, stats, connected };
+  return { rows, stats, statsRows, statsSinceMs, connected };
+}
+
+/**
+ * Stats eligibility filter — OPEN rows always count (they are live, current
+ * data); a closed row counts only when it was OPENED at/after the baseline.
+ * Keyed on openedAt (not closedAt): it is the ENTRY decision that was taken
+ * on bad data, so a legacy row that happened to close after the fix is still
+ * excluded.
+ */
+export function filterStatsRows(
+  rows: Quant7GatesSimulationView[],
+  statsSinceMs: number | null,
+): Quant7GatesSimulationView[] {
+  if (statsSinceMs == null) return rows;
+  return rows.filter(r => {
+    if (r.status === 'OPEN') return true;
+    const opened = Date.parse(r.openedAt);
+    return Number.isFinite(opened) && opened >= statsSinceMs;
+  });
 }
 
 /**
@@ -181,7 +225,7 @@ export function useQuant7GatesSimulations(): State {
  * a loss when {@code pnlPoints < 0}; exactly-zero outcomes (rare) are
  * resolved-but-flat and contribute to {@code closedCount} only.
  */
-function computeStats(rows: Quant7GatesSimulationView[]): Quant7GatesSimulationStats {
+export function computeStats(rows: Quant7GatesSimulationView[]): Quant7GatesSimulationStats {
   let closedCount = 0;
   let wins = 0;
   let losses = 0;

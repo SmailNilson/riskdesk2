@@ -52,6 +52,192 @@ at 23:00 UTC — so compare against the next bar's start, not a naive +4h.
 3. Pre-April cross-timeframe backtests (PR #450 Round 3 `filterConsistent` workaround) can be
    re-run on the corrected data — the 10m/1m basis artefact is gone.
 
+## PLAYBOOK confirmation-entry profile MNQ_10M_CONFIRMATION (2026-06-11)
+
+Implements the backtest-validated confirmation mechanism (PR #450 rounds 3–4, below)
+as an armable Playbook execution profile. **Paper-only by design** (`executable=false`)
+until forward validation completes.
+
+**Mechanism** (domain: `ConfirmationEntryPlanner`): when the playbook detects an SMC
+zone, the entry is a **STOP at the zone exit** — LONG buy-stop at `zoneHigh`, SHORT
+sell-stop at `zoneLow` — instead of the legacy passive limit inside the zone (which
+fills while the zone is failing — adverse selection on the LONG side). A
+pending setup **cancels if price first breaks the far side of the zone by 0.5×ATR**
+(never buy the reclaim of a broken zone). Exits are ATR brackets: SL 1.5×ATR,
+TP 2.25×ATR (R:R 1.5). Gates: score ≥5; LONGs only inside RTH (09:30–16:00 ET),
+SHORTs inside the extended day window (08:00–17:00 ET, both DST-aware via
+`TradingSessionResolver`); zone dedup — one attempt per zone/direction (skip while a
+same-direction sim is open, and for 2h within 0.3×ATR of a prior attempt).
+
+**Wiring:**
+- `PlaybookDecision` gains nullable `entryType` (`LIMIT`/`STOP`) + `invalidationPrice`
+  (new columns `entry_type`, `invalidation_price` via ddl-auto).
+- `PlaybookAutomationService.onCandleClosed` builds a confirmation decision (plan
+  fields overridden, verdict prefixed `CONFIRMATION —`) when the profile is armed;
+  legacy path untouched otherwise.
+- `TradeSimulationService` honors STOP plans: trigger on break-through (high≥entry
+  for longs), pre-fill invalidation → `CANCELLED`, no `MISSED` state; LIMIT plans
+  byte-identical (regression-pinned in `StopEntrySimulationTest`).
+- Arming guard generalized: profiles declare their scope (`supportsScope`) — the old
+  "non-legacy profiles are MGC 10m only" rule is gone.
+
+**To start the paper validation:**
+`PUT /api/playbook/automation/MNQ/10m {"armedProfile":"MNQ_10M_CONFIRMATION"}`
+(paper stays on by default; Auto-IBKR remains blocked by `executable=false`).
+Re-assess after 4–6 weeks via `GET /api/playbook/automation/MNQ/10m/decisions` —
+confirmation rows carry `entryType=STOP`.
+
+## PLAYBOOK MNQ 10m — full-pipeline 1m backtest: no edge found (2026-06-11)
+
+**Why.** The PLAYBOOK MNQ 10m automation showed 30% WR / −$4,234 / PF 0.16 on its last
+100 paper decisions. A replay backtest was built to diagnose the losses and test fixes
+(min-R:R gate, 1h EMA20/50 HTF filter, per-zone dedup, score≥6 threshold, entry style).
+
+**Harness.** `src/test/java/com/riskdesk/backtest/PlaybookBacktestHarnessTest.java`
+(auto-skips when data files are absent). Phase A re-runs the REAL production pipeline
+(`IndicatorService` snapshot → `PlaybookService` → `PlaybookEvaluator`) bar-by-bar over
+stored 10m candles (Jan 5 → Jun 11 2026, 13,490 decisions) — validated 1:1 against the
+live decision log (103 vs 100 decisions on the Jun 10–11 window, same directions/scores/
+entries). Phase B simulates each decision on stored 1m candles with the exact
+`TradeSimulationService` rules (1h PENDING_ENTRY timeout, MISSED, pessimistic
+same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
+`/api/candles/MNQ/{tf}/range` into `/tmp` (override with `-Dpb.data.dir`).
+
+**Verdicts (realistic portfolio mode, max 1 concurrent position, 1152 configs):**
+- Baseline: **−$30,853 net / 5.5 months** (WR 19%, PF 0.42). The dashboard's −$68k
+  over-counts by letting the same zone open overlapping sims every 10m candle.
+- The recommended filters are **loss reducers, not edge creators**: best non-inverted
+  combo (MID entry, score≥5, HTF 1h, skip-late) lands at ≈ $0 net. HTF is the
+  strongest single filter.
+- Best overall config: **inverted signal + ATR exits (1.5×SL / 2.25×TP) + HTF**:
+  +$1,558 net, PF 1.20, WR 42% — positive but fragile (April dominates, 3/6 positive
+  months). Not tradeable as-is.
+- **Trailing stop never engages on PLAYBOOK sims**: the 1h entry timeout means a fill
+  never has the 15 five-minute bars `computeAtrAtActivation` needs → ATR is null →
+  trailing skipped. Live PLAYBOOK P&L is pure fixed SL/TP.
+
+**Methodology traps documented for future backtests:**
+1. Without per-zone dedup the same zone re-signals every candle → 5–10 overlapping
+   sims ride one move → fake +$200k. Always also evaluate one-position-at-a-time.
+2. Inverting a limit-entry signal turns the entry into a STOP order: fill =
+   `max(entry, bar open)` for longs — `priceInZone` setups are already in-the-money
+   and would otherwise fill at impossible below-market prices (fake +$300k / 85% WR).
+
+**Round 2 (session / setup / direction / ATR-multiplier / break-even dimensions):**
+- The ONLY structurally positive family is **SHORT-only + 1h HTF bear alignment +
+  ATR exits** — 86/144 neighboring configs positive (median +$400), so it is not an
+  isolated grid spike. The LONG side of the playbook is worthless under every exit
+  scheme tested (10/144 positive, median −$9,275): MNQ bull legs do not retest the
+  zones the engine draws. PLAN exits under identical filters stay negative (median
+  −$168) — the ATR exit geometry is causally necessary, same conclusion as the
+  Quant 7-Gates recalibration (PR #441).
+- **Champion config**: MID entry, score≥5, HTF 1h, zone dedup, skip-late, SHORT-only,
+  RTH session, ATR exits SL 2.0× / TP 3.0× → 56 resolved trades, **WR 60.7%,
+  +$5,252 net / 5.5 months, PF 2.05, maxDD $1,262**, top day 24% of P&L. Highest-WR
+  strong variant: same + BREAK_RETEST-only → WR 65.6%, PF 2.76, +$4,104 (n=32).
+- Round-1's inverted-signal hope did NOT survive refinement (median −$1,771 across
+  288 inverted configs once session/ATR variants are scrutinized).
+- Caveats before any live use: n is small (56 trades), profits concentrate in
+  bear-regime months (Mar, Jun) by construction of the HTF+SHORT filter, and the
+  config was selected from an 864-config search — forward-paper it first.
+
+**Round 3 — CRITICAL DATA ARTIFACT + LONG confirmation mechanism:**
+- **Stored 10m and 1m MNQ candles disagree by the quarterly contract basis before
+  the March 2026 roll** (~250 pts ≈ 9 ATR in January, decaying to ~0 by April) —
+  one timeframe was deep-backfilled with a different contract month than the
+  other. Every cross-timeframe simulation over Jan–Feb is invalid (March partly);
+  the harness now drops decisions whose plan entry sits >3 ATR from the 1m open
+  (`filterConsistent`, 4,701 of 13,490 decisions dropped). **Prod data needs a
+  consistent-contract re-backfill before any backtest uses pre-April history.**
+- This artifact had poisoned round-2's directional conclusions: on CLEAN data the
+  LONG side is NOT worthless. Corrected verdicts (Apr–Jun window, portfolio mode):
+  - Baseline playbook: −$2,828 (mildly negative, not −$31k).
+  - Best limit-based config is now BIDIRECTIONAL: MID score≥5 + HTF + dedup +
+    skip-late + ATR(2.0/3.0) exits + RTH → 198 resolved, **WR 50.5%, +$7,916 net,
+    PF 1.51, maxDD $1,224**, 4/5 positive months, top day 16%.
+- **LONG confirmation-entry study** (`runLongMechanismStudy`): instead of the
+  passive limit inside the zone, arm a **buy-stop at zoneHigh** (BREAKOUT) or
+  require touch-then-reclaim (RECLAIM_TOP/MID), cancel if price breaks
+  zoneLow − 0.5×ATR before triggering ("never buy the reclaim of a broken zone").
+  Result on clean data: **273/288 LONG configs positive (95%)**; champion
+  BREAKOUT + ATR(2.0/3.0), no HTF needed: 265 resolved, WR 47.5%, **+$7,402 net,
+  PF 1.38, maxDD $1,489**, top day 17%, and June (a −5.3% month) stayed positive —
+  the invalidation guard self-filters bear regimes. SHORT mirror (sell-stop at
+  zoneLow) also improves on the limit version: +$9,170, WR 52.2%, PF 1.76 (NO_ON).
+- Caveat: the clean window is only ~2.5 months and Apr–May was strongly bullish —
+  forward-paper before live, and re-run after the data re-backfill.
+
+**Round 4 — full-window revalidation after the contract re-backfill (2026-06-11):**
+- The prod re-backfill landed (10m/1h/4h re-filled with H6 through Mar 11, validated
+  to ≤0.75 pt vs 1m; see the playbook-mnq-backtest-verdicts memory / PR #452 for
+  details). Phase A was recomputed on the repaired 10m series: 13,757 decisions,
+  consistency gate now drops only 49 (vs 4,701) — all 5.5 months are simulable.
+- **Baseline playbook, portfolio mode, repaired data: +$4,413** (WR 44.1%, PF 1.23).
+  The raw signal stream is mildly positive one-position-at-a-time; the heavy losses
+  shown on the dashboard come from the overlapping-sims convention and a bad recent
+  live stretch, not from a uniformly worthless signal.
+- **LONG confirmation champion (full window)**: BREAKOUT buy-stop at zoneHigh +
+  zone-broken invalidation + ATR(1.5/2.25) exits + RTH + score≥5, arm 3h →
+  n=296, WR 45.6%, **+$4,955 net, PF 1.30, maxDD $1,341, top day 14%,
+  5/6 positive months** (Jan, Mar, Jun positive — chop AND bear months; only
+  Feb −$510). HTF optional (htf=Y variant: PF 1.35). BREAKOUT family: 74/96
+  configs positive, median +$1,626.
+- **SHORT mirror champion (full window)**: BREAKOUT sell-stop at zoneLow +
+  ATR(1.5/2.25) + NO_ON session + score≥5 → n=315, WR 47.0%, **+$9,515 net,
+  PF 1.46, maxDD $1,215**, top day 19%.
+- Same exits, same mechanism, both sides: a dual-side deployment (LONG RTH +
+  SHORT NO_ON) totals ≈ +$14.5k/5.5 months per micro contract. The
+  previous limit-entry champions hold but are weaker and more concentrated
+  (top configs' best-day share 70%+) — the confirmation-entry mechanism is the
+  better implementation candidate.
+
+## Quant 7-Gates: per-instrument sim policy + per-instrument stats (2026-06-11)
+
+The `riskdesk.quant.sim.*` paper-policy knobs were global; MNQ and MCL trade on very
+different volatility/flow profiles and their P&L was blended into one panel aggregate.
+
+- **Per-instrument config overrides** — `riskdesk.quant.sim.per-instrument.<INSTR>.<key>`
+  (e.g. `...per-instrument.MCL.sl-atr-mult=1.5`). Overridable keys: exit-policy, stop-mode,
+  atr-timeframe, atr-period, sl/tp1/tp2-atr-mult, htf-filter-enabled, htf-timeframe,
+  htf-ema-fast/slow. Unset keys inherit the global value (partial blocks are the expected
+  usage). EOD-flat / entry-blackout windows stay global — they are CME-session properties,
+  not instrument characteristics. Resolution lives in `QuantSimProperties.<key>(String
+  instrument)`; `Quant7GatesSimulationService` and `DefaultQuantSimMarketContext` resolve
+  per instrument at entry/exit time. **No per-instrument values are set yet** — validate a
+  candidate with `GET /api/quant/backtest/exits?instrument=...` before setting one.
+- **Per-instrument stats** — `Quant7GatesSimulationService.statsByInstrument()` +
+  `byInstrument` map on `GET /api/quant/simulations/stats` (each entry: closed/wins/losses/
+  WR/net pts/net USD/open count). The panel renders one compact per-instrument row under
+  the global strip (client-side grouping of the same rows, so slices always sum to the strip).
+- **Signals were already per-instrument** — each scan/gate evaluation is per instrument and
+  PR #445 made delta/abs thresholds per-instrument; this slice separates *policy* and *reporting*.
+- **Stats baseline** — `riskdesk.quant.sim.stats-since=2026-06-11T09:33:40Z` (the v1.11.126
+  prod boot, from `process.start.time`): rows OPENED before it ran on broken order-flow delta
+  (and the legacy FLOW_AVOID exit), so they are excluded from every aggregate — global,
+  per-instrument, and the panel strip (the hook fetches `statsSince` from `/stats` and filters
+  client-side with the same openedAt rule). History rows stay visible in the list. Keyed on
+  `openedAt`, not `closedAt`: the ENTRY decision is what consumed bad data. Clear the key to
+  re-include the full history.
+- Tests: `Quant7GatesSimulationServicePolicyTest` (override resolution incl. partial
+  inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check,
+  stats-since baseline exclusion).
+## WTX — session ON par défaut pour tout panneau auto-trade (2026-06-11)
+
+Politique actée: tout signal avec auto-exécution démarre session ON (blocage des entrées
+03:00-08:00 ET, fenêtre globale), désactivable par panneau via le bouton Session (#439).
+Fondement: l'étude pleine période sur données front réelles (jan→juin) a renversé le verdict
+session-OFF de la sélection d'origine (mars→juin) — ON garde ~le même net (+$9,980 vs +$9,768)
+avec un maxDD ÷3.5 ($1,614 vs $5,639) et survit aux mois sans direction jamais vus par la
+sélection. Changements:
+- `WtxParamOverride.TOP_TRAIN_Z35.sessionFilterEnabled`: FALSE → null (hérite du global, qui
+  est ON). Ré-appliquer le preset ne désactive plus la session; le bouton reste l'opt-out.
+- Fix vue REST: `WtxStrategyController.toStateView`/`defaultStateView` exposent maintenant
+  `sessionFilterEnabled` (effectif) — sans quoi le bouton Session affichait toujours OFF même
+  moteur ON (bug d'affichage de #439, le moteur n'était pas affecté).
+- Côté prod, le panneau Z35 a été basculé ON à chaud via l'endpoint (override DB session=true);
+  la config zone du panneau vient du preset déclaré dans application.properties (variants[0]),
+  pas de la ligne DB — les colonnes NULL de la ligne d'override sont normales.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
