@@ -86,6 +86,37 @@ export interface DepthMetrics {
   serverStale?: boolean;
 }
 
+/**
+ * Continuous depth-flow signals computed backend-side from successive 500ms book
+ * snapshots (/topic/depth-flow). OFI follows Cont-Kukanov-Stoikov — NB: the canonical
+ * result is contemporaneous (entry-timing gauge), not a standalone forecast.
+ */
+export interface DepthFlowMetrics {
+  instrument: string;
+  ofi1s: number;
+  ofi10s: number;
+  ofiEma60s: number;
+  // Z-score of the 10s OFI sum vs a trailing 5-min distribution (0 until warm).
+  ofiZ10s: number;
+  ofiExtreme: boolean;
+  // EMA-smoothed best-level queue imbalance, -1..+1 (positive = bid-heavy).
+  queueImbalance: number;
+  // False when the combined best-level mass is below min-queue-mass — grey out the gauge.
+  queueImbalanceValid: boolean;
+  // Micro-price minus mid, in ticks. Positive = fair price leans toward the ask.
+  microPriceOffsetTicks: number;
+  vacuumState: 'NORMAL' | 'THIN' | 'VACUUM_BID' | 'VACUUM_ASK';
+  bidDepthRatio: number;
+  askDepthRatio: number;
+  bidPulled10s: number;
+  bidStacked10s: number;
+  askPulled10s: number;
+  askStacked10s: number;
+  // ((bidStacked-bidPulled) - (askStacked-askPulled)) / baseline depth.
+  pullStackScore: number;
+  timestamp: string;
+}
+
 export interface AbsorptionEvent {
   instrument: string;
   side: string;
@@ -265,6 +296,7 @@ export function useOrderFlow() {
 
   const [orderFlowData, setOrderFlowData] = useState<Map<string, OrderFlowMetrics>>(new Map());
   const [depthData, setDepthData] = useState<Map<string, DepthMetrics>>(new Map());
+  const [depthFlowData, setDepthFlowData] = useState<Map<string, DepthFlowMetrics>>(new Map());
   const [absorptionEvents, setAbsorptionEvents] = useState<AbsorptionEvent[]>([]);
   const [spoofingEvents, setSpoofingEvents] = useState<SpoofingEvent[]>([]);
   const [icebergEvents, setIcebergEvents] = useState<IcebergEvent[]>([]);
@@ -298,6 +330,15 @@ export function useOrderFlow() {
         client.subscribe('/topic/depth', (msg: IMessage) => {
           const metrics: DepthMetrics = JSON.parse(msg.body);
           setDepthData(prev => {
+            const next = new Map(prev);
+            next.set(metrics.instrument, metrics);
+            return next;
+          });
+        });
+
+        client.subscribe('/topic/depth-flow', (msg: IMessage) => {
+          const metrics: DepthFlowMetrics = JSON.parse(msg.body);
+          setDepthFlowData(prev => {
             const next = new Map(prev);
             next.set(metrics.instrument, metrics);
             return next;
@@ -407,6 +448,7 @@ export function useOrderFlow() {
   return {
     orderFlowData,
     depthData,
+    depthFlowData,
     absorptionEvents,
     spoofingEvents,
     icebergEvents,

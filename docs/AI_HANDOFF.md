@@ -2,6 +2,33 @@
 
 Last updated: 2026-06-11
 
+## Depth flow signals + DOM heatmap (2026-06-11)
+
+Continuous L2 signals computed from the existing 500ms `DepthMetrics` snapshots —
+the hardened `MutableOrderBook` hot path is untouched (snapshot consumers only):
+
+- **`DepthFlowAnalyzer`** (pure domain, one per instrument, WallTracker pattern) emits
+  `DepthFlowMetrics` per transition: **OFI** (Cont-Kukanov-Stoikov best-level events,
+  1s/10s sums + EMA-60s; 10s sum z-scored vs a trailing 5-min distribution — the
+  canonical result is CONTEMPORANEOUS (~65% R² over 10s), so it is an entry-timing
+  gauge, not a forecast), **queue imbalance + micro-price** (EMA ~3s, min-queue-mass
+  gate 10, micro-price offset in ticks), **liquidity vacuum** (side <40% of its 5-min
+  baseline for ≥3s while the other holds ≥70% → VACUUM_BID/ASK; both <50% → THIN), and
+  **pull/stack net flow** (per-level resting-size deltas beyond a 2-contract noise
+  floor, 10s sums; approximation — no per-level trade attribution).
+- **Stale-gap rule:** snapshots older than 10s (or eval gaps >10s) reset the analyzer —
+  flow is never computed across a feed freeze. `DepthFlowService` (@Scheduled 500ms,
+  initialDelay 30s) feeds the analyzers, caches the latest, publishes flat JSON on
+  `/topic/depth-flow` and serves `GET /api/order-flow/depth-flow/{instrument}`.
+  Config `riskdesk.order-flow.depth-flow.*` (MNQ-tuned defaults, all documented).
+  `OrderFlowController` ctor gained `DepthFlowService`.
+- **Frontend:** `DepthFlowStrip` (compact row: OFI z bar amber ≥2 / red ≥3, queue lean
+  ▲/▼ 0.4/0.6, µP offset, vacuum chip, P/S net) and `DepthHeatmap` (raw-canvas
+  Bookmap-style movie of the last 20 min of `/topic/depth` ladders: ~2400 columns ring
+  buffer, 40-tick auto-follow window, log-scaled brightness normalized to rolling p95,
+  FLUX FIGÉ overlay on serverStale, collapsible). Both mounted in `OrderFlowPanel`
+  under the Order Book; `useOrderFlow` subscribes `/topic/depth-flow`.
+
 ## Order flow — session CVD + divergence, speed of tape, big prints (2026-06-11)
 
 Three pro order-flow tools added on the classified AllLast tick stream (research gap pass):
