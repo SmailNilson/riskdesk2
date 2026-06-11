@@ -26,8 +26,10 @@ class WtxParamOverridePresetTest {
         assertEquals(0, BigDecimal.valueOf(-35).compareTo(p.nsv()));
         assertEquals(Boolean.FALSE, p.useCompra1());
         assertEquals(Boolean.FALSE, p.useVenta1());
-        // The winning run was session-OFF — the preset must carry it (legacy panels keep the global filter).
-        assertEquals(Boolean.FALSE, p.sessionFilterEnabled());
+        // Session is NOT pinned by the preset anymore: the full-period front-real study (jan->juin)
+        // reversed the session-OFF verdict (ON = same net, maxDD /3.5). null = inherit the global
+        // gate (ships ON); the per-panel Session button remains the opt-out.
+        org.junit.jupiter.api.Assertions.assertNull(p.sessionFilterEnabled());
         assertFalse(p.isEmpty());
     }
 

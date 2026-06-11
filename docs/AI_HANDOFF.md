@@ -32,6 +32,22 @@ different volatility/flow profiles and their P&L was blended into one panel aggr
 - Tests: `Quant7GatesSimulationServicePolicyTest` (override resolution incl. partial
   inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check,
   stats-since baseline exclusion).
+## WTX — session ON par défaut pour tout panneau auto-trade (2026-06-11)
+
+Politique actée: tout signal avec auto-exécution démarre session ON (blocage des entrées
+03:00-08:00 ET, fenêtre globale), désactivable par panneau via le bouton Session (#439).
+Fondement: l'étude pleine période sur données front réelles (jan→juin) a renversé le verdict
+session-OFF de la sélection d'origine (mars→juin) — ON garde ~le même net (+$9,980 vs +$9,768)
+avec un maxDD ÷3.5 ($1,614 vs $5,639) et survit aux mois sans direction jamais vus par la
+sélection. Changements:
+- `WtxParamOverride.TOP_TRAIN_Z35.sessionFilterEnabled`: FALSE → null (hérite du global, qui
+  est ON). Ré-appliquer le preset ne désactive plus la session; le bouton reste l'opt-out.
+- Fix vue REST: `WtxStrategyController.toStateView`/`defaultStateView` exposent maintenant
+  `sessionFilterEnabled` (effectif) — sans quoi le bouton Session affichait toujours OFF même
+  moteur ON (bug d'affichage de #439, le moteur n'était pas affecté).
+- Côté prod, le panneau Z35 a été basculé ON à chaud via l'endpoint (override DB session=true);
+  la config zone du panneau vient du preset déclaré dans application.properties (variants[0]),
+  pas de la ligne DB — les colonnes NULL de la ligne d'override sont normales.
 
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
