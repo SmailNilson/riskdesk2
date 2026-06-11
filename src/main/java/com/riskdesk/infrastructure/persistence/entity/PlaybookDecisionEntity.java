@@ -91,6 +91,14 @@ public class PlaybookDecisionEntity {
     @Column(name = "evaluated_candle_ts", nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
     private Instant evaluatedCandleTs;
 
+    /** LIMIT (null = legacy limit semantics) or STOP for confirmation entries. */
+    @Column(name = "entry_type", length = 12)
+    private String entryType;
+
+    /** Pre-fill invalidation level for STOP entries — pending setup cancels beyond it. */
+    @Column(name = "invalidation_price", precision = 19, scale = 6)
+    private BigDecimal invalidationPrice;
+
     @Column(name = "created_at", nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
     private Instant createdAt;
 
@@ -152,4 +160,20 @@ public class PlaybookDecisionEntity {
     public void setRoutingErrorMessage(String routingErrorMessage) { this.routingErrorMessage = routingErrorMessage; }
     public Long getExecutionId() { return executionId; }
     public void setExecutionId(Long executionId) { this.executionId = executionId; }
+
+    public String getEntryType() {
+        return entryType;
+    }
+
+    public void setEntryType(String entryType) {
+        this.entryType = entryType;
+    }
+
+    public BigDecimal getInvalidationPrice() {
+        return invalidationPrice;
+    }
+
+    public void setInvalidationPrice(BigDecimal invalidationPrice) {
+        this.invalidationPrice = invalidationPrice;
+    }
 }

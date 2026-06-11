@@ -102,6 +102,23 @@ public final class TradingSessionResolver {
      * Monday–Friday 09:30–16:00 ET (DST-aware). Used as the session anchor selector
      * for the session-anchored CVD (RTH anchor inside this window, Globex-day outside).
      */
+    /** Open of the extended US day window used by confirmation-entry gates (08:00 ET). */
+    public static final LocalTime DAY_WINDOW_OPEN = LocalTime.of(8, 0);
+
+    /**
+     * Returns {@code true} if the timestamp falls within the extended US day window:
+     * Monday-Friday 08:00-17:00 ET (DST-aware). This is the "no-overnight" gate of the
+     * Playbook confirmation-entry profile - it admits the pre-RTH ramp and the close,
+     * but excludes the Globex overnight session.
+     */
+    public static boolean isWithinUsDayWindow(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) return false;
+        LocalTime t = zdt.toLocalTime();
+        return !t.isBefore(DAY_WINDOW_OPEN) && t.isBefore(CME_SESSION_CLOSE);
+    }
+
     public static boolean isWithinRth(Instant timestamp) {
         ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
         DayOfWeek dow = zdt.getDayOfWeek();
