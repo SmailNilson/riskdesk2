@@ -35,6 +35,119 @@ classified. Findings (verified against the deployed v1.11.125 via `/actuator/inf
 - Tests: `IbkrTickDataAdapterTest` pins midpoint/missing/inverted-BBO → quote-rule UNCLASSIFIED,
   tick-rule resolution + `TickResolution` contract, and REAL_TICKS vs REAL_TICKS_TICKRULE
   window stamping honesty.
+## Quant 7-Gates exit recalibration + exit-replay backtest (2026-06-11)
+
+**Why.** After 863 closed paper trades (2026-06-02 → 2026-06-11) the harness sat at
+41% WR / −$2,550 net. A data-driven autopsy on the recorded trades + prod 1m candles
+(intrabar replay, pessimistic both-cross rule) found the causes were the EXITS and a
+missing trend filter — the order-flow entry signal itself has real edge:
+
+- **Flow-AVOID churn**: 79% of trades (682/863) closed on the first AVOID scan,
+  median hold 2 min, median −0.6 pts → −$3,630. The pattern flips constantly at the
+  60s cadence; the entry needed HIGH conf only one minute earlier.
+- **Fixed 25/40/80-pt offsets** are MNQ-scaled: never reachable on MCL (~$65) / MGC,
+  so 100% of their trades degenerated to AVOID churn (zero SL/TP closes on either).
+- **60s-scan SL granularity**: average realized SL was −$81.5 vs −$50 design (63%
+  overshoot — exits priced at the scan tick, not at the level).
+- **Counter-trend longs**: the window was a −2,000-pt MNQ downtrend; LONGs ran
+  −0.25R (WR 30%) vs SHORTs +0.34R (WR 55%) under symmetric exits. With a 1h
+  EMA20/50 alignment filter, the same recorded entries replayed to **+$37.7k gross /
+  +0.32R, WR 54.5%** (ATR 2.0/3.0 stops, no AVOID exit, EOD flat, n=391) vs −$2.5k
+  actual. Same lesson as WTX (#418): the edge is the HTF filter, not exit tinkering.
+  ⚠ In-sample, 9 days, one bearish regime — re-run the replay as history grows.
+
+**What changed** (all reversible via `riskdesk.quant.sim.*`, defaults = calibrated):
+
+- `QuantSimExitPolicy` — `SLTP_ONLY` (default) | `FLOW_AVOID_IN_PROFIT` |
+  `FLOW_AVOID` (legacy). AVOID flips no longer realize losses.
+- `QuantSimStopMode.ATR` (default) — SL/TP = 2.0/3.0/6.0 × ATR(14) on 5m, per
+  instrument, via `DefaultQuantSimMarketContext` (30s cache; fixed-offset fallback
+  + WARN when the candle store is cold).
+- **HTF filter** (default on, fail-closed): entry requires 1h EMA20/50 alignment
+  with the trade direction.
+- **EOD flat**: paper rows flatten from 16:55 ET (status `CLOSED_EOD`, new enum +
+  frontend pill) and entries are blocked from 16:50 ET until the 18:00 ET reopen —
+  paper and the Auto-IBKR mirror (force-close cron) now resolve together. ET-zone
+  projected, DST covered in tests, injectable `Clock`.
+- **Exit-replay backtest**: `GET /api/quant/backtest/exits` re-manages the RECORDED
+  entry signals under any policy bundle (stopMode/slAtrMult/tpAtrMult/exitPolicy/
+  htfFilter/commissionUsd/from/to/instrument, `includeTrades=true` for the trade
+  list). Engine: `domain/quant/backtest/QuantExitReplayEngine` (pure; pessimistic
+  both-cross, no lookahead — ATR/EMA only from closed buckets, EOD flat). It is an
+  ENTRY-replay (recorded signals only), not a gate-replay; a full gate-replay from
+  `tick_log`/footprint/event tables is the natural next slice.
+- Legacy behaviour for pre-existing unit tests is preserved via the old service
+  constructors (`QuantSimProperties.legacyDefaults()`).
+
+**Known limitation**: live SL/TP checks still price at the 60s scan tick (the −63%
+SL overshoot persists live); the replay engine resolves intrabar at the exact level.
+Tightening the live loop (1m-candle extreme checks or resident broker stops) is a
+follow-up.
+
+## Quant per-scan flow log — `quant_scan_snapshots` (2026-06-11)
+
+The rolling delta window the gates consume was ephemeral (`TickDataPort`): no
+table held the delta/buy%/absorption state *as the gates saw it*, so gate-replay
+backtests and threshold sweeps ("what if G3 required Δ < −150?") were impossible —
+`tick_log` reconstruction cannot reproduce the live classifier state (BBO cache,
+tick-rule fallback, watchdog abstains from PR #413).
+
+- `QuantGateService.scan()` now appends one row per scan per instrument
+  (best-effort, outside the per-instrument lock, never breaks the scan) to
+  `quant_scan_snapshots` via `QuantScanSnapshotPort` →
+  `QuantScanSnapshotJpaAdapter`. **Non-signal scans are logged too** — a
+  signals-only log would be survivorship-biased for backtests.
+- Row = raw INPUTS (delta *as seen by gates* — null on stale-drop — plus
+  `deltaSource` provenance of the raw window, buy%, absorption window counts +
+  dominant side, dist/accu type+conf, cycle, price+source) and key OUTPUTS
+  (SHORT/LONG scores, pattern type/label/conf/action, per-gate verdicts as JSON).
+  The stale-drop case is distinguishable from "no window at all": `delta=null` +
+  `deltaSource!=null` vs both null.
+- Volume: ~4.3k rows/day for 3 instruments. Retention 90 days — purged by the
+  existing `OrderFlowEventPersistenceService` daily job alongside the event tables.
+- Read surface: `GET /api/quant/scan-log/{instrument}?from&to&limit` (newest
+  first, default last 2h, cap 5000).
+- Known limit: the log freezes the *current* window definition (5m rolling).
+  Threshold/entry-rule sweeps are now possible; changing the window length
+  itself still needs `tick_log` (30d).
+## Live candle volume fix + candle upsert (2026-06-11)
+
+Production diagnosis: LIVE-built 1m candles under-reported volume ~10× (variable 5–17×) vs
+IBKR backfill — MNQ daily 1m volume 2.6–3.7M (backfilled Jun 3–5) vs 144k–363k (live-built
+Jun 8–10) — so two volume scales coexisted in `candles`. Root cause: `MarketDataService`'s
+inner `CandleAccumulator` set `volume = 1` at bar open and `volume++` per price update —
+counting **debounced price events** (100ms debounce + same-price skip), not contracts.
+
+Fix (PR claude/frosty-sammet-5c46b9):
+
+- **Volume source = IBKR session-cumulative `TickType.VOLUME` deltas.** The existing
+  `reqTopMktData` streaming subscription already received them; `StreamingPriceSubscription.tickSize`
+  was a no-op. It now computes per-update deltas (`IbGatewayNativeClient.volumeDelta`: first
+  reading = baseline only, counter going backwards = Globex session reset → new reading is the
+  delta) and pushes them through the new `StreamingPriceListener.onLiveVolumeUpdate` default
+  method (domain port, Spring-free). This covers **all 4 streamed futures** — the AllLast
+  tick-by-tick stream only covers MNQ/MCL. Cumulative deltas also self-heal: volume missed
+  during a quiet stream lands in the next delta, so hourly/daily sums match the exchange.
+- **`MarketDataService`** routes deltas into the open bar of every intraday timeframe
+  (gated on market-open + maintenance window, same as prices). Volume arriving before a bar's
+  first price tick is stashed (`pendingVolume`, claimed at bar creation); volume lagging just
+  past a roll goes to the open bar (totals preserved). Price updates no longer touch volume —
+  a bar with no volume ticks closes at volume 0. Pending volume is flushed on rollover.
+- **Candle writes are upserts** on `(instrument, timeframe, timestamp)` in
+  `JpaCandleRepositoryAdapter` (natural-key id adoption + one range query per batch group +
+  `DataIntegrityViolationException` retry). Fixes the boot race: the startup gap-fill read its
+  high-water mark, then the live writer closed bars before `saveAll` flushed → 11
+  `uk_candle_instrument_tf_ts` violations at boot, each aborting an entire gap-fill batch.
+- Tests: `MarketDataServiceTest` (delta accumulation, pending claim, zero-volume honesty),
+  `JpaCandleUpsertTest`, `IbGatewayNativeClientVolumeDeltaTest`.
+
+**Post-deploy validation:** let one full hour build live, then
+`SELECT date_trunc('hour', timestamp), SUM(volume) FROM candles WHERE instrument='MNQ' AND timeframe='1m' GROUP BY 1`,
+re-backfill the same hour via `POST /api/candles/backfill-range` with `replace=true`, and compare
+(expect agreement within a few %; also cross-check footprint bar volume for the same window).
+**Historical repair:** live-built rows from before this fix (e.g. Jun 8–10) are still at the
+wrong scale — re-source them with the range backfill in `replace` mode. Until then, do NOT
+normalize tick-vs-candle volume across that window.
 
 ## Depth flow signals + DOM heatmap (2026-06-11)
 

@@ -12,6 +12,8 @@ package com.riskdesk.domain.quant.simulation;
  *   <li>{@link #CLOSED_TP2} — live price touched the configured TP2 offset.</li>
  *   <li>{@link #CLOSED_SL} — live price touched the configured stop-loss
  *       offset on the adverse side.</li>
+ *   <li>{@link #CLOSED_EOD} — flattened ahead of the 17:00 ET CME daily break
+ *       (no position is carried through the close unmanaged).</li>
  * </ul>
  */
 public enum Quant7GatesSimulationStatus {
@@ -19,5 +21,6 @@ public enum Quant7GatesSimulationStatus {
     CLOSED_FLOW_AVOID,
     CLOSED_TP1,
     CLOSED_TP2,
-    CLOSED_SL
+    CLOSED_SL,
+    CLOSED_EOD
 }

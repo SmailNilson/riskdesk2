@@ -72,6 +72,7 @@ public class OrderFlowEventPersistenceService {
     private final JpaMomentumEventRepository momentumRepository;
     private final JpaCycleEventRepository cycleRepository;
     private final JpaWallEpisodeRepository wallEpisodeRepository;
+    private final com.riskdesk.infrastructure.persistence.JpaQuantScanSnapshotRepository quantScanSnapshotRepository;
     private final ObjectMapper objectMapper;
 
     public OrderFlowEventPersistenceService(JpaAbsorptionEventRepository absorptionRepository,
@@ -83,6 +84,7 @@ public class OrderFlowEventPersistenceService {
                                             JpaMomentumEventRepository momentumRepository,
                                             JpaCycleEventRepository cycleRepository,
                                             JpaWallEpisodeRepository wallEpisodeRepository,
+                                            com.riskdesk.infrastructure.persistence.JpaQuantScanSnapshotRepository quantScanSnapshotRepository,
                                             ObjectMapper objectMapper) {
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
@@ -93,6 +95,7 @@ public class OrderFlowEventPersistenceService {
         this.momentumRepository = momentumRepository;
         this.cycleRepository = cycleRepository;
         this.wallEpisodeRepository = wallEpisodeRepository;
+        this.quantScanSnapshotRepository = quantScanSnapshotRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -332,11 +335,12 @@ public class OrderFlowEventPersistenceService {
             int momentum = momentumRepository.deleteByTimestampBefore(cutoff);
             int cycle = cycleRepository.deleteByTimestampBefore(cutoff);
             int walls = wallEpisodeRepository.deleteByTimestampBefore(cutoff);
-            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle + walls > 0) {
+            int quantScans = quantScanSnapshotRepository.deleteByScannedAtBefore(cutoff);
+            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle + walls + quantScans > 0) {
                 log.info("Purged order flow events: {} absorption, {} spoofing, {} iceberg, {} flash crash, " +
-                         "{} footprint, {} distribution, {} momentum, {} cycle, {} wall episodes",
+                         "{} footprint, {} distribution, {} momentum, {} cycle, {} wall episodes, {} quant scans",
                          absorption, spoofing, iceberg, flashCrash, footprint,
-                         distribution, momentum, cycle, walls);
+                         distribution, momentum, cycle, walls, quantScans);
             }
         } catch (Exception e) {
             log.error("Failed to purge expired order flow events: {}", e.getMessage(), e);
