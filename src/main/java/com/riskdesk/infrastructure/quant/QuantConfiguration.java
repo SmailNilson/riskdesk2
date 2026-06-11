@@ -17,8 +17,11 @@ import org.springframework.context.annotation.Configuration;
 public class QuantConfiguration {
 
     @Bean
-    public GateEvaluator gateEvaluator() {
-        return new GateEvaluator();
+    public GateEvaluator gateEvaluator(QuantGateProperties gateProperties) {
+        // Veto tiers, per-instrument delta thresholds and buy% bands come from
+        // riskdesk.quant.{veto,gates}.* — converted to a framework-free value
+        // object so the domain never touches Spring configuration.
+        return new GateEvaluator(gateProperties.toDomainConfig());
     }
 
     @Bean

@@ -87,6 +87,35 @@ tooling):
 - Frontend `FootprintChart.tsx`: emerald/red cell borders for diagonal flags, row
   band tint for stacked zones (+ header zone counters ⊞/⊟), ▲/▼ unfinished-auction
   markers (also in the closed-bar history strip).
+## Quant gates + absorption pipeline recalibration (2026-06-11)
+
+Data-driven recalibration from a production audit + 90-day event study (key finding:
+DISTRIBUTION events with conf≥70 were INVERTED at 5m — 44.6% hit vs 47.7% baseline —
+while conf<70 carried a small positive edge at 15-30m). Four fixes:
+
+1. **A/D veto de-tautologized.** `InstitutionalDistributionDetector.computeConfidence`
+   floored at 50 == the old GateEvaluator veto base tier (50) ⇒ 100% of events vetoed
+   by construction. New formula: base `35 + min(15, (count-min)×5)`, log-compressed
+   score bonus `min(25, 25·log1p(max(0, avg-minAvg))/log1p(20))` (old linear bonus
+   saturated at avg≈5 while real avgScores span 2.5→50+), duration/intensity bonuses
+   kept, total capped 95. Veto tiers raised 50/65/75 → **60/70/80** (base+10/base+20)
+   and the veto now has a **linear age decay**: `effective = conf × max(0, 1-age/600s)`
+   (the 8-min detector cooldown < 10-min lookup window meant the veto re-armed before
+   expiring). Config: `riskdesk.quant.veto.{base-threshold=60,decay-seconds=600}` →
+   `QuantGateProperties` (infra) → `QuantGateConfig` (domain, Spring-free). Telemetry
+   gains `adEffectiveConfidence` (decayed); `adConfidence` stays raw.
+2. **Absorption emission de-dup.** The 10s absorption window slides every 5s ⇒ one
+   burst was counted 2-3× (~1100 rows/day MNQ, inflating n8 + the DIST streak). New
+   per-(instrument, side) `RecentSignalGate` in `OrderFlowOrchestrator`;
+   `riskdesk.order-flow.absorption.dedup-seconds=10` (default = window-seconds). A
+   sustained 30s burst still yields 3 events 10s apart ⇒ genuine streaks still fire.
+3. **Session-aware thresholds.** `riskdesk.order-flow.absorption.eth-threshold-multiplier=0.4`
+   scales the absorption/momentum delta baseline outside RTH (09:30-16:00 ET, resolved
+   DST-aware via new `TradingSessionResolver.isRegularTradingHours`); detectors stay
+   session-unaware — the orchestrator passes the resolved value.
+4. **Per-instrument G3/L3 + configurable G4/L4.** `riskdesk.quant.gates.delta-threshold.{MNQ=100,MCL=40}`
+   (+`default-delta-threshold=100`), `bearish-buy-pct=48` / `bullish-buy-pct=52`.
+   `QuantTelemetry.deltaThreshold` now reports the per-instrument resolved value.
 
 ## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
 

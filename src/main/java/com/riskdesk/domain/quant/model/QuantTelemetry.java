@@ -32,7 +32,8 @@ import java.util.List;
  * @param delta               5-min rolling delta sampled at scan time ({@code null} on abstain)
  * @param deltaAbstain        {@code true} when G3/L3 abstained (delta feed down/stale)
  * @param deltaHistory        last scans' deltas (capped at 3, oldest first)
- * @param deltaThreshold      magnitude of the G3/L3 decision boundary (currently 100.0)
+ * @param deltaThreshold      magnitude of the G3/L3 decision boundary — the per-instrument
+ *                            RESOLVED value (e.g. 100 on MNQ, 40 on MCL), not a global constant
  * @param buyPct              buy ratio percentage 0–100 ({@code null} on abstain)
  * @param buyAbstain          {@code true} when G4/L4 abstained (delta feed down/stale)
  * @param bearishLimitPct     G4 limit — buy% below this favours SHORT (currently 48)
@@ -42,7 +43,10 @@ import java.util.List;
  * @param absorptionMaxScore  max absorption score in the window ({@code null} when no event)
  * @param absorptionMinN8     G1/L1 minimum n8 for the gate to engage (currently 8)
  * @param adType              most recent A/D event type in the 10-min window ({@code DISTRIBUTION}/{@code ACCUMULATION}/{@code null})
- * @param adConfidence        confidence of {@code adType} ({@code null} when no event)
+ * @param adConfidence        RAW confidence of {@code adType} ({@code null} when no event)
+ * @param adEffectiveConfidence age-decayed confidence the G5/L5 veto actually compared against
+ *                            its tier: {@code conf × max(0, 1 - age/decaySeconds)} — a stale
+ *                            event no longer vetoes at full strength ({@code null} when no event)
  * @param adDistThreshold     dynamic L5 DIST veto threshold for the current delta/buy% context
  * @param adAccuThreshold     dynamic G5 ACCU veto threshold for the current delta/buy% context
  * @param adLongBlocked       {@code true} when the L5 gate blocked the LONG track
@@ -64,6 +68,7 @@ public record QuantTelemetry(
     int absorptionMinN8,
     String adType,
     Integer adConfidence,
+    Double adEffectiveConfidence,
     int adDistThreshold,
     int adAccuThreshold,
     boolean adLongBlocked,

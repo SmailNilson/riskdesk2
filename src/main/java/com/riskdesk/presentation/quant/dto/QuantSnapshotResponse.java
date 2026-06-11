@@ -150,6 +150,7 @@ public record QuantSnapshotResponse(
         int absorptionMinN8,
         String adType,
         Integer adConfidence,
+        Double adEffectiveConfidence,
         int adDistThreshold,
         int adAccuThreshold,
         boolean adLongBlocked,
@@ -162,7 +163,8 @@ public record QuantSnapshotResponse(
                 t.delta(), t.deltaAbstain(), t.deltaHistory(), t.deltaThreshold(),
                 t.buyPct(), t.buyAbstain(), t.bearishLimitPct(), t.bullishLimitPct(),
                 t.absorptionN8(), t.absorptionDominance(), t.absorptionMaxScore(), t.absorptionMinN8(),
-                t.adType(), t.adConfidence(), t.adDistThreshold(), t.adAccuThreshold(),
+                t.adType(), t.adConfidence(), t.adEffectiveConfidence(),
+                t.adDistThreshold(), t.adAccuThreshold(),
                 t.adLongBlocked(), t.adShortBlocked(), t.adEventAgeSeconds()
             );
         }

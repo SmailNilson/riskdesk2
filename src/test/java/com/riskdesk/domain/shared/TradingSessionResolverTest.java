@@ -387,4 +387,35 @@ class TradingSessionResolverTest {
         assertEquals(Instant.parse("2026-04-12T22:00:00Z"),
             TradingSessionResolver.overnightStart(LocalDate.of(2026, 4, 13)));
     }
+    // -- isRegularTradingHours — RTH (09:30-16:00 ET) vs ETH, DST-aware ---------
+    // Drives the order-flow ETH threshold multiplier: thresholds calibrated on
+    // RTH volume are scaled down overnight (MNQ volume ratio 10-20×).
+
+    @ParameterizedTest
+    @CsvSource({
+        // Summer (EDT, UTC-4) — Wednesday 2026-07-15
+        "2026-07-15T13:29:59Z, false",   // 09:29:59 ET — one second before the open
+        "2026-07-15T13:30:00Z, true",    // 09:30 ET — RTH open boundary (inclusive)
+        "2026-07-15T17:00:00Z, true",    // 13:00 ET — mid-session
+        "2026-07-15T19:59:59Z, true",    // 15:59:59 ET — last RTH second
+        "2026-07-15T20:00:00Z, false",   // 16:00 ET — close boundary (exclusive)
+        "2026-07-15T08:00:00Z, false",   // 04:00 ET — overnight (London)
+        // Winter (EST, UTC-5) — Thursday 2026-01-15: same ET wall-clock, shifted UTC
+        "2026-01-15T14:29:59Z, false",   // 09:29:59 ET
+        "2026-01-15T14:30:00Z, true",    // 09:30 ET
+        "2026-01-15T20:59:59Z, true",    // 15:59:59 ET
+        "2026-01-15T21:00:00Z, false",   // 16:00 ET
+        // The summer UTC open instant is NOT RTH in winter (hardcoded-UTC trap)
+        "2026-01-15T13:30:00Z, false",   // 08:30 ET in EST
+        // Weekend: Saturday noon ET — market closed, never RTH
+        "2026-07-18T16:00:00Z, false",
+        // Sunday Globex reopen 18:30 ET — market open but overnight, not RTH
+        "2026-07-19T22:30:00Z, false",
+    })
+    void isRegularTradingHours_dstAndBoundaries(String timestamp, boolean expectedRth) {
+        Instant tick = Instant.parse(timestamp);
+        assertEquals(expectedRth, TradingSessionResolver.isRegularTradingHours(tick),
+                "isRegularTradingHours(" + timestamp + ") should be " + expectedRth);
+    }
+
 }

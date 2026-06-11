@@ -65,7 +65,10 @@ class InstitutionalDistributionDetectorTest {
         assertThat(ds.avgScore()).isEqualTo(5.0);
         assertThat(ds.priceAtDetection()).isEqualTo(27100.0);
         assertThat(ds.resistanceLevel()).isEqualTo(27155.0);
-        assertThat(ds.confidenceScore()).isBetween(50, 100);
+        // Recalibrated formula: a just-crossed-threshold streak (count == min, avg
+        // moderately above floor, 20s duration) sits in the low-confidence zone —
+        // base 35 + log score bonus ≈ 9 + duration ≈ 1 + intensity ≈ 1 → ≈ 46.
+        assertThat(ds.confidenceScore()).isBetween(40, 55);
     }
 
     @Test
@@ -161,9 +164,10 @@ class InstitutionalDistributionDetectorTest {
     void mnqScenario_firesOnceAtThreshold() {
         // Tonight's MNQ observation: 10 bearish events, avg ~5.0.
         // Detector fires on the 5th event (threshold reached) and cooldowns — so
-        // the emitted signal reflects count=5, not 10. Confidence for a just-crossed
-        // threshold with strong score is in the 60-80 range (score bonus maxed,
-        // duration bonus minimal because fire happens after 20s).
+        // the emitted signal reflects count=5, not 10. Under the recalibrated
+        // formula a just-crossed-threshold streak stays BELOW the 60 veto base
+        // tier (the 90-day event study showed conf≥70 DIST inverted at 5m, so a
+        // minimal streak must not arm the structural veto anymore).
         Optional<DistributionSignal> fired = Optional.empty();
         for (int i = 0; i < 10; i++) {
             Optional<DistributionSignal> out = detector.onAbsorption(
@@ -173,12 +177,12 @@ class InstitutionalDistributionDetectorTest {
         assertThat(fired).isPresent();
         assertThat(fired.get().consecutiveCount()).isEqualTo(5);
         assertThat(fired.get().avgScore()).isEqualTo(5.0);
-        assertThat(fired.get().confidenceScore()).isGreaterThanOrEqualTo(60);
+        assertThat(fired.get().confidenceScore()).isLessThan(60);
     }
 
     @Test
     void confidenceIsBounded() {
-        // Extreme parameters shouldn't exceed 100
+        // Extreme parameters shouldn't exceed the new 95 cap
         Optional<DistributionSignal> fired = Optional.empty();
         for (int i = 0; i < 50; i++) {
             Optional<DistributionSignal> out = detector.onAbsorption(
@@ -186,7 +190,7 @@ class InstitutionalDistributionDetectorTest {
             if (out.isPresent()) fired = out;
         }
         assertThat(fired).isPresent();
-        assertThat(fired.get().confidenceScore()).isBetween(0, 100);
+        assertThat(fired.get().confidenceScore()).isBetween(0, 95);
     }
 
     // ---- MNQ-tuned default constructor tests --------------------------------
@@ -207,7 +211,8 @@ class InstitutionalDistributionDetectorTest {
         assertThat(fired.get().type()).isEqualTo(DistributionType.DISTRIBUTION);
         assertThat(fired.get().consecutiveCount()).isEqualTo(3);
         assertThat(fired.get().avgScore()).isEqualTo(3.5);
-        assertThat(fired.get().confidenceScore()).isBetween(50, 100);
+        // Minimal MNQ streak (3 events, avg just above floor, 10s) → ~40-50 zone.
+        assertThat(fired.get().confidenceScore()).isBetween(35, 55);
     }
 
     @Test
@@ -292,5 +297,84 @@ class InstitutionalDistributionDetectorTest {
         assertThat(lowFired).isPresent();
         assertThat(highFired.get().confidenceScore())
             .isGreaterThan(lowFired.get().confidenceScore());
+    }
+
+    // ---- Recalibrated confidence formula (2026-06 audit + 90-day event study) ----
+    //
+    // Old formula: base = min(80, max(50, …)) — FLOOR 50 == old veto base tier 50
+    // ⇒ every DISTRIBUTION event armed the GateEvaluator veto by construction.
+    // New formula: base 35 + count bonus; log-compressed score bonus; cap 95.
+
+    private AbsorptionSignal bearCustom(Instant ts, double score, long delta, long volume) {
+        return new AbsorptionSignal(instrument, AbsorptionSide.BEARISH_ABSORPTION,
+            score, delta, 2.0, volume, ts,
+            AbsorptionSignal.AbsorptionType.CLASSIC, "Classic bear confirmation");
+    }
+
+    @Test
+    void floorStreak_landsBelowVetoBaseTier() {
+        // 3 events scraping the score floor (2.6 vs minAvgScore 2.5), short duration
+        // (10s), negligible delta intensity → confidence must stay BELOW 60, the
+        // GateEvaluator veto base tier (the old formula floored this exact case at 50+,
+        // which was also the old veto threshold — the tautology this PR removes).
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        Optional<DistributionSignal> fired = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = mnqDetector.onAbsorption(
+                bearCustom(t0.plusSeconds(i * 5), 2.6, 100, 9000),
+                27100.0, null, t0.plusSeconds(i * 5));
+            if (out.isPresent()) fired = out;
+        }
+
+        assertThat(fired).isPresent();
+        assertThat(fired.get().confidenceScore()).isLessThan(60);
+        assertThat(fired.get().confidenceScore()).isGreaterThanOrEqualTo(35);
+    }
+
+    @Test
+    void sustainedHighScoreStreak_reachesVetoZone() {
+        // Sustained, high-conviction streak: avg score 25 (log bonus saturates),
+        // 30s duration, delta intensity ≈ 1.0 (pure one-sided flow) → ≥ 70.
+        // Only this kind of streak should reach the dynamic veto tiers (70/80).
+        InstitutionalDistributionDetector mnqDetector =
+            new InstitutionalDistributionDetector(instrument);
+
+        Optional<DistributionSignal> fired = Optional.empty();
+        for (int i = 0; i < 3; i++) {
+            Optional<DistributionSignal> out = mnqDetector.onAbsorption(
+                bearCustom(t0.plusSeconds(i * 15), 25.0, 9000, 9000),
+                27100.0, null, t0.plusSeconds(i * 15));
+            if (out.isPresent()) fired = out;
+        }
+
+        assertThat(fired).isPresent();
+        assertThat(fired.get().confidenceScore()).isGreaterThanOrEqualTo(70);
+        assertThat(fired.get().confidenceScore()).isLessThanOrEqualTo(95);
+    }
+
+    @Test
+    void logCompression_isMonotonicOverRealScoreRange() {
+        // The old linear bonus saturated at avg = 2×minAvgScore (≈5.0) while real
+        // avgScores span 2.5→50+ (heterogeneous CLASSIC vs DIVERGENCE formulas).
+        // The log1p compression must keep discriminating: conf(5) < conf(12) < conf(25).
+        int[] confidences = new int[3];
+        double[] avgScores = {5.0, 12.0, 25.0};
+        for (int s = 0; s < avgScores.length; s++) {
+            InstitutionalDistributionDetector det = new InstitutionalDistributionDetector(instrument);
+            Optional<DistributionSignal> fired = Optional.empty();
+            for (int i = 0; i < 3; i++) {
+                Optional<DistributionSignal> out = det.onAbsorption(
+                    bearCustom(t0.plusSeconds(i * 5), avgScores[s], 700, 9000),
+                    27100.0, null, t0.plusSeconds(i * 5));
+                if (out.isPresent()) fired = out;
+            }
+            assertThat(fired).as("streak with avgScore %s must fire", avgScores[s]).isPresent();
+            confidences[s] = fired.get().confidenceScore();
+        }
+
+        assertThat(confidences[1]).as("conf(12) > conf(5)").isGreaterThan(confidences[0]);
+        assertThat(confidences[2]).as("conf(25) > conf(12)").isGreaterThan(confidences[1]);
     }
 }

@@ -162,6 +162,7 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
         out.put("absorptionMinN8", t.absorptionMinN8());
         out.put("adType", t.adType());
         out.put("adConfidence", t.adConfidence());
+        out.put("adEffectiveConfidence", t.adEffectiveConfidence());
         out.put("adDistThreshold", t.adDistThreshold());
         out.put("adAccuThreshold", t.adAccuThreshold());
         out.put("adLongBlocked", t.adLongBlocked());
