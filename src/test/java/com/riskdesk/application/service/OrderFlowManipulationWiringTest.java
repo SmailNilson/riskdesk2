@@ -74,6 +74,7 @@ class OrderFlowManipulationWiringTest {
         when(depthProvider.getIfAvailable()).thenReturn(depthPort);
         ObjectProvider<FootprintPort> footprintProvider = mock(ObjectProvider.class);
         ObjectProvider<com.riskdesk.domain.orderflow.port.TickBarPort> tickBarProvider = mock(ObjectProvider.class);
+        ObjectProvider<com.riskdesk.domain.orderflow.port.BigPrintPort> bigPrintProvider = mock(ObjectProvider.class);
 
         orchestrator = new OrderFlowOrchestrator(
             mock(IbGatewayNativeClient.class),
@@ -87,6 +88,7 @@ class OrderFlowManipulationWiringTest {
             depthProvider,
             footprintProvider,
             tickBarProvider,
+            bigPrintProvider,
             eventPublisher,
             mock(CandleRepositoryPort.class),
             flashCrashConfig

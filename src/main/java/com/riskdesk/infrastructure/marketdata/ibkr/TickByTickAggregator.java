@@ -1,9 +1,13 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.riskdesk.domain.marketdata.model.SessionCvd;
+import com.riskdesk.domain.marketdata.model.TapeSpeed;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 
 import java.time.Instant;
+import java.util.Iterator;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
@@ -30,6 +34,13 @@ public class TickByTickAggregator {
     private volatile double firstPriceInWindow = Double.NaN;
     private volatile double lastPrice = Double.NaN;
     private volatile long previousCumulativeDelta = 0;
+
+    /**
+     * Session-anchored CVD state, replaced atomically as an immutable snapshot on every
+     * classified tick (single writer: the IBKR EReader thread). Survives beyond the 5-min
+     * deque — it is accumulated tick by tick, never rebuilt from the window.
+     */
+    private volatile CvdState cvdState = CvdState.EMPTY;
 
     public TickByTickAggregator(Instrument instrument) {
         this(instrument, DEFAULT_WINDOW_SECONDS, DEFAULT_MIN_QUOTE_FRACTION);
@@ -74,7 +85,53 @@ public class TickByTickAggregator {
             firstPriceInWindow = price;
         }
 
+        cvdState = cvdState.accumulate(
+            classification == TickClassification.BUY ? size : -size, timestamp);
+
         evictExpired(timestamp);
+    }
+
+    /**
+     * Session-anchored Cumulative Volume Delta as of {@code now}: the running sum of signed
+     * classified volume since the session anchor — the RTH open (09:30 ET) while inside RTH,
+     * otherwise the CME Globex daily session start (17:00 ET; equivalent to the 18:00 ET
+     * re-open since no trades print during the maintenance halt). All boundaries come from
+     * {@link TradingSessionResolver} (DST-aware).
+     * <p>
+     * Read-only and race-free: the accumulated state is an immutable snapshot. If the stored
+     * anchor no longer matches {@code now}'s session (no tick has arrived since the boundary),
+     * the value reads as 0 rather than leaking the previous session's CVD.
+     */
+    public SessionCvd sessionCvd(Instant now) {
+        CvdState s = cvdState;
+        if (TradingSessionResolver.isWithinRth(now)) {
+            Instant anchor = TradingSessionResolver.rthSessionStart(now);
+            long value = anchor.equals(s.rthAnchor()) ? s.rthCvd() : 0L;
+            return new SessionCvd(value, SessionCvd.ANCHOR_RTH, anchor);
+        }
+        Instant anchor = TradingSessionResolver.dailySessionStart(now);
+        long value = anchor.equals(s.globexAnchor()) ? s.globexCvd() : 0L;
+        return new SessionCvd(value, SessionCvd.ANCHOR_GLOBEX, anchor);
+    }
+
+    /**
+     * Speed of tape over the trailing {@code windowSeconds}: prints/sec and contracts/sec.
+     * Single backward pass over the deque (stops at the first tick older than the cutoff);
+     * does not mutate anything — safe from any thread.
+     */
+    public TapeSpeed tapeSpeed(long windowSeconds, Instant now) {
+        Instant cutoff = now.minusSeconds(windowSeconds);
+        long trades = 0;
+        long contracts = 0;
+        Iterator<ClassifiedTick> it = ticks.descendingIterator();
+        while (it.hasNext()) {
+            ClassifiedTick tick = it.next();
+            if (tick.timestamp().isBefore(cutoff)) break;
+            trades++;
+            contracts += tick.size();
+        }
+        double seconds = Math.max(1, windowSeconds);
+        return new TapeSpeed(trades, contracts, trades / seconds, contracts / seconds);
     }
 
     /**
@@ -155,7 +212,7 @@ public class TickByTickAggregator {
         }
 
         if (windowStart == null) {
-            return new TickAggregation(instrument, 0, 0, 0, 0, 0.0,
+            return new TickAggregation(instrument, 0, 0, 0, sessionCvd(now).value(), 0.0,
                 TickAggregation.TREND_FLAT, false, null,
                 now, now, TickAggregation.SOURCE_REAL_TICKS,
                 Double.NaN, Double.NaN,
@@ -163,7 +220,10 @@ public class TickByTickAggregator {
         }
 
         long delta = buyVol - sellVol;
-        long cumulativeDelta = delta; // cumulative within the window
+        // Session-anchored CVD (RTH anchor inside 09:30-16:00 ET, else Globex-day anchor).
+        // Previously this was just `delta` relabeled ("cumulative within the window"), which
+        // made the frontend's cumulative display a 5-min delta in disguise.
+        long cumulativeDelta = sessionCvd(now).value();
 
         double totalVol = buyVol + sellVol;
         double buyRatio = totalVol > 0 ? (buyVol * 100.0 / totalVol) : 50.0;
@@ -246,4 +306,32 @@ public class TickByTickAggregator {
     /** A classified trade tick. {@code tickRule} = classified by the tick rule, not Lee-Ready. */
     record ClassifiedTick(double price, long size, TickClassification classification,
                           boolean tickRule, Instant timestamp) {}
+
+    /**
+     * Immutable session-CVD accumulator snapshot. Two parallel accumulators are kept:
+     * a Globex-day CVD (anchor = {@link TradingSessionResolver#dailySessionStart}, 17:00 ET)
+     * accumulated on every classified tick, and an RTH CVD (anchor =
+     * {@link TradingSessionResolver#rthSessionStart}, 09:30 ET) accumulated only while the
+     * tick falls inside RTH. Each accumulator resets when its anchor rolls over —
+     * the reset check happens on the tick path itself, so the CVD never depends on the
+     * 5-min deque. Replaced wholesale (volatile reference) so readers never see a torn
+     * anchor/value pair.
+     */
+    record CvdState(Instant globexAnchor, long globexCvd, Instant rthAnchor, long rthCvd) {
+
+        static final CvdState EMPTY = new CvdState(null, 0L, null, 0L);
+
+        CvdState accumulate(long signedSize, Instant timestamp) {
+            Instant gAnchor = TradingSessionResolver.dailySessionStart(timestamp);
+            long gCvd = gAnchor.equals(globexAnchor) ? globexCvd + signedSize : signedSize;
+
+            Instant rAnchor = rthAnchor;
+            long rCvd = rthCvd;
+            if (TradingSessionResolver.isWithinRth(timestamp)) {
+                rAnchor = TradingSessionResolver.rthSessionStart(timestamp);
+                rCvd = rAnchor.equals(rthAnchor) ? rthCvd + signedSize : signedSize;
+            }
+            return new CvdState(gAnchor, gCvd, rAnchor, rCvd);
+        }
+    }
 }

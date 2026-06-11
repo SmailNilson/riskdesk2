@@ -279,6 +279,155 @@ class TickByTickAggregatorTest {
         assertTrue(agg.hasData(), "read-only snapshot must NOT evict — the tick stays in the deque");
     }
 
+    // ── Session-anchored CVD (cumulativeDelta semantics change) ─────────────
+    //
+    // cumulativeDelta used to be the 5-min window delta relabeled; it now carries the
+    // session-anchored CVD (RTH anchor 09:30 ET inside RTH, else Globex-day 17:00 ET).
+    // All instants below are FIXED (never wall-clock); boundaries via TradingSessionResolver.
+
+    // Wednesday 2026-06-10, EDT (UTC-4). Globex session = Tue 17:00 ET → Wed 17:00 ET.
+    private static final Instant WED_0300_ET = Instant.parse("2026-06-10T07:00:00Z");
+    private static final Instant WED_0400_ET = Instant.parse("2026-06-10T08:00:00Z");
+    private static final Instant WED_0900_ET = Instant.parse("2026-06-10T13:00:00Z");
+    private static final Instant WED_0915_ET = Instant.parse("2026-06-10T13:15:00Z");
+    private static final Instant WED_0931_ET = Instant.parse("2026-06-10T13:31:00Z");
+    private static final Instant WED_0935_ET = Instant.parse("2026-06-10T13:35:00Z");
+    private static final Instant WED_1630_ET = Instant.parse("2026-06-10T20:30:00Z");
+    private static final Instant WED_1830_ET = Instant.parse("2026-06-10T22:30:00Z");
+    private static final Instant WED_1900_ET = Instant.parse("2026-06-10T23:00:00Z");
+    private static final Instant TUE_1700_ET = Instant.parse("2026-06-09T21:00:00Z");
+    private static final Instant WED_1700_ET = Instant.parse("2026-06-10T21:00:00Z");
+    private static final Instant WED_RTH_OPEN = Instant.parse("2026-06-10T13:30:00Z");
+
+    @Test
+    void sessionCvd_accumulatesBeyondTheRollingWindow() {
+        // 300s window: the first tick is evicted from the deque by the second (1h later),
+        // but the session CVD must keep counting it — it is accumulated, never rebuilt.
+        var agg = new TickByTickAggregator(Instrument.MNQ, 300);
+        agg.onTick(100.0, 100, BUY, WED_0300_ET);
+        agg.onTick(101.0, 30, SELL, WED_0400_ET);
+
+        var cvd = agg.sessionCvd(WED_0400_ET);
+        assertEquals(70, cvd.value(), "CVD must survive deque eviction");
+        assertEquals("GLOBEX", cvd.anchor());
+        assertEquals(TUE_1700_ET, cvd.anchorStart(), "Globex anchor = Tue 17:00 ET in UTC");
+    }
+
+    @Test
+    void sessionCvd_rthAnchorResetsAtNineThirtyEt() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 50, BUY, WED_0900_ET);   // pre-RTH → Globex only
+        assertEquals(50, agg.sessionCvd(WED_0915_ET).value());
+        assertEquals("GLOBEX", agg.sessionCvd(WED_0915_ET).anchor());
+
+        agg.onTick(101.0, 20, BUY, WED_0931_ET);   // first RTH tick
+        var rth = agg.sessionCvd(WED_0935_ET);
+        assertEquals("RTH", rth.anchor());
+        assertEquals(20, rth.value(), "RTH CVD must NOT include the pre-09:30 tick");
+        assertEquals(WED_RTH_OPEN, rth.anchorStart());
+    }
+
+    @Test
+    void sessionCvd_fallsBackToGlobexAfterRthClose() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 50, BUY, WED_0900_ET);   // pre-RTH
+        agg.onTick(101.0, 20, BUY, WED_0931_ET);   // RTH
+        // 16:30 ET is past RTH close but inside the same Globex day → Globex CVD = all ticks.
+        var cvd = agg.sessionCvd(Instant.parse("2026-06-10T20:30:00Z"));
+        assertEquals("GLOBEX", cvd.anchor());
+        assertEquals(70, cvd.value(), "Globex CVD accumulates RTH ticks too");
+    }
+
+    @Test
+    void sessionCvd_globexResetsAtDailySessionRollover() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 40, BUY, WED_1630_ET);   // old Globex day (Tue 17:00 → Wed 17:00)
+        agg.onTick(101.0, 10, SELL, WED_1830_ET);  // new Globex day (Wed 17:00 → Thu 17:00)
+
+        var cvd = agg.sessionCvd(WED_1900_ET);
+        assertEquals(-10, cvd.value(), "17:00 ET rollover must reset the Globex CVD");
+        assertEquals(WED_1700_ET, cvd.anchorStart());
+    }
+
+    @Test
+    void sessionCvd_readsZeroWhenNoTickSinceSessionBoundary() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 100, BUY, WED_0300_ET);
+        // Read on Thursday 03:00 ET: the stored anchor is stale → 0, never the old session's CVD.
+        var cvd = agg.sessionCvd(Instant.parse("2026-06-11T07:00:00Z"));
+        assertEquals(0, cvd.value());
+    }
+
+    @Test
+    void sessionCvd_dstSpringForward_rthAnchorIsDstAware() {
+        // Monday 2026-03-09 — first weekday after the US spring-forward (2026-03-08).
+        // EDT (UTC-4): 09:31 ET = 13:31Z; RTH anchor must be 13:30Z, not the EST 14:30Z.
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 10, BUY, Instant.parse("2026-03-09T13:31:00Z"));
+        var cvd = agg.sessionCvd(Instant.parse("2026-03-09T13:35:00Z"));
+        assertEquals("RTH", cvd.anchor());
+        assertEquals(10, cvd.value());
+        assertEquals(Instant.parse("2026-03-09T13:30:00Z"), cvd.anchorStart());
+    }
+
+    @Test
+    void sessionCvd_dstFallBack_rthAnchorIsDstAware() {
+        // Monday 2026-11-02 — first weekday after the US fall-back (2026-11-01).
+        // EST (UTC-5): 09:31 ET = 14:31Z; RTH anchor must be 14:30Z.
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 10, BUY, Instant.parse("2026-11-02T14:31:00Z"));
+        var cvd = agg.sessionCvd(Instant.parse("2026-11-02T14:35:00Z"));
+        assertEquals("RTH", cvd.anchor());
+        assertEquals(10, cvd.value());
+        assertEquals(Instant.parse("2026-11-02T14:30:00Z"), cvd.anchorStart());
+    }
+
+    @Test
+    void snapshotCumulativeDeltaCarriesTheSessionCvd() {
+        // The aggregation's cumulativeDelta must equal sessionCvd(now), NOT the window delta.
+        var agg = new TickByTickAggregator(Instrument.MNQ, 10); // 10s window
+        var now = Instant.now();
+        agg.onTick(27000.0, 100, BUY, now.minusSeconds(60));  // outside the window
+        agg.onTick(27001.0, 5, SELL, now);                    // inside the window
+
+        var snapshot = agg.snapshot();
+        assertEquals(-5, snapshot.delta(), "window delta excludes the evicted tick");
+        assertEquals(agg.sessionCvd(Instant.now()).value(), snapshot.cumulativeDelta(),
+            "cumulativeDelta = session CVD, no longer the window delta relabeled");
+    }
+
+    // ── Speed of tape ────────────────────────────────────────────────────────
+
+    @Test
+    void tapeSpeed_countsTradesAndContractsPerWindow() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        var now = WED_0400_ET;
+        agg.onTick(100.0, 10, BUY, now.minusSeconds(40)); // outside 5s and 30s
+        agg.onTick(100.0, 4, BUY, now.minusSeconds(20));  // 30s only
+        agg.onTick(100.0, 2, SELL, now.minusSeconds(3));  // both
+        agg.onTick(100.0, 1, BUY, now.minusSeconds(1));   // both
+
+        var t5 = agg.tapeSpeed(5, now);
+        assertEquals(2, t5.trades());
+        assertEquals(3, t5.contracts());
+        assertEquals(0.4, t5.tradesPerSec(), 1e-9);
+        assertEquals(0.6, t5.contractsPerSec(), 1e-9);
+
+        var t30 = agg.tapeSpeed(30, now);
+        assertEquals(3, t30.trades());
+        assertEquals(7, t30.contracts());
+        assertEquals(0.1, t30.tradesPerSec(), 1e-9);
+    }
+
+    @Test
+    void tapeSpeed_emptyWindowIsZero() {
+        var agg = new TickByTickAggregator(Instrument.MNQ);
+        agg.onTick(100.0, 10, BUY, WED_0300_ET);
+        var t5 = agg.tapeSpeed(5, WED_0400_ET); // an hour later
+        assertEquals(0, t5.trades());
+        assertEquals(0.0, t5.tradesPerSec(), 1e-9);
+    }
+
     @Test
     void snapshotReadOnly_doesNotMutateTrendState() {
         // snapshotReadOnly() is called off the scheduler thread (status endpoint); it must NOT

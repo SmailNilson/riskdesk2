@@ -1,6 +1,42 @@
 # AI Handoff
 
-Last updated: 2026-06-10
+Last updated: 2026-06-11
+
+## Order flow — session CVD + divergence, speed of tape, big prints (2026-06-11)
+
+Three pro order-flow tools added on the classified AllLast tick stream (research gap pass):
+
+- **Session-anchored CVD (A)** — `TickByTickAggregator` now accumulates a TRUE session
+  CVD tick-by-tick (immutable `CvdState` snapshot, volatile swap; survives the 5-min
+  deque). Anchors via `TradingSessionResolver` (new `isWithinRth`/`rthSessionStart`,
+  DST-aware): **RTH open 09:30 ET inside RTH, else Globex daily start 17:00 ET**
+  (≡ 18:00 ET re-open — no prints during the maintenance halt). **Bug fixed:**
+  `TickAggregation.cumulativeDelta` was the 5-min window delta relabeled; it now carries
+  the session CVD (frontend label "Cum:" → "CVD session (RTH|GLOBEX)"). New
+  `SessionCvd`/`TapeSpeed` models + `TickDataPort.sessionCvd/tapeSpeed` defaults.
+- **CVD divergence** — pure domain `CvdDivergenceDetector` builds 1m bars internally
+  from the orchestrator's 5s (price, CVD) samples; swing pivots confirmed 5L/5R on
+  closes; price HH + CVD LH → bearish, price LL + CVD HL → bullish; `min-cvd-swing`
+  (200) filters flat CVD; pivot state clears on anchor change (never compares across a
+  CVD reset). Emits `CvdDivergenceDetected` → WS `/topic/cvd-divergence`, NO persistence.
+  Config `riskdesk.order-flow.cvd.{enabled,pivot-bars,min-cvd-swing}`.
+- **Speed of tape (B)** — `TickByTickAggregator.tapeSpeed(window, now)` (single backward
+  pass). Orchestrator z-scores 5s/30s trades/sec against a rolling 30-min baseline
+  (sampled per 5s pass, current sample excluded). Payload fields on `/topic/order-flow`:
+  `tapeSpeed5s/30s`, `tapeZ5s/30s`, `tapeRatio5s`. UI gauge: amber z≥2, red z≥3.
+  Config `riskdesk.order-flow.tape.{enabled,burst-z}`.
+- **Big prints (C)** — pure domain `BigPrintDetector` (rolling 30-min size histogram,
+  flag ≥ p99 with floor 10 contracts, threshold judged vs prior distribution).
+  `IbkrBigPrintAdapter` (implements `BigPrintPort`) wired in `IbkrTickDataAdapter`
+  routing; emits `BigPrintDetected` rate-limited 1/sec/instrument → WS
+  `/topic/big-prints`; `bigPrintDelta5m` rides `/topic/order-flow`. NO persistence.
+  Config `riskdesk.order-flow.big-print.{enabled,percentile,min-size,window-minutes}`.
+  **Caveat:** IBKR AllLast pre-aggregates same-price simultaneous executions — a
+  "print" is a match event, so big prints ≈ sweep detection (Javadoc'd).
+- Frontend: `useOrderFlow` subscribes the two new topics; `OrderFlowPanel` Delta section
+  shows CVD session, tape gauge, big-print 5m delta, "DIV ▲/▼ il y a Xm" badge (10 min),
+  and a "Big Prints" feed (8 rows). `OrderFlowOrchestrator` ctor gained
+  `ObjectProvider<BigPrintPort>`.
 
 ## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
 
