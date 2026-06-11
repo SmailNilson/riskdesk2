@@ -1442,7 +1442,13 @@ export interface Quant7GatesSimulationStats {
    * Server-side field on GET /api/quant/simulations/stats; absent on
    * client-side derived aggregates.
    */
-  byInstrument?: Record<string, Omit<Quant7GatesSimulationStats, 'byInstrument'>>;
+  byInstrument?: Record<string, Omit<Quant7GatesSimulationStats, 'byInstrument' | 'statsSince'>>;
+  /**
+   * Stats baseline (ISO instant) — rows opened before it are excluded from
+   * every aggregate (known-bad entry-data era, e.g. pre-delta-fix). Null =
+   * full history. Server-side field; absent on client-side aggregates.
+   */
+  statsSince?: string | null;
 }
 
 /**

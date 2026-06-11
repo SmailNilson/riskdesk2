@@ -4,6 +4,7 @@ import com.riskdesk.domain.quant.simulation.QuantSimExitPolicy;
 import com.riskdesk.domain.quant.simulation.QuantSimStopMode;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import java.time.Instant;
 import java.time.LocalTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -89,6 +90,15 @@ public class QuantSimProperties {
     private Map<String, InstrumentOverride> perInstrument = new LinkedHashMap<>();
 
     /**
+     * Stats baseline — rows OPENED before this instant are excluded from the
+     * win-rate / P&amp;L aggregates (global and per-instrument). They stay in
+     * the trade history; only the reported numbers ignore them. Used to cut
+     * off eras whose ENTRY data is known-bad (e.g. the broken-delta rows
+     * before the 2026-06-11 order-flow fix deploy). {@code null} = no cut.
+     */
+    private Instant statsSince;
+
+    /**
      * Legacy policy bundle used by the backward-compatible service
      * constructors (pre-policy unit tests): immediate flow-AVOID exit, fixed
      * 25/40/80 offsets, no HTF filter, no EOD flat.
@@ -148,6 +158,9 @@ public class QuantSimProperties {
     public void setPerInstrument(Map<String, InstrumentOverride> perInstrument) {
         this.perInstrument = perInstrument == null ? new LinkedHashMap<>() : perInstrument;
     }
+
+    public Instant getStatsSince() { return statsSince; }
+    public void setStatsSince(Instant statsSince) { this.statsSince = statsSince; }
 
     // ── per-instrument resolution (override → global fallback) ──────────────
 

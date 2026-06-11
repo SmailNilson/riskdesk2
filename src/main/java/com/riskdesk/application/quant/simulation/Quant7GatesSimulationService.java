@@ -575,13 +575,13 @@ public class Quant7GatesSimulationService {
     public synchronized Stats stats() {
         Quant7GatesSimulationRepositoryPort repo = repo();
         if (repo != null) {
-            return aggregate(repo.findAllClosed());
+            return aggregate(filterSinceBaseline(repo.findAllClosed()));
         }
         List<Quant7GatesSimulation> closed = new ArrayList<>();
         for (List<Quant7GatesSimulation> rows : byInstrument.values()) {
             for (Quant7GatesSimulation s : rows) if (!s.isOpen()) closed.add(s);
         }
-        return aggregate(closed);
+        return aggregate(filterSinceBaseline(closed));
     }
 
     /**
@@ -600,12 +600,31 @@ public class Quant7GatesSimulationService {
             }
         }
         Map<String, List<Quant7GatesSimulation>> grouped = new TreeMap<>();
-        for (Quant7GatesSimulation s : closed) {
+        for (Quant7GatesSimulation s : filterSinceBaseline(closed)) {
             if (s.isOpen()) continue;
             grouped.computeIfAbsent(s.instrument().name(), k -> new ArrayList<>()).add(s);
         }
         Map<String, Stats> out = new LinkedHashMap<>();
         grouped.forEach((name, rows) -> out.put(name, aggregate(rows)));
+        return out;
+    }
+
+    /**
+     * Drops rows OPENED before the stats baseline
+     * ({@code riskdesk.quant.sim.stats-since}). Eras whose entry data is
+     * known-bad (e.g. the broken-delta rows before the 2026-06-11 order-flow
+     * fix deploy) stay visible in the history but must not pollute the
+     * reported win-rate / P&amp;L. Filtering keys on {@code openedAt}: it is
+     * the ENTRY decision that was taken on bad data, so a legacy row closed
+     * after the fix is still excluded.
+     */
+    private List<Quant7GatesSimulation> filterSinceBaseline(List<Quant7GatesSimulation> rows) {
+        Instant since = props.getStatsSince();
+        if (since == null) return rows;
+        List<Quant7GatesSimulation> out = new ArrayList<>(rows.size());
+        for (Quant7GatesSimulation s : rows) {
+            if (s.openedAt() != null && !s.openedAt().isBefore(since)) out.add(s);
+        }
         return out;
     }
 

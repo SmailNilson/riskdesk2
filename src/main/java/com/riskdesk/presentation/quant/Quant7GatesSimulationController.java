@@ -3,6 +3,7 @@ package com.riskdesk.presentation.quant;
 import com.riskdesk.application.quant.simulation.Quant7GatesSimulationService;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionProperties;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionState;
+import com.riskdesk.application.quant.simulation.QuantSimProperties;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.presentation.quant.dto.Quant7GatesSimulationResponse;
 import org.springframework.http.HttpStatus;
@@ -39,13 +40,16 @@ public class Quant7GatesSimulationController {
     private final Quant7GatesSimulationService service;
     private final QuantSimExecutionState execState;
     private final QuantSimExecutionProperties execProps;
+    private final QuantSimProperties simProps;
 
     public Quant7GatesSimulationController(Quant7GatesSimulationService service,
                                            QuantSimExecutionState execState,
-                                           QuantSimExecutionProperties execProps) {
+                                           QuantSimExecutionProperties execProps,
+                                           QuantSimProperties simProps) {
         this.service = service;
         this.execState = execState;
         this.execProps = execProps;
+        this.simProps = simProps;
     }
 
     @GetMapping
@@ -83,7 +87,8 @@ public class Quant7GatesSimulationController {
             s.netPoints(),
             s.netUsd(),
             service.listOpen().size(),
-            byInstrument
+            byInstrument,
+            simProps.getStatsSince()
         );
     }
 
@@ -142,7 +147,9 @@ public class Quant7GatesSimulationController {
      * Public-facing aggregate. {@code winRatePct} is null when no rows are
      * decided yet. {@code byInstrument} breaks the same numbers down per
      * instrument (key = enum name, sorted) so each market is judged on its
-     * own P&amp;L.
+     * own P&amp;L. {@code statsSince} is the stats baseline — rows opened
+     * before it are excluded from every aggregate here (known-bad entry-data
+     * era, e.g. pre-delta-fix); null = full history.
      */
     public record StatsResponse(
         int closedCount,
@@ -152,7 +159,8 @@ public class Quant7GatesSimulationController {
         double netPoints,
         double netUsd,
         int openCount,
-        Map<String, InstrumentStats> byInstrument
+        Map<String, InstrumentStats> byInstrument,
+        java.time.Instant statsSince
     ) {}
 
     /** Per-instrument slice of {@link StatsResponse}. */

@@ -18,7 +18,7 @@ import type { Quant7GatesSimulationStats, Quant7GatesSimulationView, QuantSimExe
  * or SL/TP touched.
  */
 export default function Quant7GatesSimulationPanel() {
-  const { rows, stats, connected } = useQuant7GatesSimulations();
+  const { rows, stats, statsRows, statsSinceMs, connected } = useQuant7GatesSimulations();
   const { state: execState, error: execError, busy: execBusy, setEnabled } = useQuantSimExecState();
 
   const { open, closed } = useMemo(() => {
@@ -44,9 +44,11 @@ export default function Quant7GatesSimulationPanel() {
 
   // Per-instrument breakdown — each market is judged on its own P&L; the
   // global strip alone lets a winner mask (or fake) a loser in the blend.
+  // Computed over statsRows (baseline-filtered), same input as the global
+  // strip, so the slices always sum to it.
   const perInstrument = useMemo(() => {
     const grouped = new Map<string, Quant7GatesSimulationView[]>();
-    for (const r of rows) {
+    for (const r of statsRows) {
       const list = grouped.get(r.instrument);
       if (list) list.push(r);
       else grouped.set(r.instrument, [r]);
@@ -54,7 +56,7 @@ export default function Quant7GatesSimulationPanel() {
     return Array.from(grouped.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([instrument, instrRows]) => ({ instrument, stats: computeStats(instrRows) }));
-  }, [rows]);
+  }, [statsRows]);
 
   return (
     <section className="rounded-lg border border-slate-700 bg-slate-900 p-4 text-slate-100">
@@ -74,6 +76,15 @@ export default function Quant7GatesSimulationPanel() {
       </header>
 
       <StatsStrip stats={stats} openCount={open.length} />
+
+      {statsSinceMs != null && (
+        <div
+          className="mt-1 text-right text-[9px] font-mono text-slate-600"
+          title="riskdesk.quant.sim.stats-since — trades entered before this instant ran on known-bad order-flow data (pre-delta-fix) and are excluded from all the numbers above; they remain in the history list."
+        >
+          stats since {formatBaseline(statsSinceMs)} — earlier (pre-fix) trades excluded
+        </div>
+      )}
 
       {perInstrument.length > 1 && (
         <div className="mt-2 space-y-1">
@@ -420,6 +431,14 @@ function formatPrice(v: number | null): string {
   if (Math.abs(v) < 10) return v.toFixed(5);
   if (Math.abs(v) < 1000) return v.toFixed(2);
   return v.toFixed(2);
+}
+
+/** Baseline stamp — UTC, minute precision, e.g. "11 Jun 2026, 09:33 UTC". */
+function formatBaseline(epochMs: number): string {
+  return new Date(epochMs).toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
+  }) + ' UTC';
 }
 
 function formatRelative(iso: string): string {

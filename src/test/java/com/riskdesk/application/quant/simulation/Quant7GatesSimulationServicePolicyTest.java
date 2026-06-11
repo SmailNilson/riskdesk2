@@ -194,6 +194,39 @@ class Quant7GatesSimulationServicePolicyTest {
             .isEqualTo(by.values().stream().mapToInt(Quant7GatesSimulationService.Stats::closedCount).sum());
     }
 
+    @Test
+    void statsSinceExcludesRowsOpenedBeforeBaseline() {
+        QuantSimProperties props = propsWith(p -> {
+            p.setStopMode(QuantSimStopMode.FIXED);
+            p.setStatsSince(Instant.parse("2026-06-11T09:33:40Z"));
+        });
+        Quant7GatesSimulationService service = service(props, null);
+
+        // Legacy era — opened AND closed before the baseline (a win on paper).
+        // The closing snapshot carries a non-qualifying pattern so no fresh
+        // row reopens on the same tick.
+        service.setClockForTesting(Clock.fixed(Instant.parse("2026-06-11T08:00:00Z"), ZoneOffset.UTC));
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+        service.setClockForTesting(Clock.fixed(Instant.parse("2026-06-11T08:05:00Z"), ZoneOffset.UTC));
+        service.onSnapshot(Instrument.MNQ,
+            snapshotAt(29687.25 + QuantSnapshot.TP2_OFFSET), longAvoidPattern());
+
+        // Post-baseline era — one decided trade.
+        service.setClockForTesting(Clock.fixed(Instant.parse("2026-06-11T10:00:00Z"), ZoneOffset.UTC));
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+        service.setClockForTesting(Clock.fixed(Instant.parse("2026-06-11T10:05:00Z"), ZoneOffset.UTC));
+        service.onSnapshot(Instrument.MNQ,
+            snapshotAt(29687.25 + QuantSnapshot.TP2_OFFSET), longAvoidPattern());
+
+        // Both rows are closed; only the post-baseline one is counted.
+        assertThat(service.listAll()).hasSize(2);
+        Quant7GatesSimulationService.Stats stats = service.stats();
+        assertThat(stats.closedCount()).isEqualTo(1);
+        assertThat(stats.wins()).isEqualTo(1);
+        assertThat(stats.netPoints()).isEqualTo(QuantSnapshot.TP2_OFFSET);
+        assertThat(service.statsByInstrument().get("MNQ").closedCount()).isEqualTo(1);
+    }
+
     // ── HTF filter ──────────────────────────────────────────────────────────
 
     @Test

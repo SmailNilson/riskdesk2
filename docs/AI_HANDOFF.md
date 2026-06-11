@@ -22,8 +22,16 @@ different volatility/flow profiles and their P&L was blended into one panel aggr
   the global strip (client-side grouping of the same rows, so slices always sum to the strip).
 - **Signals were already per-instrument** — each scan/gate evaluation is per instrument and
   PR #445 made delta/abs thresholds per-instrument; this slice separates *policy* and *reporting*.
+- **Stats baseline** — `riskdesk.quant.sim.stats-since=2026-06-11T09:33:40Z` (the v1.11.126
+  prod boot, from `process.start.time`): rows OPENED before it ran on broken order-flow delta
+  (and the legacy FLOW_AVOID exit), so they are excluded from every aggregate — global,
+  per-instrument, and the panel strip (the hook fetches `statsSince` from `/stats` and filters
+  client-side with the same openedAt rule). History rows stay visible in the list. Keyed on
+  `openedAt`, not `closedAt`: the ENTRY decision is what consumed bad data. Clear the key to
+  re-include the full history.
 - Tests: `Quant7GatesSimulationServicePolicyTest` (override resolution incl. partial
-  inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check).
+  inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check,
+  stats-since baseline exclusion).
 
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
