@@ -144,6 +144,7 @@ State management uses React hooks only (no Redux/Zustand). Key files:
 - `frontend/app/lib/api.ts` — all REST calls via native `fetch` (no axios), 30+ endpoints
 - `frontend/app/hooks/useWebSocket.ts` — STOMP/SockJS client, subscribes to `/topic/{prices,alerts,rollover}` (Mentor topic/poll removed)
 - `frontend/app/hooks/useRollover.ts` — polls rollover status every 5 min
+- `frontend/app/hooks/useIsMobile.ts` — SSR-safe `matchMedia` hook on the `lg` breakpoint; below 1024px `Dashboard.tsx` renders a focused mobile UI (bottom tab bar: TickChart / Indicators / WTX / Quant / Playbook / Portfolio) and mounts ONLY the active tab's panels — heavy desktop panels (full Chart, OrderFlow, Footprint, Backtest, AlertsFeed…) never mount on mobile
 - `frontend/app/components/Chart.tsx` — TradingView `lightweight-charts` with SMC overlays (order blocks, liquidity, structure breaks); wrapped in `React.memo`
 - `frontend/app/components/{OrderFlowPanel,IndicatorPanel}.tsx` — heavy panels, wrapped in `React.memo` to avoid re-render on every parent tick
 
