@@ -34,6 +34,14 @@ public class IcebergDetector {
     private static final double LARGE_SIZE_BONUS = 20.0;
     private static final long LARGE_SIZE_THRESHOLD = 200;
     private static final double MAX_SCORE = 100.0;
+    /**
+     * A DISAPPEARED→APPEARED cycle only counts as a recharge when the level stayed
+     * gone at least this long. Real icebergs need fills between chunks (seconds);
+     * sub-500ms cycles are book-shift flicker, not reloading.
+     */
+    private static final long MIN_RECHARGE_GAP_MS = 500;
+    /** Reject patterns whose whole lifetime is shorter than this — a 0.0s "iceberg" is flicker. */
+    private static final double MIN_DURATION_SECONDS = 1.0;
 
     /**
      * Evaluates a list of recent wall events for iceberg patterns.
@@ -122,9 +130,15 @@ public class IcebergDetector {
                 lastWasAppeared = false;
                 lastEvent = event.timestamp();
             } else if (!lastWasAppeared && event.type() == WallEventType.APPEARED) {
-                // This is a recharge: level disappeared then reappeared
-                rechargeCount++;
-                totalRechargeSize += event.size();
+                long gapMs = lastEvent != null
+                    ? Duration.between(lastEvent, event.timestamp()).toMillis()
+                    : 0;
+                if (gapMs >= MIN_RECHARGE_GAP_MS) {
+                    // Genuine recharge: the level stayed gone long enough for fills.
+                    rechargeCount++;
+                    totalRechargeSize += event.size();
+                }
+                // Sub-gap re-appearance is flicker — resume tracking without counting.
                 lastWasAppeared = true;
                 lastEvent = event.timestamp();
             }
@@ -135,6 +149,9 @@ public class IcebergDetector {
         }
 
         double durationSeconds = Duration.between(firstAppeared, lastEvent).toMillis() / 1000.0;
+        if (durationSeconds < MIN_DURATION_SECONDS) {
+            return null; // physically impossible iceberg — a real one reloads over seconds
+        }
         long avgRechargeSize = totalRechargeSize / (rechargeCount + 1); // +1 for initial appearance
 
         // Score: base per recharge + bonus for large sizes

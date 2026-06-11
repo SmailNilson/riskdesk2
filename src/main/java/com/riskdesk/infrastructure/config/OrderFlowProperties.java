@@ -389,6 +389,12 @@ public class OrderFlowProperties {
         private int dedupSeconds = 60;
         /** Only emit icebergs scoring at least this (0-100); filters weak single-recharge noise. */
         private double minScore = 50.0;
+        /**
+         * Width of the dedup bucket in ticks: events within the same N-tick price band
+         * share one dedup key, so one physical order flickering across adjacent levels
+         * cannot re-fire per tick. 8 ticks = 2 points on MNQ.
+         */
+        private int dedupPriceTicks = 8;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -400,6 +406,8 @@ public class OrderFlowProperties {
         public void setDedupSeconds(int v) { this.dedupSeconds = v; }
         public double getMinScore() { return minScore; }
         public void setMinScore(double v) { this.minScore = v; }
+        public int getDedupPriceTicks() { return dedupPriceTicks; }
+        public void setDedupPriceTicks(int v) { this.dedupPriceTicks = v; }
     }
 
     /**
@@ -414,6 +422,12 @@ public class OrderFlowProperties {
         private int dedupSeconds = 30;
         /** Only emit spoofs above this composite score (detector's own floor is 1.0). */
         private double minScore = 1.0;
+        /**
+         * Width of the dedup bucket in ticks: events within the same N-tick price band
+         * share one dedup key, so one physical wall flickering across adjacent levels
+         * cannot re-fire per tick (the 6-duplicate-spoof artifact). 8 ticks = 2 pts MNQ.
+         */
+        private int dedupPriceTicks = 8;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -423,6 +437,8 @@ public class OrderFlowProperties {
         public void setDedupSeconds(int v) { this.dedupSeconds = v; }
         public double getMinScore() { return minScore; }
         public void setMinScore(double v) { this.minScore = v; }
+        public int getDedupPriceTicks() { return dedupPriceTicks; }
+        public void setDedupPriceTicks(int v) { this.dedupPriceTicks = v; }
 
         /**
          * Per-instrument minimum score for a spoofing event to be DISPLAYED

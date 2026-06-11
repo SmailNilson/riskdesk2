@@ -4,6 +4,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.WallEvent;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
+import com.riskdesk.infrastructure.config.OrderFlowProperties;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -25,8 +26,10 @@ public class IbkrMarketDepthAdapter implements MarketDepthPort {
     private final ConcurrentHashMap<Instrument, MutableOrderBook> books = new ConcurrentHashMap<>();
     private final double wallThresholdMultiplier;
 
-    public IbkrMarketDepthAdapter() {
-        this.wallThresholdMultiplier = DEFAULT_WALL_THRESHOLD_MULTIPLIER;
+    public IbkrMarketDepthAdapter(OrderFlowProperties properties) {
+        this.wallThresholdMultiplier = properties != null && properties.getDepth() != null
+            ? properties.getDepth().getWallThresholdMultiplier()
+            : DEFAULT_WALL_THRESHOLD_MULTIPLIER;
     }
 
     @Override
@@ -69,6 +72,18 @@ public class IbkrMarketDepthAdapter implements MarketDepthPort {
         MutableOrderBook book = books.computeIfAbsent(instrument,
             k -> new MutableOrderBook(wallThresholdMultiplier));
         book.updateDepth(position, operation, side, price, size, instrument);
+    }
+
+    /**
+     * Empties the per-instrument book. Must be called before a fresh (re)subscription
+     * so the incoming IBKR snapshot never merges into stale levels from a previous
+     * subscription, connection or contract.
+     */
+    public void clearBook(Instrument instrument) {
+        MutableOrderBook book = books.get(instrument);
+        if (book != null) {
+            book.clear();
+        }
     }
 
     public double getWallThresholdMultiplier() {

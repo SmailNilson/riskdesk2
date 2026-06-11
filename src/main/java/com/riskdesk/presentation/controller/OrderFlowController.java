@@ -156,6 +156,10 @@ public class OrderFlowController {
             result.put("bids", ladderPayload(d.bids()));
             result.put("asks", ladderPayload(d.asks()));
             result.put("timestamp", d.timestamp() != null ? d.timestamp().toString() : null);
+            if (d.timestamp() != null) {
+                result.put("ageSeconds", Math.max(0,
+                    java.time.Duration.between(d.timestamp(), java.time.Instant.now()).getSeconds()));
+            }
             return ResponseEntity.ok(result);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
