@@ -71,6 +71,8 @@ function payloadToView(p: QuantWsPayload): QuantSnapshotView {
     longFinalScore: p.longFinalScore ?? longScore,
     longBlocked: p.longBlocked ?? false,
     longAvailable: p.longAvailable ?? longScore >= 6,
+    // Structured microstructure telemetry (null on old backends).
+    telemetry: p.telemetry ?? null,
   };
 }
 

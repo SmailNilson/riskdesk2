@@ -570,4 +570,165 @@ class GateEvaluatorTest {
             .snapshot();
         assertThat(snapshot.deltaAvailable()).isFalse();
     }
+
+    // ── Structured telemetry (replaces frontend regex-parsing of reasons) ───
+
+    @Test
+    @DisplayName("Telemetry: live values mirror the snapshot — delta, buy%, history, real thresholds")
+    void telemetry_liveValues_arePopulated() {
+        QuantState state = baseState().appendDelta(-50.0).appendDelta(-120.0);
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-315.0).buyPct(41.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.5)
+            .dist("DISTRIBUTION", 87).distTimestamp(NOW.minusSeconds(240))
+            .build();
+
+        var t = evaluator.evaluate(ms, withDistHistory(state, 87, 87), Instrument.MNQ)
+            .snapshot().telemetry();
+
+        assertThat(t).isNotNull();
+        assertThat(t.delta()).isEqualTo(-315.0);
+        assertThat(t.deltaAbstain()).isFalse();
+        // History is capped at 3 and includes the freshly appended scan value.
+        assertThat(t.deltaHistory()).containsExactly(-50.0, -120.0, -315.0);
+        assertThat(t.deltaThreshold()).isEqualTo(100.0);
+        assertThat(t.buyPct()).isEqualTo(41.0);
+        assertThat(t.buyAbstain()).isFalse();
+        assertThat(t.bearishLimitPct()).isEqualTo(48.0);
+        assertThat(t.bullishLimitPct()).isEqualTo(52.0);
+        assertThat(t.absorptionN8()).isEqualTo(10);
+        assertThat(t.absorptionDominance()).isEqualTo("BEAR");
+        assertThat(t.absorptionMaxScore()).isEqualTo(9.5);
+        assertThat(t.absorptionMinN8()).isEqualTo(8);
+        assertThat(t.adType()).isEqualTo("DISTRIBUTION");
+        assertThat(t.adConfidence()).isEqualTo(87);
+        assertThat(t.adEventAgeSeconds()).isEqualTo(240L);
+    }
+
+    @Test
+    @DisplayName("Telemetry: feed-down abstain — delta/buyPct null with explicit abstain flags")
+    void telemetry_feedDown_flagsAbstain() {
+        MarketSnapshot noDelta = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(null).buyPct(null)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .build();
+
+        var t = evaluator.evaluate(noDelta, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.delta()).isNull();
+        assertThat(t.deltaAbstain()).isTrue();
+        assertThat(t.buyPct()).isNull();
+        assertThat(t.buyAbstain()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Telemetry: balanced absorption reports MIX dominance (never a BEAR fallback)")
+    void telemetry_balancedAbsorption_isMix() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-50.0).buyPct(49.0)
+            .absFresh(4).absBull8(2).absBear8(2).absMaxScore(8.7)
+            .build();
+
+        var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.absorptionN8()).isEqualTo(4);
+        assertThat(t.absorptionDominance()).isEqualTo("MIX");
+        assertThat(t.absorptionMaxScore()).isEqualTo(8.7);
+    }
+
+    @Test
+    @DisplayName("Telemetry: no absorption events in window → maxScore null, n8 0")
+    void telemetry_noAbsorption_maxScoreNull() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-50.0).buyPct(49.0)
+            .absFresh(0).absBull8(0).absBear8(0).absMaxScore(0)
+            .build();
+
+        var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.absorptionN8()).isZero();
+        assertThat(t.absorptionMaxScore()).isNull();
+    }
+
+    @Test
+    @DisplayName("Telemetry: ACCU veto blocks SHORT only — adShortBlocked true, adLongBlocked false")
+    void telemetry_accuVeto_blocksShortOnly() {
+        // Extreme bearish context bumps the ACCU threshold to 75; ACCU @80 blocks G5.
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-600.0).buyPct(40.0)
+            .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.0)
+            .dist("ACCUMULATION", 80).distTimestamp(NOW.minusSeconds(10))
+            .build();
+
+        var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.adType()).isEqualTo("ACCUMULATION");
+        assertThat(t.adShortBlocked()).isTrue();
+        assertThat(t.adLongBlocked()).isFalse();
+        assertThat(t.adAccuThreshold()).isEqualTo(75);
+        assertThat(t.adEventAgeSeconds()).isEqualTo(10L);
+    }
+
+    @Test
+    @DisplayName("Telemetry: DIST veto blocks LONG only — adLongBlocked true, adShortBlocked false")
+    void telemetry_distVeto_blocksLongOnly() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(600.0).buyPct(60.0)
+            .absFresh(10).absBull8(10).absBear8(0).absMaxScore(9.0)
+            .dist("DISTRIBUTION", 80).distTimestamp(NOW.minusSeconds(90))
+            .build();
+
+        var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.adType()).isEqualTo("DISTRIBUTION");
+        assertThat(t.adLongBlocked()).isTrue();
+        assertThat(t.adShortBlocked()).isFalse();
+        assertThat(t.adDistThreshold()).isEqualTo(75);
+        assertThat(t.adEventAgeSeconds()).isEqualTo(90L);
+    }
+
+    @Test
+    @DisplayName("Telemetry: no A/D event → adType/conf/age null, neither direction blocked")
+    void telemetry_noAdEvent_isNeutral() {
+        MarketSnapshot ms = snap()
+            .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+            .delta(-50.0).buyPct(49.0)
+            .absFresh(0).absBull8(0).absBear8(0).absMaxScore(0)
+            .dist(null, null)
+            .build();
+
+        var t = evaluator.evaluate(ms, baseState(), Instrument.MNQ).snapshot().telemetry();
+
+        assertThat(t.adType()).isNull();
+        assertThat(t.adConfidence()).isNull();
+        assertThat(t.adEventAgeSeconds()).isNull();
+        assertThat(t.adShortBlocked()).isFalse();
+        assertThat(t.adLongBlocked()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Reasons use Locale.ROOT decimals: buy%=46.5 never renders as '46,5' on a French JVM")
+    void reasons_useRootLocale_decimalPoint() {
+        java.util.Locale original = java.util.Locale.getDefault();
+        try {
+            java.util.Locale.setDefault(java.util.Locale.FRANCE);
+            GateResult g4 = GateEvaluator.evaluateG4(46.5);
+            assertThat(g4.reason()).contains("46.5").doesNotContain("46,5");
+
+            GateResult g1 = GateEvaluator.evaluateG1(snap()
+                .now(NOW).price(20_000.0).priceSource("LIVE_PUSH")
+                .delta(-50.0).buyPct(46.5)
+                .absFresh(10).absBull8(0).absBear8(10).absMaxScore(9.5)
+                .build());
+            assertThat(g1.reason()).contains("9.5").doesNotContain("9,5");
+        } finally {
+            java.util.Locale.setDefault(original);
+        }
+    }
 }

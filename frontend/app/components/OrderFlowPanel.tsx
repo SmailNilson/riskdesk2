@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   useOrderFlow,
   OrderFlowMetrics,
@@ -12,11 +12,10 @@ import {
   MomentumEvent,
   CycleEvent,
 } from '@/app/hooks/useOrderFlow';
-import { useQuantStream } from '@/app/hooks/useQuantStream';
 import DepthBookWidget from './DepthBookWidget';
 import WallTrackerPanel from './WallTrackerPanel';
 import { api } from '@/app/lib/api';
-import QuantTelemetryDashboard, { INSTRUMENT_THRESHOLDS } from './quant/QuantTelemetryDashboard';
+import QuantTelemetryDashboard from './quant/QuantTelemetryDashboard';
 import { QUANT_INSTRUMENTS, type QuantInstrument } from './quant/types';
 
 const DEPTH_INSTRUMENTS = ['MNQ', 'MCL', 'MGC'] as const;
@@ -445,7 +444,6 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
     connected,
   } = useOrderFlow();
 
-  const { snapshots: quantSnapshots } = useQuantStream();
   const [showTelemetry, setShowTelemetry] = useState(true);
 
   // Heartbeat: re-render every 5s so the STALE badge appears/updates even when the feed
@@ -459,8 +457,6 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
     selectedInstrument && (QUANT_INSTRUMENTS as readonly string[]).includes(selectedInstrument)
       ? (selectedInstrument as QuantInstrument)
       : 'MNQ';
-  const telemetryGates = quantSnapshots[telemetryInstrument]?.gates ?? [];
-  const telemetryThresholds = INSTRUMENT_THRESHOLDS[telemetryInstrument];
 
   // Historical lists seeded on mount via REST, then kept fresh by merging
   // WebSocket events (prepend, cap at HISTORY_LIMIT).
@@ -584,13 +580,42 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
     ? depthEntries.filter(m => m.instrument === selectedInstrument)
     : depthEntries;
 
+  // --- Smart Money Cycle display filter ---------------------------------------
+  // PHASE_1-only partials are weak, often-abandoned detections; without a cutoff
+  // they linger in the list for days. Hide PHASE_1 rows older than 10 minutes —
+  // PHASE_2 / PHASE_3 / COMPLETE rows always stay. Plain filter (no memo) so the
+  // 5s heartbeat keeps the cutoff honest as rows age.
+  const visibleCycles = cycleHistory.filter(e => {
+    if (e.currentPhase !== 'PHASE_1') return true;
+    const age = ageSeconds(e.timestamp);
+    return age === null || age <= 600;
+  });
+
   // --- Live combined event log (kept for quick cross-type glance) ------------
-  const liveFeed = [
-    ...absorptionEvents.map(e => ({ event: e, type: 'absorption' as const })),
-    ...spoofingEvents.map(e => ({ event: e, type: 'spoofing' as const })),
-    ...icebergEvents.map(e => ({ event: e, type: 'iceberg' as const })),
-  ].sort((a, b) => new Date(b.event.timestamp).getTime() - new Date(a.event.timestamp).getTime())
-   .slice(0, HISTORY_LIMIT);
+  // Seeded from the REST-fetched histories merged with the WS buffers — the
+  // WS-only version showed "No live events yet" next to fully-populated
+  // history sections until the first post-load event arrived.
+  const liveFeed = useMemo(() => {
+    const merged = [
+      ...absorptionHistory.map(e => ({ event: e, type: 'absorption' as const })),
+      ...spoofingHistory.map(e => ({ event: e, type: 'spoofing' as const })),
+      ...icebergHistory.map(e => ({ event: e, type: 'iceberg' as const })),
+      ...absorptionEvents.map(e => ({ event: e as AbsorptionRow, type: 'absorption' as const })),
+      ...spoofingEvents.map(e => ({ event: e as SpoofingRow, type: 'spoofing' as const })),
+      ...icebergEvents.map(e => ({ event: e as IcebergRow, type: 'iceberg' as const })),
+    ];
+    const seen = new Set<string>();
+    const unique: typeof merged = [];
+    for (const item of merged) {
+      const key = `${item.type}|${item.event.instrument}|${item.event.timestamp}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(item);
+    }
+    return unique
+      .sort((a, b) => new Date(b.event.timestamp).getTime() - new Date(a.event.timestamp).getTime())
+      .slice(0, HISTORY_LIMIT);
+  }, [absorptionHistory, spoofingHistory, icebergHistory, absorptionEvents, spoofingEvents, icebergEvents]);
 
   const filteredLiveFeed = selectedInstrument
     ? liveFeed.filter(e => e.event.instrument === selectedInstrument)
@@ -607,37 +632,22 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
       {/* Section 0: LOB Microstructure Telemetry (live from Quant 7-Gates) */}
       {showTelemetry ? (
         <QuantTelemetryDashboard
-          gates={telemetryGates}
           active={telemetryInstrument}
           onClose={() => setShowTelemetry(false)}
         />
       ) : (
-        telemetryThresholds && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <span className="text-slate-500 font-semibold uppercase tracking-wider">Parameters ({telemetryInstrument}):</span>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">Stable Band:</span>
-                <span className="text-slate-300 font-bold">{telemetryThresholds.stableBand}</span>
-              </div>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">Strong Delta:</span>
-                <span className="text-sky-400 font-bold">±{telemetryThresholds.strongDelta}</span>
-              </div>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">High Delta:</span>
-                <span className="text-violet-400 font-bold">±{telemetryThresholds.highDelta}</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowTelemetry(true)}
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] border border-slate-700 text-slate-300 hover:text-white transition-colors font-mono"
-            >
-              📊 Expand Telemetry
-            </button>
-          </div>
-        )
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
+          <span className="text-slate-500 font-semibold uppercase tracking-wider">
+            LOB Telemetry ({telemetryInstrument})
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowTelemetry(true)}
+            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] border border-slate-700 text-slate-300 hover:text-white transition-colors font-mono"
+          >
+            📊 Expand Telemetry
+          </button>
+        </div>
       )}
 
       {/* Section 1: Delta Bars */}
@@ -690,11 +700,11 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
       <div>
         <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
           Smart Money Cycle{selectedInstrument ? ` — ${selectedInstrument}` : ''}
-          <span className="text-zinc-600 normal-case tracking-normal"> (conf ≥ 70)</span>
+          <span className="text-zinc-600 normal-case tracking-normal"> (conf ≥ 55)</span>
         </h4>
         <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
-          {cycleHistory.length > 0
-            ? cycleHistory.map((e, i) => (
+          {visibleCycles.length > 0
+            ? visibleCycles.map((e, i) => (
                 <CycleRowView key={`cycle-${e.timestamp}-${i}`} event={e} />
               ))
             : <p className="text-xs text-zinc-600 italic">

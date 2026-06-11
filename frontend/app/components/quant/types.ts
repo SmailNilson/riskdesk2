@@ -18,6 +18,46 @@ export interface StructuralWarningView {
   scoreModifier: number;
 }
 
+/**
+ * Structured microstructure telemetry — mirrors
+ * QuantSnapshotResponse.TelemetryView (REST) and the `telemetry` map on the
+ * WebSocket snapshot payload. Replaces the old regex-parsing of the French
+ * gate `reason` strings. Absent (`undefined`/`null`) on old backends.
+ */
+export interface QuantTelemetryView {
+  /** 5-min rolling delta sampled at scan time; null when the gates abstained (feed down). */
+  delta: number | null;
+  deltaAbstain: boolean;
+  /** Last scans' deltas, capped at 3, oldest first. */
+  deltaHistory: number[];
+  /** Real G3/L3 decision boundary magnitude (currently 100). */
+  deltaThreshold: number;
+  buyPct: number | null;
+  buyAbstain: boolean;
+  /** G4 limit — buy% below this favours SHORT (currently 48). */
+  bearishLimitPct: number;
+  /** L4 limit — buy% above this favours LONG (currently 52). */
+  bullishLimitPct: number;
+  /** Absorption events scoring ≥ 8 in the 3-min window (unbounded). */
+  absorptionN8: number;
+  /** True dominant side — may be MIX; never a frontend fallback. */
+  absorptionDominance: 'BULL' | 'BEAR' | 'MIX' | null;
+  absorptionMaxScore: number | null;
+  /** G1/L1 minimum n8 for the gate to engage (currently 8). */
+  absorptionMinN8: number;
+  /** Most recent A/D event within the 10-min window. */
+  adType: 'DISTRIBUTION' | 'ACCUMULATION' | null;
+  adConfidence: number | null;
+  /** Dynamic L5 DIST veto threshold (blocks LONG). */
+  adDistThreshold: number;
+  /** Dynamic G5 ACCU veto threshold (blocks SHORT). */
+  adAccuThreshold: number;
+  adLongBlocked: boolean;
+  adShortBlocked: boolean;
+  /** Age of the A/D event at scan time, in seconds; null when unknown. */
+  adEventAgeSeconds: number | null;
+}
+
 export interface QuantSnapshotView {
   instrument: string;
   score: number;
@@ -53,6 +93,8 @@ export interface QuantSnapshotView {
   longFinalScore?: number;
   longBlocked?: boolean;
   longAvailable?: boolean;
+  // Structured microstructure telemetry — optional for backward compat.
+  telemetry?: QuantTelemetryView | null;
 }
 
 /** WebSocket payload — same shape as REST plus a `kind` discriminator. */
@@ -91,6 +133,8 @@ export interface QuantWsPayload {
   longFinalScore?: number;
   longBlocked?: boolean;
   longAvailable?: boolean;
+  // Structured microstructure telemetry — optional for backward compat.
+  telemetry?: QuantTelemetryView | null;
 }
 
 export interface PatternView {
