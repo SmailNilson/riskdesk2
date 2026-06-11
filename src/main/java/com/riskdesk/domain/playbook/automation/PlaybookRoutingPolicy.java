@@ -21,12 +21,12 @@ public final class PlaybookRoutingPolicy {
         if (!profile.supports(decision)) {
             return PlaybookRoutingDecision.paperOnly(
                 PlaybookRoutingOutcome.SKIPPED_PROFILE_SCOPE,
-                profile.name() + " only applies to MGC 10m BREAK_RETEST");
+                profile.name() + " does not support this decision's instrument/timeframe/setup");
         }
         if (!profile.executable()) {
             return PlaybookRoutingDecision.paperOnly(
                 PlaybookRoutingOutcome.SKIPPED_PROFILE_NOT_EXECUTABLE,
-                profile.name() + " is benchmark-only");
+                profile.name() + " is not executable (paper validation only)");
         }
         if (profile.manualValidationRequired() && !state.scalpProfileValidated()) {
             return PlaybookRoutingDecision.paperOnly(

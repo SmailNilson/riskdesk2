@@ -32,6 +32,15 @@ public final class PlaybookProfilePlanner {
                 true);
             case MGC_10M_SCALP_0_5R -> riskMultiplePlan(decision, profile, HALF_R, true);
             case MGC_10M_NORMAL_1R_BENCHMARK -> riskMultiplePlan(decision, profile, ONE_R, false);
+            // Confirmation decisions are built with their plan already in final form
+            // (STOP entry + ATR brackets) — the profile passes it through unchanged.
+            case MNQ_10M_CONFIRMATION -> new PlaybookProfilePlan(
+                profile,
+                decision.entryPrice(),
+                decision.stopLoss(),
+                decision.takeProfit1(),
+                new BigDecimal("1.5"),
+                false);
         };
     }
 

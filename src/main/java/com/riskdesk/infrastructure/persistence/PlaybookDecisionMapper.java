@@ -33,6 +33,8 @@ final class PlaybookDecisionMapper {
         e.setRoutingOutcome(d.routingOutcome());
         e.setRoutingErrorMessage(d.routingErrorMessage());
         e.setExecutionId(d.executionId());
+        e.setEntryType(d.entryType());
+        e.setInvalidationPrice(d.invalidationPrice());
         return e;
     }
 
@@ -61,7 +63,9 @@ final class PlaybookDecisionMapper {
             e.getCreatedAt(),
             e.getRoutingOutcome(),
             e.getRoutingErrorMessage(),
-            e.getExecutionId()
+            e.getExecutionId(),
+            e.getEntryType(),
+            e.getInvalidationPrice()
         );
     }
 }

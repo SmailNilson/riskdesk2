@@ -123,26 +123,31 @@ class WtxStrategyServicePresetTest {
     }
 
     @Test
-    void preset_disablesTheSessionFilter_forThisPanelOnly() {
-        // Global config WITH the 03:00-08:00 ET entry block (the prod shape).
+    void preset_inheritsTheGlobalSessionGate_sessionOnByDefault() {
+        // Global config WITH the 03:00-08:00 ET entry block (the prod shape). Policy: every
+        // auto-trading panel defaults to session ON; the Session button is the per-panel opt-out.
         WtxStrategyService svc = service(WtxConfig.defaults().withSessionFilter(true, 180, 480));
         svc.applyPreset("MNQ", "10m-z35", WtxParamOverride.TOP_TRAIN_Z35);
 
-        // The preset carries the validated session-OFF shape for ITS panel...
-        org.junit.jupiter.api.Assertions.assertFalse(
+        // The preset leaves the gate to the global config -> ON by default on the preset panel...
+        org.junit.jupiter.api.Assertions.assertTrue(
                 svc.effectiveConfig("MNQ", "10m-z35").sessionFilterEnabled(),
-                "preset panel must trade around the clock (validated shape)");
-        // ...while the legacy panel keeps the global protection.
+                "preset panel must inherit the global session gate (ON by default)");
+        // ...and the per-panel button can still opt out without touching the preset fields.
+        svc.updateSessionFilter("MNQ", "10m-z35", false);
+        org.junit.jupiter.api.Assertions.assertFalse(
+                svc.effectiveConfig("MNQ", "10m-z35").sessionFilterEnabled());
+        assertEquals(5, svc.effectiveConfig("MNQ", "10m-z35").n1());
         org.junit.jupiter.api.Assertions.assertTrue(
                 svc.effectiveConfig("MNQ", "10m").sessionFilterEnabled(),
-                "legacy panel must keep the global session block");
+                "legacy panel keeps the global session block");
     }
 
     @Test
     void sessionToggle_persistsOnlyTheGate_andPreservesTheZoneOverride() {
         // Global config WITH the 03:00-08:00 ET entry block (the prod shape).
         WtxStrategyService svc = service(WtxConfig.defaults().withSessionFilter(true, 180, 480));
-        svc.applyPreset("MNQ", "10m-z35", WtxParamOverride.TOP_TRAIN_Z35); // preset = session OFF
+        svc.applyPreset("MNQ", "10m-z35", WtxParamOverride.TOP_TRAIN_Z35); // session non épinglée par le preset
 
         // The button re-enables the gate on THIS panel without touching the rest of the preset.
         svc.updateSessionFilter("MNQ", "10m-z35", true);

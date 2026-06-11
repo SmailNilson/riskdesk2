@@ -28,7 +28,8 @@ class Quant7GatesSimulationControllerExecTest {
         props = new QuantSimExecutionProperties();
         props.setEnabled(true);
         props.setInstruments(List.of("MNQ", "MCL"));
-        controller = new Quant7GatesSimulationController(null, state, props);
+        controller = new Quant7GatesSimulationController(null, state, props,
+            new com.riskdesk.application.quant.simulation.QuantSimProperties());
     }
 
     @Test
