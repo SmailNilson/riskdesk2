@@ -452,6 +452,31 @@ Constants are hardcoded for CME: `ZoneId.of("America/New_York")`, session close 
 - **Daily (1d):** aggregate from `dailySessionStart()` to `dailySessionEnd()` via `TradingSessionResolver`. Do NOT truncate to midnight UTC — this would mix two CME sessions.
 - **Weekly (1w):** aggregate from `weeklySessionStart()` (Sunday 17:00 ET) to Friday 17:00 ET via `TradingSessionResolver`.
 
+### Live Candle Volume Rule
+
+- **Candle volume is true traded contracts — never a count of price updates.** The live
+  accumulator in `MarketDataService` sources volume exclusively from
+  `StreamingPriceListener.onLiveVolumeUpdate`: per-bar deltas of IBKR's session-cumulative
+  `TickType.VOLUME` tick (emitted by `StreamingPriceSubscription` in `IbGatewayNativeClient`).
+  This is the same scale as IBKR historical bars, for **all** streamed instruments — unlike the
+  AllLast tick-by-tick stream, which only covers `riskdesk.order-flow.tick-by-tick.instruments`
+  (MNQ, MCL by default).
+- The first cumulative reading after (re)subscribe is a **baseline only** (delta 0); a counter
+  that goes backwards marks the Globex session reset and the new reading is the volume since
+  the reset. See `IbGatewayNativeClient.volumeDelta`.
+- A bar with price movement but no volume ticks closes with `volume = 0` — honest zero, never a
+  synthetic update count. (Historical context: until 2026-06-11 live 1m volume was the number of
+  debounced price updates, ~5–17× below the real scale, so live-built and backfilled rows
+  coexisted at two scales in the `candles` table.)
+
+### Candle Upsert Rule
+
+- `JpaCandleRepositoryAdapter.save/saveAll` are **upserts on (instrument, timeframe, timestamp)**.
+  Two writers legitimately produce the same bar (live accumulator vs IBKR backfill, which races
+  at boot); a plain insert dies on `uk_candle_instrument_tf_ts` and aborts the whole backfill
+  batch. Last writer wins. Callers should still pre-filter known-existing timestamps for
+  efficiency — the upsert is the race-safety net, not the primary dedupe.
+
 ### Candle Backfill & Range Read Rule
 
 - **Deep range backfill** (`HistoricalDataProvider.fetchHistoryRange` →

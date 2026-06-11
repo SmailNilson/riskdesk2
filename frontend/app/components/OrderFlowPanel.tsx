@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   useOrderFlow,
   OrderFlowMetrics,
@@ -11,12 +11,15 @@ import {
   DistributionEvent,
   MomentumEvent,
   CycleEvent,
+  CvdDivergenceEvent,
+  BigPrintEvent,
 } from '@/app/hooks/useOrderFlow';
-import { useQuantStream } from '@/app/hooks/useQuantStream';
 import DepthBookWidget from './DepthBookWidget';
+import DepthFlowStrip from './DepthFlowStrip';
+import DepthHeatmap from './DepthHeatmap';
 import WallTrackerPanel from './WallTrackerPanel';
 import { api } from '@/app/lib/api';
-import QuantTelemetryDashboard, { INSTRUMENT_THRESHOLDS } from './quant/QuantTelemetryDashboard';
+import QuantTelemetryDashboard from './quant/QuantTelemetryDashboard';
 import { QUANT_INSTRUMENTS, type QuantInstrument } from './quant/types';
 
 const DEPTH_INSTRUMENTS = ['MNQ', 'MCL', 'MGC'] as const;
@@ -100,7 +103,50 @@ function StaleBadge({ ageSec }: { ageSec: number | null }) {
 // Live metric sub-components
 // ---------------------------------------------------------------------------
 
-function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
+// A divergence is surfaced as a badge for this long after it fired.
+const DIVERGENCE_BADGE_WINDOW_SEC = 600;
+
+function DivergenceBadge({ event }: { event: CvdDivergenceEvent }) {
+  const isBull = event.type === 'BULLISH_DIVERGENCE';
+  const ageSec = ageSeconds(event.timestamp) ?? 0;
+  const ageMin = Math.max(1, Math.round(ageSec / 60));
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+        isBull ? 'bg-emerald-900/60 text-emerald-300' : 'bg-red-900/60 text-red-300'
+      }`}
+      title={`Divergence CVD ${isBull ? 'haussière' : 'baissière'} — prix ${event.prevPivotPrice.toFixed(2)}→${event.newPivotPrice.toFixed(2)}, CVD ${event.prevPivotCvd.toLocaleString()}→${event.newPivotCvd.toLocaleString()}`}
+    >
+      DIV {isBull ? '▲' : '▼'} il y a {ageMin}m
+    </span>
+  );
+}
+
+function TapeGauge({ metrics }: { metrics: OrderFlowMetrics }) {
+  if (metrics.tapeSpeed5s == null) return null;
+  const z = metrics.tapeZ5s ?? 0;
+  const ratio = metrics.tapeRatio5s ?? 1;
+  const burst = z >= 2;
+  const colorClass = z >= 3 ? 'text-red-400' : z >= 2 ? 'text-amber-400' : 'text-zinc-500';
+  return (
+    <div className="flex items-center justify-between text-[10px]">
+      <span className="text-zinc-500">
+        Tape: {metrics.tapeSpeed5s.toFixed(1)}/s
+        {metrics.tapeSpeed30s != null && (
+          <span className="text-zinc-600"> · 30s: {metrics.tapeSpeed30s.toFixed(1)}/s</span>
+        )}
+      </span>
+      <span
+        className={`font-semibold ${colorClass}`}
+        title={`Intensité du tape vs baseline 30 min — z(5s)=${z.toFixed(1)}, z(30s)=${(metrics.tapeZ30s ?? 0).toFixed(1)}`}
+      >
+        {ratio.toFixed(1)}×{burst ? ' burst' : ''}
+      </span>
+    </div>
+  );
+}
+
+function DeltaBar({ metrics, divergence }: { metrics: OrderFlowMetrics; divergence?: CvdDivergenceEvent }) {
   const totalVolume = metrics.buyVolume + metrics.sellVolume;
   const buyPct = totalVolume > 0 ? (metrics.buyVolume / totalVolume) * 100 : 50;
   const sellPct = 100 - buyPct;
@@ -144,6 +190,7 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
           <span className={metrics.delta >= 0 ? 'text-emerald-400' : 'text-red-400'}>
             {metrics.delta >= 0 ? '+' : ''}{metrics.delta.toLocaleString()}
           </span>
+          {divergence && <DivergenceBadge event={divergence} />}
           {stale && !isOff && <StaleBadge ageSec={age} />}
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${sourceClass}`} title={sourceTitle}>
             {sourceLabel}
@@ -165,9 +212,26 @@ function DeltaBar({ metrics }: { metrics: OrderFlowMetrics }) {
 
       <div className="flex justify-between text-[10px] text-zinc-500">
         <span>Buy {metrics.buyVolume.toLocaleString()} ({buyPct.toFixed(1)}%)</span>
-        <span className="text-zinc-600">Cum: {metrics.cumulativeDelta.toLocaleString()}</span>
+        <span
+          className="text-zinc-600"
+          title={`CVD ancré à ${metrics.cvdAnchor === 'RTH' ? "l'ouverture RTH (09:30 ET)" : 'la session Globex (17:00 ET)'}`}
+        >
+          CVD session{metrics.cvdAnchor ? ` (${metrics.cvdAnchor})` : ''}: {metrics.cumulativeDelta.toLocaleString()}
+        </span>
         <span>Sell {metrics.sellVolume.toLocaleString()} ({sellPct.toFixed(1)}%)</span>
       </div>
+
+      {/* Speed of tape: 5s intensity vs the rolling 30-min baseline */}
+      <TapeGauge metrics={metrics} />
+
+      {metrics.bigPrintDelta5m != null && metrics.bigPrintDelta5m !== 0 && (
+        <div className="text-[10px] text-zinc-600" title="Somme signée des gros prints (≥ p99) sur 5 min">
+          Big prints 5m:{' '}
+          <span className={metrics.bigPrintDelta5m >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+            {metrics.bigPrintDelta5m >= 0 ? '+' : ''}{metrics.bigPrintDelta5m.toLocaleString()}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -310,6 +374,27 @@ function SpoofingRowView({ event }: { event: SpoofingRow }) {
   );
 }
 
+function BigPrintRowView({ event }: { event: BigPrintEvent }) {
+  const isBuy = event.side === 'BUY';
+  return (
+    <div className="flex items-center gap-2 px-2 py-1 text-[11px] rounded bg-zinc-800/40 hover:bg-zinc-800/70 transition-colors">
+      <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-900/60 text-teal-300">
+        BIG
+      </span>
+      <span className="text-zinc-400 shrink-0">{event.instrument}</span>
+      <span className={`shrink-0 font-semibold ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>
+        {isBuy ? 'BUY' : 'SELL'} {event.size.toLocaleString()}
+      </span>
+      <span className="text-zinc-500 truncate">
+        @{event.price.toFixed(2)} · p{Math.round(event.percentile * 100)}
+      </span>
+      <span className="ml-auto text-zinc-600 shrink-0" title={event.timestamp}>
+        {formatRelativeTime(event.timestamp)}
+      </span>
+    </div>
+  );
+}
+
 function DistributionRowView({ event }: { event: DistributionRow }) {
   const isDistribution = event.type === 'DISTRIBUTION';
   const confColor =
@@ -436,17 +521,20 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
   const {
     orderFlowData,
     depthData,
+    depthFlowData,
     absorptionEvents,
     spoofingEvents,
     icebergEvents,
     distributionEvents,
     momentumEvents,
     cycleEvents,
+    cvdDivergenceEvents,
+    bigPrintEvents,
     connected,
   } = useOrderFlow();
 
-  const { snapshots: quantSnapshots } = useQuantStream();
   const [showTelemetry, setShowTelemetry] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(true);
 
   // Heartbeat: re-render every 5s so the STALE badge appears/updates even when the feed
   // is frozen and no new WebSocket messages arrive to trigger a render.
@@ -459,8 +547,6 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
     selectedInstrument && (QUANT_INSTRUMENTS as readonly string[]).includes(selectedInstrument)
       ? (selectedInstrument as QuantInstrument)
       : 'MNQ';
-  const telemetryGates = quantSnapshots[telemetryInstrument]?.gates ?? [];
-  const telemetryThresholds = INSTRUMENT_THRESHOLDS[telemetryInstrument];
 
   // Historical lists seeded on mount via REST, then kept fresh by merging
   // WebSocket events (prepend, cap at HISTORY_LIMIT).
@@ -578,19 +664,61 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
     ? flowEntries.filter(m => m.instrument === selectedInstrument)
     : flowEntries;
 
+  // Latest CVD divergence per instrument, surfaced as a badge for 10 minutes.
+  const latestDivergence = (instrument: string): CvdDivergenceEvent | undefined =>
+    cvdDivergenceEvents.find(e => {
+      if (e.instrument !== instrument) return false;
+      const age = ageSeconds(e.timestamp);
+      return age != null && age <= DIVERGENCE_BADGE_WINDOW_SEC;
+    });
+
+  const filteredBigPrints = (selectedInstrument
+    ? bigPrintEvents.filter(e => e.instrument === selectedInstrument)
+    : bigPrintEvents
+  ).slice(0, 8);
+
   const depthEntries = Array.from(depthData.values())
     .filter(m => DEPTH_INSTRUMENTS.includes(m.instrument as typeof DEPTH_INSTRUMENTS[number]));
   const filteredDepth = selectedInstrument
     ? depthEntries.filter(m => m.instrument === selectedInstrument)
     : depthEntries;
 
+  // --- Smart Money Cycle display filter ---------------------------------------
+  // PHASE_1-only partials are weak, often-abandoned detections; without a cutoff
+  // they linger in the list for days. Hide PHASE_1 rows older than 10 minutes —
+  // PHASE_2 / PHASE_3 / COMPLETE rows always stay. Plain filter (no memo) so the
+  // 5s heartbeat keeps the cutoff honest as rows age.
+  const visibleCycles = cycleHistory.filter(e => {
+    if (e.currentPhase !== 'PHASE_1') return true;
+    const age = ageSeconds(e.timestamp);
+    return age === null || age <= 600;
+  });
+
   // --- Live combined event log (kept for quick cross-type glance) ------------
-  const liveFeed = [
-    ...absorptionEvents.map(e => ({ event: e, type: 'absorption' as const })),
-    ...spoofingEvents.map(e => ({ event: e, type: 'spoofing' as const })),
-    ...icebergEvents.map(e => ({ event: e, type: 'iceberg' as const })),
-  ].sort((a, b) => new Date(b.event.timestamp).getTime() - new Date(a.event.timestamp).getTime())
-   .slice(0, HISTORY_LIMIT);
+  // Seeded from the REST-fetched histories merged with the WS buffers — the
+  // WS-only version showed "No live events yet" next to fully-populated
+  // history sections until the first post-load event arrived.
+  const liveFeed = useMemo(() => {
+    const merged = [
+      ...absorptionHistory.map(e => ({ event: e, type: 'absorption' as const })),
+      ...spoofingHistory.map(e => ({ event: e, type: 'spoofing' as const })),
+      ...icebergHistory.map(e => ({ event: e, type: 'iceberg' as const })),
+      ...absorptionEvents.map(e => ({ event: e as AbsorptionRow, type: 'absorption' as const })),
+      ...spoofingEvents.map(e => ({ event: e as SpoofingRow, type: 'spoofing' as const })),
+      ...icebergEvents.map(e => ({ event: e as IcebergRow, type: 'iceberg' as const })),
+    ];
+    const seen = new Set<string>();
+    const unique: typeof merged = [];
+    for (const item of merged) {
+      const key = `${item.type}|${item.event.instrument}|${item.event.timestamp}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(item);
+    }
+    return unique
+      .sort((a, b) => new Date(b.event.timestamp).getTime() - new Date(a.event.timestamp).getTime())
+      .slice(0, HISTORY_LIMIT);
+  }, [absorptionHistory, spoofingHistory, icebergHistory, absorptionEvents, spoofingEvents, icebergEvents]);
 
   const filteredLiveFeed = selectedInstrument
     ? liveFeed.filter(e => e.event.instrument === selectedInstrument)
@@ -607,37 +735,22 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
       {/* Section 0: LOB Microstructure Telemetry (live from Quant 7-Gates) */}
       {showTelemetry ? (
         <QuantTelemetryDashboard
-          gates={telemetryGates}
           active={telemetryInstrument}
           onClose={() => setShowTelemetry(false)}
         />
       ) : (
-        telemetryThresholds && (
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-              <span className="text-slate-500 font-semibold uppercase tracking-wider">Parameters ({telemetryInstrument}):</span>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">Stable Band:</span>
-                <span className="text-slate-300 font-bold">{telemetryThresholds.stableBand}</span>
-              </div>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">Strong Delta:</span>
-                <span className="text-sky-400 font-bold">±{telemetryThresholds.strongDelta}</span>
-              </div>
-              <div className="flex items-center gap-1.5 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800/30">
-                <span className="text-slate-500">High Delta:</span>
-                <span className="text-violet-400 font-bold">±{telemetryThresholds.highDelta}</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowTelemetry(true)}
-              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] border border-slate-700 text-slate-300 hover:text-white transition-colors font-mono"
-            >
-              📊 Expand Telemetry
-            </button>
-          </div>
-        )
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400 font-mono bg-slate-950/45 rounded-lg p-2 border border-slate-800/50">
+          <span className="text-slate-500 font-semibold uppercase tracking-wider">
+            LOB Telemetry ({telemetryInstrument})
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowTelemetry(true)}
+            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] border border-slate-700 text-slate-300 hover:text-white transition-colors font-mono"
+          >
+            📊 Expand Telemetry
+          </button>
+        </div>
       )}
 
       {/* Section 1: Delta Bars */}
@@ -645,8 +758,25 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
         <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Delta</h4>
         <div className="flex flex-col gap-1.5">
           {filteredFlow.length > 0
-            ? filteredFlow.map(m => <DeltaBar key={m.instrument} metrics={m} />)
+            ? filteredFlow.map(m => (
+                <DeltaBar key={m.instrument} metrics={m} divergence={latestDivergence(m.instrument)} />
+              ))
             : <p className="text-xs text-zinc-600 italic">Waiting for order flow data...</p>
+          }
+        </div>
+      </div>
+
+      {/* Section 1b: Big Prints (outsized AllLast prints ≥ p99 — sweep-like events) */}
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+          Big Prints{selectedInstrument ? ` — ${selectedInstrument}` : ''}
+        </h4>
+        <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+          {filteredBigPrints.length > 0
+            ? filteredBigPrints.map((e, i) => (
+                <BigPrintRowView key={`big-${e.timestamp}-${i}`} event={e} />
+              ))
+            : <p className="text-xs text-zinc-600 italic">No big prints yet</p>
           }
         </div>
       </div>
@@ -675,6 +805,57 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
         </div>
       )}
 
+      {/* Section 2a-2: Depth Heatmap — Bookmap-style movie of the last 20 min of book */}
+      {selectedInstrument && (
+        showHeatmap ? (
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <h4 className="text-[10px] uppercase tracking-wider text-zinc-500">
+                Heatmap (20 min) — {selectedInstrument}
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowHeatmap(false)}
+                className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] border border-zinc-700 text-zinc-300 hover:text-white transition-colors font-mono"
+              >
+                Collapse
+              </button>
+            </div>
+            <DepthHeatmap
+              instrument={selectedInstrument}
+              depthData={depthData.get(selectedInstrument)}
+            />
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-400 font-mono bg-zinc-800/40 rounded-lg p-2 border border-zinc-800/50">
+            <span className="text-zinc-500 font-semibold uppercase tracking-wider">
+              Heatmap (20 min) — {selectedInstrument}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowHeatmap(true)}
+              className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] border border-zinc-700 text-zinc-300 hover:text-white transition-colors font-mono"
+            >
+              📈 Expand Heatmap
+            </button>
+          </div>
+        )
+      )}
+
+      {/* Section 2a-3: Depth Flow — continuous DOM signals (OFI / queue / vacuum / pull-stack) */}
+      {selectedInstrument && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+            Depth Flow — {selectedInstrument}
+            <span className="text-zinc-600 normal-case tracking-normal"> (OFI · queue · vacuum · pull/stack)</span>
+          </h4>
+          <DepthFlowStrip
+            instrument={selectedInstrument}
+            metrics={depthFlowData.get(selectedInstrument)}
+          />
+        </div>
+      )}
+
       {/* Section 2a-bis: Wall Tracker — traceability of large resting orders */}
       {selectedInstrument && (
         <div>
@@ -690,11 +871,11 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
       <div>
         <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
           Smart Money Cycle{selectedInstrument ? ` — ${selectedInstrument}` : ''}
-          <span className="text-zinc-600 normal-case tracking-normal"> (conf ≥ 70)</span>
+          <span className="text-zinc-600 normal-case tracking-normal"> (conf ≥ 55)</span>
         </h4>
         <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
-          {cycleHistory.length > 0
-            ? cycleHistory.map((e, i) => (
+          {visibleCycles.length > 0
+            ? visibleCycles.map((e, i) => (
                 <CycleRowView key={`cycle-${e.timestamp}-${i}`} event={e} />
               ))
             : <p className="text-xs text-zinc-600 italic">

@@ -303,6 +303,77 @@ class MutableOrderBookTest {
         assertThat(events).isEmpty();
     }
 
+    // =================== Price-keyed wall tracking (no index flicker) ===================
+
+    @Test
+    void bookShift_doesNotReEmitWallEvents_forSamePrice() {
+        // Wall at 70.35 (sizes 1,1,1,100 → avg 25.75, threshold 77.25)
+        MutableOrderBook book2 = new MutableOrderBook(WALL_THRESHOLD);
+        book2.updateDepth(0, "INSERT", "BUY", 70.50, 1, instrument);
+        book2.updateDepth(1, "INSERT", "BUY", 70.45, 1, instrument);
+        book2.updateDepth(2, "INSERT", "BUY", 70.40, 1, instrument);
+        book2.updateDepth(3, "INSERT", "BUY", 70.35, 100, instrument);
+        long appearedBefore = book2.recentWallEvents(Duration.ofMinutes(1)).stream()
+                .filter(e -> e.type() == WallEvent.WallEventType.APPEARED).count();
+
+        // New best bid shifts the wall from index 3 to index 4 — same price, same order.
+        // The old index-keyed flags re-emitted APPEARED+DISAPPEARED here (flicker).
+        book2.updateDepth(0, "INSERT", "BUY", 70.55, 1, instrument);
+
+        List<WallEvent> events = book2.recentWallEvents(Duration.ofMinutes(1));
+        long appearedAfter = events.stream()
+                .filter(e -> e.type() == WallEvent.WallEventType.APPEARED).count();
+        long disappeared = events.stream()
+                .filter(e -> e.type() == WallEvent.WallEventType.DISAPPEARED).count();
+
+        assertThat(appearedAfter).isEqualTo(appearedBefore); // no re-APPEARED
+        assertThat(disappeared).isZero();                     // no phantom DISAPPEARED
+    }
+
+    @Test
+    void wallDisappeared_carriesOriginalWallPriceAndSize() {
+        MutableOrderBook book2 = new MutableOrderBook(WALL_THRESHOLD);
+        book2.updateDepth(0, "INSERT", "BUY", 70.50, 1, instrument);
+        book2.updateDepth(1, "INSERT", "BUY", 70.45, 1, instrument);
+        book2.updateDepth(2, "INSERT", "BUY", 70.40, 1, instrument);
+        book2.updateDepth(3, "INSERT", "BUY", 70.35, 100, instrument);
+
+        // The wall level is deleted outright; the slot now holds a different price.
+        book2.updateDepth(3, "DELETE", "BUY", 0, 0, instrument);
+
+        List<WallEvent> disappeared = book2.recentWallEvents(Duration.ofMinutes(1)).stream()
+                .filter(e -> e.type() == WallEvent.WallEventType.DISAPPEARED)
+                .toList();
+        assertThat(disappeared).hasSize(1);
+        assertThat(disappeared.get(0).price()).isCloseTo(70.35, within(0.001));
+        assertThat(disappeared.get(0).size()).isEqualTo(100);
+    }
+
+    // =================== clear() — resubscribe/reconnect/rollover hygiene ===================
+
+    @Test
+    void clear_emptiesBook_andFreshSnapshotDoesNotMergeWithStaleLevels() {
+        book.updateDepth(0, "INSERT", "BUY", 70.50, 10, instrument);
+        book.updateDepth(1, "INSERT", "BUY", 70.45, 15, instrument);
+        book.updateDepth(0, "INSERT", "SELL", 70.55, 12, instrument);
+
+        book.clear();
+
+        assertThat(book.hasData()).isFalse();
+        DepthMetrics cleared = book.computeMetrics(instrument);
+        assertThat(cleared.totalBidSize()).isZero();
+        assertThat(cleared.totalAskSize()).isZero();
+
+        // Fresh (thin) snapshot after clear: only the new levels exist — the old
+        // 70.45/70.50/70.55 regime must not survive as phantom deep levels.
+        book.updateDepth(0, "INSERT", "BUY", 71.20, 5, instrument);
+        DepthMetrics metrics = book.computeMetrics(instrument);
+        assertThat(metrics.totalBidSize()).isEqualTo(5);
+        assertThat(metrics.totalAskSize()).isZero();
+        assertThat(metrics.bestBid()).isCloseTo(71.20, within(0.001));
+        assertThat(metrics.bids()).hasSize(1);
+    }
+
     @Test
     void deleteAllLevels_bookBecomesEmpty() {
         book.updateDepth(0, "INSERT", "BUY", 70.50, 10, instrument);

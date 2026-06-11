@@ -16,7 +16,9 @@ public record TickAggregation(
     long buyVolume,
     long sellVolume,
     long delta,                 // buyVolume - sellVolume
-    long cumulativeDelta,       // running cumulative delta over the window
+    long cumulativeDelta,       // session-anchored CVD: signed volume since RTH open (09:30 ET)
+                                // when inside RTH, else since the Globex daily session start
+                                // (17:00 ET) — see SessionCvd. NOT the window delta.
     double buyRatioPct,         // buyVolume / (buyVolume + sellVolume) * 100
     String deltaTrend,          // RISING, FALLING, FLAT
     boolean divergenceDetected, // price direction vs delta direction mismatch

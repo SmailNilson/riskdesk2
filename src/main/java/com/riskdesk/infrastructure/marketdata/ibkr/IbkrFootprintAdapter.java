@@ -61,9 +61,11 @@ public class IbkrFootprintAdapter implements FootprintPort {
         FootprintAggregator aggregator = aggregators.computeIfAbsent(instrument, k -> {
             double bucketSize = bucketSizeFor(k);
             int barSeconds = barSeconds();
-            log.info("Footprint: created aggregator for {} (bucketSize={}, barSeconds={})",
-                     k, bucketSize, barSeconds);
-            return new FootprintAggregator(k, bucketSize, barSeconds);
+            double imbalanceRatio = properties.getFootprint().getImbalanceRatio();
+            long minCellVolume = properties.getFootprint().minCellVolumeFor(k.name());
+            log.info("Footprint: created aggregator for {} (bucketSize={}, barSeconds={}, imbalanceRatio={}, minCellVolume={})",
+                     k, bucketSize, barSeconds, imbalanceRatio, minCellVolume);
+            return new FootprintAggregator(k, bucketSize, barSeconds, imbalanceRatio, minCellVolume);
         });
 
         Optional<FootprintBar> closed;

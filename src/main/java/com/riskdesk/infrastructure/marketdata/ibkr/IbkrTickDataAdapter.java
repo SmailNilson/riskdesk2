@@ -1,5 +1,7 @@
 package com.riskdesk.infrastructure.marketdata.ibkr;
 
+import com.riskdesk.domain.marketdata.model.SessionCvd;
+import com.riskdesk.domain.marketdata.model.TapeSpeed;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Instrument;
@@ -27,6 +29,7 @@ public class IbkrTickDataAdapter implements TickDataPort {
     private final ConcurrentHashMap<Instrument, TickByTickAggregator> aggregators = new ConcurrentHashMap<>();
     private final IbkrFootprintAdapter footprintAdapter;
     private final IbkrTickBarAdapter tickBarAdapter;
+    private final IbkrBigPrintAdapter bigPrintAdapter;
     private final OrderFlowProperties orderFlowProperties;
 
     /** Last trade price per instrument — the reference for the trade-to-trade tick rule (L2). */
@@ -44,9 +47,11 @@ public class IbkrTickDataAdapter implements TickDataPort {
 
     public IbkrTickDataAdapter(IbkrFootprintAdapter footprintAdapter,
                                IbkrTickBarAdapter tickBarAdapter,
+                               IbkrBigPrintAdapter bigPrintAdapter,
                                OrderFlowProperties orderFlowProperties) {
         this.footprintAdapter = footprintAdapter;
         this.tickBarAdapter = tickBarAdapter;
+        this.bigPrintAdapter = bigPrintAdapter;
         this.orderFlowProperties = orderFlowProperties;
     }
 
@@ -155,7 +160,26 @@ public class IbkrTickDataAdapter implements TickDataPort {
         if (resolved != TickByTickAggregator.TickClassification.UNCLASSIFIED) {
             footprintAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
             tickBarAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
+            bigPrintAdapter.onTick(instrument, price, size, resolved.name(), timestamp);
         }
+    }
+
+    @Override
+    public Optional<SessionCvd> sessionCvd(Instrument instrument) {
+        TickByTickAggregator aggregator = aggregators.get(instrument);
+        if (aggregator != null && aggregator.hasData()) {
+            return Optional.of(aggregator.sessionCvd(Instant.now()));
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<TapeSpeed> tapeSpeed(Instrument instrument, long windowSeconds) {
+        TickByTickAggregator aggregator = aggregators.get(instrument);
+        if (aggregator != null && aggregator.hasData()) {
+            return Optional.of(aggregator.tapeSpeed(windowSeconds, Instant.now()));
+        }
+        return Optional.empty();
     }
 
     /**

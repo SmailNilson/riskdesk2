@@ -2,11 +2,14 @@ package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
 import com.riskdesk.domain.engine.indicators.AtrCalculator;
+import com.riskdesk.domain.marketdata.model.SessionCvd;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
 import com.riskdesk.domain.marketdata.port.TickDataPort;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
+import com.riskdesk.domain.orderflow.event.BigPrintDetected;
+import com.riskdesk.domain.orderflow.event.CvdDivergenceDetected;
 import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
 import com.riskdesk.domain.orderflow.event.IcebergDetected;
@@ -14,6 +17,7 @@ import com.riskdesk.domain.orderflow.event.MomentumBurstDetected;
 import com.riskdesk.domain.orderflow.event.SmartMoneyCycleDetected;
 import com.riskdesk.domain.orderflow.event.SpoofingDetected;
 import com.riskdesk.domain.orderflow.model.AbsorptionSignal;
+import com.riskdesk.domain.orderflow.model.CvdDivergenceSignal;
 import com.riskdesk.domain.orderflow.model.DepthMetrics;
 import com.riskdesk.domain.orderflow.model.DistributionSignal;
 import com.riskdesk.domain.orderflow.model.FlashCrashEvaluation;
@@ -28,16 +32,19 @@ import com.riskdesk.domain.orderflow.model.MomentumSignal;
 import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
 import com.riskdesk.domain.orderflow.model.WallEvent;
+import com.riskdesk.domain.orderflow.port.BigPrintPort;
 import com.riskdesk.domain.orderflow.port.FlashCrashConfigPort;
 import com.riskdesk.domain.orderflow.port.FootprintPort;
 import com.riskdesk.domain.orderflow.port.MarketDepthPort;
 import com.riskdesk.domain.orderflow.service.AbsorptionDetector;
 import com.riskdesk.domain.orderflow.service.AggressiveMomentumDetector;
+import com.riskdesk.domain.orderflow.service.CvdDivergenceDetector;
 import com.riskdesk.domain.orderflow.service.DistributionCycleDetector;
 import com.riskdesk.domain.orderflow.service.FlashCrashFSM;
 import com.riskdesk.domain.orderflow.service.IcebergDetector;
 import com.riskdesk.domain.orderflow.service.InstitutionalDistributionDetector;
 import com.riskdesk.domain.orderflow.service.SpoofingDetector;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import com.riskdesk.infrastructure.config.OrderFlowProperties;
@@ -92,6 +99,7 @@ public class OrderFlowOrchestrator {
     private final ObjectProvider<MarketDepthPort> depthPortProvider;
     private final ObjectProvider<FootprintPort> footprintPortProvider;
     private final ObjectProvider<TickBarPort> tickBarPortProvider;
+    private final ObjectProvider<BigPrintPort> bigPrintPortProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final CandleRepositoryPort candleRepository;
     private final FlashCrashConfigPort flashCrashConfig;
@@ -104,6 +112,15 @@ public class OrderFlowOrchestrator {
     /** Transition-style de-dup gates so a re-scanned window doesn't re-emit the same signal. */
     private final RecentSignalGate icebergGate = new RecentSignalGate();
     private final RecentSignalGate spoofingGate = new RecentSignalGate();
+
+    /**
+     * Per-(instrument, side) emission gate for absorption events. The 10s
+     * absorption window is re-evaluated every 5s, so one 10-15s burst used to
+     * be seen by 2-3 overlapping windows, each publishing + persisting its own
+     * AbsorptionDetected (no dedup — unlike spoofing/iceberg). See
+     * {@link OrderFlowProperties.Absorption#getDedupSeconds()}.
+     */
+    private final RecentSignalGate absorptionGate = new RecentSignalGate();
 
     /** Per-instrument stateful flash-crash FSMs (NORMAL→INITIATING→…→REVERSING→NORMAL). */
     private final ConcurrentHashMap<Instrument, FlashCrashFSM> flashCrashFSMs = new ConcurrentHashMap<>();
@@ -128,6 +145,14 @@ public class OrderFlowOrchestrator {
 
     /** Cached ATR(14) per instrument from 5m candles — refreshed every 60s. */
     private final ConcurrentHashMap<Instrument, Double> atrCache = new ConcurrentHashMap<>();
+
+    /** Per-instrument stateful CVD divergence detectors (1m bars built from 5s samples). */
+    private final ConcurrentHashMap<Instrument, CvdDivergenceDetector> cvdDetectors
+        = new ConcurrentHashMap<>();
+
+    /** Rolling speed-of-tape baselines (mean/σ of the 5s and 30s measures over ~30 min). */
+    private final ConcurrentHashMap<Instrument, TapeBaseline> tape5Baselines = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Instrument, TapeBaseline> tape30Baselines = new ConcurrentHashMap<>();
 
     /**
      * Rolling history of recent absorption-window total volumes per instrument.
@@ -171,6 +196,7 @@ public class OrderFlowOrchestrator {
                                   ObjectProvider<MarketDepthPort> depthPortProvider,
                                   ObjectProvider<FootprintPort> footprintPortProvider,
                                   ObjectProvider<TickBarPort> tickBarPortProvider,
+                                  ObjectProvider<BigPrintPort> bigPrintPortProvider,
                                   ApplicationEventPublisher eventPublisher,
                                   CandleRepositoryPort candleRepository,
                                   FlashCrashConfigPort flashCrashConfig) {
@@ -185,6 +211,7 @@ public class OrderFlowOrchestrator {
         this.depthPortProvider = depthPortProvider;
         this.footprintPortProvider = footprintPortProvider;
         this.tickBarPortProvider = tickBarPortProvider;
+        this.bigPrintPortProvider = bigPrintPortProvider;
         this.eventPublisher = eventPublisher;
         this.candleRepository = candleRepository;
         this.flashCrashConfig = flashCrashConfig;
@@ -470,6 +497,48 @@ public class OrderFlowOrchestrator {
                 payload.put("deltaTrend", a.deltaTrend());
                 payload.put("divergenceDetected", a.divergenceDetected());
                 payload.put("divergenceType", a.divergenceType());
+
+                // Session CVD anchor label — cumulativeDelta above is the session-anchored CVD
+                // (RTH anchor inside 09:30-16:00 ET, else Globex-day), not the window delta.
+                Optional<SessionCvd> cvd = tickDataPort.sessionCvd(instrument);
+                cvd.ifPresent(c -> payload.put("cvdAnchor", c.anchor()));
+
+                // Speed of tape (trade intensity): trailing 5s/30s prints-per-second,
+                // z-scored against a rolling ~30-min baseline sampled by this 5s pass.
+                if (properties.getTape().isEnabled()) {
+                    tickDataPort.tapeSpeed(instrument, 5).ifPresent(t5 -> {
+                        TapeBaseline.Stats stats = tape5Baselines
+                            .computeIfAbsent(instrument, k -> new TapeBaseline())
+                            .recordAndScore(t5.tradesPerSec());
+                        payload.put("tapeSpeed5s", round2(t5.tradesPerSec()));
+                        payload.put("tapeZ5s", round2(stats.z()));
+                        payload.put("tapeRatio5s", round2(stats.ratio()));
+                    });
+                    tickDataPort.tapeSpeed(instrument, 30).ifPresent(t30 -> {
+                        TapeBaseline.Stats stats = tape30Baselines
+                            .computeIfAbsent(instrument, k -> new TapeBaseline())
+                            .recordAndScore(t30.tradesPerSec());
+                        payload.put("tapeSpeed30s", round2(t30.tradesPerSec()));
+                        payload.put("tapeZ30s", round2(stats.z()));
+                    });
+                }
+
+                // Net signed volume of flagged big prints over the last 5 minutes.
+                BigPrintPort bigPrintPort = bigPrintPortProvider.getIfAvailable();
+                if (bigPrintPort != null && properties.getBigPrint().isEnabled()) {
+                    payload.put("bigPrintDelta5m",
+                        bigPrintPort.bigPrintDelta5m(instrument, java.time.Instant.now()));
+                }
+
+                // CVD divergence detection: feed the per-instrument detector one
+                // (price, session CVD) sample per pass; it builds 1m bars internally.
+                // Skipped when the feed is stale — a frozen lastPrice would fabricate bars.
+                if (!stale && properties.getCvd().isEnabled()
+                        && cvd.isPresent() && !Double.isNaN(a.lastPrice())) {
+                    evaluateCvdDivergence(instrument, a.lastPrice(), cvd.get(),
+                        java.time.Instant.now());
+                }
+
                 String feedHealth = stale ? "STARVED" : a.source();
                 payload.put("source", feedHealth);
                 payload.put("feedHealth", feedHealth);
@@ -497,7 +566,7 @@ public class OrderFlowOrchestrator {
             int absWindowSec = properties.getAbsorption().getWindowSeconds();
             Optional<TickAggregation> shortAgg = tickDataPort.recentAggregation(instrument, absWindowSec);
             if (shortAgg.isPresent()) {
-                evaluateAbsorption(instrument, shortAgg.get());
+                evaluateAbsorption(instrument, shortAgg.get(), java.time.Instant.now());
             }
 
             // Always tick cycle state machine (timeouts must run even on quiet windows).
@@ -833,7 +902,10 @@ public class OrderFlowOrchestrator {
         int dedupSec = properties.getIceberg().getDedupSeconds();
         for (IcebergSignal s : signals) {
             if (s.icebergScore() < minScore) continue;
-            String key = "ICE|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            // Dedup in price SPACE (N-tick buckets), not per exact tick — one physical
+            // order flickering across adjacent levels must share a single dedup key.
+            double bucket = tickSize * Math.max(1, properties.getIceberg().getDedupPriceTicks());
+            String key = "ICE|" + s.side() + "|" + Math.round(s.priceLevel() / bucket);
             if (icebergGate.shouldEmit(instrument, key, now, dedupSec)) {
                 eventPublisher.publishEvent(new IcebergDetected(instrument, s, now));
             }
@@ -852,7 +924,9 @@ public class OrderFlowOrchestrator {
         int dedupSec = properties.getSpoofing().getDedupSeconds();
         for (SpoofingSignal s : signals) {
             if (s.spoofScore() < minScore) continue;
-            String key = "SPF|" + s.side() + "|" + Math.round(s.priceLevel() / tickSize);
+            // Dedup in price SPACE (N-tick buckets) — see the iceberg twin above.
+            double bucket = tickSize * Math.max(1, properties.getSpoofing().getDedupPriceTicks());
+            String key = "SPF|" + s.side() + "|" + Math.round(s.priceLevel() / bucket);
             if (spoofingGate.shouldEmit(instrument, key, now, dedupSec)) {
                 eventPublisher.publishEvent(new SpoofingDetected(instrument, s, now));
             }
@@ -884,7 +958,13 @@ public class OrderFlowOrchestrator {
         return total / (2.0 * rows);
     }
 
-    private void evaluateAbsorption(Instrument instrument, TickAggregation agg) {
+    /**
+     * Seam for deterministic testing: {@code now} is injected by the caller
+     * (the scheduled loop passes {@link Instant#now()}) so the absorption
+     * dedup gate and the RTH/ETH threshold resolution can be pinned to fixed
+     * instants in tests — mirrors {@code evaluateBookManipulation(Instant)}.
+     */
+    void evaluateAbsorption(Instrument instrument, TickAggregation agg, java.time.Instant now) {
         try {
             boolean absorptionEnabled = properties.getAbsorption().isEnabled();
             boolean momentumEnabled = properties.getMomentum().isEnabled();
@@ -898,7 +978,7 @@ public class OrderFlowOrchestrator {
                 return;
             }
 
-            double deltaThreshold = properties.getAbsorption().getDeltaThreshold();
+            double deltaThreshold = resolvedDeltaThreshold(now);
             // Maintain the rolling avgVolume baseline only when absorption is enabled.
             // Momentum doesn't depend on a normalised baseline the same way, so we feed it
             // the current totalVolume as a neutral fallback (its detector handles edge cases).
@@ -924,7 +1004,6 @@ public class OrderFlowOrchestrator {
 
             // Real ATR from cache (falls back to 1.0 only before first cache refresh)
             double atr = atrCache.getOrDefault(instrument, 1.0);
-            java.time.Instant now = java.time.Instant.now();
 
             // Absorption is only evaluated when its own toggle is on. Momentum is independent
             // and runs in the else branch below regardless of the absorption toggle.
@@ -937,6 +1016,23 @@ public class OrderFlowOrchestrator {
 
             if (signal.isPresent()) {
                 AbsorptionSignal s = signal.get();
+
+                // Emission gate (multiply-counting audit fix): the detection window
+                // (10s) overlaps the 5s scheduling cadence, so the same physical
+                // burst is re-detected by 2-3 successive windows. Suppress a new
+                // AbsorptionDetected when the previous one for this (instrument,
+                // side) is younger than dedup-seconds (default = window-seconds ⇒
+                // only NON-overlapping windows emit). Suppression covers the whole
+                // pipeline: persistence, n8 counts, WS display AND the distribution
+                // detector feed. A sustained 30s burst still yields 3 events 10s
+                // apart (≤ the detector's 20s max gap), so genuine sustained
+                // absorption streaks keep firing.
+                int dedupSec = properties.getAbsorption().effectiveDedupSeconds();
+                String dedupKey = "ABS|" + s.side().name();
+                if (!absorptionGate.shouldEmit(instrument, dedupKey, now, dedupSec)) {
+                    return;
+                }
+
                 eventPublisher.publishEvent(new AbsorptionDetected(instrument, s, now));
 
                 // Display calibration: only events above the per-instrument display score
@@ -992,6 +1088,25 @@ public class OrderFlowOrchestrator {
             // Order flow evaluation is best-effort but log so we can debug stalls
             log.debug("evaluateAbsorption failed for {}: {}", instrument, e.toString());
         }
+    }
+
+    /**
+     * Session-aware delta threshold for the absorption + momentum detectors.
+     * MNQ volume runs 10-20× higher during RTH (09:30-16:00 ET) than overnight,
+     * so the single configured baseline is multiplied by
+     * {@code eth-threshold-multiplier} (default 0.4) outside RTH. The SAME
+     * resolved value feeds both {@code AbsorptionDetector} and
+     * {@code AggressiveMomentumDetector} (whose Javadoc baseline already reads
+     * "e.g. 100 RTH, 40 ETH"). Session resolution happens here, in the
+     * application layer, via {@link TradingSessionResolver} — the domain
+     * detectors stay session-unaware and no UTC hour is ever hardcoded.
+     */
+    private double resolvedDeltaThreshold(java.time.Instant now) {
+        double base = properties.getAbsorption().getDeltaThreshold();
+        if (!TradingSessionResolver.isRegularTradingHours(now)) {
+            base *= properties.getAbsorption().getEthThresholdMultiplier();
+        }
+        return base;
     }
 
     /**
@@ -1078,6 +1193,110 @@ public class OrderFlowOrchestrator {
     }
 
     // -------------------------------------------------------------------------
+    // CVD divergence (A) + speed of tape (B) + big prints (C)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Feeds one (price, session CVD) sample into the per-instrument
+     * {@link CvdDivergenceDetector} and publishes any confirmed divergence as a
+     * {@link CvdDivergenceDetected} domain event + {@code /topic/cvd-divergence}
+     * WebSocket payload. No persistence.
+     */
+    void evaluateCvdDivergence(Instrument instrument, double lastPrice, SessionCvd cvd, Instant now) {
+        try {
+            CvdDivergenceDetector detector = cvdDetectors.computeIfAbsent(instrument, i ->
+                new CvdDivergenceDetector(properties.getCvd().getPivotBars(),
+                                          properties.getCvd().getMinCvdSwing()));
+            detector.onSample(now, lastPrice, cvd.value(), cvd.anchorStart())
+                .ifPresent(s -> publishCvdDivergence(instrument, s, now));
+        } catch (Exception e) {
+            log.debug("evaluateCvdDivergence failed for {}: {}", instrument, e.toString());
+        }
+    }
+
+    private void publishCvdDivergence(Instrument instrument, CvdDivergenceSignal s, Instant now) {
+        eventPublisher.publishEvent(new CvdDivergenceDetected(instrument, s, now));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("instrument", instrument.name());
+        payload.put("type", s.type());
+        payload.put("prevPivotPrice", s.prevPivotPrice());
+        payload.put("newPivotPrice", s.newPivotPrice());
+        payload.put("prevPivotCvd", s.prevPivotCvd());
+        payload.put("newPivotCvd", s.newPivotCvd());
+        payload.put("pivotTimestamp", s.pivotTimestamp().toString());
+        payload.put("timestamp", now.toString());
+        messagingTemplate.convertAndSend("/topic/cvd-divergence", payload);
+        log.info("CVD divergence: {} {} price {} -> {} cvd {} -> {}", instrument, s.type(),
+                 s.prevPivotPrice(), s.newPivotPrice(), s.prevPivotCvd(), s.newPivotCvd());
+    }
+
+    /**
+     * Pushes every flagged big print (already rate-limited to 1/sec/instrument by the
+     * emitting adapter) to {@code /topic/big-prints}. No persistence.
+     */
+    @EventListener
+    public void onBigPrintDetected(BigPrintDetected event) {
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("instrument", event.instrument().name());
+            payload.put("price", event.print().price());
+            payload.put("size", event.print().size());
+            payload.put("side", event.print().side());
+            payload.put("percentile", event.print().percentile());
+            payload.put("timestamp", event.print().timestamp().toString());
+            messagingTemplate.convertAndSend("/topic/big-prints", payload);
+        } catch (Exception e) {
+            log.debug("Big print publish failed: {}", e.getMessage());
+        }
+    }
+
+    private static double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    /**
+     * Rolling speed-of-tape baseline: ~30 min of samples (one per 5s orchestrator pass).
+     * The z-score and burst ratio of a new sample are computed against the PRIOR samples
+     * (excluding itself, mirroring {@code flashVolumeBaseline}) so a genuine burst is not
+     * diluted into its own baseline. Below {@code MIN_SAMPLES} (≈1 min) z reads 0 and the
+     * ratio reads 1 — no burst can be claimed without a baseline. Only touched by the 5s
+     * scheduler thread.
+     */
+    static final class TapeBaseline {
+        private static final int MAX_SAMPLES = 360; // 30 min at one sample per 5s
+        private static final int MIN_SAMPLES = 12;  // ≥1 min of history before scoring
+
+        private final Deque<Double> samples = new ArrayDeque<>();
+
+        record Stats(double z, double ratio) {}
+
+        Stats recordAndScore(double value) {
+            double z = 0.0;
+            double ratio = 1.0;
+            int n = samples.size();
+            if (n >= MIN_SAMPLES) {
+                double mean = 0.0;
+                for (double s : samples) mean += s;
+                mean /= n;
+                double var = 0.0;
+                for (double s : samples) var += (s - mean) * (s - mean);
+                double sd = Math.sqrt(var / n);
+                if (sd > 1e-9) {
+                    z = (value - mean) / sd;
+                }
+                if (mean > 1e-9) {
+                    ratio = value / mean;
+                }
+            }
+            samples.addLast(value);
+            while (samples.size() > MAX_SAMPLES) {
+                samples.pollFirst();
+            }
+            return new Stats(z, ratio);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // WebSocket publication — /topic/depth
     // -------------------------------------------------------------------------
 
@@ -1119,6 +1338,14 @@ public class OrderFlowOrchestrator {
                 String dataTs = d.timestamp() != null ? d.timestamp().toString() : null;
                 payload.put("dataTimestamp", dataTs);
                 payload.put("timestamp", dataTs != null ? dataTs : java.time.Instant.now().toString());
+                // Server-authoritative staleness: the frontend must never render a frozen
+                // ladder as live (the 3h "25-pt spread" incident). Threshold = the same
+                // freshness config that drives the depth watchdog.
+                long ageSec = d.timestamp() != null
+                    ? Math.max(0, java.time.Duration.between(d.timestamp(), java.time.Instant.now()).getSeconds())
+                    : Long.MAX_VALUE;
+                payload.put("ageSeconds", ageSec == Long.MAX_VALUE ? null : ageSec);
+                payload.put("serverStale", ageSec > properties.getFreshness().getDepthStalenessSeconds());
 
                 messagingTemplate.convertAndSend("/topic/depth", payload);
             } catch (Exception e) {

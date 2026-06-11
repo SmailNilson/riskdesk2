@@ -736,7 +736,19 @@ export interface FootprintLevel {
   buyVolume: number;
   sellVolume: number;
   delta: number;
+  /** @deprecated same-price 3:1 flag — use the diagonal flags (pro convention) */
   imbalance: boolean;
+  /** Diagonal: buy(P) >= ratio x sell(P - 1 bucket), volume-filtered. Absent on old rows. */
+  diagonalBuyImbalance?: boolean;
+  /** Diagonal: sell(P) >= ratio x buy(P + 1 bucket), volume-filtered. Absent on old rows. */
+  diagonalSellImbalance?: boolean;
+}
+
+/** >= 3 consecutive buckets flagged with a diagonal imbalance on the same side. */
+export interface ImbalanceZone {
+  fromPrice: number;
+  toPrice: number;
+  buckets: number;
 }
 
 export interface FootprintBar {
@@ -748,6 +760,35 @@ export interface FootprintBar {
   totalBuyVolume: number;
   totalSellVolume: number;
   totalDelta: number;
+  stackedBuyZones?: ImbalanceZone[];
+  stackedSellZones?: ImbalanceZone[];
+  /** Top bucket traded on both sides — unfinished auction at the high. */
+  unfinishedHigh?: boolean;
+  /** Bottom bucket traded on both sides — unfinished auction at the low. */
+  unfinishedLow?: boolean;
+}
+
+// ── Session Volume Profile (GET /api/order-flow/volume-profile/{instrument}) ──
+export interface VolumeProfileSession {
+  date: string;          // ET trading date, ISO yyyy-MM-dd
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  totalVolume: number;
+  developing: boolean;
+}
+
+export interface NakedPoc {
+  price: number;
+  date: string;
+}
+
+export interface VolumeProfileResponse {
+  instrument: string;
+  session: VolumeProfileSession | null;
+  priorSession: VolumeProfileSession | null;
+  overnight: VolumeProfileSession | null;
+  nakedPocs: NakedPoc[];
 }
 
 /**
@@ -1085,6 +1126,10 @@ export const api = {
   // Most recent closed footprint bars, newest first.
   getFootprintHistory: (instrument: string, bars = 12) =>
     get<FootprintBar[]>(`/api/order-flow/footprint/${instrument}/history?bars=${bars}`),
+  // Session volume profile: current/prior RTH session + overnight + naked POCs.
+  // Server-side cache refreshes at most once per minute — poll at 60s.
+  getVolumeProfile: (instrument: string) =>
+    get<VolumeProfileResponse>(`/api/order-flow/volume-profile/${instrument}`),
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
   // Tick chart bars (oldest first; last element may be the in-progress bar).

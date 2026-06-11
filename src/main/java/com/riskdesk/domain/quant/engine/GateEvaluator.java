@@ -7,11 +7,14 @@ import com.riskdesk.domain.quant.model.GateResult;
 import com.riskdesk.domain.quant.model.MarketSnapshot;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
 import com.riskdesk.domain.quant.model.QuantState;
+import com.riskdesk.domain.quant.model.QuantTelemetry;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -29,23 +32,32 @@ public final class GateEvaluator {
 
     public static final ZoneId ET = ZoneId.of("America/New_York");
 
-    /** Thresholds (kept as constants so they appear once, mirroring the Python source). */
+    /** Universal thresholds (kept as constants so they appear once, mirroring the Python source). */
     static final double G0_DAY_MOVE_LIMIT      = 75.0;
     static final int    G0_RECENT_BULL_LIMIT   = 3;
     static final int    G1_MIN_N8              = 8;
     static final double G1_DELTA_INCOHERENCE   = 500.0;
     static final int    G2_MIN_PERSISTENCE     = 2;
     static final int    G2_CONF_THRESHOLD      = 60;
-    static final double G3_DELTA_THRESHOLD     = -100.0;
-    static final double G4_BUY_PCT_LIMIT       = 48.0;
     static final int    G5_ABS_SCORE_THRESHOLD = 8;
     static final String LIVE_PUSH              = "LIVE_PUSH";
 
-    // ── LONG mirrors ───────────────────────────────────────────────────────
-    /** Symmetric LONG threshold for L3: Δ &gt; +100. */
-    static final double L3_DELTA_THRESHOLD     = 100.0;
-    /** Symmetric LONG threshold for L4: buy% &gt; 52. */
-    static final double L4_BUY_PCT_LIMIT       = 52.0;
+    /**
+     * Calibration knobs that the 2026-06 audit moved out of hardcoded constants:
+     * per-instrument G3/L3 delta magnitude (the ±100 constant was MNQ-specific),
+     * G4/L4 buy% bands, and the A/D veto base tier + linear age decay. Injected
+     * by {@code QuantConfiguration} from {@code riskdesk.quant.*} properties so
+     * the domain stays Spring-free.
+     */
+    private final QuantGateConfig config;
+
+    public GateEvaluator() {
+        this(QuantGateConfig.defaults());
+    }
+
+    public GateEvaluator(QuantGateConfig config) {
+        this.config = config == null ? QuantGateConfig.defaults() : config;
+    }
 
     /**
      * Aggregate result of a single evaluation tick. Carries both directions —
@@ -108,12 +120,15 @@ public final class GateEvaluator {
             working = working.pruneAbsBearScans(snap.now());
         }
 
-        // 6) Evaluate SHORT gates.
+        // 6) Evaluate SHORT gates. The delta gate magnitude is resolved per
+        // instrument (audit fix: the ±100 constant was lifted from an
+        // MNQ-specific monitor and was nearly always red on MCL).
+        double deltaThreshold = config.deltaThresholdFor(instrument.name());
         Map<Gate, GateResult> gates = new EnumMap<>(Gate.class);
         gates.put(Gate.G0_REGIME, evaluateG0(dayMove, working.absBullScans30m().size()));
         gates.put(Gate.G1_ABS_BEAR, evaluateG1(snap));
         gates.put(Gate.G2_DIST_PUR, evaluateG2(working.distOnlyHistory()));
-        gates.put(Gate.G3_DELTA_NEG, evaluateG3(snap.delta(), working.deltaHistory()));
+        gates.put(Gate.G3_DELTA_NEG, evaluateG3(snap.delta(), working.deltaHistory(), deltaThreshold));
         gates.put(Gate.G4_BUY_PCT_LOW, evaluateG4(snap.buyPct()));
         gates.put(Gate.G5_ACCU_THRESHOLD, evaluateG5(snap));
         gates.put(Gate.G6_LIVE_PUSH, evaluateG6(snap.priceSource()));
@@ -126,7 +141,7 @@ public final class GateEvaluator {
         gates.put(Gate.L0_REGIME,        evaluateL0(dayMove, working.absBearScans30m().size()));
         gates.put(Gate.L1_ABS_BULL,      evaluateL1(snap));
         gates.put(Gate.L2_ACCU_PUR,      evaluateL2(working.accuOnlyHistory()));
-        gates.put(Gate.L3_DELTA_POS,     evaluateL3(snap.delta(), working.deltaHistory()));
+        gates.put(Gate.L3_DELTA_POS,     evaluateL3(snap.delta(), working.deltaHistory(), deltaThreshold));
         gates.put(Gate.L4_BUY_PCT_HIGH,  evaluateL4(snap.buyPct()));
         gates.put(Gate.L5_DIST_THRESHOLD, evaluateL5(snap));
         gates.put(Gate.L6_LIVE_PUSH,     evaluateG6(snap.priceSource()));  // same source check
@@ -147,34 +162,79 @@ public final class GateEvaluator {
             snap.priceSource(),
             dayMove,
             snap.now().atZone(ET)
-        );
+        ).withTelemetry(buildTelemetry(snap, working, gates, deltaThreshold));
         return new Outcome(snapshot, working);
+    }
+
+    /**
+     * Structured telemetry mirror of the values already rendered into the
+     * gate reasons — so the frontend never has to regex-parse them. Purely
+     * derived from the snapshot, the working state and the gate verdicts:
+     * no behaviour change to gate pass/fail logic. {@code deltaThreshold} is
+     * the per-instrument RESOLVED magnitude (not a global constant), and
+     * {@code adEffectiveConfidence} is the age-decayed confidence the veto
+     * actually compared against its tier ({@code adConfidence} stays raw).
+     */
+    QuantTelemetry buildTelemetry(MarketSnapshot snap, QuantState working,
+                                  Map<Gate, GateResult> gates, double deltaThreshold) {
+        int n8 = snap.absBull8Count() + snap.absBear8Count();
+        GateResult g5 = gates.get(Gate.G5_ACCU_THRESHOLD);
+        GateResult l5 = gates.get(Gate.L5_DIST_THRESHOLD);
+        Long adEventAgeSeconds = null;
+        if (snap.distTimestamp() != null && snap.now() != null) {
+            adEventAgeSeconds = Math.max(0L, Duration.between(snap.distTimestamp(), snap.now()).getSeconds());
+        }
+        Double adEffectiveConfidence = snap.distConf() == null
+            ? null
+            : effectiveConfidence(snap.distConf(), snap.distTimestamp(), snap.now());
+        return new QuantTelemetry(
+            snap.delta(),
+            snap.delta() == null,
+            working.deltaHistory(),
+            deltaThreshold,
+            snap.buyPct(),
+            snap.buyPct() == null,
+            config.bearishBuyPct(),
+            config.bullishBuyPct(),
+            n8,
+            snap.dominantSide(),
+            snap.absFreshTotal() > 0 ? snap.absMaxScore() : null,
+            G1_MIN_N8,
+            snap.distType(),
+            snap.distConf(),
+            adEffectiveConfidence,
+            distThreshold(snap.delta(), snap.buyPct()),
+            accumThreshold(snap.delta(), snap.buyPct()),
+            l5 != null && !l5.ok(),
+            g5 != null && !g5.ok(),
+            adEventAgeSeconds
+        );
     }
 
     // ── Individual gates ────────────────────────────────────────────────────
 
     static GateResult evaluateG0(double dayMove, int recentBullCount) {
         if (dayMove > G0_DAY_MOVE_LIMIT) {
-            return GateResult.fail(String.format("HAUSSIER +%.0fpts depuis start", dayMove));
+            return GateResult.fail(String.format(Locale.ROOT, "HAUSSIER +%.0fpts depuis start", dayMove));
         }
         if (recentBullCount >= G0_RECENT_BULL_LIMIT) {
-            return GateResult.fail(String.format("ABS BULL x%d en 30min — biais long", recentBullCount));
+            return GateResult.fail(String.format(Locale.ROOT, "ABS BULL x%d en 30min — biais long", recentBullCount));
         }
-        return GateResult.pass(String.format("Δjour=%+.0fpts  ABSbull/30m=%d", dayMove, recentBullCount));
+        return GateResult.pass(String.format(Locale.ROOT, "Δjour=%+.0fpts  ABSbull/30m=%d", dayMove, recentBullCount));
     }
 
     static GateResult evaluateG1(MarketSnapshot snap) {
         int n8 = snap.absBull8Count() + snap.absBear8Count();
         if (n8 < G1_MIN_N8) {
-            return GateResult.fail(String.format("n8=%d<%d", n8, G1_MIN_N8));
+            return GateResult.fail(String.format(Locale.ROOT, "n8=%d<%d", n8, G1_MIN_N8));
         }
         if (!"BEAR".equals(snap.dominantSide())) {
-            return GateResult.fail(String.format("dom=%s≠BEAR", snap.dominantSide()));
+            return GateResult.fail(String.format(Locale.ROOT, "dom=%s≠BEAR", snap.dominantSide()));
         }
         if (snap.delta() != null && snap.delta() > G1_DELTA_INCOHERENCE) {
-            return GateResult.fail(String.format("Δ=%.0f>500 incohérent", snap.delta()));
+            return GateResult.fail(String.format(Locale.ROOT, "Δ=%.0f>500 incohérent", snap.delta()));
         }
-        return GateResult.pass(String.format("n8=%d dom=%s maxSc=%.1f ✓",
+        return GateResult.pass(String.format(Locale.ROOT, "n8=%d dom=%s maxSc=%.1f ✓",
             n8, snap.dominantSide(), snap.absMaxScore()));
     }
 
@@ -183,40 +243,41 @@ public final class GateEvaluator {
             .filter(e -> e.conf() >= G2_CONF_THRESHOLD)
             .count();
         boolean ok = persistence >= G2_MIN_PERSISTENCE;
-        String reason = String.format("%d/%d DIST_only≥%d%%  hist=%s",
+        String reason = String.format(Locale.ROOT, "%d/%d DIST_only≥%d%%  hist=%s",
             persistence, Math.max(distOnlyHistory.size(), G2_MIN_PERSISTENCE + 1), G2_CONF_THRESHOLD,
             formatDistHistory(distOnlyHistory, "DIST"));
         return new GateResult(ok, reason);
     }
 
-    static GateResult evaluateG3(Double delta, List<Double> deltaHistory) {
+    GateResult evaluateG3(Double delta, List<Double> deltaHistory, double deltaThreshold) {
         if (delta == null) {
             return GateResult.abstain("Δ=ABSTAIN (feed down)");
         }
-        boolean ok = delta < G3_DELTA_THRESHOLD;
+        boolean ok = delta < -deltaThreshold;
         String trendStr = formatDeltaTrend(deltaHistory);
-        String trendBonus = strictlyDecreasingAndNegative(deltaHistory) ? " +TREND✅" : "";
-        return new GateResult(ok, String.format("Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
+        String trendBonus = strictlyDecreasingAndNegative(deltaHistory, deltaThreshold) ? " +TREND✅" : "";
+        return new GateResult(ok, String.format(Locale.ROOT, "Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
     }
 
-    static GateResult evaluateG4(Double buyPct) {
+    GateResult evaluateG4(Double buyPct) {
         if (buyPct == null) {
             return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
-        boolean ok = buyPct < G4_BUY_PCT_LIMIT;
-        return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));
+        boolean ok = buyPct < config.bearishBuyPct();
+        return new GateResult(ok, String.format(Locale.ROOT, "buy%%=%.1f%%", buyPct));
     }
 
-    static GateResult evaluateG5(MarketSnapshot snap) {
+    GateResult evaluateG5(MarketSnapshot snap) {
         int threshold = accumThreshold(snap.delta(), snap.buyPct());
         boolean accuActive = "ACCUMULATION".equals(snap.distType());
         if (!accuActive) {
             return GateResult.pass("pas d'ACCU active ✓");
         }
         int conf = snap.distConf() != null ? snap.distConf() : 0;
-        boolean blocks = conf >= threshold;
-        String reason = String.format("ACCU %d%% vs seuil=%d%% → %s",
-            conf, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
+        double effective = effectiveConfidence(conf, snap.distTimestamp(), snap.now());
+        boolean blocks = effective >= threshold;
+        String reason = String.format(Locale.ROOT, "ACCU %d%% (eff=%.0f%%) vs seuil=%d%% → %s",
+            conf, effective, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
         return new GateResult(!blocks, reason);
     }
 
@@ -230,27 +291,27 @@ public final class GateEvaluator {
     /** L0 — daily regime filter, mirror of G0. Bearish day (or repeated ABS BEAR) suspends LONG. */
     static GateResult evaluateL0(double dayMove, int recentBearCount) {
         if (dayMove < -G0_DAY_MOVE_LIMIT) {
-            return GateResult.fail(String.format("BAISSIER %+.0fpts depuis start", dayMove));
+            return GateResult.fail(String.format(Locale.ROOT, "BAISSIER %+.0fpts depuis start", dayMove));
         }
         if (recentBearCount >= G0_RECENT_BULL_LIMIT) {
-            return GateResult.fail(String.format("ABS BEAR x%d en 30min — biais short", recentBearCount));
+            return GateResult.fail(String.format(Locale.ROOT, "ABS BEAR x%d en 30min — biais short", recentBearCount));
         }
-        return GateResult.pass(String.format("Δjour=%+.0fpts  ABSbear/30m=%d", dayMove, recentBearCount));
+        return GateResult.pass(String.format(Locale.ROOT, "Δjour=%+.0fpts  ABSbear/30m=%d", dayMove, recentBearCount));
     }
 
     /** L1 — coherent bullish absorption, mirror of G1. */
     static GateResult evaluateL1(MarketSnapshot snap) {
         int n8 = snap.absBull8Count() + snap.absBear8Count();
         if (n8 < G1_MIN_N8) {
-            return GateResult.fail(String.format("n8=%d<%d", n8, G1_MIN_N8));
+            return GateResult.fail(String.format(Locale.ROOT, "n8=%d<%d", n8, G1_MIN_N8));
         }
         if (!"BULL".equals(snap.dominantSide())) {
-            return GateResult.fail(String.format("dom=%s≠BULL", snap.dominantSide()));
+            return GateResult.fail(String.format(Locale.ROOT, "dom=%s≠BULL", snap.dominantSide()));
         }
         if (snap.delta() != null && snap.delta() < -G1_DELTA_INCOHERENCE) {
-            return GateResult.fail(String.format("Δ=%.0f<-500 incohérent", snap.delta()));
+            return GateResult.fail(String.format(Locale.ROOT, "Δ=%.0f<-500 incohérent", snap.delta()));
         }
-        return GateResult.pass(String.format("n8=%d dom=%s maxSc=%.1f ✓",
+        return GateResult.pass(String.format(Locale.ROOT, "n8=%d dom=%s maxSc=%.1f ✓",
             n8, snap.dominantSide(), snap.absMaxScore()));
     }
 
@@ -260,84 +321,114 @@ public final class GateEvaluator {
             .filter(e -> e.conf() >= G2_CONF_THRESHOLD)
             .count();
         boolean ok = persistence >= G2_MIN_PERSISTENCE;
-        String reason = String.format("%d/%d ACCU_only≥%d%%  hist=%s",
+        String reason = String.format(Locale.ROOT, "%d/%d ACCU_only≥%d%%  hist=%s",
             persistence, Math.max(accuOnlyHistory.size(), G2_MIN_PERSISTENCE + 1), G2_CONF_THRESHOLD,
             formatDistHistory(accuOnlyHistory, "ACCU"));
         return new GateResult(ok, reason);
     }
 
-    /** L3 — Δ &gt; +100 with optional ascending-trend bonus. */
-    static GateResult evaluateL3(Double delta, List<Double> deltaHistory) {
+    /** L3 — Δ &gt; +threshold (per-instrument) with optional ascending-trend bonus. */
+    GateResult evaluateL3(Double delta, List<Double> deltaHistory, double deltaThreshold) {
         if (delta == null) {
             return GateResult.abstain("Δ=ABSTAIN (feed down)");
         }
-        boolean ok = delta > L3_DELTA_THRESHOLD;
+        boolean ok = delta > deltaThreshold;
         String trendStr = formatDeltaTrend(deltaHistory);
-        String trendBonus = strictlyIncreasingAndPositive(deltaHistory) ? " +TREND✅" : "";
-        return new GateResult(ok, String.format("Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
+        String trendBonus = strictlyIncreasingAndPositive(deltaHistory, deltaThreshold) ? " +TREND✅" : "";
+        return new GateResult(ok, String.format(Locale.ROOT, "Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
     }
 
-    /** L4 — buy% &gt; 52, mirror of G4. */
-    static GateResult evaluateL4(Double buyPct) {
+    /** L4 — buy% &gt; bullish band (default 52), mirror of G4. */
+    GateResult evaluateL4(Double buyPct) {
         if (buyPct == null) {
             return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
-        boolean ok = buyPct > L4_BUY_PCT_LIMIT;
-        return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));
+        boolean ok = buyPct > config.bullishBuyPct();
+        return new GateResult(ok, String.format(Locale.ROOT, "buy%%=%.1f%%", buyPct));
     }
 
     /** L5 — conditional DIST threshold, mirror of G5. */
-    static GateResult evaluateL5(MarketSnapshot snap) {
+    GateResult evaluateL5(MarketSnapshot snap) {
         int threshold = distThreshold(snap.delta(), snap.buyPct());
         boolean distActive = "DISTRIBUTION".equals(snap.distType());
         if (!distActive) {
             return GateResult.pass("pas de DIST active ✓");
         }
         int conf = snap.distConf() != null ? snap.distConf() : 0;
-        boolean blocks = conf >= threshold;
-        String reason = String.format("DIST %d%% vs seuil=%d%% → %s",
-            conf, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
+        double effective = effectiveConfidence(conf, snap.distTimestamp(), snap.now());
+        boolean blocks = effective >= threshold;
+        String reason = String.format(Locale.ROOT, "DIST %d%% (eff=%.0f%%) vs seuil=%d%% → %s",
+            conf, effective, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
         return new GateResult(!blocks, reason);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    static int accumThreshold(Double delta, Double buyPct) {
+    /**
+     * Linear age decay of the A/D structural veto (2026-06 audit fix). The
+     * detector cooldown (8 min) is shorter than the application-layer lookup
+     * window (10 min), so on an instrument that fires routinely (MNQ: several
+     * times/hour) the veto re-armed before it could ever expire — a 10–20 s
+     * detection drove a full-strength veto for 10+ minutes. The decayed value
+     * is what the G5/L5 tiers compare against:
+     * {@code effective = conf × max(0, 1 - age/decaySeconds)}.
+     *
+     * <p>When the event timestamp is unknown ({@code null}), the raw
+     * confidence is used unchanged — conservative: an undatable event keeps
+     * its full veto strength rather than silently bypassing the gate.</p>
+     */
+    double effectiveConfidence(int conf, java.time.Instant eventTs, java.time.Instant now) {
+        if (eventTs == null || now == null) return conf;
+        long ageSeconds = Math.max(0L, Duration.between(eventTs, now).getSeconds());
+        double decay = Math.max(0.0, 1.0 - (double) ageSeconds / config.vetoDecaySeconds());
+        return conf * decay;
+    }
+
+    /**
+     * Dynamic G5 ACCU veto tier. Base raised 50 → 60 (config): the old
+     * detector confidence FLOOR was 50, equal to the old base tier, so every
+     * ACCUMULATION event blocked by construction (tautology — see the
+     * {@code InstitutionalDistributionDetector#computeConfidence} audit note).
+     * Escalation tiers stay monotonic at base+10 / base+20 (60/70/80).
+     */
+    int accumThreshold(Double delta, Double buyPct) {
+        int base = (int) Math.round(config.vetoBaseThreshold());
         if (delta != null && delta < -500.0 && buyPct != null && buyPct < 45.0) {
-            return 75;
+            return base + 20;
         }
         if (delta != null && delta < -200.0 && buyPct != null && buyPct < 47.0) {
-            return 65;
+            return base + 10;
         }
-        return 50;
+        return base;
     }
 
     /** LONG mirror of {@link #accumThreshold}. */
-    static int distThreshold(Double delta, Double buyPct) {
+    int distThreshold(Double delta, Double buyPct) {
+        int base = (int) Math.round(config.vetoBaseThreshold());
         if (delta != null && delta > 500.0 && buyPct != null && buyPct > 55.0) {
-            return 75;
+            return base + 20;
         }
         if (delta != null && delta > 200.0 && buyPct != null && buyPct > 53.0) {
-            return 65;
+            return base + 10;
         }
-        return 50;
+        return base;
     }
 
-    static boolean strictlyDecreasingAndNegative(List<Double> hist) {
+    static boolean strictlyDecreasingAndNegative(List<Double> hist, double deltaThreshold) {
         if (hist == null || hist.size() < 2) return false;
         for (int i = 0; i < hist.size() - 1; i++) {
             if (hist.get(i) <= hist.get(i + 1)) return false;
         }
-        return hist.get(hist.size() - 1) < G3_DELTA_THRESHOLD;
+        return hist.get(hist.size() - 1) < -deltaThreshold;
     }
 
     /** LONG mirror of {@link #strictlyDecreasingAndNegative}. */
-    static boolean strictlyIncreasingAndPositive(List<Double> hist) {
+    static boolean strictlyIncreasingAndPositive(List<Double> hist, double deltaThreshold) {
         if (hist == null || hist.size() < 2) return false;
         for (int i = 0; i < hist.size() - 1; i++) {
             if (hist.get(i) >= hist.get(i + 1)) return false;
         }
-        return hist.get(hist.size() - 1) > L3_DELTA_THRESHOLD;
+        return hist.get(hist.size() - 1) > deltaThreshold;
     }
 
     static double roundToOneDecimal(double v) {

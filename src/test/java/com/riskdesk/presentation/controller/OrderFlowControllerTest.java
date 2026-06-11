@@ -49,10 +49,14 @@ class OrderFlowControllerTest {
     private final OrderFlowHistoryService historyService = mock(OrderFlowHistoryService.class);
     private final com.riskdesk.application.service.WallTrackingService wallTrackingService =
         mock(com.riskdesk.application.service.WallTrackingService.class);
+    private final com.riskdesk.application.service.VolumeProfileService volumeProfileService =
+        mock(com.riskdesk.application.service.VolumeProfileService.class);
+    private final com.riskdesk.application.service.DepthFlowService depthFlowService =
+        mock(com.riskdesk.application.service.DepthFlowService.class);
 
     private final OrderFlowController controller = new OrderFlowController(
         orchestratorProvider, tickDataPortProvider, depthPortProvider, tickBarPortProvider,
-        historyService, wallTrackingService);
+        historyService, wallTrackingService, volumeProfileService, depthFlowService);
 
     // ------------------------------------------------------------------ Iceberg
 
@@ -155,5 +159,58 @@ class OrderFlowControllerTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
         verifyNoInteractions(historyService);
+    }
+
+    // --------------------------------------------------------------- Depth flow
+
+    @Test
+    void getDepthFlow_returnsFlatPayload_whenMetricsCached() {
+        com.riskdesk.domain.orderflow.model.DepthFlowMetrics metrics =
+            new com.riskdesk.domain.orderflow.model.DepthFlowMetrics(
+                Instrument.MNQ,
+                12.0, 85.0, 40.0, 2.4, true,
+                0.45, true, 0.3,
+                com.riskdesk.domain.orderflow.model.DepthFlowMetrics.VacuumState.VACUUM_ASK,
+                0.95, 0.35,
+                10L, 22L, 30L, 5L, -0.12,
+                Instant.parse("2026-06-10T14:30:00Z"));
+        when(depthFlowService.latest(eq(Instrument.MNQ))).thenReturn(java.util.Optional.of(metrics));
+
+        ResponseEntity<?> response = controller.getDepthFlow("mnq");
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertInstanceOf(Map.class, response.getBody());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertEquals(true, body.get("available"));
+        assertEquals("MNQ", body.get("instrument"));
+        assertEquals(85.0, body.get("ofi10s"));
+        assertEquals(2.4, body.get("ofiZ10s"));
+        assertEquals(true, body.get("ofiExtreme"));
+        assertEquals("VACUUM_ASK", body.get("vacuumState"));
+        assertEquals(22L, body.get("bidStacked10s"));
+        assertEquals("2026-06-10T14:30:00Z", body.get("timestamp"));
+    }
+
+    @Test
+    void getDepthFlow_returnsUnavailable_whenNoMetrics() {
+        when(depthFlowService.latest(eq(Instrument.MCL))).thenReturn(java.util.Optional.empty());
+
+        ResponseEntity<?> response = controller.getDepthFlow("MCL");
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertNotNull(body);
+        assertEquals(false, body.get("available"));
+        assertEquals("MCL", body.get("instrument"));
+    }
+
+    @Test
+    void getDepthFlow_unknownInstrument_returns400() {
+        ResponseEntity<?> response = controller.getDepthFlow("XXX");
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        verifyNoInteractions(depthFlowService);
     }
 }

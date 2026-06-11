@@ -77,6 +77,186 @@ tick-rule fallback, watchdog abstains from PR #413).
 - Known limit: the log freezes the *current* window definition (5m rolling).
   Threshold/entry-rule sweeps are now possible; changing the window length
   itself still needs `tick_log` (30d).
+## Live candle volume fix + candle upsert (2026-06-11)
+
+Production diagnosis: LIVE-built 1m candles under-reported volume ~10× (variable 5–17×) vs
+IBKR backfill — MNQ daily 1m volume 2.6–3.7M (backfilled Jun 3–5) vs 144k–363k (live-built
+Jun 8–10) — so two volume scales coexisted in `candles`. Root cause: `MarketDataService`'s
+inner `CandleAccumulator` set `volume = 1` at bar open and `volume++` per price update —
+counting **debounced price events** (100ms debounce + same-price skip), not contracts.
+
+Fix (PR claude/frosty-sammet-5c46b9):
+
+- **Volume source = IBKR session-cumulative `TickType.VOLUME` deltas.** The existing
+  `reqTopMktData` streaming subscription already received them; `StreamingPriceSubscription.tickSize`
+  was a no-op. It now computes per-update deltas (`IbGatewayNativeClient.volumeDelta`: first
+  reading = baseline only, counter going backwards = Globex session reset → new reading is the
+  delta) and pushes them through the new `StreamingPriceListener.onLiveVolumeUpdate` default
+  method (domain port, Spring-free). This covers **all 4 streamed futures** — the AllLast
+  tick-by-tick stream only covers MNQ/MCL. Cumulative deltas also self-heal: volume missed
+  during a quiet stream lands in the next delta, so hourly/daily sums match the exchange.
+- **`MarketDataService`** routes deltas into the open bar of every intraday timeframe
+  (gated on market-open + maintenance window, same as prices). Volume arriving before a bar's
+  first price tick is stashed (`pendingVolume`, claimed at bar creation); volume lagging just
+  past a roll goes to the open bar (totals preserved). Price updates no longer touch volume —
+  a bar with no volume ticks closes at volume 0. Pending volume is flushed on rollover.
+- **Candle writes are upserts** on `(instrument, timeframe, timestamp)` in
+  `JpaCandleRepositoryAdapter` (natural-key id adoption + one range query per batch group +
+  `DataIntegrityViolationException` retry). Fixes the boot race: the startup gap-fill read its
+  high-water mark, then the live writer closed bars before `saveAll` flushed → 11
+  `uk_candle_instrument_tf_ts` violations at boot, each aborting an entire gap-fill batch.
+- Tests: `MarketDataServiceTest` (delta accumulation, pending claim, zero-volume honesty),
+  `JpaCandleUpsertTest`, `IbGatewayNativeClientVolumeDeltaTest`.
+
+**Post-deploy validation:** let one full hour build live, then
+`SELECT date_trunc('hour', timestamp), SUM(volume) FROM candles WHERE instrument='MNQ' AND timeframe='1m' GROUP BY 1`,
+re-backfill the same hour via `POST /api/candles/backfill-range` with `replace=true`, and compare
+(expect agreement within a few %; also cross-check footprint bar volume for the same window).
+**Historical repair:** live-built rows from before this fix (e.g. Jun 8–10) are still at the
+wrong scale — re-source them with the range backfill in `replace` mode. Until then, do NOT
+normalize tick-vs-candle volume across that window.
+
+## Depth flow signals + DOM heatmap (2026-06-11)
+
+Continuous L2 signals computed from the existing 500ms `DepthMetrics` snapshots —
+the hardened `MutableOrderBook` hot path is untouched (snapshot consumers only):
+
+- **`DepthFlowAnalyzer`** (pure domain, one per instrument, WallTracker pattern) emits
+  `DepthFlowMetrics` per transition: **OFI** (Cont-Kukanov-Stoikov best-level events,
+  1s/10s sums + EMA-60s; 10s sum z-scored vs a trailing 5-min distribution — the
+  canonical result is CONTEMPORANEOUS (~65% R² over 10s), so it is an entry-timing
+  gauge, not a forecast), **queue imbalance + micro-price** (EMA ~3s, min-queue-mass
+  gate 10, micro-price offset in ticks), **liquidity vacuum** (side <40% of its 5-min
+  baseline for ≥3s while the other holds ≥70% → VACUUM_BID/ASK; both <50% → THIN), and
+  **pull/stack net flow** (per-level resting-size deltas beyond a 2-contract noise
+  floor, 10s sums; approximation — no per-level trade attribution).
+- **Stale-gap rule:** snapshots older than 10s (or eval gaps >10s) reset the analyzer —
+  flow is never computed across a feed freeze. `DepthFlowService` (@Scheduled 500ms,
+  initialDelay 30s) feeds the analyzers, caches the latest, publishes flat JSON on
+  `/topic/depth-flow` and serves `GET /api/order-flow/depth-flow/{instrument}`.
+  Config `riskdesk.order-flow.depth-flow.*` (MNQ-tuned defaults, all documented).
+  `OrderFlowController` ctor gained `DepthFlowService`.
+- **Frontend:** `DepthFlowStrip` (compact row: OFI z bar amber ≥2 / red ≥3, queue lean
+  ▲/▼ 0.4/0.6, µP offset, vacuum chip, P/S net) and `DepthHeatmap` (raw-canvas
+  Bookmap-style movie of the last 20 min of `/topic/depth` ladders: ~2400 columns ring
+  buffer, 40-tick auto-follow window, log-scaled brightness normalized to rolling p95,
+  FLUX FIGÉ overlay on serverStale, collapsible). Both mounted in `OrderFlowPanel`
+  under the Order Book; `useOrderFlow` subscribes `/topic/depth-flow`.
+
+## Order flow — session CVD + divergence, speed of tape, big prints (2026-06-11)
+
+Three pro order-flow tools added on the classified AllLast tick stream (research gap pass):
+
+- **Session-anchored CVD (A)** — `TickByTickAggregator` now accumulates a TRUE session
+  CVD tick-by-tick (immutable `CvdState` snapshot, volatile swap; survives the 5-min
+  deque). Anchors via `TradingSessionResolver` (new `isWithinRth`/`rthSessionStart`,
+  DST-aware): **RTH open 09:30 ET inside RTH, else Globex daily start 17:00 ET**
+  (≡ 18:00 ET re-open — no prints during the maintenance halt). **Bug fixed:**
+  `TickAggregation.cumulativeDelta` was the 5-min window delta relabeled; it now carries
+  the session CVD (frontend label "Cum:" → "CVD session (RTH|GLOBEX)"). New
+  `SessionCvd`/`TapeSpeed` models + `TickDataPort.sessionCvd/tapeSpeed` defaults.
+- **CVD divergence** — pure domain `CvdDivergenceDetector` builds 1m bars internally
+  from the orchestrator's 5s (price, CVD) samples; swing pivots confirmed 5L/5R on
+  closes; price HH + CVD LH → bearish, price LL + CVD HL → bullish; `min-cvd-swing`
+  (200) filters flat CVD; pivot state clears on anchor change (never compares across a
+  CVD reset). Emits `CvdDivergenceDetected` → WS `/topic/cvd-divergence`, NO persistence.
+  Config `riskdesk.order-flow.cvd.{enabled,pivot-bars,min-cvd-swing}`.
+- **Speed of tape (B)** — `TickByTickAggregator.tapeSpeed(window, now)` (single backward
+  pass). Orchestrator z-scores 5s/30s trades/sec against a rolling 30-min baseline
+  (sampled per 5s pass, current sample excluded). Payload fields on `/topic/order-flow`:
+  `tapeSpeed5s/30s`, `tapeZ5s/30s`, `tapeRatio5s`. UI gauge: amber z≥2, red z≥3.
+  Config `riskdesk.order-flow.tape.{enabled,burst-z}`.
+- **Big prints (C)** — pure domain `BigPrintDetector` (rolling 30-min size histogram,
+  flag ≥ p99 with floor 10 contracts, threshold judged vs prior distribution).
+  `IbkrBigPrintAdapter` (implements `BigPrintPort`) wired in `IbkrTickDataAdapter`
+  routing; emits `BigPrintDetected` rate-limited 1/sec/instrument → WS
+  `/topic/big-prints`; `bigPrintDelta5m` rides `/topic/order-flow`. NO persistence.
+  Config `riskdesk.order-flow.big-print.{enabled,percentile,min-size,window-minutes}`.
+  **Caveat:** IBKR AllLast pre-aggregates same-price simultaneous executions — a
+  "print" is a match event, so big prints ≈ sweep detection (Javadoc'd).
+- Frontend: `useOrderFlow` subscribes the two new topics; `OrderFlowPanel` Delta section
+  shows CVD session, tape gauge, big-print 5m delta, "DIV ▲/▼ il y a Xm" badge (10 min),
+  and a "Big Prints" feed (8 rows). `OrderFlowOrchestrator` ctor gained
+  `ObjectProvider<BigPrintPort>`.
+## Session volume profile + footprint diagonal imbalance (UC-OF-015, 2026-06-11)
+
+Two pro order-flow upgrades for MNQ trading (gap analysis vs Sierra/Bookmap-class
+tooling):
+
+**A. Session volume profile (POC / VAH / VAL, 70% VA) + naked POCs.**
+- New pure domain calculator `SessionVolumeProfileCalculator`
+  (`domain/engine/indicators/`): distributes each 1m candle's volume across its
+  high–low range proportionally (uniform-across-ticks approximation) instead of the
+  legacy typical-price binning of `VolumeProfileCalculator` (which is unchanged and
+  still feeds Mentor/IndicatorSnapshot). Same 70% outward VA expansion. Also hosts the
+  pure naked-POC ladder logic (`nakedPocs`): a session POC is naked while no later
+  session's range touched it (developing session range acts as a toucher).
+- `TradingSessionResolver` gained RTH helpers: `rthStart/rthEnd(LocalDate)`,
+  `rthSessionDate(Instant)`, `previousRthDate`, `isWithinRth`, `overnightStart`
+  (18:00 ET Globex reopen, Sunday for Monday sessions) — all DST-aware, fixed-instant
+  tested (EDT/EST/spring-forward).
+- `VolumeProfileService` (application): current RTH session (developing flag), prior
+  session, overnight Globex session, naked-POC ladder (lookback default 10 sessions);
+  per-instrument cache, recompute at most once per
+  `riskdesk.order-flow.volume-profile.cache-seconds` (60). 1m candles from PostgreSQL
+  only. Injectable `Clock` for tests.
+- REST: `GET /api/order-flow/volume-profile/{instrument}` (400 for DXY/synthetic).
+  No WS topic. Config: `riskdesk.order-flow.volume-profile.*` (bucket-size MNQ 1.0,
+  MCL 0.05).
+- Frontend: `Chart.tsx` "VP" toggle (next to SMC/MTF) draws price lines — developing
+  POC solid amber, prior pPOC violet / pVAH+pVAL grey dashed, naked POCs dotted
+  violet `nPOC <date>` (prior session's own POC deduped). 60s poll inside Chart.
+
+**B. Footprint diagonal imbalance (industry standard) + finer MNQ buckets.**
+- The old per-level `imbalance` flag compared buy vs sell at the SAME price — not the
+  pro signal. It is kept (deprecated) in `FootprintLevel` for persisted-JSON
+  backward compat. New per-level flags: `diagonalBuyImbalance` (buy(P) ≥ ratio ×
+  sell(P − 1 bucket)) and `diagonalSellImbalance` (sell(P) ≥ ratio × buy(P + 1
+  bucket)); missing neighbour = 0; the LARGER cell of the pair must be ≥
+  `min-cell-volume` (MNQ 20, MCL 5) so 4-vs-1 never flags. Ratio default 3.0.
+- Bar-level additions on `FootprintBar`: `stackedBuyZones`/`stackedSellZones`
+  (≥3 consecutive bucket-adjacent flags, `{fromPrice,toPrice,buckets}`) and
+  `unfinishedHigh`/`unfinishedLow` (extreme bucket traded on both sides).
+- Pure logic lives in `FootprintImbalanceCalculator` (domain), shared by the live
+  `FootprintAggregator` (new 5-arg ctor; 3-arg keeps defaults) and by
+  `OrderFlowHistoryService.toBar`, which recomputes zones/unfinished from persisted
+  level JSON — old rows without the new fields parse fine (flags default false,
+  zones empty; unfinished works since it only needs volumes).
+- **`riskdesk.order-flow.footprint.bucket-size.MNQ` changed 5.0 → 2.0 points (8
+  ticks)** — research consensus 4–10 ticks/row for NQ-class; bars persisted before
+  the change have 5-point buckets (zones suppressed on them by the adjacency check).
+- Frontend `FootprintChart.tsx`: emerald/red cell borders for diagonal flags, row
+  band tint for stacked zones (+ header zone counters ⊞/⊟), ▲/▼ unfinished-auction
+  markers (also in the closed-bar history strip).
+## Quant gates + absorption pipeline recalibration (2026-06-11)
+
+Data-driven recalibration from a production audit + 90-day event study (key finding:
+DISTRIBUTION events with conf≥70 were INVERTED at 5m — 44.6% hit vs 47.7% baseline —
+while conf<70 carried a small positive edge at 15-30m). Four fixes:
+
+1. **A/D veto de-tautologized.** `InstitutionalDistributionDetector.computeConfidence`
+   floored at 50 == the old GateEvaluator veto base tier (50) ⇒ 100% of events vetoed
+   by construction. New formula: base `35 + min(15, (count-min)×5)`, log-compressed
+   score bonus `min(25, 25·log1p(max(0, avg-minAvg))/log1p(20))` (old linear bonus
+   saturated at avg≈5 while real avgScores span 2.5→50+), duration/intensity bonuses
+   kept, total capped 95. Veto tiers raised 50/65/75 → **60/70/80** (base+10/base+20)
+   and the veto now has a **linear age decay**: `effective = conf × max(0, 1-age/600s)`
+   (the 8-min detector cooldown < 10-min lookup window meant the veto re-armed before
+   expiring). Config: `riskdesk.quant.veto.{base-threshold=60,decay-seconds=600}` →
+   `QuantGateProperties` (infra) → `QuantGateConfig` (domain, Spring-free). Telemetry
+   gains `adEffectiveConfidence` (decayed); `adConfidence` stays raw.
+2. **Absorption emission de-dup.** The 10s absorption window slides every 5s ⇒ one
+   burst was counted 2-3× (~1100 rows/day MNQ, inflating n8 + the DIST streak). New
+   per-(instrument, side) `RecentSignalGate` in `OrderFlowOrchestrator`;
+   `riskdesk.order-flow.absorption.dedup-seconds=10` (default = window-seconds). A
+   sustained 30s burst still yields 3 events 10s apart ⇒ genuine streaks still fire.
+3. **Session-aware thresholds.** `riskdesk.order-flow.absorption.eth-threshold-multiplier=0.4`
+   scales the absorption/momentum delta baseline outside RTH (09:30-16:00 ET, resolved
+   DST-aware via new `TradingSessionResolver.isRegularTradingHours`); detectors stay
+   session-unaware — the orchestrator passes the resolved value.
+4. **Per-instrument G3/L3 + configurable G4/L4.** `riskdesk.quant.gates.delta-threshold.{MNQ=100,MCL=40}`
+   (+`default-delta-threshold=100`), `bearish-buy-pct=48` / `bullish-buy-pct=52`.
+   `QuantTelemetry.deltaThreshold` now reports the per-instrument resolved value.
 
 ## Candle backfill — explicit per-contract mode (`contractMonth=YYYYMM`) (2026-06-10)
 

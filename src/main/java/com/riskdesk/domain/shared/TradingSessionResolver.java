@@ -25,6 +25,13 @@ public final class TradingSessionResolver {
     public static final ZoneId CME_ZONE = ZoneId.of("America/New_York");
     public static final LocalTime CME_SESSION_CLOSE = LocalTime.of(17, 0);
 
+    /** US cash-equity Regular Trading Hours open (09:30 ET, DST-aware). */
+    public static final LocalTime RTH_OPEN = LocalTime.of(9, 30);
+    /** US cash-equity Regular Trading Hours close (16:00 ET, DST-aware). */
+    public static final LocalTime RTH_CLOSE = LocalTime.of(16, 0);
+    /** CME Globex daily reopen after the 17:00–18:00 ET maintenance halt. */
+    public static final LocalTime GLOBEX_REOPEN = LocalTime.of(18, 0);
+
     /**
      * Daily CME Globex maintenance windows (America/New_York, DST-aware).
      * <ul>
@@ -88,6 +95,35 @@ public final class TradingSessionResolver {
         }
 
         return sundayOpen.toInstant();
+    }
+
+    /**
+     * Returns {@code true} if the timestamp falls within US Regular Trading Hours:
+     * Monday–Friday 09:30–16:00 ET (DST-aware). Used as the session anchor selector
+     * for the session-anchored CVD (RTH anchor inside this window, Globex-day outside).
+     */
+    public static boolean isWithinRth(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        DayOfWeek dow = zdt.getDayOfWeek();
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) return false;
+        LocalTime t = zdt.toLocalTime();
+        return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
+    }
+
+    /**
+     * Returns the most recent RTH open (09:30 ET) at or before the given timestamp,
+     * as a UTC {@link Instant}. If the timestamp is before 09:30 ET on its calendar
+     * day, the anchor is 09:30 ET of the previous calendar day. Intended to be used
+     * together with {@link #isWithinRth(Instant)} — callers anchor RTH-scoped state
+     * only while inside the RTH window.
+     */
+    public static Instant rthSessionStart(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        LocalDate date = zdt.toLocalDate();
+        if (zdt.toLocalTime().isBefore(RTH_OPEN)) {
+            date = date.minusDays(1);
+        }
+        return date.atTime(RTH_OPEN).atZone(CME_ZONE).toInstant();
     }
 
     /**
@@ -173,6 +209,24 @@ public final class TradingSessionResolver {
     }
 
     /**
+     * Returns {@code true} when the timestamp falls inside US cash-equity
+     * Regular Trading Hours — <b>09:30–16:00 America/New_York</b> (DST-aware) —
+     * on a day the CME market is open. Everything else inside the Globex week
+     * is "ETH" (overnight / extended hours).
+     * <p>
+     * Used to scale order-flow thresholds: MNQ volume runs roughly 10–20×
+     * higher during RTH than overnight, so a single global delta threshold is
+     * either deaf overnight or hyperactive intraday. Callers (application
+     * layer) resolve the session here and pass adjusted thresholds into the
+     * domain detectors — never hardcode UTC hour boundaries.
+     */
+    public static boolean isRegularTradingHours(Instant timestamp) {
+        if (!isMarketOpen(timestamp)) return false;
+        LocalTime t = timestamp.atZone(CME_ZONE).toLocalTime();
+        return !t.isBefore(RTH_OPEN) && t.isBefore(RTH_CLOSE);
+    }
+
+    /**
      * Returns {@code true} if the timestamp falls within an ICT kill zone:
      * London 02:00–05:00 ET, NY 08:30–11:00 ET.
      * Used to gate 5m alert evaluation.
@@ -224,5 +278,65 @@ public final class TradingSessionResolver {
     /** Convenience overload using the current wall-clock time. */
     public static SessionPhase currentPhase() {
         return currentPhase(Instant.now());
+    }
+
+    // -------------------------------------------------------------------------
+    // RTH (cash session 09:30–16:00 ET) and overnight/Globex windows — used by the
+    // session volume profile (UC-OF-015). All DST-aware via CME_ZONE.
+    // -------------------------------------------------------------------------
+
+    /** Start of the RTH session for the given ET calendar date: 09:30 ET as UTC Instant. */
+    public static Instant rthStart(LocalDate date) {
+        return date.atTime(RTH_OPEN).atZone(CME_ZONE).toInstant();
+    }
+
+    /** End (exclusive) of the RTH session for the given ET calendar date: 16:00 ET as UTC Instant. */
+    public static Instant rthEnd(LocalDate date) {
+        return date.atTime(RTH_CLOSE).atZone(CME_ZONE).toInstant();
+    }
+
+    /**
+     * Start of the overnight (Globex) session that precedes the RTH session of
+     * {@code rthDate}: 18:00 ET on the previous calendar day. For a Monday RTH date
+     * this is Sunday 18:00 ET — the weekly Globex reopen.
+     */
+    public static Instant overnightStart(LocalDate rthDate) {
+        return rthDate.minusDays(1).atTime(GLOBEX_REOPEN).atZone(CME_ZONE).toInstant();
+    }
+
+    /**
+     * Returns the ET calendar date of the most recent RTH session that has
+     * <em>started</em> at or before {@code timestamp}. Before 09:30 ET the current
+     * day's RTH has not started, so the previous weekday is returned; weekends roll
+     * back to Friday. Holidays are not modelled — a holiday session simply has no
+     * candles and is skipped by callers.
+     */
+    public static LocalDate rthSessionDate(Instant timestamp) {
+        ZonedDateTime zdt = timestamp.atZone(CME_ZONE);
+        LocalDate date = zdt.toLocalDate();
+        if (zdt.toLocalTime().isBefore(RTH_OPEN)) {
+            date = date.minusDays(1);
+        }
+        return rollBackToWeekday(date);
+    }
+
+    /** Previous weekday (Mon–Fri) strictly before the given ET date. */
+    public static LocalDate previousRthDate(LocalDate date) {
+        return rollBackToWeekday(date.minusDays(1));
+    }
+
+    /**
+     * Returns {@code true} if the timestamp falls inside the RTH window
+     * (09:30 ≤ t &lt; 16:00 ET) of the given ET calendar date.
+     */
+    public static boolean isWithinRth(Instant timestamp, LocalDate date) {
+        return !timestamp.isBefore(rthStart(date)) && timestamp.isBefore(rthEnd(date));
+    }
+
+    private static LocalDate rollBackToWeekday(LocalDate date) {
+        while (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+            date = date.minusDays(1);
+        }
+        return date;
     }
 }

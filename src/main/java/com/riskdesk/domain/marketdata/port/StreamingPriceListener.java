@@ -11,4 +11,12 @@ import java.time.Instant;
  */
 public interface StreamingPriceListener {
     void onLivePriceUpdate(Instrument instrument, BigDecimal price, Instant timestamp);
+
+    /**
+     * Traded-volume increment (in contracts) since the previous update, derived from the
+     * exchange's session-cumulative volume counter. This — not the count of price updates —
+     * is the scale that matches IBKR historical bars.
+     */
+    default void onLiveVolumeUpdate(Instrument instrument, long volumeDelta, Instant timestamp) {
+    }
 }

@@ -12,8 +12,14 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
@@ -54,10 +60,20 @@ public class MutableOrderBook {
     // book reads as "just born" rather than 1970.
     private volatile long lastUpdateMillis = System.currentTimeMillis();
 
-    // Wall state tracking
-    private final boolean[] bidWasWall = new boolean[MAX_DEPTH];
-    private final boolean[] askWasWall = new boolean[MAX_DEPTH];
+    // Wall state tracking — keyed by tick-rounded PRICE, not array index. Index-keyed
+    // flags flicker on every book shift: an INSERT/DELETE moves the same resting order
+    // to a new index, emitting spurious APPEARED/DISAPPEARED pairs at neighbouring
+    // prices (the source of duplicate spoof signals and 0.0s "icebergs"). Only the
+    // writer thread mutates these maps.
+    private final Map<Long, TrackedWall> bidWalls = new HashMap<>();
+    private final Map<Long, TrackedWall> askWalls = new HashMap<>();
     private final ConcurrentLinkedDeque<WallEvent> wallEvents = new ConcurrentLinkedDeque<>();
+
+    /** Last known price/size of a tracked wall — so DISAPPEARED carries the wall's own values. */
+    private static final class TrackedWall {
+        double price;
+        long lastSize;
+    }
 
     private final double wallThresholdMultiplier;
 
@@ -75,7 +91,7 @@ public class MutableOrderBook {
      * @param size      size at this level
      * @param instrument the instrument (for wall event creation)
      */
-    public void updateDepth(int position, String operation, String side,
+    public synchronized void updateDepth(int position, String operation, String side,
                             double price, long size, Instrument instrument) {
         if (position < 0 || position >= MAX_DEPTH) {
             return;
@@ -101,6 +117,31 @@ public class MutableOrderBook {
         }
 
         checkWalls(instrument);
+    }
+
+    /**
+     * Empties the book. Must be called before a (re)subscription so the fresh IBKR
+     * snapshot (INSERTs at positions 0..N-1) never merges into levels from a previous
+     * price regime or contract — without this, a thin fresh snapshot leaves phantom
+     * deep levels pinned forever (the "25-point spread" frozen-ladder symptom).
+     * Wall events are retained: they are timestamped history and clearing them
+     * mid-window would blind the spoofing detector to a wall pulled just before
+     * the resubscription.
+     */
+    public synchronized void clear() {
+        generation++;
+        try {
+            Arrays.fill(bidPrices, 0);
+            Arrays.fill(bidSizes, 0);
+            Arrays.fill(askPrices, 0);
+            Arrays.fill(askSizes, 0);
+            bidCount = 0;
+            askCount = 0;
+        } finally {
+            generation++;
+        }
+        bidWalls.clear();
+        askWalls.clear();
     }
 
     private void applyMutation(double[] prices, long[] sizes, int position,
@@ -293,11 +334,12 @@ public class MutableOrderBook {
      */
     private void checkWalls(Instrument instrument) {
         Instant now = Instant.now();
+        double tickSize = instrument.getTickSize().doubleValue();
 
-        checkWallSide(bidPrices, bidSizes, bidCount, bidWasWall,
-                      WallEvent.WallSide.BID, instrument, now);
-        checkWallSide(askPrices, askSizes, askCount, askWasWall,
-                      WallEvent.WallSide.ASK, instrument, now);
+        checkWallSide(bidPrices, bidSizes, bidCount, bidWalls,
+                      WallEvent.WallSide.BID, instrument, tickSize, now);
+        checkWallSide(askPrices, askSizes, askCount, askWalls,
+                      WallEvent.WallSide.ASK, instrument, tickSize, now);
 
         // Bound deque size
         while (wallEvents.size() > MAX_WALL_EVENTS) {
@@ -306,13 +348,11 @@ public class MutableOrderBook {
     }
 
     private void checkWallSide(double[] prices, long[] sizes, int count,
-                               boolean[] wasWall, WallEvent.WallSide side,
-                               Instrument instrument, Instant now) {
+                               Map<Long, TrackedWall> tracked, WallEvent.WallSide side,
+                               Instrument instrument, double tickSize, Instant now) {
         if (count == 0) {
-            // Clear all wall states when no levels present
-            for (int i = 0; i < MAX_DEPTH; i++) {
-                wasWall[i] = false;
-            }
+            // Side emptied: every tracked wall is gone — emit with the wall's OWN values.
+            emitAllDisappeared(tracked, side, instrument, now);
             return;
         }
 
@@ -323,27 +363,52 @@ public class MutableOrderBook {
         double avg = (double) total / count;
         double threshold = wallThresholdMultiplier * avg;
 
+        Set<Long> stillWalled = new HashSet<>(4);
         for (int i = 0; i < count; i++) {
-            boolean isWallNow = avg > 0 && sizes[i] > threshold;
-            if (isWallNow && !wasWall[i]) {
+            if (!(avg > 0 && sizes[i] > threshold)) continue;
+            long key = Math.round(prices[i] / tickSize);
+            stillWalled.add(key);
+            TrackedWall wall = tracked.get(key);
+            if (wall == null) {
+                wall = new TrackedWall();
+                wall.price = prices[i];
+                wall.lastSize = sizes[i];
+                tracked.put(key, wall);
                 wallEvents.addLast(new WallEvent(
                     instrument, side, prices[i], sizes[i], now,
                     WallEvent.WallEventType.APPEARED
                 ));
-                wasWall[i] = true;
-            } else if (!isWallNow && wasWall[i]) {
-                wallEvents.addLast(new WallEvent(
-                    instrument, side, prices[i], sizes[i], now,
-                    WallEvent.WallEventType.DISAPPEARED
-                ));
-                wasWall[i] = false;
+            } else {
+                // Same price still walled (possibly at a new index after a shift) —
+                // refresh size, no event: this is the flicker the old index-keyed
+                // flags converted into APPEARED/DISAPPEARED noise.
+                wall.lastSize = sizes[i];
             }
         }
 
-        // Clear wall state for levels beyond current count
-        for (int i = count; i < MAX_DEPTH; i++) {
-            wasWall[i] = false;
+        Iterator<Map.Entry<Long, TrackedWall>> it = tracked.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Long, TrackedWall> entry = it.next();
+            if (stillWalled.contains(entry.getKey())) continue;
+            TrackedWall wall = entry.getValue();
+            wallEvents.addLast(new WallEvent(
+                instrument, side, wall.price, wall.lastSize, now,
+                WallEvent.WallEventType.DISAPPEARED
+            ));
+            it.remove();
         }
+    }
+
+    private void emitAllDisappeared(Map<Long, TrackedWall> tracked, WallEvent.WallSide side,
+                                    Instrument instrument, Instant now) {
+        if (tracked.isEmpty()) return;
+        for (TrackedWall wall : tracked.values()) {
+            wallEvents.addLast(new WallEvent(
+                instrument, side, wall.price, wall.lastSize, now,
+                WallEvent.WallEventType.DISAPPEARED
+            ));
+        }
+        tracked.clear();
     }
 
     public boolean hasData() {

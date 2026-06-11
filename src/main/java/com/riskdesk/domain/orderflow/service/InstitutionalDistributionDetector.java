@@ -192,22 +192,50 @@ public final class InstitutionalDistributionDetector {
     }
 
     /**
-     * Confidence 0-100 based on count above threshold, average score, duration,
+     * Confidence 0-95 based on count above threshold, average score, duration,
      * and delta intensity (directional conviction of the streak).
+     *
+     * <p><b>Recalibrated — 2026-06 production audit + 90-day event study.</b>
+     * The previous formula had two structural defects:</p>
      * <ul>
-     *   <li>Base: 50 at threshold, climbs with extra consecutive events</li>
-     *   <li>Score bonus: up to +20 for average score well above threshold</li>
-     *   <li>Duration bonus: up to +30 for sustained patterns (10+ min)</li>
-     *   <li>Intensity bonus: up to +15 for high |cumDelta| / totalVolume ratio</li>
+     *   <li><b>Tautological floor.</b> Base was clamped to
+     *       {@code min(80, max(50, …))} — a FLOOR of 50, identical to the
+     *       GateEvaluator's old veto base tier (50). Every DISTRIBUTION event
+     *       therefore armed the structural veto by construction; confidence
+     *       carried zero discriminating power at the gate.</li>
+     *   <li><b>Saturating score bonus.</b>
+     *       {@code min(20, ((avg-minAvg)/minAvg)*20)} maxed out at
+     *       {@code avg = 2×minAvg ≈ 5.0}, while real averages span 2.5→50+
+     *       (the CLASSIC and DIVERGENCE score formulas are heterogeneous).
+     *       Confidence ended up dominated by count/duration, not absorption
+     *       strength. The event study confirms the mis-scoring: conf≥70
+     *       DISTRIBUTION events were INVERTED at 5 m (price pops UP — 44.6%
+     *       hit vs 47.7% baseline) while conf&lt;70 carried a small positive
+     *       edge at 15–30 m.</li>
      * </ul>
+     *
+     * <p>New components:</p>
+     * <ul>
+     *   <li>Base: {@code 35 + min(15, (count - minConsecutive) × 5)} — floor 35,
+     *       meaningfully below the 60 veto base tier</li>
+     *   <li>Score bonus: {@code min(25, 25 × log1p(max(0, avg - minAvgScore)) / log1p(20))}
+     *       — log compression discriminates across the real 2.5→50+ range
+     *       instead of saturating at 5.0</li>
+     *   <li>Duration bonus: up to +30 for sustained patterns (10+ min), unchanged</li>
+     *   <li>Intensity bonus: up to +15 for high |cumDelta| / totalVolume ratio, unchanged</li>
+     *   <li>Total capped at 95</li>
+     * </ul>
+     *
+     * <p>Net effect: a minimal streak (3 events scraping the score floor,
+     * short duration) lands ~40-50 — below the veto tier; only sustained,
+     * high-score streaks reach 70+.</p>
      */
     private int computeConfidence(int count, double avgScore, double durationSeconds,
                                    long cumDelta, long totalVolume) {
-        double base = 50.0 + ((double) (count - minConsecutiveCount) / minConsecutiveCount) * 30.0;
-        base = Math.min(80.0, Math.max(50.0, base));
+        double base = 35.0 + Math.min(15.0, (count - minConsecutiveCount) * 5.0);
 
-        double scoreBonus = Math.min(20.0, ((avgScore - minAvgScore) / minAvgScore) * 20.0);
-        scoreBonus = Math.max(0.0, scoreBonus);
+        double scoreBonus = Math.min(25.0,
+            25.0 * Math.log1p(Math.max(0.0, avgScore - minAvgScore)) / Math.log1p(20.0));
 
         double durationMinutes = durationSeconds / 60.0;
         double durationBonus = Math.min(30.0, (durationMinutes / 10.0) * 30.0);
@@ -217,7 +245,7 @@ public final class InstitutionalDistributionDetector {
         double intensityBonus = Math.min(15.0, deltaIntensity * 15.0);
 
         int confidence = (int) Math.round(base + scoreBonus + durationBonus + intensityBonus);
-        return Math.max(0, Math.min(100, confidence));
+        return Math.max(0, Math.min(95, confidence));
     }
 
     /** Reset all state (e.g. after session boundary). */

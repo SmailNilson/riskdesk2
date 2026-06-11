@@ -30,6 +30,11 @@ public class OrderFlowProperties {
     private TickChart tickChart = new TickChart();
     private Footprint footprint = new Footprint();
     private WallTracker wallTracker = new WallTracker();
+    private DepthFlow depthFlow = new DepthFlow();
+    private Cvd cvd = new Cvd();
+    private Tape tape = new Tape();
+    private BigPrint bigPrint = new BigPrint();
+    private VolumeProfile volumeProfile = new VolumeProfile();
 
     public TickByTick getTickByTick() { return tickByTick; }
     public void setTickByTick(TickByTick tickByTick) { this.tickByTick = tickByTick; }
@@ -61,6 +66,16 @@ public class OrderFlowProperties {
     public void setFootprint(Footprint footprint) { this.footprint = footprint; }
     public WallTracker getWallTracker() { return wallTracker; }
     public void setWallTracker(WallTracker wallTracker) { this.wallTracker = wallTracker; }
+    public DepthFlow getDepthFlow() { return depthFlow; }
+    public void setDepthFlow(DepthFlow depthFlow) { this.depthFlow = depthFlow; }
+    public Cvd getCvd() { return cvd; }
+    public void setCvd(Cvd cvd) { this.cvd = cvd; }
+    public Tape getTape() { return tape; }
+    public void setTape(Tape tape) { this.tape = tape; }
+    public BigPrint getBigPrint() { return bigPrint; }
+    public void setBigPrint(BigPrint bigPrint) { this.bigPrint = bigPrint; }
+    public VolumeProfile getVolumeProfile() { return volumeProfile; }
+    public void setVolumeProfile(VolumeProfile volumeProfile) { this.volumeProfile = volumeProfile; }
 
     /** Tick-by-tick data subscription (reqTickByTickData). */
     public static class TickByTick {
@@ -171,6 +186,72 @@ public class OrderFlowProperties {
         public void setMinSize(long v) { this.minSize = v; }
     }
 
+    /**
+     * Continuous depth-flow signals (OFI, queue imbalance, liquidity vacuum, pull/stack)
+     * computed from successive 500ms {@code DepthMetrics} snapshots by the per-instrument
+     * {@code DepthFlowAnalyzer}. Defaults are tuned for MNQ's thin micro book.
+     */
+    public static class DepthFlow {
+        private boolean enabled = true;
+        /** Evaluation cadence — matches the /topic/depth publication cadence (500ms). */
+        private long evalIntervalMs = 500;
+        /**
+         * Snapshots older than this (and evaluation gaps wider than this) reset the analyzer —
+         * flow is never computed across a frozen-feed gap.
+         */
+        private double staleGapSeconds = 10.0;
+        /**
+         * Combined best-level mass (qb+qa) below which queue imbalance is flagged not
+         * meaningful. 10 contracts ≈ a normal MNQ RTH best level; overnight the book is
+         * thinner and a 1-vs-3 lot "imbalance" is pure noise.
+         */
+        private long minQueueMass = 10;
+        /** Queue imbalance EMA time constant (~3s — Stoikov's micro-price horizon). */
+        private double imbalanceEmaSeconds = 3.0;
+        /**
+         * Per-level resting-size change at/below this (contracts) is ignored by pull/stack —
+         * 1-2 lot flicker is retail/MM noise on MNQ.
+         */
+        private long noiseFloorContracts = 2;
+        /** Side depth below this fraction of its rolling baseline = depletion candidate (0.4). */
+        private double vacuumDepletionRatio = 0.4;
+        /** The opposite side must hold at/above this fraction of its baseline for a vacuum (0.7). */
+        private double vacuumHoldRatio = 0.7;
+        /** Both sides below this fraction of baseline = THIN (overall withdrawal). */
+        private double thinRatio = 0.5;
+        /** A depletion candidate must persist this long before VACUUM_BID/ASK is flagged (3s). */
+        private double vacuumPersistenceSeconds = 3.0;
+        /** |z| of the 10s OFI sum at/above this sets the ofiExtreme flag (UI amber; red ≥3). */
+        private double ofiZFlagThreshold = 2.0;
+        /** Rolling window for the depth baselines and the OFI z distribution (5 min). */
+        private double baselineWindowSeconds = 300.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public long getEvalIntervalMs() { return evalIntervalMs; }
+        public void setEvalIntervalMs(long v) { this.evalIntervalMs = v; }
+        public double getStaleGapSeconds() { return staleGapSeconds; }
+        public void setStaleGapSeconds(double v) { this.staleGapSeconds = v; }
+        public long getMinQueueMass() { return minQueueMass; }
+        public void setMinQueueMass(long v) { this.minQueueMass = v; }
+        public double getImbalanceEmaSeconds() { return imbalanceEmaSeconds; }
+        public void setImbalanceEmaSeconds(double v) { this.imbalanceEmaSeconds = v; }
+        public long getNoiseFloorContracts() { return noiseFloorContracts; }
+        public void setNoiseFloorContracts(long v) { this.noiseFloorContracts = v; }
+        public double getVacuumDepletionRatio() { return vacuumDepletionRatio; }
+        public void setVacuumDepletionRatio(double v) { this.vacuumDepletionRatio = v; }
+        public double getVacuumHoldRatio() { return vacuumHoldRatio; }
+        public void setVacuumHoldRatio(double v) { this.vacuumHoldRatio = v; }
+        public double getThinRatio() { return thinRatio; }
+        public void setThinRatio(double v) { this.thinRatio = v; }
+        public double getVacuumPersistenceSeconds() { return vacuumPersistenceSeconds; }
+        public void setVacuumPersistenceSeconds(double v) { this.vacuumPersistenceSeconds = v; }
+        public double getOfiZFlagThreshold() { return ofiZFlagThreshold; }
+        public void setOfiZFlagThreshold(double v) { this.ofiZFlagThreshold = v; }
+        public double getBaselineWindowSeconds() { return baselineWindowSeconds; }
+        public void setBaselineWindowSeconds(double v) { this.baselineWindowSeconds = v; }
+    }
+
     /** Tick data logging (persistence for calibration). */
     public static class TickLog {
         private boolean enabled = true;
@@ -216,6 +297,38 @@ public class OrderFlowProperties {
         private int volumeHistorySize = 12;
         /** Baseline delta normaliser — score = (|delta|/deltaThreshold) × stability × (vol/avgVol). */
         private long deltaThreshold = 50;
+        /**
+         * Emission de-dup window (seconds) per (instrument, side): a new
+         * AbsorptionDetected is suppressed when the previous one for the same
+         * instrument+side was emitted less than this many seconds ago. The
+         * {@link #windowSeconds 10s detection window} is re-evaluated every 5s,
+         * so without this gate one 10-15s burst was multiply counted by 2-3
+         * overlapping windows — inflating the DB (~1100 rows/day on MNQ, mostly
+         * resampling noise), the quant n8 counts and the distribution detector's
+         * "3 consecutive events" streak (one micro-burst == instant streak).
+         * {@code null} (default) = use {@link #windowSeconds}, i.e. only
+         * non-overlapping windows emit. Expected effect on MNQ: raw emission
+         * drops ~2-3× (theoretical per-side ceiling at 10s = 8 640/day; observed
+         * bursts make the practical figure a few hundred/day).
+         * <p>
+         * Streak compatibility: the distribution detector requires 3 consecutive
+         * events ≤ 20s apart — with dedup at 10s a sustained 30s burst still
+         * yields 3 events 10s apart, so GENUINE sustained absorption still fires.
+         */
+        private Integer dedupSeconds;
+        /**
+         * Session multiplier applied to {@link #deltaThreshold} outside Regular
+         * Trading Hours (09:30-16:00 ET): MNQ volume runs 10-20× higher in RTH
+         * than overnight, so a single global threshold is either deaf overnight
+         * or hyperactive intraday. 0.4 mirrors the momentum detector's
+         * documented baseline ("e.g. 100 RTH, 40 ETH") and also scales the
+         * delta baseline fed to {@code AggressiveMomentumDetector} (the
+         * orchestrator passes the same resolved value to both). Session
+         * resolution happens in the application layer via
+         * {@code TradingSessionResolver} — the domain detectors stay
+         * session-unaware.
+         */
+        private double ethThresholdMultiplier = 0.4;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -225,13 +338,21 @@ public class OrderFlowProperties {
         public void setVolumeHistorySize(int v) { this.volumeHistorySize = v; }
         public long getDeltaThreshold() { return deltaThreshold; }
         public void setDeltaThreshold(long v) { this.deltaThreshold = v; }
+        public Integer getDedupSeconds() { return dedupSeconds; }
+        public void setDedupSeconds(Integer v) { this.dedupSeconds = v; }
+        /** Effective de-dup window: configured value, or {@link #windowSeconds} when unset. */
+        public int effectiveDedupSeconds() { return dedupSeconds != null ? dedupSeconds : windowSeconds; }
+        public double getEthThresholdMultiplier() { return ethThresholdMultiplier; }
+        public void setEthThresholdMultiplier(double v) { this.ethThresholdMultiplier = v; }
 
         /**
          * Per-instrument minimum score for an absorption event to be DISPLAYED
          * (WebSocket /topic/absorption + REST history). Internal consumers
          * (distribution chaining, quant gates, persistence) are NOT filtered.
          * Calibrated 2026-06-10 from 14 days of prod score percentiles, targeting
-         * ~5-15 displayed events/day per instrument (raw emission was ~1100/day on MNQ).
+         * ~5-15 displayed events/day per instrument (raw emission was ~1100/day
+         * on MNQ — measured BEFORE the {@link #dedupSeconds} emission gate;
+         * expect the post-dedup raw rate to be ~2-3× lower).
          */
         private Map<String, Double> minDisplayScore = new HashMap<>(Map.of(
             "MNQ", 80.0,  // ≈ P99 → ~11/day
@@ -389,6 +510,12 @@ public class OrderFlowProperties {
         private int dedupSeconds = 60;
         /** Only emit icebergs scoring at least this (0-100); filters weak single-recharge noise. */
         private double minScore = 50.0;
+        /**
+         * Width of the dedup bucket in ticks: events within the same N-tick price band
+         * share one dedup key, so one physical order flickering across adjacent levels
+         * cannot re-fire per tick. 8 ticks = 2 points on MNQ.
+         */
+        private int dedupPriceTicks = 8;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -400,6 +527,8 @@ public class OrderFlowProperties {
         public void setDedupSeconds(int v) { this.dedupSeconds = v; }
         public double getMinScore() { return minScore; }
         public void setMinScore(double v) { this.minScore = v; }
+        public int getDedupPriceTicks() { return dedupPriceTicks; }
+        public void setDedupPriceTicks(int v) { this.dedupPriceTicks = v; }
     }
 
     /**
@@ -414,6 +543,12 @@ public class OrderFlowProperties {
         private int dedupSeconds = 30;
         /** Only emit spoofs above this composite score (detector's own floor is 1.0). */
         private double minScore = 1.0;
+        /**
+         * Width of the dedup bucket in ticks: events within the same N-tick price band
+         * share one dedup key, so one physical wall flickering across adjacent levels
+         * cannot re-fire per tick (the 6-duplicate-spoof artifact). 8 ticks = 2 pts MNQ.
+         */
+        private int dedupPriceTicks = 8;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -423,6 +558,8 @@ public class OrderFlowProperties {
         public void setDedupSeconds(int v) { this.dedupSeconds = v; }
         public double getMinScore() { return minScore; }
         public void setMinScore(double v) { this.minScore = v; }
+        public int getDedupPriceTicks() { return dedupPriceTicks; }
+        public void setDedupPriceTicks(int v) { this.dedupPriceTicks = v; }
 
         /**
          * Per-instrument minimum score for a spoofing event to be DISPLAYED
@@ -490,6 +627,66 @@ public class OrderFlowProperties {
         public void setMaxBars(int v) { this.maxBars = v; }
     }
 
+    /**
+     * Session-anchored CVD divergence detector (UC-OF-CVD): swing-pivot divergences
+     * between 1m price closes and the session CVD, published on {@code /topic/cvd-divergence}.
+     */
+    public static class Cvd {
+        private boolean enabled = true;
+        /** Confirmed bars on each side of a swing pivot (5 left / 5 right). */
+        private int pivotBars = 5;
+        /** Minimum |CVD difference| (contracts) between the two pivots — filters flat-CVD noise. */
+        private long minCvdSwing = 200;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getPivotBars() { return pivotBars; }
+        public void setPivotBars(int v) { this.pivotBars = v; }
+        public long getMinCvdSwing() { return minCvdSwing; }
+        public void setMinCvdSwing(long v) { this.minCvdSwing = v; }
+    }
+
+    /**
+     * Speed of tape (trade-intensity z-score): trades/sec over trailing 5s and 30s windows,
+     * z-scored against a rolling 30-min baseline sampled every 5s by the orchestrator pass.
+     * Published in the {@code /topic/order-flow} payload.
+     */
+    public static class Tape {
+        private boolean enabled = true;
+        /** Z-score at or above which the tape counts as a burst (frontend amber; red at z≥3). */
+        private double burstZ = 2.0;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getBurstZ() { return burstZ; }
+        public void setBurstZ(double v) { this.burstZ = v; }
+    }
+
+    /**
+     * Big-print detector (UC-OF-BIGPRINT): flags AllLast prints at or above the rolling
+     * size-distribution percentile (with an absolute floor), publishes events on
+     * {@code /topic/big-prints} (rate-limited 1/sec/instrument) and a 5-min signed
+     * big-print delta in the {@code /topic/order-flow} payload.
+     */
+    public static class BigPrint {
+        private boolean enabled = true;
+        /** Distribution percentile a print must reach to be flagged (0..1]. */
+        private double percentile = 0.99;
+        /** Absolute floor (contracts) — guards thin tape where the percentile collapses. */
+        private int minSize = 10;
+        /** Rolling window (minutes) of the print-size distribution. */
+        private int windowMinutes = 30;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public double getPercentile() { return percentile; }
+        public void setPercentile(double v) { this.percentile = v; }
+        public int getMinSize() { return minSize; }
+        public void setMinSize(int v) { this.minSize = v; }
+        public int getWindowMinutes() { return windowMinutes; }
+        public void setWindowMinutes(int v) { this.windowMinutes = v; }
+    }
+
     /** Footprint chart bars (UC-OF-011): clock-aligned bars of classified tick volume per price bucket. */
     public static class Footprint {
         /** Bar duration in minutes, aligned to the wall clock (10 → 14:00, 14:10, …). */
@@ -499,13 +696,33 @@ public class OrderFlowProperties {
          * whose lower bound it falls into. Instruments not listed fall back to their
          * native tick size — which is usually far too granular for reading a footprint
          * (MNQ at 0.25 produces hundreds of one-lot levels).
+         *
+         * <p>MNQ lowered 5.0 → 2.0 (8 ticks) on 2026-06-11: research consensus for
+         * NQ-class footprints is 4–10 ticks per row; 20-tick rows destroy diagonal
+         * imbalance resolution. Bars persisted before the change have 5-point buckets.</p>
          */
         private Map<String, Double> bucketSize = new HashMap<>(Map.of(
-            "MNQ", 5.0,   // 20 ticks
+            "MNQ", 2.0,   // 8 ticks
             "MCL", 0.05   // 5 ticks
         ));
         /** Max bars returned by the history endpoint. */
         private int historyMaxBars = 50;
+        /**
+         * Diagonal imbalance dominance ratio: buy at P vs sell one bucket lower (and
+         * mirrored for sells). 3.0 = 300%, the industry default.
+         */
+        private double imbalanceRatio = 3.0;
+        /**
+         * Per-instrument minimum-volume filter: the larger cell of the diagonal pair
+         * must hold at least this many contracts to flag (a 4-vs-1 pair must not).
+         * MCL is lower because micro crude tape volume is a fraction of MNQ's.
+         */
+        private Map<String, Long> minCellVolume = new HashMap<>(Map.of(
+            "MNQ", 20L,
+            "MCL", 5L
+        ));
+        /** Fallback minimum-volume filter for instruments without an explicit entry. */
+        private long defaultMinCellVolume = 20;
 
         public int getBarMinutes() { return barMinutes; }
         public void setBarMinutes(int v) { this.barMinutes = v; }
@@ -513,5 +730,54 @@ public class OrderFlowProperties {
         public void setBucketSize(Map<String, Double> v) { this.bucketSize = v; }
         public int getHistoryMaxBars() { return historyMaxBars; }
         public void setHistoryMaxBars(int v) { this.historyMaxBars = v; }
+        public double getImbalanceRatio() { return imbalanceRatio; }
+        public void setImbalanceRatio(double v) { this.imbalanceRatio = v; }
+        public Map<String, Long> getMinCellVolume() { return minCellVolume; }
+        public void setMinCellVolume(Map<String, Long> v) { this.minCellVolume = v; }
+        public long getDefaultMinCellVolume() { return defaultMinCellVolume; }
+        public void setDefaultMinCellVolume(long v) { this.defaultMinCellVolume = v; }
+
+        /** Minimum-volume filter for an instrument, falling back to the default. */
+        public long minCellVolumeFor(String instrument) {
+            Long v = minCellVolume.get(instrument);
+            return v != null ? v : defaultMinCellVolume;
+        }
+    }
+
+    /**
+     * Session volume profile (UC-OF-015): POC / VAH / VAL (70% value area) built from
+     * internal 1m candles per RTH session, plus the naked-POC ladder.
+     */
+    public static class VolumeProfile {
+        /**
+         * Per-instrument price bucket size (points) for the session histogram.
+         * Coarser than the footprint bucket — a session profile spans the whole
+         * day's range.
+         */
+        private Map<String, Double> bucketSize = new HashMap<>(Map.of(
+            "MNQ", 1.0,
+            "MCL", 0.05
+        ));
+        /** Fallback bucket size for instruments without an explicit entry. */
+        private double defaultBucketSize = 1.0;
+        /** How many completed RTH sessions the naked-POC scan walks back. */
+        private int nakedPocLookbackSessions = 10;
+        /** Profiles are recomputed at most once per this many seconds (per instrument). */
+        private int cacheSeconds = 60;
+
+        public Map<String, Double> getBucketSize() { return bucketSize; }
+        public void setBucketSize(Map<String, Double> v) { this.bucketSize = v; }
+        public double getDefaultBucketSize() { return defaultBucketSize; }
+        public void setDefaultBucketSize(double v) { this.defaultBucketSize = v; }
+        public int getNakedPocLookbackSessions() { return nakedPocLookbackSessions; }
+        public void setNakedPocLookbackSessions(int v) { this.nakedPocLookbackSessions = v; }
+        public int getCacheSeconds() { return cacheSeconds; }
+        public void setCacheSeconds(int v) { this.cacheSeconds = v; }
+
+        /** Bucket size for an instrument, falling back to the default. */
+        public double bucketSizeFor(String instrument) {
+            Double v = bucketSize.get(instrument);
+            return v != null && v > 0 ? v : defaultBucketSize;
+        }
     }
 }
