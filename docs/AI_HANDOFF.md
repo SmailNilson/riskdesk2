@@ -38,6 +38,24 @@ same-candle SL+TP = LOSS, opposite-direction reversal). Candle data comes from
    `max(entry, bar open)` for longs — `priceInZone` setups are already in-the-money
    and would otherwise fill at impossible below-market prices (fake +$300k / 85% WR).
 
+**Round 2 (session / setup / direction / ATR-multiplier / break-even dimensions):**
+- The ONLY structurally positive family is **SHORT-only + 1h HTF bear alignment +
+  ATR exits** — 86/144 neighboring configs positive (median +$400), so it is not an
+  isolated grid spike. The LONG side of the playbook is worthless under every exit
+  scheme tested (10/144 positive, median −$9,275): MNQ bull legs do not retest the
+  zones the engine draws. PLAN exits under identical filters stay negative (median
+  −$168) — the ATR exit geometry is causally necessary, same conclusion as the
+  Quant 7-Gates recalibration (PR #441).
+- **Champion config**: MID entry, score≥5, HTF 1h, zone dedup, skip-late, SHORT-only,
+  RTH session, ATR exits SL 2.0× / TP 3.0× → 56 resolved trades, **WR 60.7%,
+  +$5,252 net / 5.5 months, PF 2.05, maxDD $1,262**, top day 24% of P&L. Highest-WR
+  strong variant: same + BREAK_RETEST-only → WR 65.6%, PF 2.76, +$4,104 (n=32).
+- Round-1's inverted-signal hope did NOT survive refinement (median −$1,771 across
+  288 inverted configs once session/ATR variants are scrutinized).
+- Caveats before any live use: n is small (56 trades), profits concentrate in
+  bear-regime months (Mar, Jun) by construction of the HTF+SHORT filter, and the
+  config was selected from an 864-config search — forward-paper it first.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with

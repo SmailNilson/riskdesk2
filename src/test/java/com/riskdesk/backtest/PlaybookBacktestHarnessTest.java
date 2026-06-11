@@ -263,19 +263,34 @@ class PlaybookBacktestHarnessTest {
 
     public record Config(String entryStyle, int minScore, double minRr, boolean htf,
                          boolean dedup, boolean skipLate, int maxHoldHours,
-                         String exitStyle, boolean invert) {
+                         String exitStyle, boolean invert,
+                         String session, String setup, String dir,
+                         double atrSl, double atrTp, boolean breakeven) {
         Config(String entryStyle, int minScore, double minRr, boolean htf,
                boolean dedup, boolean skipLate, int maxHoldHours) {
-            this(entryStyle, minScore, minRr, htf, dedup, skipLate, maxHoldHours, "PLAN", false);
+            this(entryStyle, minScore, minRr, htf, dedup, skipLate, maxHoldHours, "PLAN", false,
+                "ALL", "ALL", "ALL", 1.5, 2.25, false);
+        }
+        Config(String entryStyle, int minScore, double minRr, boolean htf,
+               boolean dedup, boolean skipLate, int maxHoldHours, String exitStyle, boolean invert) {
+            this(entryStyle, minScore, minRr, htf, dedup, skipLate, maxHoldHours, exitStyle, invert,
+                "ALL", "ALL", "ALL", 1.5, 2.25, false);
         }
         String label() {
-            return String.format("entry=%s score>=%d rr>=%.1f htf=%s dedup=%s skipLate=%s hold<=%s exit=%s%s",
+            return String.format("entry=%s score>=%d rr>=%.1f htf=%s dedup=%s skipLate=%s hold<=%s exit=%s%s%s%s%s%s%s",
                 entryStyle, minScore, minRr, htf ? "Y" : "n", dedup ? "Y" : "n", skipLate ? "Y" : "n",
-                maxHoldHours <= 0 ? "inf" : maxHoldHours + "h", exitStyle, invert ? " INVERT" : "");
+                maxHoldHours <= 0 ? "inf" : maxHoldHours + "h",
+                "ATR".equals(exitStyle) ? String.format("ATR(%.1f/%.2f)", atrSl, atrTp) : exitStyle,
+                invert ? " INVERT" : "",
+                "ALL".equals(session) ? "" : " sess=" + session,
+                "ALL".equals(setup) ? "" : " setup=" + setup,
+                "ALL".equals(dir) ? "" : " dir=" + dir,
+                breakeven ? " BE@1R" : "",
+                "");
         }
     }
 
-    private enum St { PENDING, ACTIVE, WIN, LOSS, MISSED, CANCELLED, REVERSED, TIMEOUT, OPEN }
+    private enum St { PENDING, ACTIVE, WIN, LOSS, MISSED, CANCELLED, REVERSED, TIMEOUT, BE, OPEN }
 
     private static final class Sim {
         final DecisionRec d;
@@ -284,10 +299,11 @@ class PlaybookBacktestHarnessTest {
         final double slDist, tpDist; // NaN for PLAN exits (structural levels stay fixed)
         final boolean isShort;     // traded direction (after optional inversion)
         final boolean trigShort;   // original signal side — governs the entry-touch condition
+        boolean breakeven = false;      // move SL to fill once +1R in favor
         long fillTime = -1;
         long resolveTime = -1;
         double fillPrice = Double.NaN;
-        double exitPrice = Double.NaN;   // set for WIN/LOSS/TIMEOUT
+        double exitPrice = Double.NaN;   // set for WIN/LOSS/TIMEOUT/BE
         St status = St.PENDING;
 
         Sim(DecisionRec d, double entry, double sl, double tp, double slDist, double tpDist,
@@ -356,10 +372,21 @@ class PlaybookBacktestHarnessTest {
             }
             boolean stop = s.isShort ? hi >= s.sl : lo <= s.sl;
             boolean target = s.isShort ? lo <= s.tp : hi >= s.tp;
-            if (stop) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return; }  // pessimistic
+            if (stop) {
+                boolean atBe = Math.abs(s.sl - s.fillPrice) < 1e-9;
+                s.status = atBe ? St.BE : St.LOSS;
+                s.resolveTime = t; s.exitPrice = s.sl; return;  // pessimistic: stop before target
+            }
             if (target) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return; }
             if (maxHoldS > 0 && t - s.fillTime >= maxHoldS) {
                 s.status = St.TIMEOUT; s.resolveTime = t; s.exitPrice = c1[i]; return;
+            }
+            if (s.breakeven) {  // arm after the checks: BE protects from the NEXT bar on
+                double risk = Math.abs(s.fillPrice - s.sl);
+                boolean oneR = s.isShort ? (s.fillPrice - lo) >= risk : (hi - s.fillPrice) >= risk;
+                if (oneR) {
+                    s.sl = s.fillPrice;
+                }
             }
         }
         s.status = active ? St.OPEN : St.CANCELLED;
@@ -380,10 +407,24 @@ class PlaybookBacktestHarnessTest {
                          double avgLoss, double maxDrawdown, double topDayShare, int posMonths,
                          int nMonths, Map<String, Double> monthlyPnl) {}
 
+    private static final java.time.ZoneId ET = java.time.ZoneId.of("America/New_York");
+
+    private static boolean inSession(long epoch, String session) {
+        if ("ALL".equals(session)) return true;
+        java.time.LocalTime t = Instant.ofEpochSecond(epoch).atZone(ET).toLocalTime();
+        return switch (session) {
+            case "RTH" -> !t.isBefore(java.time.LocalTime.of(9, 30)) && t.isBefore(java.time.LocalTime.of(16, 0));
+            case "NO_ON" -> !t.isBefore(java.time.LocalTime.of(8, 0)) && t.isBefore(java.time.LocalTime.of(17, 0));
+            default -> true;
+        };
+    }
+
     /** Applies decision gates + exit geometry; returns the ready-to-walk Sim or null when filtered out. */
     private Sim buildSim(DecisionRec d, Config cfg) {
         if (d.score() < cfg.minScore()) return null;
         if (cfg.skipLate() && d.late()) return null;
+        if (!"ALL".equals(cfg.setup()) && !cfg.setup().equals(d.setupType())) return null;
+        if (!inSession(d.decisionTime(), cfg.session())) return null;
         double entry = d.entry();
         if ("EDGE".equals(cfg.entryStyle()) && !"LIQUIDITY_SWEEP".equals(d.setupType())) {
             entry = "SHORT".equals(d.dir()) ? d.zoneLow() : d.zoneHigh();
@@ -395,8 +436,8 @@ class PlaybookBacktestHarnessTest {
         if ("ATR".equals(cfg.exitStyle())) {
             double atr = d.atr();
             if (atr <= 0) return null;
-            slDist = 1.5 * atr;
-            tpDist = 2.25 * atr;
+            slDist = cfg.atrSl() * atr;
+            tpDist = cfg.atrTp() * atr;
             sl = isShort ? entry + slDist : entry - slDist;
             tp = isShort ? entry - tpDist : entry + tpDist;
         } else if (cfg.invert()) {
@@ -414,7 +455,10 @@ class PlaybookBacktestHarnessTest {
             boolean aligned = isShort ? d.ema20h() < d.ema50h() : d.ema20h() > d.ema50h();
             if (!aligned) return null;
         }
-        return new Sim(d, entry, sl, tp, slDist, tpDist, isShort, trigShort);
+        if (!"ALL".equals(cfg.dir()) && ("LONG".equals(cfg.dir()) == isShort)) return null;
+        Sim sim = new Sim(d, entry, sl, tp, slDist, tpDist, isShort, trigShort);
+        sim.breakeven = cfg.breakeven();
+        return sim;
     }
 
     private boolean zoneCooldownBlocked(List<Sim> sims, DecisionRec d, double entry, long now) {
@@ -493,13 +537,14 @@ class PlaybookBacktestHarnessTest {
                 case CANCELLED -> canc++;
                 case REVERSED -> rev++;
                 case TIMEOUT -> tmo++;
+                case BE -> rev++;          // reuse the R column for breakevens (REVERSED never occurs in portfolio mode)
                 default -> open++;
             }
             double p = s.pnl();
             pnl += p;
             if (p > 0) grossW += p;
             if (p < 0) grossL -= p;
-            if (s.resolvedTrade()) {
+            if (s.resolvedTrade() || s.status == St.BE) {
                 resolved++;
                 String day = Instant.ofEpochSecond(s.resolveTime).toString().substring(0, 10);
                 daily.merge(day, p, Double::sum);
@@ -564,20 +609,33 @@ class PlaybookBacktestHarnessTest {
         System.out.println("\nBASELINE dashboard (overlapping sims): " + fmt(baseRaw));
         System.out.println("BASELINE portfolio (1 position max):    " + fmt(basePf));
 
+        record AtrExit(String style, double sl, double tp) {}
         List<Result> results = new ArrayList<>();
+        // Family A — original signal, exit/session/setup/direction redesign
         for (String entry : List.of("MID", "EDGE"))
-            for (int score : List.of(4, 5, 6))
-                for (double rr : List.of(0.0, 1.0, 1.5))
-                    for (boolean htf : List.of(false, true))
-                        for (boolean dedup : List.of(false, true))
-                            for (boolean skipLate : List.of(false, true))
-                                for (int hold : List.of(0, 6))
-                                    for (String exit : List.of("PLAN", "ATR"))
-                                        for (boolean invert : List.of(false, true)) {
-                                            Config c = new Config(entry, score, rr, htf, dedup,
-                                                skipLate, hold, exit, invert);
-                                            results.add(simulatePortfolio(decisions, c, t1, o1, h1, l1, c1));
-                                        }
+            for (AtrExit ex : List.of(new AtrExit("PLAN", 1.5, 2.25), new AtrExit("ATR", 1.0, 1.5),
+                                      new AtrExit("ATR", 1.5, 2.25), new AtrExit("ATR", 2.0, 3.0)))
+                for (boolean be : List.of(false, true))
+                    for (String sess : List.of("ALL", "RTH", "NO_ON"))
+                        for (String setup : List.of("ALL", "ZONE_RETEST", "BREAK_RETEST", "LIQUIDITY_SWEEP"))
+                            for (String dir : List.of("ALL", "LONG", "SHORT")) {
+                                Config c = new Config(entry, 5, 0, true, true, true, 0,
+                                    ex.style(), false, sess, setup, dir, ex.sl(), ex.tp(), be);
+                                results.add(simulatePortfolio(decisions, c, t1, o1, h1, l1, c1));
+                            }
+        // Family B — inverted signal refinement (best round-1 family)
+        for (String entry : List.of("MID", "EDGE"))
+            for (int score : List.of(4, 5))
+                for (boolean htf : List.of(false, true))
+                    for (boolean dedup : List.of(false, true))
+                        for (AtrExit ex : List.of(new AtrExit("ATR", 1.0, 1.5),
+                                                  new AtrExit("ATR", 1.5, 2.25), new AtrExit("ATR", 2.0, 3.0)))
+                            for (boolean be : List.of(false, true))
+                                for (String sess : List.of("ALL", "RTH", "NO_ON")) {
+                                    Config c = new Config(entry, score, 0, htf, dedup, true, 0,
+                                        ex.style(), true, sess, "ALL", "ALL", ex.sl(), ex.tp(), be);
+                                    results.add(simulatePortfolio(decisions, c, t1, o1, h1, l1, c1));
+                                }
 
         results.sort(Comparator.comparingDouble(Result::netPnl).reversed());
         System.out.println("\nPORTFOLIO MODE — TOP 25 by net PnL (min 25 resolved trades):");
