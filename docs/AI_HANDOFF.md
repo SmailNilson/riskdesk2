@@ -2,6 +2,39 @@
 
 Last updated: 2026-06-11
 
+## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
+
+Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).
+Two residues remained in prod PostgreSQL and are now fixed via the same proven pattern
+(`POST /api/candles/backfill/MNQ/{tf}?from=&to=&contractMonth=YYYYMM&replace=true&async=true`,
+jobs run strictly sequentially, polled to `DONE`):
+
+1. **1d 2026-01-01 → 03-11 was still M6 (202606).** Re-backfilled with `contractMonth=202603`:
+   47 bars purged/replaced. Validated: daily volumes jumped 1.4k–19k → **1.27M–3.18M**
+   (front-month scale) and all sampled 1d closes (6/6 days across the window) sit inside that
+   trading day's 1m low–high range (the 1m series is the reference — H6 until 2026-03-12
+   00:00 UTC, M6 after).
+2. **Pre-2026 1h/4h/1d history was thin M6 back-month junk** (volumes 0–1 typical, avg 11–101).
+   **Decision: re-backfill per front-month window rather than purge** — IBKR still serves
+   expired 2025 contracts (~2-year retention), and correct deep HTF history feeds the 1h/4h
+   trend filters used by Quant/WTX backtests. Roll calendar used (CME equity roll = Thursday
+   8 days before 3rd-Friday expiry, switch at 00:00 UTC, matching the observed Mar 12 00:00 UTC
+   H6→M6 switch in 1m): H5=202503 → 2025-03-12, M5=202506 → 2025-06-11, U5=202509 → 2025-09-10,
+   Z5=202512 → 2025-12-10, H6=202603 → 2026-03-11. Windows re-backfilled (12 jobs, all `DONE`):
+   - **1d** from 2025-03-24 (M5/U5/Z5/H6): 196 junk rows → 196 correct bars, avg vol 101 → **1.52M**
+   - **1h** from 2025-06-20 (U5/Z5/H6): 1,713 junk rows → **3,151** bars (back-month junk was
+     sparse — many hours never traded), avg vol 11.5 → **61k**
+   - **4h** from 2025-01-14 (H5/M5/U5/Z5/H6): 1,038 junk rows → **1,736** bars, avg vol 25 → **217k**
+
+Post-checks: roll seams show the expected forward-basis jump (Sep 11 +236 pts, Dec 11 +205 pts)
+with thin first-overnight volume building through the roll day — correct stitched-series
+behaviour, not residual junk. The only remaining sub-10-volume bars are Thanksgiving-2025
+closure hours (legit). **The MNQ candle store is now contract-correct across every stored
+timeframe and the full stored history**; backtests may use pre-April windows on 1h/4h/1d
+without the back-month caveat. Caveat that remains: per-window series are per-contract
+(no back-adjustment), so price levels jump at each roll seam — indicators spanning a seam
+(e.g. long EMAs) see the basis step.
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with
