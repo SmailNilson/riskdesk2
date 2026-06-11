@@ -25,8 +25,10 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -274,7 +276,7 @@ public class Quant7GatesSimulationService {
         // HTF trend filter — fail-closed: a counter-trend (or unverifiable)
         // entry is skipped. Calibration showed counter-trend entries ran
         // -0.29R/trade while HTF-aligned ones ran +0.32R/trade.
-        if (props.isHtfFilterEnabled()) {
+        if (props.htfFilterEnabled(instrument.name())) {
             Boolean aligned = ctx == null ? null : ctx.htfAligned(instrument, direction);
             if (aligned == null || !aligned) {
                 log.debug("quant-sim entry skipped instr={} dir={} — HTF filter (aligned={})",
@@ -286,12 +288,12 @@ public class Quant7GatesSimulationService {
         double slOffset = QuantSnapshot.SL_OFFSET;
         double tp1Offset = QuantSnapshot.TP1_OFFSET;
         double tp2Offset = QuantSnapshot.TP2_OFFSET;
-        if (props.getStopMode() == QuantSimStopMode.ATR && ctx != null) {
+        if (props.stopMode(instrument.name()) == QuantSimStopMode.ATR && ctx != null) {
             Double atr = ctx.atr(instrument);
             if (atr != null && atr > 0) {
-                slOffset = props.getSlAtrMult() * atr;
-                tp1Offset = props.getTp1AtrMult() * atr;
-                tp2Offset = props.getTp2AtrMult() * atr;
+                slOffset = props.slAtrMult(instrument.name()) * atr;
+                tp1Offset = props.tp1AtrMult(instrument.name()) * atr;
+                tp2Offset = props.tp2AtrMult(instrument.name()) * atr;
             } else {
                 // Fixed fallback keeps the harness alive on a cold candle store,
                 // but it is MNQ-scaled — log so the operator sees the degradation.
@@ -366,7 +368,8 @@ public class Quant7GatesSimulationService {
         // the configured policy. SLTP_ONLY ignores the flip (calibration showed
         // the immediate exit closed 79% of trades in a ~2-minute churn);
         // FLOW_AVOID_IN_PROFIT only locks in gains, never realises a loss early.
-        if (props.getExitPolicy() != QuantSimExitPolicy.SLTP_ONLY && pattern != null) {
+        QuantSimExitPolicy exitPolicy = props.exitPolicy(sim.instrument().name());
+        if (exitPolicy != QuantSimExitPolicy.SLTP_ONLY && pattern != null) {
             PatternAnalysis.TradeBias bias = dir == Quant7GatesSimulation.Direction.LONG
                 ? PatternAnalysis.TradeBias.LONG
                 : PatternAnalysis.TradeBias.SHORT;
@@ -375,8 +378,8 @@ public class Quant7GatesSimulationService {
                 double signedPts = dir == Quant7GatesSimulation.Direction.LONG
                     ? livePrice - sim.entryPrice()
                     : sim.entryPrice() - livePrice;
-                boolean honour = props.getExitPolicy() == QuantSimExitPolicy.FLOW_AVOID
-                    || (props.getExitPolicy() == QuantSimExitPolicy.FLOW_AVOID_IN_PROFIT && signedPts > 0);
+                boolean honour = exitPolicy == QuantSimExitPolicy.FLOW_AVOID
+                    || (exitPolicy == QuantSimExitPolicy.FLOW_AVOID_IN_PROFIT && signedPts > 0);
                 if (honour) {
                     String why = "flow AVOID — " + pattern.label();
                     return sim.close(livePrice, liveSource, now, why, Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
@@ -579,6 +582,31 @@ public class Quant7GatesSimulationService {
             for (Quant7GatesSimulation s : rows) if (!s.isOpen()) closed.add(s);
         }
         return aggregate(closed);
+    }
+
+    /**
+     * Pure read — per-instrument win/loss stats over resolved rows, keyed by
+     * instrument name (sorted). Each market is judged on its own P&amp;L: an
+     * MNQ edge must not be masked (or faked) by MCL rows in a blended number.
+     */
+    public synchronized Map<String, Stats> statsByInstrument() {
+        List<Quant7GatesSimulation> closed = new ArrayList<>();
+        Quant7GatesSimulationRepositoryPort repo = repo();
+        if (repo != null) {
+            closed.addAll(repo.findAllClosed());
+        } else {
+            for (List<Quant7GatesSimulation> rows : byInstrument.values()) {
+                for (Quant7GatesSimulation s : rows) if (!s.isOpen()) closed.add(s);
+            }
+        }
+        Map<String, List<Quant7GatesSimulation>> grouped = new TreeMap<>();
+        for (Quant7GatesSimulation s : closed) {
+            if (s.isOpen()) continue;
+            grouped.computeIfAbsent(s.instrument().name(), k -> new ArrayList<>()).add(s);
+        }
+        Map<String, Stats> out = new LinkedHashMap<>();
+        grouped.forEach((name, rows) -> out.put(name, aggregate(rows)));
+        return out;
     }
 
     /** Aggregates win/loss + net P&amp;L over a list of (already resolved) rows. */

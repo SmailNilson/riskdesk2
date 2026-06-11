@@ -1,9 +1,9 @@
 'use client';
 
 import { useMemo } from 'react';
-import { useQuant7GatesSimulations } from '@/app/hooks/useQuant7GatesSimulations';
+import { computeStats, useQuant7GatesSimulations } from '@/app/hooks/useQuant7GatesSimulations';
 import { useQuantSimExecState } from '@/app/hooks/useQuantSimExecState';
-import type { Quant7GatesSimulationView, QuantSimExecState } from '@/app/lib/api';
+import type { Quant7GatesSimulationStats, Quant7GatesSimulationView, QuantSimExecState } from '@/app/lib/api';
 
 /**
  * Live tracker for the Quant 7-Gates simulation harness.
@@ -42,6 +42,20 @@ export default function Quant7GatesSimulationPanel() {
     return { open: o, closed: c };
   }, [rows]);
 
+  // Per-instrument breakdown — each market is judged on its own P&L; the
+  // global strip alone lets a winner mask (or fake) a loser in the blend.
+  const perInstrument = useMemo(() => {
+    const grouped = new Map<string, Quant7GatesSimulationView[]>();
+    for (const r of rows) {
+      const list = grouped.get(r.instrument);
+      if (list) list.push(r);
+      else grouped.set(r.instrument, [r]);
+    }
+    return Array.from(grouped.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([instrument, instrRows]) => ({ instrument, stats: computeStats(instrRows) }));
+  }, [rows]);
+
   return (
     <section className="rounded-lg border border-slate-700 bg-slate-900 p-4 text-slate-100">
       <header className="mb-3 flex items-center justify-between">
@@ -60,6 +74,14 @@ export default function Quant7GatesSimulationPanel() {
       </header>
 
       <StatsStrip stats={stats} openCount={open.length} />
+
+      {perInstrument.length > 1 && (
+        <div className="mt-2 space-y-1">
+          {perInstrument.map(({ instrument, stats: s }) => (
+            <InstrumentStatsRow key={instrument} instrument={instrument} stats={s} />
+          ))}
+        </div>
+      )}
 
       <AutoIbkrControls state={execState} error={execError} busy={execBusy} onToggle={setEnabled} />
 
@@ -172,6 +194,39 @@ function StatsStrip({
         value={formatSignedUsd(netUsd)}
         tone={netUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}
       />
+    </div>
+  );
+}
+
+/**
+ * One-line per-instrument slice of the global strip. Same reducer
+ * ({@code computeStats}) over the instrument's own rows, so the slices always
+ * sum to the global strip above them.
+ */
+function InstrumentStatsRow({
+  instrument,
+  stats,
+}: {
+  instrument: string;
+  stats: Quant7GatesSimulationStats;
+}) {
+  const winRate = stats.winRatePct;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-slate-800 bg-slate-950/40 px-2 py-1 font-mono text-[10px]">
+      <span className="w-10 font-bold text-slate-200">{instrument}</span>
+      <span className="text-amber-400">{stats.openCount} open</span>
+      <span className="text-slate-400">{stats.closedCount} closed</span>
+      <span>
+        <span className="text-emerald-400">{stats.wins}W</span>
+        <span className="text-slate-600"> / </span>
+        <span className="text-rose-400">{stats.losses}L</span>
+      </span>
+      <span className={winRateTone(winRate)}>
+        {winRate != null ? `WR ${winRate.toFixed(0)}%` : 'WR —'}
+      </span>
+      <span className={`ml-auto font-semibold ${stats.netUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+        {formatSignedUsd(stats.netUsd)}
+      </span>
     </div>
   );
 }

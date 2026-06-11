@@ -181,7 +181,7 @@ export function useQuant7GatesSimulations(): State {
  * a loss when {@code pnlPoints < 0}; exactly-zero outcomes (rare) are
  * resolved-but-flat and contribute to {@code closedCount} only.
  */
-function computeStats(rows: Quant7GatesSimulationView[]): Quant7GatesSimulationStats {
+export function computeStats(rows: Quant7GatesSimulationView[]): Quant7GatesSimulationStats {
   let closedCount = 0;
   let wins = 0;
   let losses = 0;

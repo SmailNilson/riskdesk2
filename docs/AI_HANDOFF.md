@@ -2,6 +2,29 @@
 
 Last updated: 2026-06-11
 
+## Quant 7-Gates: per-instrument sim policy + per-instrument stats (2026-06-11)
+
+The `riskdesk.quant.sim.*` paper-policy knobs were global; MNQ and MCL trade on very
+different volatility/flow profiles and their P&L was blended into one panel aggregate.
+
+- **Per-instrument config overrides** — `riskdesk.quant.sim.per-instrument.<INSTR>.<key>`
+  (e.g. `...per-instrument.MCL.sl-atr-mult=1.5`). Overridable keys: exit-policy, stop-mode,
+  atr-timeframe, atr-period, sl/tp1/tp2-atr-mult, htf-filter-enabled, htf-timeframe,
+  htf-ema-fast/slow. Unset keys inherit the global value (partial blocks are the expected
+  usage). EOD-flat / entry-blackout windows stay global — they are CME-session properties,
+  not instrument characteristics. Resolution lives in `QuantSimProperties.<key>(String
+  instrument)`; `Quant7GatesSimulationService` and `DefaultQuantSimMarketContext` resolve
+  per instrument at entry/exit time. **No per-instrument values are set yet** — validate a
+  candidate with `GET /api/quant/backtest/exits?instrument=...` before setting one.
+- **Per-instrument stats** — `Quant7GatesSimulationService.statsByInstrument()` +
+  `byInstrument` map on `GET /api/quant/simulations/stats` (each entry: closed/wins/losses/
+  WR/net pts/net USD/open count). The panel renders one compact per-instrument row under
+  the global strip (client-side grouping of the same rows, so slices always sum to the strip).
+- **Signals were already per-instrument** — each scan/gate evaluation is per instrument and
+  PR #445 made delta/abs thresholds per-instrument; this slice separates *policy* and *reporting*.
+- Tests: `Quant7GatesSimulationServicePolicyTest` (override resolution incl. partial
+  inheritance, per-instrument exit policy, statsByInstrument separation + slice-sum check).
+
 ## Tick log provenance fix + BBO circularity audit (2026-06-11)
 
 A prod log audit found every sampled `TICK #N` line reading `class=UNCLASSIFIED` with

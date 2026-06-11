@@ -111,6 +111,89 @@ class Quant7GatesSimulationServicePolicyTest {
         assertThat(row.takeProfit1()).isEqualTo(29687.25 + QuantSnapshot.TP1_OFFSET);
     }
 
+    // ── per-instrument overrides ────────────────────────────────────────────
+
+    @Test
+    void perInstrumentAtrMultsOverrideGlobals() {
+        QuantSimProperties props = propsWith(p -> {
+            p.setStopMode(QuantSimStopMode.ATR);
+            p.setSlAtrMult(2.0);
+            p.setTp1AtrMult(3.0);
+            p.setTp2AtrMult(6.0);
+            QuantSimProperties.InstrumentOverride mcl = new QuantSimProperties.InstrumentOverride();
+            mcl.setSlAtrMult(1.0);
+            mcl.setTp1AtrMult(2.0);
+            // tp2AtrMult left unset — must inherit the global 6.0.
+            p.setPerInstrument(Map.of("MCL", mcl));
+        });
+        Quant7GatesSimulationService service = service(props, stubContext(10.0, true));
+
+        service.onSnapshot(Instrument.MNQ, snapshotAt(Instrument.MNQ, 29687.25), longTradePattern());
+        service.onSnapshot(Instrument.MCL, snapshotAt(Instrument.MCL, 90.00), longTradePattern());
+
+        Quant7GatesSimulation mnq = service.listOpen().stream()
+            .filter(r -> r.instrument() == Instrument.MNQ).findFirst().orElseThrow();
+        assertThat(mnq.stopLoss()).isEqualTo(29687.25 - 20.0);     // global 2.0 × ATR 10
+
+        Quant7GatesSimulation mcl = service.listOpen().stream()
+            .filter(r -> r.instrument() == Instrument.MCL).findFirst().orElseThrow();
+        assertThat(mcl.stopLoss()).isEqualTo(90.00 - 10.0);        // override 1.0 × ATR 10
+        assertThat(mcl.takeProfit1()).isEqualTo(90.00 + 20.0);     // override 2.0 × ATR 10
+        assertThat(mcl.takeProfit2()).isEqualTo(90.00 + 60.0);     // unset → global 6.0
+    }
+
+    @Test
+    void perInstrumentExitPolicyOverridesGlobal() {
+        QuantSimProperties props = propsWith(p -> {
+            p.setExitPolicy(QuantSimExitPolicy.SLTP_ONLY);
+            p.setStopMode(QuantSimStopMode.FIXED);
+            QuantSimProperties.InstrumentOverride mnq = new QuantSimProperties.InstrumentOverride();
+            mnq.setExitPolicy(QuantSimExitPolicy.FLOW_AVOID);
+            p.setPerInstrument(Map.of("MNQ", mnq));
+        });
+        Quant7GatesSimulationService service = service(props, null);
+
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+        assertThat(service.listOpen()).hasSize(1);
+
+        // Global policy would ignore the AVOID flip — the MNQ override honours it.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29682.25), longAvoidPattern());
+        assertThat(service.listOpen()).isEmpty();
+        assertThat(service.listAll().get(0).status())
+            .isEqualTo(Quant7GatesSimulationStatus.CLOSED_FLOW_AVOID);
+    }
+
+    // ── per-instrument stats ────────────────────────────────────────────────
+
+    @Test
+    void statsByInstrumentSeparatesMarkets() {
+        QuantSimProperties props = propsWith(p -> p.setStopMode(QuantSimStopMode.FIXED));
+        Quant7GatesSimulationService service = service(props, null);
+
+        // MNQ LONG rides to TP2 (+80 pts) — a win.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(Instrument.MNQ, 29687.25), longTradePattern());
+        service.onSnapshot(Instrument.MNQ,
+            snapshotAt(Instrument.MNQ, 29687.25 + QuantSnapshot.TP2_OFFSET), longTradePattern());
+
+        // MCL LONG collapses through the SL — a loss.
+        service.onSnapshot(Instrument.MCL, snapshotAt(Instrument.MCL, 90.00), longTradePattern());
+        service.onSnapshot(Instrument.MCL, snapshotAt(Instrument.MCL, 60.00), longTradePattern());
+
+        Map<String, Quant7GatesSimulationService.Stats> by = service.statsByInstrument();
+        assertThat(by).containsOnlyKeys("MCL", "MNQ");
+        assertThat(by.get("MNQ").wins()).isEqualTo(1);
+        assertThat(by.get("MNQ").losses()).isZero();
+        assertThat(by.get("MNQ").netPoints()).isEqualTo(QuantSnapshot.TP2_OFFSET);
+        assertThat(by.get("MCL").wins()).isZero();
+        assertThat(by.get("MCL").losses()).isEqualTo(1);
+        assertThat(by.get("MCL").netPoints()).isEqualTo(-30.0);
+
+        // The blended aggregate still matches the sum of the slices.
+        Quant7GatesSimulationService.Stats total = service.stats();
+        assertThat(total.closedCount())
+            .isEqualTo(by.values().stream().mapToInt(Quant7GatesSimulationService.Stats::closedCount).sum());
+    }
+
     // ── HTF filter ──────────────────────────────────────────────────────────
 
     @Test
@@ -251,9 +334,13 @@ class Quant7GatesSimulationServicePolicyTest {
     }
 
     private static QuantSnapshot snapshotAt(double price) {
+        return snapshotAt(Instrument.MNQ, price);
+    }
+
+    private static QuantSnapshot snapshotAt(Instrument instrument, double price) {
         Map<Gate, GateResult> gates = new EnumMap<>(Gate.class);
         return new QuantSnapshot(
-            Instrument.MNQ, gates, 4, 4,
+            instrument, gates, 4, 4,
             price, "LIVE_PUSH", 0.0,
             ZonedDateTime.now(ZoneId.of("America/New_York")));
     }

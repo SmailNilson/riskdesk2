@@ -1437,6 +1437,12 @@ export interface Quant7GatesSimulationStats {
   netPoints: number;
   netUsd: number;
   openCount: number;
+  /**
+   * Per-instrument breakdown (key = instrument enum name, e.g. "MNQ").
+   * Server-side field on GET /api/quant/simulations/stats; absent on
+   * client-side derived aggregates.
+   */
+  byInstrument?: Record<string, Omit<Quant7GatesSimulationStats, 'byInstrument'>>;
 }
 
 /**
