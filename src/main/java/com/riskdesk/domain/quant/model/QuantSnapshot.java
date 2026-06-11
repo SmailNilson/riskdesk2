@@ -46,6 +46,7 @@ import java.util.Map;
  * @param longStructuralWarnings           structural warnings against LONG (score modifiers)
  * @param longStructuralScoreModifier      cumulative LONG warning modifier (≤ 0)
  * @param longBlocked                      {@code true} if any LONG block fired
+ * @param telemetry                        structured microstructure telemetry (nullable for legacy callers)
  */
 public record QuantSnapshot(
     Instrument instrument,
@@ -63,7 +64,8 @@ public record QuantSnapshot(
     List<StructuralBlock> longStructuralBlocks,
     List<StructuralWarning> longStructuralWarnings,
     int longStructuralScoreModifier,
-    boolean longBlocked
+    boolean longBlocked,
+    QuantTelemetry telemetry
 ) {
     /** SL offset (points) added to the live price for SHORT setups. */
     public static final double SL_OFFSET     = 25.0;
@@ -97,7 +99,7 @@ public record QuantSnapshot(
                           boolean shortBlocked) {
         this(instrument, gates, score, 0, price, priceSource, dayMove, scanTime,
              structuralBlocks, structuralWarnings, structuralScoreModifier, shortBlocked,
-             List.of(), List.of(), 0, false);
+             List.of(), List.of(), 0, false, null);
     }
 
     /**
@@ -110,7 +112,7 @@ public record QuantSnapshot(
                           ZonedDateTime scanTime) {
         this(instrument, gates, score, 0, price, priceSource, dayMove, scanTime,
              List.of(), List.of(), 0, false,
-             List.of(), List.of(), 0, false);
+             List.of(), List.of(), 0, false, null);
     }
 
     /**
@@ -123,7 +125,7 @@ public record QuantSnapshot(
                           ZonedDateTime scanTime) {
         this(instrument, gates, score, longScore, price, priceSource, dayMove, scanTime,
              List.of(), List.of(), 0, false,
-             List.of(), List.of(), 0, false);
+             List.of(), List.of(), 0, false, null);
     }
 
     /** New copy with the SHORT structural filter result attached. */
@@ -131,7 +133,8 @@ public record QuantSnapshot(
         if (sr == null) return this;
         return new QuantSnapshot(instrument, gates, score, longScore, price, priceSource, dayMove, scanTime,
             sr.blocks(), sr.warnings(), sr.scoreModifier(), sr.shortBlocked(),
-            longStructuralBlocks, longStructuralWarnings, longStructuralScoreModifier, longBlocked);
+            longStructuralBlocks, longStructuralWarnings, longStructuralScoreModifier, longBlocked,
+            telemetry);
     }
 
     /** New copy with the LONG structural filter result attached. */
@@ -139,7 +142,17 @@ public record QuantSnapshot(
         if (sr == null) return this;
         return new QuantSnapshot(instrument, gates, score, longScore, price, priceSource, dayMove, scanTime,
             structuralBlocks, structuralWarnings, structuralScoreModifier, shortBlocked,
-            sr.blocks(), sr.warnings(), sr.scoreModifier(), sr.shortBlocked());
+            sr.blocks(), sr.warnings(), sr.scoreModifier(), sr.shortBlocked(),
+            telemetry);
+    }
+
+    /** New copy with the structured microstructure telemetry attached. */
+    public QuantSnapshot withTelemetry(QuantTelemetry t) {
+        if (t == null) return this;
+        return new QuantSnapshot(instrument, gates, score, longScore, price, priceSource, dayMove, scanTime,
+            structuralBlocks, structuralWarnings, structuralScoreModifier, shortBlocked,
+            longStructuralBlocks, longStructuralWarnings, longStructuralScoreModifier, longBlocked,
+            t);
     }
 
     /**

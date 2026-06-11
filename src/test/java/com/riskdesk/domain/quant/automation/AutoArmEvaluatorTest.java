@@ -176,7 +176,8 @@ class AutoArmEvaluatorTest {
             Instrument.MNQ, allGatesPass(4), 4, /*longScore*/7,
             20000.0, "test", 0.0, ZonedDateTime.now(),
             List.of(), List.of(), 0, false,
-            List.of(), List.of(), 0, false
+            List.of(), List.of(), 0, false,
+            null
         );
         Optional<AutoArmDecision> decision = evaluator.evaluate(snap, CFG, Optional.empty(), null, NY_KILL_ZONE);
         assertThat(decision).isPresent();
@@ -194,7 +195,8 @@ class AutoArmEvaluatorTest {
             Instrument.MNQ, allGatesPass(7), 6, /*longScore*/7,
             20000.0, "test", 0.0, ZonedDateTime.now(),
             List.of(), List.of(), 0, false,
-            List.of(), List.of(), 0, false
+            List.of(), List.of(), 0, false,
+            null
         );
         Optional<AutoArmDecision> decision = evaluator.evaluate(snap, CFG, Optional.empty(), null, NY_KILL_ZONE);
         assertThat(decision).isPresent();
@@ -208,7 +210,8 @@ class AutoArmEvaluatorTest {
             Instrument.MNQ, allGatesPass(7), 7, /*longScore*/7,
             20000.0, "test", 0.0, ZonedDateTime.now(),
             List.of(), List.of(), 0, false,
-            List.of(), List.of(), 0, false
+            List.of(), List.of(), 0, false,
+            null
         );
         Optional<AutoArmDecision> decision = evaluator.evaluate(snap, CFG, Optional.empty(), null, NY_KILL_ZONE);
         assertThat(decision).isPresent();

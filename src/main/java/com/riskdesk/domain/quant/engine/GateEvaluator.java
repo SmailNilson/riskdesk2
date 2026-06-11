@@ -7,11 +7,14 @@ import com.riskdesk.domain.quant.model.GateResult;
 import com.riskdesk.domain.quant.model.MarketSnapshot;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
 import com.riskdesk.domain.quant.model.QuantState;
+import com.riskdesk.domain.quant.model.QuantTelemetry;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -147,34 +150,71 @@ public final class GateEvaluator {
             snap.priceSource(),
             dayMove,
             snap.now().atZone(ET)
-        );
+        ).withTelemetry(buildTelemetry(snap, working, gates));
         return new Outcome(snapshot, working);
+    }
+
+    /**
+     * Structured telemetry mirror of the values already rendered into the
+     * gate reasons — so the frontend never has to regex-parse them. Purely
+     * derived from the snapshot, the working state and the gate verdicts:
+     * no behaviour change to gate pass/fail logic.
+     */
+    static QuantTelemetry buildTelemetry(MarketSnapshot snap, QuantState working, Map<Gate, GateResult> gates) {
+        int n8 = snap.absBull8Count() + snap.absBear8Count();
+        GateResult g5 = gates.get(Gate.G5_ACCU_THRESHOLD);
+        GateResult l5 = gates.get(Gate.L5_DIST_THRESHOLD);
+        Long adEventAgeSeconds = null;
+        if (snap.distTimestamp() != null && snap.now() != null) {
+            adEventAgeSeconds = Math.max(0L, Duration.between(snap.distTimestamp(), snap.now()).getSeconds());
+        }
+        return new QuantTelemetry(
+            snap.delta(),
+            snap.delta() == null,
+            working.deltaHistory(),
+            Math.abs(G3_DELTA_THRESHOLD),
+            snap.buyPct(),
+            snap.buyPct() == null,
+            G4_BUY_PCT_LIMIT,
+            L4_BUY_PCT_LIMIT,
+            n8,
+            snap.dominantSide(),
+            snap.absFreshTotal() > 0 ? snap.absMaxScore() : null,
+            G1_MIN_N8,
+            snap.distType(),
+            snap.distConf(),
+            distThreshold(snap.delta(), snap.buyPct()),
+            accumThreshold(snap.delta(), snap.buyPct()),
+            l5 != null && !l5.ok(),
+            g5 != null && !g5.ok(),
+            adEventAgeSeconds
+        );
     }
 
     // ── Individual gates ────────────────────────────────────────────────────
 
     static GateResult evaluateG0(double dayMove, int recentBullCount) {
         if (dayMove > G0_DAY_MOVE_LIMIT) {
-            return GateResult.fail(String.format("HAUSSIER +%.0fpts depuis start", dayMove));
+            return GateResult.fail(String.format(Locale.ROOT, "HAUSSIER +%.0fpts depuis start", dayMove));
         }
         if (recentBullCount >= G0_RECENT_BULL_LIMIT) {
-            return GateResult.fail(String.format("ABS BULL x%d en 30min — biais long", recentBullCount));
+            return GateResult.fail(String.format(Locale.ROOT, "ABS BULL x%d en 30min — biais long", recentBullCount));
         }
-        return GateResult.pass(String.format("Δjour=%+.0fpts  ABSbull/30m=%d", dayMove, recentBullCount));
+        return GateResult.pass(String.format(Locale.ROOT, "Δjour=%+.0fpts  ABSbull/30m=%d", dayMove, recentBullCount));
     }
 
     static GateResult evaluateG1(MarketSnapshot snap) {
         int n8 = snap.absBull8Count() + snap.absBear8Count();
         if (n8 < G1_MIN_N8) {
-            return GateResult.fail(String.format("n8=%d<%d", n8, G1_MIN_N8));
+            return GateResult.fail(String.format(Locale.ROOT, "n8=%d<%d", n8, G1_MIN_N8));
         }
         if (!"BEAR".equals(snap.dominantSide())) {
-            return GateResult.fail(String.format("dom=%s≠BEAR", snap.dominantSide()));
+            return GateResult.fail(String.format(Locale.ROOT, "dom=%s≠BEAR", snap.dominantSide()));
         }
         if (snap.delta() != null && snap.delta() > G1_DELTA_INCOHERENCE) {
-            return GateResult.fail(String.format("Δ=%.0f>500 incohérent", snap.delta()));
+            return GateResult.fail(String.format(Locale.ROOT, "Δ=%.0f>500 incohérent", snap.delta()));
         }
-        return GateResult.pass(String.format("n8=%d dom=%s maxSc=%.1f ✓",
+        return GateResult.pass(String.format(Locale.ROOT, "n8=%d dom=%s maxSc=%.1f ✓",
             n8, snap.dominantSide(), snap.absMaxScore()));
     }
 
@@ -183,7 +223,7 @@ public final class GateEvaluator {
             .filter(e -> e.conf() >= G2_CONF_THRESHOLD)
             .count();
         boolean ok = persistence >= G2_MIN_PERSISTENCE;
-        String reason = String.format("%d/%d DIST_only≥%d%%  hist=%s",
+        String reason = String.format(Locale.ROOT, "%d/%d DIST_only≥%d%%  hist=%s",
             persistence, Math.max(distOnlyHistory.size(), G2_MIN_PERSISTENCE + 1), G2_CONF_THRESHOLD,
             formatDistHistory(distOnlyHistory, "DIST"));
         return new GateResult(ok, reason);
@@ -196,7 +236,7 @@ public final class GateEvaluator {
         boolean ok = delta < G3_DELTA_THRESHOLD;
         String trendStr = formatDeltaTrend(deltaHistory);
         String trendBonus = strictlyDecreasingAndNegative(deltaHistory) ? " +TREND✅" : "";
-        return new GateResult(ok, String.format("Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
+        return new GateResult(ok, String.format(Locale.ROOT, "Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
     }
 
     static GateResult evaluateG4(Double buyPct) {
@@ -204,7 +244,7 @@ public final class GateEvaluator {
             return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
         boolean ok = buyPct < G4_BUY_PCT_LIMIT;
-        return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));
+        return new GateResult(ok, String.format(Locale.ROOT, "buy%%=%.1f%%", buyPct));
     }
 
     static GateResult evaluateG5(MarketSnapshot snap) {
@@ -215,7 +255,7 @@ public final class GateEvaluator {
         }
         int conf = snap.distConf() != null ? snap.distConf() : 0;
         boolean blocks = conf >= threshold;
-        String reason = String.format("ACCU %d%% vs seuil=%d%% → %s",
+        String reason = String.format(Locale.ROOT, "ACCU %d%% vs seuil=%d%% → %s",
             conf, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
         return new GateResult(!blocks, reason);
     }
@@ -230,27 +270,27 @@ public final class GateEvaluator {
     /** L0 — daily regime filter, mirror of G0. Bearish day (or repeated ABS BEAR) suspends LONG. */
     static GateResult evaluateL0(double dayMove, int recentBearCount) {
         if (dayMove < -G0_DAY_MOVE_LIMIT) {
-            return GateResult.fail(String.format("BAISSIER %+.0fpts depuis start", dayMove));
+            return GateResult.fail(String.format(Locale.ROOT, "BAISSIER %+.0fpts depuis start", dayMove));
         }
         if (recentBearCount >= G0_RECENT_BULL_LIMIT) {
-            return GateResult.fail(String.format("ABS BEAR x%d en 30min — biais short", recentBearCount));
+            return GateResult.fail(String.format(Locale.ROOT, "ABS BEAR x%d en 30min — biais short", recentBearCount));
         }
-        return GateResult.pass(String.format("Δjour=%+.0fpts  ABSbear/30m=%d", dayMove, recentBearCount));
+        return GateResult.pass(String.format(Locale.ROOT, "Δjour=%+.0fpts  ABSbear/30m=%d", dayMove, recentBearCount));
     }
 
     /** L1 — coherent bullish absorption, mirror of G1. */
     static GateResult evaluateL1(MarketSnapshot snap) {
         int n8 = snap.absBull8Count() + snap.absBear8Count();
         if (n8 < G1_MIN_N8) {
-            return GateResult.fail(String.format("n8=%d<%d", n8, G1_MIN_N8));
+            return GateResult.fail(String.format(Locale.ROOT, "n8=%d<%d", n8, G1_MIN_N8));
         }
         if (!"BULL".equals(snap.dominantSide())) {
-            return GateResult.fail(String.format("dom=%s≠BULL", snap.dominantSide()));
+            return GateResult.fail(String.format(Locale.ROOT, "dom=%s≠BULL", snap.dominantSide()));
         }
         if (snap.delta() != null && snap.delta() < -G1_DELTA_INCOHERENCE) {
-            return GateResult.fail(String.format("Δ=%.0f<-500 incohérent", snap.delta()));
+            return GateResult.fail(String.format(Locale.ROOT, "Δ=%.0f<-500 incohérent", snap.delta()));
         }
-        return GateResult.pass(String.format("n8=%d dom=%s maxSc=%.1f ✓",
+        return GateResult.pass(String.format(Locale.ROOT, "n8=%d dom=%s maxSc=%.1f ✓",
             n8, snap.dominantSide(), snap.absMaxScore()));
     }
 
@@ -260,7 +300,7 @@ public final class GateEvaluator {
             .filter(e -> e.conf() >= G2_CONF_THRESHOLD)
             .count();
         boolean ok = persistence >= G2_MIN_PERSISTENCE;
-        String reason = String.format("%d/%d ACCU_only≥%d%%  hist=%s",
+        String reason = String.format(Locale.ROOT, "%d/%d ACCU_only≥%d%%  hist=%s",
             persistence, Math.max(accuOnlyHistory.size(), G2_MIN_PERSISTENCE + 1), G2_CONF_THRESHOLD,
             formatDistHistory(accuOnlyHistory, "ACCU"));
         return new GateResult(ok, reason);
@@ -274,7 +314,7 @@ public final class GateEvaluator {
         boolean ok = delta > L3_DELTA_THRESHOLD;
         String trendStr = formatDeltaTrend(deltaHistory);
         String trendBonus = strictlyIncreasingAndPositive(deltaHistory) ? " +TREND✅" : "";
-        return new GateResult(ok, String.format("Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
+        return new GateResult(ok, String.format(Locale.ROOT, "Δ=%.0f [%s]%s", delta, trendStr, trendBonus));
     }
 
     /** L4 — buy% &gt; 52, mirror of G4. */
@@ -283,7 +323,7 @@ public final class GateEvaluator {
             return GateResult.abstain("buy%=ABSTAIN (feed down)");
         }
         boolean ok = buyPct > L4_BUY_PCT_LIMIT;
-        return new GateResult(ok, String.format("buy%%=%.1f%%", buyPct));
+        return new GateResult(ok, String.format(Locale.ROOT, "buy%%=%.1f%%", buyPct));
     }
 
     /** L5 — conditional DIST threshold, mirror of G5. */
@@ -295,7 +335,7 @@ public final class GateEvaluator {
         }
         int conf = snap.distConf() != null ? snap.distConf() : 0;
         boolean blocks = conf >= threshold;
-        String reason = String.format("DIST %d%% vs seuil=%d%% → %s",
+        String reason = String.format(Locale.ROOT, "DIST %d%% vs seuil=%d%% → %s",
             conf, threshold, blocks ? "BLOQUE ❌" : "PASS ✅");
         return new GateResult(!blocks, reason);
     }

@@ -5,6 +5,7 @@ import com.riskdesk.domain.quant.advisor.AiAdvice;
 import com.riskdesk.domain.quant.model.Gate;
 import com.riskdesk.domain.quant.model.GateResult;
 import com.riskdesk.domain.quant.model.QuantSnapshot;
+import com.riskdesk.domain.quant.model.QuantTelemetry;
 import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import com.riskdesk.domain.quant.port.QuantNotificationPort;
 import com.riskdesk.domain.quant.structure.StructuralBlock;
@@ -136,7 +137,37 @@ public class QuantWebSocketAdapter implements QuantNotificationPort {
         root.put("longFinalScore", snapshot.longFinalScore());
         root.put("longBlocked", snapshot.longBlocked());
         root.put("longAvailable", snapshot.longAvailable());
+
+        // ── Structured microstructure telemetry ─────────────────────────
+        // Same field names as QuantSnapshotResponse.TelemetryView so the
+        // frontend consumes one shape from both REST and WebSocket.
+        root.put("telemetry", serialiseTelemetry(snapshot.telemetry()));
         return root;
+    }
+
+    private static Map<String, Object> serialiseTelemetry(QuantTelemetry t) {
+        if (t == null) return null;
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("delta", t.delta());
+        out.put("deltaAbstain", t.deltaAbstain());
+        out.put("deltaHistory", t.deltaHistory());
+        out.put("deltaThreshold", t.deltaThreshold());
+        out.put("buyPct", t.buyPct());
+        out.put("buyAbstain", t.buyAbstain());
+        out.put("bearishLimitPct", t.bearishLimitPct());
+        out.put("bullishLimitPct", t.bullishLimitPct());
+        out.put("absorptionN8", t.absorptionN8());
+        out.put("absorptionDominance", t.absorptionDominance());
+        out.put("absorptionMaxScore", t.absorptionMaxScore());
+        out.put("absorptionMinN8", t.absorptionMinN8());
+        out.put("adType", t.adType());
+        out.put("adConfidence", t.adConfidence());
+        out.put("adDistThreshold", t.adDistThreshold());
+        out.put("adAccuThreshold", t.adAccuThreshold());
+        out.put("adLongBlocked", t.adLongBlocked());
+        out.put("adShortBlocked", t.adShortBlocked());
+        out.put("adEventAgeSeconds", t.adEventAgeSeconds());
+        return out;
     }
 
     private static List<Map<String, Object>> serialiseBlocks(List<StructuralBlock> source) {
