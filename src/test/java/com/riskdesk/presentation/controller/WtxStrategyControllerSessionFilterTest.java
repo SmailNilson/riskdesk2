@@ -48,6 +48,9 @@ class WtxStrategyControllerSessionFilterTest {
 
         assertEquals(200, resp.getStatusCode().value());
         verify(service).updateSessionFilter("MNQ", "10m-z35", false);
+        // The view must expose the effective gate — the panel's Session button reads it
+        // (without it the toggle renders OFF regardless of the engine state).
+        assertEquals(false, resp.getBody().get("sessionFilterEnabled"));
     }
 
     @Test
