@@ -32,6 +32,8 @@ import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZo
 import MobileVitalStrip from './mobile/MobileVitalStrip';
 import MobileInstrumentPills from './mobile/MobileInstrumentPills';
 import MobileCollapse from './mobile/MobileCollapse';
+import OrderTicketSheet from './mobile/OrderTicketSheet';
+import MobilePositionsCard from './mobile/MobilePositionsCard';
 import { CandlestickIcon, BoltIcon, FlaskIcon, TargetIcon, BriefcaseIcon } from './mobile/TabIcons';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
@@ -71,6 +73,7 @@ export default function Dashboard() {
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>('chart');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [ticketOpen, setTicketOpen] = useState(false);
 
   const handlePurge = useCallback(async () => {
     if (purging) return;
@@ -233,7 +236,15 @@ export default function Dashboard() {
       {isMobile && (
         <main className="flex-1 flex flex-col gap-3 p-3 min-w-0 pb-[calc(4.5rem_+_env(safe-area-inset-bottom))]">
           {mobileTab === 'chart' && (
-            <TickChart selectedInstrument={instrument} snapshot={snapshot} />
+            <>
+              <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
+              <button
+                onClick={() => setTicketOpen(true)}
+                className="flex items-center justify-center gap-2 min-h-[48px] rounded-lg border border-emerald-900 bg-emerald-950/40 text-[13px] font-medium text-emerald-300 active:scale-[0.98] transition-transform"
+              >
+                Passer un ordre · {instrument}
+              </button>
+            </>
           )}
           {mobileTab === 'wtx' && (
             <>
@@ -265,11 +276,14 @@ export default function Dashboard() {
             </div>
           )}
           {mobileTab === 'portfolio' && (
-            <IbkrPortfolioPanel
-              selectedAccountId={selectedIbkrAccountId}
-              onAccountChange={setSelectedIbkrAccountId}
-              onRefreshRequested={loadSummary}
-            />
+            <>
+              <MobilePositionsCard onNewOrder={() => setTicketOpen(true)} />
+              <IbkrPortfolioPanel
+                selectedAccountId={selectedIbkrAccountId}
+                onAccountChange={setSelectedIbkrAccountId}
+                onRefreshRequested={loadSummary}
+              />
+            </>
           )}
         </main>
       )}
@@ -388,6 +402,18 @@ export default function Dashboard() {
           <ExternalSetupPanel />
         </CollapsibleZone>
       </div>
+      )}
+
+      {/* Manual order ticket — mobile bottom sheet, instrument follows the header selector */}
+      {isMobile && (
+        <OrderTicketSheet
+          open={ticketOpen}
+          instrument={instrument}
+          lastPrice={prices[instrument]?.price ?? null}
+          brokerAccountId={selectedIbkrAccountId ?? null}
+          onClose={() => setTicketOpen(false)}
+          onPlaced={() => setMobileTab('portfolio')}
+        />
       )}
 
       {/* AlertsFeed is desktop-only — intentionally absent from the mobile UI. */}
