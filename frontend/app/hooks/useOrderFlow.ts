@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Client, IMessage } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 import { API_BASE, WS_BASE } from '@/app/lib/runtimeConfig';
+import { isRingRestart, newestBySeq } from '@/app/lib/tickBarSession';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -293,6 +294,9 @@ const WS_URL = buildWsUrl(WS_BASE, API_BASE);
 
 export function useOrderFlow() {
   const clientRef = useRef<Client | null>(null);
+  /** Last known (seq, closeTime) per instrument — detects a backend tick-bar ring restart. */
+  const lastTickBarRef = useRef<Map<string, { seq: number; closeTime: number }>>(new Map());
+  const hasConnectedRef = useRef(false);
 
   const [orderFlowData, setOrderFlowData] = useState<Map<string, OrderFlowMetrics>>(new Map());
   const [depthData, setDepthData] = useState<Map<string, DepthMetrics>>(new Map());
@@ -303,6 +307,9 @@ export function useOrderFlow() {
   const [flashCrashState, setFlashCrashState] = useState<Map<string, FlashCrashState>>(new Map());
   const [footprintData, setFootprintData] = useState<Map<string, FootprintBar>>(new Map());
   const [tickBars, setTickBars] = useState<Map<string, TickBar[]>>(new Map());
+  /** Bumped whenever accumulated tick bars were dropped (STOMP reconnect or backend
+   *  ring restart) — consumers holding a REST seed must refetch it. */
+  const [tickBarResets, setTickBarResets] = useState(0);
   const [distributionEvents, setDistributionEvents] = useState<DistributionEvent[]>([]);
   const [momentumEvents, setMomentumEvents] = useState<MomentumEvent[]>([]);
   const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
@@ -317,6 +324,16 @@ export function useOrderFlow() {
       reconnectDelay: 5000,
       onConnect: () => {
         setConnected(true);
+
+        // A reconnect may follow a backend redeploy whose tick-bar ring restarted
+        // at seq 0: bars kept from the previous session would collide with the new
+        // seqs and ghost at the end of the timeline. Drop them and signal a re-seed.
+        if (hasConnectedRef.current) {
+          lastTickBarRef.current = new Map();
+          setTickBars(new Map());
+          setTickBarResets(n => n + 1);
+        }
+        hasConnectedRef.current = true;
 
         client.subscribe('/topic/order-flow', (msg: IMessage) => {
           const metrics: OrderFlowMetrics = JSON.parse(msg.body);
@@ -379,13 +396,21 @@ export function useOrderFlow() {
         });
 
         // Tick chart tail: {instrument, bars: [last completed…, in-progress]}.
-        // Merge by seq so bars completed between pushes are reconciled.
+        // Merge by seq so bars completed between pushes are reconciled. seq is
+        // only unique within one backend session: when the ring restarts (deploy)
+        // the incoming seqs regress while time moves forward — reset the
+        // instrument instead of merging, and signal seed consumers to refetch.
         client.subscribe('/topic/tick-bars', (msg: IMessage) => {
           const payload: { instrument: string; bars: TickBar[] } = JSON.parse(msg.body);
           if (!payload?.bars?.length) return;
+          const restarted = isRingRestart(lastTickBarRef.current.get(payload.instrument), payload.bars);
+          const newest = newestBySeq(payload.bars);
+          if (newest) {
+            lastTickBarRef.current.set(payload.instrument, { seq: newest.seq, closeTime: newest.closeTime });
+          }
           setTickBars(prev => {
             const next = new Map(prev);
-            const existing = next.get(payload.instrument) ?? [];
+            const existing = restarted ? [] : next.get(payload.instrument) ?? [];
             const bySeq = new Map(existing.map(b => [b.seq, b]));
             for (const bar of payload.bars) bySeq.set(bar.seq, bar);
             const merged = Array.from(bySeq.values())
@@ -394,6 +419,7 @@ export function useOrderFlow() {
             next.set(payload.instrument, merged);
             return next;
           });
+          if (restarted) setTickBarResets(n => n + 1);
         });
 
         client.subscribe('/topic/distribution', (msg: IMessage) => {
@@ -455,6 +481,7 @@ export function useOrderFlow() {
     flashCrashState,
     footprintData,
     tickBars,
+    tickBarResets,
     distributionEvents,
     momentumEvents,
     cycleEvents,
