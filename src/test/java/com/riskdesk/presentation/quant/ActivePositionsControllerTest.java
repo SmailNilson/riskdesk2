@@ -14,7 +14,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.web.server.ResponseStatusException;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -105,13 +108,33 @@ class ActivePositionsControllerTest {
     }
 
     @Test
-    void cancel_entry_with_fills_returns_409() {
+    void cancel_entry_with_fills_returns_409_with_reason() {
         when(service.cancelEntry(42L, "tester"))
             .thenThrow(new IllegalStateException("has fills — use close"));
 
-        ResponseEntity<ActivePositionView> response = controller.cancelEntry(42L, "tester");
+        // The reason must travel with the 409 (server.error.include-message=always) so the
+        // UI toast can show WHY instead of a bare status code.
+        assertThatThrownBy(() -> controller.cancelEntry(42L, "tester"))
+            .isInstanceOf(ResponseStatusException.class)
+            .satisfies(ex -> {
+                ResponseStatusException rse = (ResponseStatusException) ex;
+                assertThat(rse.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(rse.getReason()).contains("use close");
+            });
+    }
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    @Test
+    void close_rejection_returns_409_with_reason() {
+        when(service.closePosition(42L, "tester"))
+            .thenThrow(new IllegalStateException("broker truth unavailable"));
+
+        assertThatThrownBy(() -> controller.close(42L, "tester"))
+            .isInstanceOf(ResponseStatusException.class)
+            .satisfies(ex -> {
+                ResponseStatusException rse = (ResponseStatusException) ex;
+                assertThat(rse.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(rse.getReason()).contains("broker truth unavailable");
+            });
     }
 
     private static ActivePositionView sampleView(ExecutionStatus status) {

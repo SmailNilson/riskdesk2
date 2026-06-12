@@ -4,6 +4,7 @@ import com.riskdesk.application.dto.ActivePositionView;
 import com.riskdesk.application.quant.positions.ActivePositionsService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Optional;
@@ -60,7 +62,9 @@ public class ActivePositionsController {
                 .orElseGet(() -> ResponseEntity.notFound().build());
         } catch (IllegalStateException e) {
             log.warn("Close rejected for execution {} — {}", executionId, e.getMessage());
-            return ResponseEntity.status(409).build();
+            // ResponseStatusException (with server.error.include-message=always) carries the
+            // reason into the error body's "message" — the UI toast shows WHY, not a bare 409.
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e);
         }
     }
 
@@ -74,7 +78,7 @@ public class ActivePositionsController {
                 .orElseGet(() -> ResponseEntity.notFound().build());
         } catch (IllegalStateException e) {
             log.warn("Cancel-entry rejected for execution {} — {}", executionId, e.getMessage());
-            return ResponseEntity.status(409).build();
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage(), e);
         }
     }
 }
