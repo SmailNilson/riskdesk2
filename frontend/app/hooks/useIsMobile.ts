@@ -18,8 +18,14 @@ export function useIsMobile(): boolean | null {
     const mql = window.matchMedia(MOBILE_QUERY);
     const update = () => setIsMobile(mql.matches);
     update();
+    // `resize` fallback: some embedded/emulated viewports resize without
+    // dispatching matchMedia change events.
     mql.addEventListener('change', update);
-    return () => mql.removeEventListener('change', update);
+    window.addEventListener('resize', update);
+    return () => {
+      mql.removeEventListener('change', update);
+      window.removeEventListener('resize', update);
+    };
   }, []);
 
   return isMobile;

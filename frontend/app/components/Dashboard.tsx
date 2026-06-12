@@ -29,6 +29,10 @@ import WtxStrategyPanel from './WtxStrategyPanel';
 import WtxRsiStrategyPanel from './WtxRsiStrategyPanel';
 import MarketableSettingsControl from './MarketableSettingsControl';
 import CollapsibleZone, { useCollapsibleZoneState } from './layout/CollapsibleZone';
+import MobileVitalStrip from './mobile/MobileVitalStrip';
+import MobileInstrumentPills from './mobile/MobileInstrumentPills';
+import MobileCollapse from './mobile/MobileCollapse';
+import { CandlestickIcon, BoltIcon, FlaskIcon, TargetIcon, BriefcaseIcon } from './mobile/TabIcons';
 import { DEFAULT_TIMEZONE, findTimezoneByTz, TIMEZONES, type TzEntry } from '@/app/lib/timezones';
 
 const INSTRUMENTS = ['MCL', 'MGC', 'E6', 'MNQ'] as const;
@@ -42,11 +46,11 @@ type Timeframe = typeof TIMEFRAMES[number];
     the full lightweight-charts Chart…) is desktop-only and never mounted on
     mobile, so its WS subscriptions and polling never start there. */
 const MOBILE_TABS = [
-  { key: 'chart', icon: '📈', label: 'Chart' },
-  { key: 'wtx', icon: '⚡', label: 'WTX' },
-  { key: 'quant', icon: '🧪', label: 'Quant' },
-  { key: 'playbook', icon: '🎯', label: 'Playbook' },
-  { key: 'portfolio', icon: '💼', label: 'Portf' },
+  { key: 'chart', Icon: CandlestickIcon, label: 'Chart' },
+  { key: 'wtx', Icon: BoltIcon, label: 'WTX' },
+  { key: 'quant', Icon: FlaskIcon, label: 'Quant' },
+  { key: 'playbook', Icon: TargetIcon, label: 'Playbook' },
+  { key: 'portfolio', Icon: BriefcaseIcon, label: 'Portf' },
 ] as const;
 type MobileTab = typeof MOBILE_TABS[number]['key'];
 
@@ -183,33 +187,45 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Mobile instrument/timeframe selectors — always visible, larger touch targets */}
-      <div className="lg:hidden flex items-center gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-800 overflow-x-auto">
-        <TabGroup options={INSTRUMENTS} value={instrument} onChange={setInstrument} grow />
-        <TabGroup options={TIMEFRAMES} value={timeframe} onChange={setTimeframe} grow />
-      </div>
+      {/* Mobile vital strip — status + total P&L always visible, expandable */}
+      {isMobile && <MobileVitalStrip summary={summary} connected={connected} prices={prices} />}
 
-      {/* Metrics bar */}
-      <MetricsBar summary={summary} connected={connected} prices={prices} />
+      {/* Desktop metrics bar */}
+      {isMobile === false && <MetricsBar summary={summary} connected={connected} prices={prices} />}
 
       {/* Rollover warning — visible only when a contract is near expiry */}
       <RolloverBanner />
 
-      {/* Live price ticker */}
-      <div className="flex gap-4 px-4 py-1.5 bg-zinc-900/50 border-b border-zinc-800/50 overflow-x-auto">
-        {TICKER_INSTRUMENTS.map(inst => {
-          const p = prices[inst];
-          const decimals = inst === 'E6' ? 5 : inst === 'DXY' ? 3 : 2;
-          return (
-            <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
-              <span className="text-[10px] text-zinc-500">{inst}</span>
-              <span className={`text-xs font-mono ${p?.source === 'STALE' ? 'text-zinc-500' : 'text-white'}`}>
-                {p ? p.price.toFixed(decimals) : '—'}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+      {/* Desktop live price ticker — on mobile the prices live inside the pills */}
+      {isMobile === false && (
+        <div className="flex gap-4 px-4 py-1.5 bg-zinc-900/50 border-b border-zinc-800/50 overflow-x-auto">
+          {TICKER_INSTRUMENTS.map(inst => {
+            const p = prices[inst];
+            const decimals = inst === 'E6' ? 5 : inst === 'DXY' ? 3 : 2;
+            return (
+              <div key={inst} className="flex items-center gap-1.5 flex-shrink-0">
+                <span className="text-[10px] text-zinc-500">{inst}</span>
+                <span className={`text-xs font-mono ${p?.source === 'STALE' ? 'text-zinc-500' : 'text-white'}`}>
+                  {p ? p.price.toFixed(decimals) : '—'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Mobile instrument pills (live price inside) + timeframe selector */}
+      {isMobile && (
+        <div className="flex flex-col gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-800">
+          <MobileInstrumentPills
+            instruments={INSTRUMENTS}
+            active={instrument}
+            onChange={setInstrument}
+            prices={prices}
+          />
+          <TabGroup options={TIMEFRAMES} value={timeframe} onChange={setTimeframe} grow />
+        </div>
+      )}
 
       {/* Mobile — focused single-panel view driven by the bottom tab bar.
           Only the active tab's panels are mounted, so hidden panels never
@@ -222,14 +238,18 @@ export default function Dashboard() {
           {mobileTab === 'wtx' && (
             <>
               <WtxStrategyPanel instrument={instrument} timeframe="5m" liveSignals={wtxSignals} />
-              <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
+              <MobileCollapse title="WTX strategy" titleClassName="text-cyan-300" subtitle={`${instrument} · 10m`}>
+                <WtxStrategyPanel instrument={instrument} timeframe="10m" liveSignals={wtxSignals} />
+              </MobileCollapse>
               {instrument === 'MNQ' && (
-                <WtxStrategyPanel
-                  instrument={instrument}
-                  timeframe="10m-z35"
-                  displayName="top-train-Z35"
-                  liveSignals={wtxSignals}
-                />
+                <MobileCollapse title="top-train-Z35" titleClassName="text-violet-300" subtitle={`${instrument} · 10m-z35`}>
+                  <WtxStrategyPanel
+                    instrument={instrument}
+                    timeframe="10m-z35"
+                    displayName="top-train-Z35"
+                    liveSignals={wtxSignals}
+                  />
+                </MobileCollapse>
               )}
             </>
           )}
@@ -262,11 +282,14 @@ export default function Dashboard() {
               <button
                 key={tab.key}
                 onClick={() => setMobileTab(tab.key)}
-                className={`flex flex-col items-center justify-center gap-0.5 h-14 text-[10px] font-medium transition-colors ${
+                className={`relative flex flex-col items-center justify-center gap-1 h-14 text-[11px] font-medium transition-colors active:scale-[0.97] ${
                   mobileTab === tab.key ? 'text-emerald-400' : 'text-zinc-500'
                 }`}
               >
-                <span className="text-base leading-none">{tab.icon}</span>
+                {mobileTab === tab.key && (
+                  <span className="absolute top-0 w-5 h-0.5 rounded-full bg-emerald-400" />
+                )}
+                <tab.Icon />
                 {tab.label}
               </button>
             ))}
