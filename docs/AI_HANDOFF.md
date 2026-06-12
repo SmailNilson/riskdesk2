@@ -1,6 +1,24 @@
 # AI Handoff
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12
+
+## Risk gate daily-drawdown formula fixed (2026-06-12)
+
+**Bug.** The AGENTS panel showed "DAILY DRAWDOWN 83.7% > 3% — NO MORE TRADES TODAY" on a
+micro-contract account with a small dollar loss. The drawdown was computed as
+`|totalUnrealizedPnL| / totalExposure × 100` (duplicated in
+`AgentOrchestratorService.buildPortfolioState` and `PortfolioStateBuilder`). On the IBKR
+path `totalExposure` maps to the `GrossPositionValue` account tag, which **excludes
+futures** — near-zero denominator → absurd percentages → spurious kill-switch blocks.
+It also ignored today's realized P&L (not actually "daily").
+
+**Fix.** `PortfolioSummary` gained an `accountEquity` field (IBKR: `netLiquidation`;
+local fallback: configured account margin) and a single derived
+`PortfolioSummary.dailyDrawdownPct()`: `max(0, -(todayRealizedPnL + totalUnrealizedPnL))
+/ accountEquity × 100`. Unknown/zero equity → 0 (fail-open, consistent with the
+risk gates' abstain-on-unknown posture). Both consumers now delegate to it. The 3%
+threshold and blocking policy are unchanged. Tests: `PortfolioSummaryDrawdownTest`,
+`PortfolioStateBuilderDrawdownTest`.
 
 ## Chart trading MVP — click-to-trade sur le Tick Chart (2026-06-11)
 

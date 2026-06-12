@@ -45,22 +45,10 @@ public class PortfolioStateBuilder {
                 ? summary.marginUsedPct().doubleValue()
                 : 0;
 
-            // Drawdown: mirror the legacy AgentOrchestratorService convention —
-            // unrealized loss as a fraction of total exposure. A dedicated daily
-            // P&L ledger will replace this approximation when it lands.
-            double drawdown = 0;
-            if (summary.totalUnrealizedPnL() != null
-                    && summary.totalUnrealizedPnL().doubleValue() < 0
-                    && summary.totalExposure() != null
-                    && summary.totalExposure().doubleValue() > 0) {
-                drawdown = Math.abs(summary.totalUnrealizedPnL().doubleValue()
-                    / summary.totalExposure().doubleValue()) * 100;
-            }
-
             return new PortfolioState(
                 summary.totalUnrealizedPnL() != null
                     ? summary.totalUnrealizedPnL().doubleValue() : 0,
-                drawdown,
+                summary.dailyDrawdownPct(),
                 (int) summary.openPositionCount(),
                 correlated,
                 marginPct
