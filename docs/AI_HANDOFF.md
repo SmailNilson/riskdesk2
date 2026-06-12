@@ -21,10 +21,15 @@ existing Quant manual-trade API; no backend change.
   with inline confirm — close goes out as marketable limit), `EXIT_SUBMITTED`
   shown as "clôture en cours". Live via `useActivePositions`
   (`/topic/positions` push + REST seed).
-- API: `POST /api/quant/manual-trade/{instrument}` (`ManualTradeRequest`),
-  `GET /api/quant/positions/active`, `POST /api/quant/positions/{id}/close` —
-  all pre-existing (PR #305/#306 era). `takeProfit2` exists in the API but is
-  deliberately not in the mobile ticket v1.
+- API: `POST /api/quant/manual-trade/{instrument}` (`ManualTradeRequest` with
+  `submitImmediately=true` — without it a LIMIT row rests as
+  PENDING_ENTRY_SUBMISSION and never reaches IBKR — and `brokerAccountId` from
+  the Dashboard account selector), `GET /api/quant/positions/active`,
+  `POST /api/quant/positions/{id}/close` for live positions and `cancelEntry`
+  for resting orders. `takeProfit2` exists in the API but is deliberately not
+  in the mobile ticket v1. The mobile TickChart also receives
+  `brokerAccountId`, so the chart click-to-trade MVP (entry below) works on
+  mobile too.
 - After a successful placement the app switches to the Portf tab to show the
   working order.
 
@@ -43,6 +48,104 @@ Second pass on the mobile UI (see entry below for the tabbed layout itself):
   while open; wraps WTX 10m and top-train-Z35 on the WTX tab.
 - `useIsMobile` gained a `resize` fallback for viewports that don't dispatch
   matchMedia change events.
+## Risk gate daily-drawdown formula fixed (2026-06-12)
+
+**Bug.** The AGENTS panel showed "DAILY DRAWDOWN 83.7% > 3% — NO MORE TRADES TODAY" on a
+micro-contract account with a small dollar loss. The drawdown was computed as
+`|totalUnrealizedPnL| / totalExposure × 100` (duplicated in
+`AgentOrchestratorService.buildPortfolioState` and `PortfolioStateBuilder`). On the IBKR
+path `totalExposure` maps to the `GrossPositionValue` account tag, which **excludes
+futures** — near-zero denominator → absurd percentages → spurious kill-switch blocks.
+It also ignored today's realized P&L (not actually "daily").
+
+**Fix.** `PortfolioSummary` gained an `accountEquity` field (IBKR: `netLiquidation`;
+local fallback: configured account margin) and a single derived
+`PortfolioSummary.dailyDrawdownPct()`: `max(0, -(todayRealizedPnL + totalUnrealizedPnL))
+/ accountEquity × 100`. Unknown/zero equity → 0 (fail-open, consistent with the
+risk gates' abstain-on-unknown posture). Both consumers now delegate to it. The 3%
+threshold and blocking policy are unchanged. Tests: `PortfolioSummaryDrawdownTest`,
+`PortfolioStateBuilderDrawdownTest`.
+
+## Chart trading MVP — click-to-trade sur le Tick Chart (2026-06-11)
+
+**Feature.** `TickChart.tsx` gains a `TRADE` toggle (off by default). When armed, a click on
+the chart opens a context menu quoting the clicked price (tick-rounded via
+`series.coordinateToPrice`); Acheter/Vendre opens a confirmation ticket (price / qty / SL / TP
+editable, LMT or MKT) which submits a real IBKR order through the existing
+`POST /api/quant/manual-trade/{instrument}` with the new `submitImmediately=true` flag.
+Working orders + live position + virtual SL/TP are drawn as price lines fed by
+`/topic/positions` (`useActivePositions`, also newly exposing `cancelEntry`); rows under the
+chart cancel a resting entry or flatten the live position with an inline two-click confirm.
+Dashboard passes `selectedIbkrAccountId` → ticket → `ManualTradeRequest.brokerAccountId`
+(server falls back to `riskdesk.quant.auto-arm.broker-account-id`).
+
+**Backend changes (the real substance — two safety holes closed + one critical bug):**
+1. **Broker order cancellation now exists.** `IbGatewayNativeClient.cancelOrderById(int)`
+   (ApiController.cancelOrder + IOrderCancelHandler; IBKR code 202 = success), surfaced via
+   `IbkrBrokerGateway.cancelOrder` (default: unsupported) → `IbkrOrderService.cancelOrder` →
+   `ActivePositionsService.cancelEntry` → `POST /api/quant/positions/{id}/cancel-entry`.
+   The row is NOT finalized synchronously: the broker's `Cancelled` callback
+   (`ExecutionFillTrackingService`) owns the CANCELLED transition, so a cancel raced by a
+   fill still resolves to ACTIVE.
+2. **Panel/chart close now reaches the broker.** `ActivePositionsService.closePosition` used
+   to mark broker-known rows `EXIT_SUBMITTED` locally WITHOUT submitting any IBKR order —
+   stranding the live position (app/broker drift). It now routes a FLATTEN `TradeIntent`
+   through the unified `DefaultOrderRouter` (broker-truth reconciliation, marketable exit
+   pricing, stuck-close re-fire). `SKIPPED_IBKR_DISABLED` keeps the legacy local mark (tests /
+   IBKR-less envs); `ENTRY_SUBMITTED` unfilled delegates to the broker cancel;
+   per-click idempotency key `panel-close:{id}:{epochMilli}`.
+3. **Action-token bug fixed (would have sent SHORTs as BUYs).** Rows persisted by
+   `QuantManualTradeService` / `QuantAutoArmService` stored `action="BUY"/"SELL"`, but the
+   gateway maps `"SHORT" → SELL, else BUY` — so a manual/auto-arm **SHORT submitted to IBKR
+   became a BUY**. Unnoticed because no UI called these endpoints yet. Both now persist
+   `"LONG"/"SHORT"` (`ManualDirection.action()`, `AutoArmDirection.action()`), and the gateway
+   defensively maps `"SELL"` → SELL for any legacy rows.
+
+**Known limitations (Phase 2 candidates):** no price-modify of a resting order (drag) — cancel
++ re-place; `ENTRY_PARTIALLY_FILLED` can neither cancel (409 "use close") nor flatten (router
+in-flight guard) — rare on 1-lot micros; SL/TP of manual rows are VIRTUAL display levels —
+no walker executes them (exits are operator-driven), no broker brackets (by design, matches
+WTX); `useActivePositions` in TickChart opens a second SockJS connection.
+
+**Tests.** `ActivePositionsServiceTest` (14, router-mocked FLATTEN capture, cancel matrix),
+`ActivePositionsControllerTest` (+3 cancel-entry), `QuantManualTradeServiceTest` (+2,
+LONG/SHORT tokens), `QuantAutoArmServiceTest` token update. `HexagonalArchitectureTest` green.
+
+## WTX — live intrabar stop exits on 1m candles (2026-06-11)
+
+**Why.** Live WTX panels evaluated protective-stop exits only on the close of the PANEL
+timeframe bar (e.g. every 10m for `top-train-Z35`), while every validated backtest (Z35
+PF 1.58 etc.) replays exits on 1m candles. Observed on prod 2026-06-11: a short's SL
+(29027.24) was breached intrabar at 14:01 UTC (1m high 29043.50) but the exit row landed
+at 14:10:00Z with the order submitted ~9 min after the breach — the app books the SL
+level while the real fill happens at the panel-close market price (that day ~64 pts
+better, but unbounded worse if the move continues).
+
+**What changed** (`WtxStrategyService`):
+
+- **1m intrabar exit sweep**: on every closed `1m` `CandleClosed`, each panel of that
+  instrument (legacy timeframes + variants; a panel whose own data timeframe is 1m is
+  excluded) re-checks its OPEN position with the same `WtxTrailingExitEvaluator` against
+  the just-closed 1m candle. An exit goes through the existing `applyExit` path — routed
+  to IBKR before flattening, **booked at the STOP LEVEL** (backtest fill convention),
+  exit row stamped at the 1m bar's timestamp under the owning panel key.
+- **Trailing state advances per 1m**: MFE / ratcheted trailing stop update on every 1m
+  close via `withTrailing` (saved + published only when values actually change, so no
+  per-minute row/WS churn while flat or unchanged). `lastCandleTs` is NOT touched by the
+  sweep — day-change detection stays owned by the panel bar.
+- **Per-panel position lock**: panel-bar processing, the 1m sweep and the NY force-close
+  now serialize on a per-`(instrument, panelKey)` monitor, so a breach landing on the
+  same tick as the panel close can never exit twice (the panel path reloads state and
+  sees FLAT). Entry/signal evaluation is untouched — still panel-timeframe only.
+- The sweep never CREATES panel state, skips BASELINE profiles (no ATR exits), and reads
+  the panel's effective config (preset + overrides), so a variant's own SL multiple
+  (e.g. Z35 `slAtrMult 4.0`) drives its 1m stop.
+
+Tests: `WtxIntrabarExitTest` — 1m breach mid-10m-bar exits promptly at the SL level with
+SL-consistent realized P&L, no double exit when the 10m close carries the same breach,
+trailing MFE/stop ratchet on consecutive 1m closes, variant panel uses its preset stop,
+BASELINE not swept.
+
 
 ## Mobile layout — focused tabbed UI below `lg` (2026-06-11)
 
@@ -89,6 +192,7 @@ level, so live results read systematically worse than backtest on fast moves.
 - Kill switch: `riskdesk.quant.sim.fast-exit-enabled=false` → scan-only exits (old behaviour).
 - Tests: `QuantSimFastExitTest` (tick SL/TP close at tick price, MTM without close, never
   opens, listener live-source gating + disable flag + VIX/null events).
+
 ## MNQ contract-month residues purged — 1d 2026 + all pre-2026 1h/4h/1d (2026-06-11)
 
 Completes the contract-month cleanup started with the 10m/1h/4h H6 re-backfill (PR #451).

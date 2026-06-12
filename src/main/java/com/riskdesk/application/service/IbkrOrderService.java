@@ -33,6 +33,18 @@ public class IbkrOrderService {
     }
 
     /**
+     * Cancels a working broker order by its IBKR order id. Throws {@code IllegalStateException}
+     * when IBKR is disabled or the broker explicitly refuses the cancel (e.g. already filled);
+     * the execution row is finalized asynchronously by the {@code Cancelled} orderStatus callback.
+     */
+    public String cancelOrder(int ibkrOrderId) {
+        if (!ibkrProperties.isEnabled()) {
+            throw new IllegalStateException("IBKR is disabled in the backend configuration.");
+        }
+        return selectedGateway().cancelOrder(ibkrOrderId);
+    }
+
+    /**
      * Looks up a broker order by its {@code orderRef} (the WTX {@code executionKey}) — live order
      * book first, then completed/historical orders. Tri-state: {@code UNAVAILABLE} when IBKR is
      * disabled or the gateway can't be queried, {@code NOT_FOUND} when the order is in neither set,

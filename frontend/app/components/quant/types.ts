@@ -205,4 +205,9 @@ export interface ManualTradeRequest {
   takeProfit1: number;
   takeProfit2: number | null;
   quantity: number;
+  /** Target IBKR account; falls back to riskdesk.quant.auto-arm.broker-account-id when omitted. */
+  brokerAccountId?: string | null;
+  /** When true, a LIMIT order is submitted to IBKR immediately (chart trading) instead of
+   *  resting as a PENDING_ENTRY_SUBMISSION row awaiting a separate submit-entry call. */
+  submitImmediately?: boolean;
 }

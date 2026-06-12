@@ -42,7 +42,7 @@ function StepDot({ on }: { on: boolean }) {
  * an inline confirmation — the close goes out as a marketable limit.
  */
 export default function MobilePositionsCard({ onNewOrder }: { onNewOrder: () => void }) {
-  const { positions, loading, error, close } = useActivePositions();
+  const { positions, loading, error, close, cancelEntry } = useActivePositions();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
 
@@ -50,9 +50,12 @@ export default function MobilePositionsCard({ onNewOrder }: { onNewOrder: () => 
   const opened = positions.filter(p => OPEN.has(p.status));
   const closing = positions.filter(p => CLOSING.has(p.status));
 
+  // Resting entries are cancelled (order pulled), live positions are closed
+  // (marketable limit) — two different backend paths.
   const doClose = async (p: ActivePositionView) => {
     setBusyId(p.executionId);
-    await close(p.executionId);
+    const resting = WORKING.has(p.status);
+    await (resting ? cancelEntry(p.executionId) : close(p.executionId));
     setBusyId(null);
     setConfirmId(null);
   };

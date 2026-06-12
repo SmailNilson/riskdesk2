@@ -237,7 +237,7 @@ export default function Dashboard() {
         <main className="flex-1 flex flex-col gap-3 p-3 min-w-0 pb-[calc(4.5rem_+_env(safe-area-inset-bottom))]">
           {mobileTab === 'chart' && (
             <>
-              <TickChart selectedInstrument={instrument} snapshot={snapshot} />
+              <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
               <button
                 onClick={() => setTicketOpen(true)}
                 className="flex items-center justify-center gap-2 min-h-[48px] rounded-lg border border-emerald-900 bg-emerald-950/40 text-[13px] font-medium text-emerald-300 active:scale-[0.98] transition-transform"
@@ -354,7 +354,7 @@ export default function Dashboard() {
             livePrice={prices[instrument]}
           />
           <OrderFlowPanel selectedInstrument={instrument} />
-          <TickChart selectedInstrument={instrument} snapshot={snapshot} />
+          <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
           <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
@@ -410,6 +410,7 @@ export default function Dashboard() {
           open={ticketOpen}
           instrument={instrument}
           lastPrice={prices[instrument]?.price ?? null}
+          brokerAccountId={selectedIbkrAccountId ?? null}
           onClose={() => setTicketOpen(false)}
           onPlaced={() => setMobileTab('portfolio')}
         />

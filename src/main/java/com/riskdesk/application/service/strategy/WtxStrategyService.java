@@ -43,6 +43,8 @@ public class WtxStrategyService {
 
     private static final Logger log = LoggerFactory.getLogger(WtxStrategyService.class);
     private static final int WARMUP_BARS = 100;
+    /** Granularity of the intrabar protective-stop sweep — matches the backtests' 1m exit replay. */
+    private static final String INTRABAR_TIMEFRAME = "1m";
 
     private final WtxStrategyStatePort statePort;
     private final WtxSignalHistoryPort historyPort;
@@ -55,6 +57,19 @@ public class WtxStrategyService {
     private final WtxClosePnlSettler closePnlSettler;
     private final WtxPositionReconciler positionReconciler;
     private final WtxParamOverridePort paramOverridePort;
+
+    /**
+     * Mutual exclusion per (instrument, panelKey): the panel-bar processing, the 1m intrabar exit
+     * sweep and the NY force-close all read-modify-write the same persisted panel state, and the
+     * panel close of a 10m bar lands on the same tick as a 1m close — serialize them so an open
+     * position can never be exited twice.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> panelLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Object panelLock(String instrument, String panelKey) {
+        return panelLocks.computeIfAbsent(instrument + "|" + panelKey, k -> new Object());
+    }
 
     public WtxStrategyService(
             WtxStrategyStatePort statePort,
@@ -178,6 +193,27 @@ public class WtxStrategyService {
     @EventListener
     public void onCandleClosed(CandleClosed event) {
         WtxConfig global = properties.toConfig();
+        // Intrabar protective-stop sweep: every closed 1m candle re-checks the OPEN position of
+        // each panel on this instrument, so a stop breached mid-bar exits within a minute instead
+        // of waiting for the panel-timeframe close (the validated backtests replay exits on 1m —
+        // the panel-close-only check booked the SL level while the real fill drifted to the bar
+        // close). Signals/entries stay on the panel timeframe below; a panel whose own data
+        // timeframe is 1m is excluded (its normal processing already sees every 1m bar).
+        if (INTRABAR_TIMEFRAME.equals(event.timeframe())) {
+            if (global.instruments().contains(event.instrument())) {
+                for (String timeframe : global.timeframes()) {
+                    if (!INTRABAR_TIMEFRAME.equals(timeframe)) {
+                        evaluateIntrabarExit(event, timeframe);
+                    }
+                }
+            }
+            for (WtxStrategyProperties.Variant variant : variants()) {
+                if (variant.getInstrument().equals(event.instrument())
+                        && !INTRABAR_TIMEFRAME.equals(variant.getBaseTimeframe())) {
+                    evaluateIntrabarExit(event, variant.getPanelKey());
+                }
+            }
+        }
         // Legacy panel — identity == data timeframe, bit-for-bit the historical behaviour.
         if (global.instruments().contains(event.instrument())
                 && global.timeframes().contains(event.timeframe())) {
@@ -200,6 +236,72 @@ public class WtxStrategyService {
      * timeframe. For legacy panels {@code panelKey == event.timeframe()}.
      */
     private void processPanel(CandleClosed event, String panelKey) {
+        synchronized (panelLock(event.instrument(), panelKey)) {
+            processPanelLocked(event, panelKey);
+        }
+    }
+
+    /**
+     * Intrabar protective-stop check for one panel on a closed 1m candle. Under the panel lock:
+     * when an ATR-exit profile holds an open position, runs the SAME {@link WtxTrailingExitEvaluator}
+     * as the panel bar against the just-closed 1m candle — an exit books at the STOP LEVEL (the
+     * backtest fill convention) via {@link #applyExit}; otherwise the trailing state (MFE /
+     * ratcheted stop) advances per 1m. Never creates panel state, never touches
+     * {@code lastCandleTs} (day-change detection belongs to the panel bar), and leaves
+     * signal/entry evaluation to the panel timeframe.
+     */
+    private void evaluateIntrabarExit(CandleClosed event, String panelKey) {
+        String instrumentName = event.instrument();
+        Instrument instrument;
+        try {
+            instrument = Instrument.valueOf(instrumentName);
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+        synchronized (panelLock(instrumentName, panelKey)) {
+            WtxStrategyState state = statePort.load(instrumentName, panelKey).orElse(null);
+            if (state == null || state.currentPosition() == WtxPosition.FLAT) {
+                return;
+            }
+            WtxProfile profile = state.activeProfile() != null ? state.activeProfile() : WtxProfile.BASELINE;
+            if (!profile.requiresAtrExits()) {
+                return;
+            }
+            List<Candle> recent = candlePort.findRecentCandles(instrument, INTRABAR_TIMEFRAME, 1);
+            if (recent.isEmpty()) {
+                return;
+            }
+            Candle oneMinute = recent.get(0);
+            WtxConfig config = applyOverrides(baseConfigFor(instrumentName, panelKey),
+                    paramOverridePort.load(instrumentName, panelKey));
+            WtxTrailingExitEvaluator.Decision exit =
+                    WtxTrailingExitEvaluator.evaluate(state, oneMinute, config);
+            if (exit.shouldExit()) {
+                WtxStrategyState closed = applyExit(state, instrument, exit, event, panelKey, profile);
+                statePort.save(closed);
+                publishState(closed, config);
+            } else if (trailingChanged(state, exit)) {
+                WtxStrategyState updated = state.withTrailing(
+                        exit.updatedBestFavorablePrice(), exit.updatedTrailingStopPrice());
+                statePort.save(updated);
+                publishState(updated, config);
+            }
+        }
+    }
+
+    /** True when the evaluator advanced the MFE or the stop — gates 1m saves/WS pushes to real changes. */
+    private static boolean trailingChanged(WtxStrategyState state, WtxTrailingExitEvaluator.Decision exit) {
+        return numericallyDifferent(state.bestFavorablePrice(), exit.updatedBestFavorablePrice())
+                || numericallyDifferent(state.trailingStopPrice(), exit.updatedTrailingStopPrice());
+    }
+
+    private static boolean numericallyDifferent(BigDecimal a, BigDecimal b) {
+        if (a == null && b == null) return false;
+        if (a == null || b == null) return true;
+        return a.compareTo(b) != 0;
+    }
+
+    private void processPanelLocked(CandleClosed event, String panelKey) {
         String instrumentName = event.instrument();
 
         // Panel base config (global, or global+preset for a variant) with the panel's stored
@@ -503,41 +605,43 @@ public class WtxStrategyService {
 
     private void forceClosePanel(String instrumentName, String panelKey, String dataTimeframe,
                                  String reason, WtxConfig config) {
-        statePort.load(instrumentName, panelKey).ifPresent(state -> {
-            if (state.currentPosition() != WtxPosition.FLAT) {
-                try {
-                    Instrument instrument = Instrument.valueOf(instrumentName);
-                    List<Candle> candles = candlePort.findRecentCandles(instrument, dataTimeframe, 1);
-                    BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
-                            : candles.get(0).getClose();
-                    WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
-                            ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
-                    WtxSignal forceCloseSignal = buildCloseSignal(state, panelKey, closeAction,
-                            "FORCE_CLOSE:" + reason, WtxExitType.FORCE_CLOSE, java.time.Instant.now());
-                    // Route to IBKR with the pre-close state so the open quantity is preserved.
-                    WtxRoutingResult fcRouting =
-                            routeToExecution(forceCloseSignal, state, exitPrice);
-                    forceCloseSignal = forceCloseSignal.withRouting(fcRouting);
-                    // Prior entry still resting unfilled → keep the position (no flatten sent).
-                    WtxStrategyState closed = skippedEntryInFlight(fcRouting)
-                            ? state
-                            : closePosition(state, instrument, exitPrice);
-                    BigDecimal fcRealizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
-                    if (fcRealizedDelta.signum() != 0) {
-                        forceCloseSignal = forceCloseSignal.withRealizedPnl(fcRealizedDelta);
+        synchronized (panelLock(instrumentName, panelKey)) {
+            statePort.load(instrumentName, panelKey).ifPresent(state -> {
+                if (state.currentPosition() != WtxPosition.FLAT) {
+                    try {
+                        Instrument instrument = Instrument.valueOf(instrumentName);
+                        List<Candle> candles = candlePort.findRecentCandles(instrument, dataTimeframe, 1);
+                        BigDecimal exitPrice = candles.isEmpty() ? state.entryPrice()
+                                : candles.get(0).getClose();
+                        WtxAction closeAction = state.currentPosition() == WtxPosition.LONG
+                                ? WtxAction.CLOSE_LONG : WtxAction.CLOSE_SHORT;
+                        WtxSignal forceCloseSignal = buildCloseSignal(state, panelKey, closeAction,
+                                "FORCE_CLOSE:" + reason, WtxExitType.FORCE_CLOSE, java.time.Instant.now());
+                        // Route to IBKR with the pre-close state so the open quantity is preserved.
+                        WtxRoutingResult fcRouting =
+                                routeToExecution(forceCloseSignal, state, exitPrice);
+                        forceCloseSignal = forceCloseSignal.withRouting(fcRouting);
+                        // Prior entry still resting unfilled → keep the position (no flatten sent).
+                        WtxStrategyState closed = skippedEntryInFlight(fcRouting)
+                                ? state
+                                : closePosition(state, instrument, exitPrice);
+                        BigDecimal fcRealizedDelta = closed.dailyRealizedPnl().subtract(state.dailyRealizedPnl());
+                        if (fcRealizedDelta.signum() != 0) {
+                            forceCloseSignal = forceCloseSignal.withRealizedPnl(fcRealizedDelta);
+                        }
+                        forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
+                        historyPort.save(forceCloseSignal);
+                        statePort.save(closed);
+                        ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
+                        publishWtxEvent(forceCloseSignal, exitPrice);
+                        log.info("WTX [{} {}] force-closed — {}", instrumentName, panelKey, reason);
+                        publishState(closed, config);
+                    } catch (Exception e) {
+                        log.error("WTX force-close failed for {} {}", instrumentName, panelKey, e);
                     }
-                    forceCloseSignal = forceCloseSignal.withPrice(exitPrice);
-                    historyPort.save(forceCloseSignal);
-                    statePort.save(closed);
-                    ws.convertAndSend("/topic/wtx-signals", toWsPayload(forceCloseSignal, closed));
-                    publishWtxEvent(forceCloseSignal, exitPrice);
-                    log.info("WTX [{} {}] force-closed — {}", instrumentName, panelKey, reason);
-                    publishState(closed, config);
-                } catch (Exception e) {
-                    log.error("WTX force-close failed for {} {}", instrumentName, panelKey, e);
                 }
-            }
-        });
+            });
+        }
     }
 
     public Optional<WtxStrategyState> getState(String instrument, String timeframe) {

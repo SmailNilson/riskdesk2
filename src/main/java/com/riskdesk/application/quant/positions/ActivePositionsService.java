@@ -1,8 +1,13 @@
 package com.riskdesk.application.quant.positions;
 
 import com.riskdesk.application.dto.ActivePositionView;
+import com.riskdesk.application.execution.OrderRouter;
+import com.riskdesk.application.service.IbkrOrderService;
+import com.riskdesk.domain.execution.RoutingResult;
+import com.riskdesk.domain.execution.TradeIntent;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
+import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.port.LivePricePort;
@@ -21,23 +26,26 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Application-layer use case for the Active Positions panel.
+ * Application-layer use case for the Active Positions panel and the chart-trading surface.
  *
- * <p>Two responsibilities:
+ * <p>Three responsibilities:
  * <ol>
  *   <li>{@link #listActive()} — fetch every non-terminal execution and
  *       enrich each row with a server-side PnL snapshot computed from the
  *       latest live-price reading. This is the cold-start payload used by
  *       the panel before the WS price stream warms up.</li>
- *   <li>{@link #closePosition(Long, String)} — operator-driven close. For
- *       rows that have not yet hit the broker (PENDING_ENTRY_SUBMISSION),
- *       transition straight to {@link ExecutionStatus#CANCELLED}. For rows
- *       already in flight at the broker (ENTRY_SUBMITTED, ACTIVE, ...), mark
- *       {@link ExecutionStatus#EXIT_SUBMITTED} so the existing fill-tracking
- *       path will reconcile the broker side. Real IBKR market-exit submission
- *       is intentionally out-of-scope for this panel slice — the simulation /
- *       virtual-exit flow already covers the close lifecycle from
- *       EXIT_SUBMITTED → CLOSED.</li>
+ *   <li>{@link #closePosition(Long, String)} — operator-driven close. Rows that
+ *       never reached the broker (PENDING_ENTRY_SUBMISSION) transition straight to
+ *       {@link ExecutionStatus#CANCELLED}; an unfilled resting entry (ENTRY_SUBMITTED)
+ *       is cancelled at the broker via {@link #cancelEntry(Long, String)}; a live
+ *       position is flattened through the unified {@link OrderRouter} (broker-truth
+ *       reconciliation, marketable exit pricing, stuck-close re-fire) so the close
+ *       actually reaches IBKR — marking EXIT_SUBMITTED without a broker order would
+ *       strand the live position (app/broker drift).</li>
+ *   <li>{@link #cancelEntry(Long, String)} — operator-driven cancel of an entry that
+ *       has NOT filled. PENDING rows cancel locally; ENTRY_SUBMITTED rows fire a real
+ *       broker cancel by {@code ibkrOrderId}; the row is finalized to CANCELLED by the
+ *       broker's Cancelled callback (ExecutionFillTrackingService), not here.</li>
  * </ol>
  *
  * <p>An {@link ActivePositionChangedEvent} is published on every state
@@ -54,15 +62,21 @@ public class ActivePositionsService {
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final LivePricePort livePricePort;
     private final ApplicationEventPublisher eventPublisher;
+    private final OrderRouter orderRouter;
+    private final IbkrOrderService ibkrOrderService;
     private final Clock clock;
 
     public ActivePositionsService(TradeExecutionRepositoryPort tradeExecutionRepository,
                                   LivePricePort livePricePort,
                                   ApplicationEventPublisher eventPublisher,
+                                  OrderRouter orderRouter,
+                                  IbkrOrderService ibkrOrderService,
                                   Clock clock) {
         this.tradeExecutionRepository = tradeExecutionRepository;
         this.livePricePort = livePricePort;
         this.eventPublisher = eventPublisher;
+        this.orderRouter = orderRouter;
+        this.ibkrOrderService = ibkrOrderService;
         this.clock = clock;
     }
 
@@ -86,7 +100,19 @@ public class ActivePositionsService {
     /**
      * Close a position by execution id.
      *
+     * <p>Branches on what actually exists at the broker:
+     * <ul>
+     *   <li>{@code PENDING_ENTRY_SUBMISSION} — nothing at the broker: cancel locally.</li>
+     *   <li>{@code ENTRY_SUBMITTED} (no fills) — a resting limit order: cancel it at the
+     *       broker (delegates to {@link #cancelEntry}); "closing" would be a naked order.</li>
+     *   <li>broker-known position states — route a FLATTEN intent through the unified
+     *       router, which reads broker truth, prices the exit marketable and re-fires a
+     *       stuck close. {@code SKIPPED_IBKR_DISABLED} falls back to the legacy local
+     *       EXIT_SUBMITTED mark (no broker to talk to — e.g. tests / paper without IBKR).</li>
+     * </ul>
+     *
      * @return the updated execution view, or empty if the id does not exist
+     * @throws IllegalStateException when the close cannot be executed safely (surfaced as 409)
      */
     public Optional<ActivePositionView> closePosition(Long executionId, String requestedBy) {
         if (executionId == null) {
@@ -104,37 +130,166 @@ public class ActivePositionsService {
         }
         if (isTerminal(current)) {
             // Idempotence — surface the existing terminal row rather than 409.
-            return Optional.of(ActivePositionView.from(exec,
-                priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class))));
+            return Optional.of(view(exec));
         }
 
         Instant now = clock.instant();
         String who = (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy;
 
         if (current == ExecutionStatus.PENDING_ENTRY_SUBMISSION) {
-            exec.setStatus(ExecutionStatus.CANCELLED);
-            exec.setStatusReason("Cancelled by " + who + " — close requested before broker submission.");
-        } else {
-            // Broker-known states: signal the exit so fill-tracking can reconcile.
-            exec.setStatus(ExecutionStatus.EXIT_SUBMITTED);
-            exec.setStatusReason("Exit requested by " + who + ". Broker exit submission tracked downstream.");
-            exec.setExitSubmittedAt(now);
+            cancelLocally(exec, "Cancelled by " + who + " — close requested before broker submission.", now);
+            return Optional.of(view(exec));
         }
+
+        if (current == ExecutionStatus.ENTRY_SUBMITTED && !hasFills(exec)) {
+            // A resting, unfilled limit order — there is no position to flatten. Cancel the
+            // order instead of firing a reducing leg that would be naked once it filled.
+            return cancelEntry(executionId, requestedBy);
+        }
+
+        Instrument instrument = parseInstrument(exec.getInstrument());
+        if (instrument == null) {
+            throw new IllegalStateException("unknown instrument on execution row: " + exec.getInstrument());
+        }
+
+        TradeIntent intent = flattenIntent(exec, instrument, now);
+        RoutingResult result = orderRouter.route(intent);
+        log.info("Active position close routed executionId={} instrument={} outcome={} message={} by={}",
+            exec.getId(), exec.getInstrument(), result.outcome(), result.message(), who);
+
+        switch (result.outcome()) {
+            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING, SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+                // The router mutated (or deliberately voided / left) the row — reload broker truth's
+                // version of it rather than the stale pre-route copy.
+                TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
+                publishSafely(changeEvent(refreshed, now));
+                return Optional.of(view(refreshed));
+            }
+            case SKIPPED_IBKR_DISABLED -> {
+                // Legacy behaviour for IBKR-less environments: mark the exit locally so the
+                // simulation / virtual-exit flow can finish the lifecycle.
+                exec.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+                exec.setStatusReason("Exit requested by " + who + " (IBKR disabled — local mark only).");
+                exec.setExitSubmittedAt(now);
+                exec.setUpdatedAt(now);
+                TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+                publishSafely(changeEvent(saved, now));
+                return Optional.of(view(saved));
+            }
+            case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
+                "entry order not (fully) filled — cancel the entry instead of closing: " + result.message());
+            default -> throw new IllegalStateException(
+                "close not executed (" + result.outcome() + "): " + result.message());
+        }
+    }
+
+    /**
+     * Cancel an entry order that has not produced any fill. PENDING rows cancel locally
+     * (idempotent with {@link #closePosition}); ENTRY_SUBMITTED rows fire a broker cancel by
+     * {@code ibkrOrderId} and KEEP their status — the broker's {@code Cancelled} callback
+     * (ExecutionFillTrackingService) is the single writer that finalizes the row to CANCELLED,
+     * so a cancel raced by a fill can still resolve to ACTIVE instead of masking a live position.
+     *
+     * @return the (possibly unchanged) execution view, or empty if the id does not exist
+     * @throws IllegalStateException when the row has fills / is broker-live (use close), or the
+     *                               broker refuses the cancel (surfaced as 409)
+     */
+    public Optional<ActivePositionView> cancelEntry(Long executionId, String requestedBy) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
+        if (opt.isEmpty()) {
+            return Optional.empty();
+        }
+        TradeExecutionRecord exec = opt.get();
+        ExecutionStatus current = exec.getStatus();
+        if (current == null) {
+            throw new IllegalStateException("execution status is null — cannot cancel");
+        }
+        if (isTerminal(current)) {
+            return Optional.of(view(exec));
+        }
+
+        Instant now = clock.instant();
+        String who = (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy;
+
+        if (current == ExecutionStatus.PENDING_ENTRY_SUBMISSION) {
+            cancelLocally(exec, "Cancelled by " + who + " — entry was never submitted to the broker.", now);
+            return Optional.of(view(exec));
+        }
+        if (current != ExecutionStatus.ENTRY_SUBMITTED || hasFills(exec)) {
+            throw new IllegalStateException("execution " + executionId + " is " + current
+                + (hasFills(exec) ? " with fills" : "") + " — cancel only applies to an unfilled entry; use close");
+        }
+        Integer ibkrOrderId = exec.getIbkrOrderId();
+        if (ibkrOrderId == null) {
+            throw new IllegalStateException("execution " + executionId
+                + " has no broker order id yet (late ack) — retry shortly or wait for the reconciler");
+        }
+
+        String brokerFeedback = ibkrOrderService.cancelOrder(ibkrOrderId);
+
+        // Deliberately NOT CANCELLED here: the Cancelled orderStatus callback owns that transition.
+        exec.setStatusReason("Cancel requested by " + who + " — broker says: " + brokerFeedback);
         exec.setUpdatedAt(now);
         TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+        publishSafely(changeEvent(saved, now));
+        log.info("Entry cancel requested executionId={} ibkrOrderId={} feedback={} by={}",
+            saved.getId(), ibkrOrderId, brokerFeedback, who);
+        return Optional.of(view(saved));
+    }
 
-        publishSafely(new ActivePositionChangedEvent(
-            saved.getId(),
-            saved.getInstrument(),
-            saved.getStatus(),
+    /**
+     * FLATTEN intent for an operator close: per-request idempotency key (each click is a fresh
+     * close attempt — required for the router's stuck-close re-fire), the row's own scope
+     * (source / timeframe / account) so {@code findOpenRow} resolves this strategy's row, and the
+     * latest live price as the passive limit fallback (the router crosses it marketable when
+     * enabled). Falls back to the entry price when no live reading exists — still a valid limit,
+     * and strictly better than refusing the close.
+     */
+    private TradeIntent flattenIntent(TradeExecutionRecord exec, Instrument instrument, Instant now) {
+        BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            limitPrice = exec.getNormalizedEntryPrice();
+        }
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            throw new IllegalStateException("no usable price to build the close order for " + exec.getInstrument());
+        }
+        ExecutionTriggerSource source = exec.getTriggerSource() != null
+            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
+        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
+            ? "manual" : exec.getTimeframe();
+        int quantity = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
+        return TradeIntent.flatten(
+            "panel-close:" + exec.getId() + ":" + now.toEpochMilli(),
+            source, instrument, timeframe, quantity, limitPrice, exec.getBrokerAccountId());
+    }
+
+    private void cancelLocally(TradeExecutionRecord exec, String reason, Instant now) {
+        exec.setStatus(ExecutionStatus.CANCELLED);
+        exec.setStatusReason(reason);
+        exec.setUpdatedAt(now);
+        tradeExecutionRepository.save(exec);
+        publishSafely(changeEvent(exec, now));
+    }
+
+    private ActivePositionView view(TradeExecutionRecord exec) {
+        return ActivePositionView.from(exec, priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class)));
+    }
+
+    private static ActivePositionChangedEvent changeEvent(TradeExecutionRecord exec, Instant now) {
+        return new ActivePositionChangedEvent(
+            exec.getId(),
+            exec.getInstrument(),
+            exec.getStatus(),
             ActivePositionChangedEvent.Kind.CLOSE_REQUESTED,
             now
-        ));
-        log.info("Active position close requested executionId={} instrument={} previousStatus={} newStatus={} by={}",
-            saved.getId(), saved.getInstrument(), current, saved.getStatus(), who);
+        );
+    }
 
-        return Optional.of(ActivePositionView.from(saved,
-            priceFor(saved.getInstrument(), new EnumMap<>(Instrument.class))));
+    private static boolean hasFills(TradeExecutionRecord exec) {
+        return exec.getFilledQuantity() != null && exec.getFilledQuantity().signum() > 0;
     }
 
     private BigDecimal priceFor(String instrumentName, Map<Instrument, BigDecimal> cache) {

@@ -30,6 +30,8 @@ interface Props {
   instrument: string;
   /** Latest live price — prefills the limit price and anchors SL/TP. */
   lastPrice: number | null;
+  /** Target IBKR account (falls back to the server-configured one when null). */
+  brokerAccountId?: string | null;
   onClose: () => void;
   /** Called after a successful placement (the sheet closes itself). */
   onPlaced: () => void;
@@ -48,7 +50,7 @@ function parseNum(s: string): number | null {
  * prefills both at sensible distances instead of making them optional.
  * Submission is hold-to-confirm (1s) to prevent fat-finger orders.
  */
-export default function OrderTicketSheet({ open, instrument, lastPrice, onClose, onPlaced }: Props) {
+export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAccountId, onClose, onPlaced }: Props) {
   const spec = SPECS[instrument] ?? SPECS.MCL;
   const fmt = useCallback((v: number) => v.toFixed(spec.decimals), [spec.decimals]);
 
@@ -135,6 +137,10 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, onClose,
       takeProfit1: tp,
       takeProfit2: null,
       quantity: qty,
+      brokerAccountId: brokerAccountId ?? null,
+      // Without this a LIMIT row would rest as PENDING_ENTRY_SUBMISSION and
+      // never reach IBKR — the mobile UI has no separate submit-entry step.
+      submitImmediately: true,
     };
     try {
       await api.submitManualTrade(instrument, body);
@@ -146,7 +152,7 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, onClose,
       setError(e instanceof Error ? e.message : 'Échec de l’envoi de l’ordre');
       setSubmitting(false);
     }
-  }, [valid, submitting, side, entryType, price, sl, tp, qty, instrument, fmt, onPlaced, onClose]);
+  }, [valid, submitting, side, entryType, price, sl, tp, qty, instrument, brokerAccountId, fmt, onPlaced, onClose]);
 
   const cancelHold = useCallback(() => {
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);

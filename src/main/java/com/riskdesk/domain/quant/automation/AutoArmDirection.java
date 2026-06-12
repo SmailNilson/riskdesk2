@@ -14,13 +14,12 @@ public enum AutoArmDirection {
     SHORT;
 
     /**
-     * Mapping to the IBKR / order-side {@code action} string used throughout
-     * {@link com.riskdesk.domain.model.TradeExecutionRecord#getAction()}.
+     * Broker-side {@code action} token persisted on
+     * {@link com.riskdesk.domain.model.TradeExecutionRecord#getAction()}. MUST be "LONG"/"SHORT" —
+     * the gateway maps {@code "SHORT"||"SELL" → SELL, else BUY}, so the previous "BUY"/"SELL"
+     * convention sent every auto-armed SHORT to IBKR as a BUY once submitted.
      */
     public String action() {
-        return switch (this) {
-            case LONG -> "BUY";
-            case SHORT -> "SELL";
-        };
+        return name();
     }
 }

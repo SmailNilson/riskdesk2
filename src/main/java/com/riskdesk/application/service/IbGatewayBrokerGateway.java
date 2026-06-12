@@ -145,7 +145,11 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         var submission = nativeClient.placeLimitOrder(
             resolved.contract(),
             request.brokerAccountId(),
-            "SHORT".equalsIgnoreCase(request.action()) ? Action.SELL : Action.BUY,
+            // Both row-action conventions exist in trade_executions ("LONG"/"SHORT" from the
+            // bridges/router, "BUY"/"SELL" from older manual/auto-arm rows) — map BOTH sell tokens,
+            // otherwise a legacy "SELL" row would be submitted as a BUY.
+            "SHORT".equalsIgnoreCase(request.action()) || "SELL".equalsIgnoreCase(request.action())
+                ? Action.SELL : Action.BUY,
             request.quantity(),
             request.limitPrice(),
             request.executionKey()
@@ -157,6 +161,11 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
             submission.orderRef(),
             submission.submittedAt()
         );
+    }
+
+    @Override
+    public String cancelOrder(int ibkrOrderId) {
+        return nativeClient.cancelOrderById(ibkrOrderId);
     }
 
     @Override
