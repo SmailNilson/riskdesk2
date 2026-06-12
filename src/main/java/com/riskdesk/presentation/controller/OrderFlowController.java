@@ -1,5 +1,6 @@
 package com.riskdesk.presentation.controller;
 
+import com.riskdesk.application.service.CvdDivergencePaperTradingService;
 import com.riskdesk.application.service.DepthFlowService;
 import com.riskdesk.application.service.OrderFlowHistoryService;
 import com.riskdesk.application.service.OrderFlowOrchestrator;
@@ -50,6 +51,7 @@ public class OrderFlowController {
     private final WallTrackingService wallTrackingService;
     private final VolumeProfileService volumeProfileService;
     private final DepthFlowService depthFlowService;
+    private final CvdDivergencePaperTradingService cvdPaperTradingService;
 
     public OrderFlowController(ObjectProvider<OrderFlowOrchestrator> orchestratorProvider,
                                 ObjectProvider<TickDataPort> tickDataPortProvider,
@@ -58,7 +60,8 @@ public class OrderFlowController {
                                 OrderFlowHistoryService historyService,
                                 WallTrackingService wallTrackingService,
                                 VolumeProfileService volumeProfileService,
-                                DepthFlowService depthFlowService) {
+                                DepthFlowService depthFlowService,
+                                CvdDivergencePaperTradingService cvdPaperTradingService) {
         this.orchestratorProvider = orchestratorProvider;
         this.tickDataPortProvider = tickDataPortProvider;
         this.depthPortProvider = depthPortProvider;
@@ -67,6 +70,7 @@ public class OrderFlowController {
         this.wallTrackingService = wallTrackingService;
         this.volumeProfileService = volumeProfileService;
         this.depthFlowService = depthFlowService;
+        this.cvdPaperTradingService = cvdPaperTradingService;
     }
 
     /**
@@ -395,6 +399,23 @@ public class OrderFlowController {
             Instrument inst = Instrument.valueOf(instrument.toUpperCase());
             List<CycleEventView> events = historyService.recentCycles(inst, limit);
             return ResponseEntity.ok(events);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
+        }
+    }
+
+    /**
+     * GET /api/order-flow/cvd-divergence/paper/{instrument}?days=7
+     * Recent CVD-divergence paper trades (UC-OF-CVD-PAPER) with aggregate stats:
+     * the RTH-gated "trade the DIV badge" simulation. Pure paper — never routed.
+     */
+    @GetMapping("/cvd-divergence/paper/{instrument}")
+    public ResponseEntity<?> getCvdDivergencePaperTrades(
+            @PathVariable String instrument,
+            @RequestParam(name = "days", required = false, defaultValue = "7") int days) {
+        try {
+            Instrument inst = Instrument.valueOf(instrument.toUpperCase());
+            return ResponseEntity.ok(cvdPaperTradingService.recentTradesWithStats(inst, days));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));
         }

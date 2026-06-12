@@ -1200,7 +1200,7 @@ public class OrderFlowOrchestrator {
      * Feeds one (price, session CVD) sample into the per-instrument
      * {@link CvdDivergenceDetector} and publishes any confirmed divergence as a
      * {@link CvdDivergenceDetected} domain event + {@code /topic/cvd-divergence}
-     * WebSocket payload. No persistence.
+     * WebSocket payload. Persistence and paper trading hang off the domain event.
      */
     void evaluateCvdDivergence(Instrument instrument, double lastPrice, SessionCvd cvd, Instant now) {
         try {
@@ -1208,14 +1208,15 @@ public class OrderFlowOrchestrator {
                 new CvdDivergenceDetector(properties.getCvd().getPivotBars(),
                                           properties.getCvd().getMinCvdSwing()));
             detector.onSample(now, lastPrice, cvd.value(), cvd.anchorStart())
-                .ifPresent(s -> publishCvdDivergence(instrument, s, now));
+                .ifPresent(s -> publishCvdDivergence(instrument, s, lastPrice, now));
         } catch (Exception e) {
             log.debug("evaluateCvdDivergence failed for {}: {}", instrument, e.toString());
         }
     }
 
-    private void publishCvdDivergence(Instrument instrument, CvdDivergenceSignal s, Instant now) {
-        eventPublisher.publishEvent(new CvdDivergenceDetected(instrument, s, now));
+    private void publishCvdDivergence(Instrument instrument, CvdDivergenceSignal s,
+                                      double lastPrice, Instant now) {
+        eventPublisher.publishEvent(new CvdDivergenceDetected(instrument, s, lastPrice, now));
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("instrument", instrument.name());
         payload.put("type", s.type());
@@ -1224,6 +1225,7 @@ public class OrderFlowOrchestrator {
         payload.put("prevPivotCvd", s.prevPivotCvd());
         payload.put("newPivotCvd", s.newPivotCvd());
         payload.put("pivotTimestamp", s.pivotTimestamp().toString());
+        payload.put("price", lastPrice);
         payload.put("timestamp", now.toString());
         messagingTemplate.convertAndSend("/topic/cvd-divergence", payload);
         log.info("CVD divergence: {} {} price {} -> {} cvd {} -> {}", instrument, s.type(),

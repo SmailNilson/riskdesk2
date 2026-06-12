@@ -53,10 +53,13 @@ class OrderFlowControllerTest {
         mock(com.riskdesk.application.service.VolumeProfileService.class);
     private final com.riskdesk.application.service.DepthFlowService depthFlowService =
         mock(com.riskdesk.application.service.DepthFlowService.class);
+    private final com.riskdesk.application.service.CvdDivergencePaperTradingService cvdPaperTradingService =
+        mock(com.riskdesk.application.service.CvdDivergencePaperTradingService.class);
 
     private final OrderFlowController controller = new OrderFlowController(
         orchestratorProvider, tickDataPortProvider, depthPortProvider, tickBarPortProvider,
-        historyService, wallTrackingService, volumeProfileService, depthFlowService);
+        historyService, wallTrackingService, volumeProfileService, depthFlowService,
+        cvdPaperTradingService);
 
     // ------------------------------------------------------------------ Iceberg
 
