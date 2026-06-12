@@ -2,6 +2,38 @@
 
 Last updated: 2026-06-12
 
+## CVD-divergence paper trading loop + event persistence (2026-06-12)
+
+The DIV badge (CVD pivot divergence, `/topic/cvd-divergence`) now drives an
+**RTH-gated paper-trading simulation** so the signal's edge can be measured
+before any real wiring is considered. Prior order-flow event studies showed no
+detector has standalone directional edge (some are inverted) — this loop exists
+to test the DIV badge against that bar, not to trade it.
+
+- **Rule under test**: divergence fires inside RTH (09:30–16:00 ET) → simulated
+  1-contract entry at last price in the divergence direction (bearish → SHORT,
+  bullish → LONG). Same-direction events refresh the hold window (mirrors the
+  frontend badge refresh); an opposite divergence closes and flips. Close when
+  the badge window (`riskdesk.order-flow.cvd.paper-hold-seconds`, default 600s)
+  lapses or RTH ends — whichever first.
+- **`CvdDivergencePaperTradingService`** (application): event listener + 5s
+  expiry scheduler. **Pure paper — never touches the execution path.** Closes
+  defer (retry next pass) when no live price is available. Config:
+  `riskdesk.order-flow.cvd.paper-trading-enabled` (default `true`).
+- **`CvdDivergenceDetected`** now carries `lastPrice` (price at detection — the
+  paper fill reference; distinct from the pivot price, which is ~5 bars older).
+  The WS payload gained a `price` field.
+- **Persistence**: `cvd_divergence_paper_trades` (trades) and
+  `order_flow_cvd_divergence_events` (ALL divergence events, all sessions, with
+  an `rth` flag — fodder for a future event study). Both purge at 90 days with
+  the other order-flow events.
+- **Endpoint**: `GET /api/order-flow/cvd-divergence/paper/{instrument}?days=7`
+  → trades + stats (win rate, PnL points/currency, per-direction split).
+- Caveats for whoever reads the stats: fills are last-price with no
+  spread/slippage model, and the detector confirms pivots `pivotBars` (5)
+  minutes late by construction — judge the edge accordingly, and only on
+  multi-week windows (one good day proves nothing).
+
 ## Mobile manual trading — order ticket bottom sheet (2026-06-12)
 
 Mobile users can now place and manage manual orders. Frontend-only — rides the
