@@ -1,6 +1,48 @@
 # AI Handoff
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12
+
+## Mobile manual trading — order ticket bottom sheet (2026-06-12)
+
+Mobile users can now place and manage manual orders. Frontend-only — rides the
+existing Quant manual-trade API; no backend change.
+
+- **`OrderTicketSheet`** (`frontend/app/components/mobile/`): bottom sheet opened
+  from "Passer un ordre" (Chart tab) or "Nouvel ordre" (Portf tab). Side
+  (Acheter/Vendre), LIMIT/MARKET, qty stepper (1–10), tick-aligned price steppers,
+  **SL/TP required** (backend rejects without them — prefilled at ≈ $50 risk /
+  $100 reward per contract), live risk line (risk-at-stop $, target $, R:R,
+  $/tick from the per-instrument contract specs mirroring `Instrument.java`).
+  Submission is **hold-to-confirm (1 s)** — release early cancels. Geometry is
+  validated client-side (and again server-side): wrong-side SL/TP disables the
+  button with an explanation.
+- **`MobilePositionsCard`** (Portf tab): working entries (Soumis → Présenté →
+  Exécuté mini-stepper, one-tap Annuler), open positions (P&L, SL/TP, Clôturer
+  with inline confirm — close goes out as marketable limit), `EXIT_SUBMITTED`
+  shown as "clôture en cours". Live via `useActivePositions`
+  (`/topic/positions` push + REST seed).
+- API: `POST /api/quant/manual-trade/{instrument}` (`ManualTradeRequest`),
+  `GET /api/quant/positions/active`, `POST /api/quant/positions/{id}/close` —
+  all pre-existing (PR #305/#306 era). `takeProfit2` exists in the API but is
+  deliberately not in the mobile ticket v1.
+- After a successful placement the app switches to the Portf tab to show the
+  working order.
+
+## Mobile cockpit design system (2026-06-12)
+
+Second pass on the mobile UI (see entry below for the tabbed layout itself):
+
+- `MobileVitalStrip` — one-line status + total P&L (always visible), expandable
+  2×2 secondary metrics, amber offline banner. Replaces MetricsBar + ticker below `lg`.
+- `MobileInstrumentPills` — live price inside each instrument pill
+  (tick-direction colored, muted when STALE/FALLBACK_DB); the separate ticker
+  row is desktop-only now.
+- `TabIcons` — inline Lucide-geometry stroke icons (no icon-lib dependency)
+  with an emerald active-indicator bar.
+- `MobileCollapse` — collapsed-by-default wrapper that only mounts children
+  while open; wraps WTX 10m and top-train-Z35 on the WTX tab.
+- `useIsMobile` gained a `resize` fallback for viewports that don't dispatch
+  matchMedia change events.
 
 ## Mobile layout — focused tabbed UI below `lg` (2026-06-11)
 
