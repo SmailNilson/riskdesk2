@@ -411,17 +411,9 @@ public class AgentOrchestratorService {
             double marginPct = summary.marginUsedPct() != null
                 ? summary.marginUsedPct().doubleValue() : 0;
 
-            // Daily drawdown: simplified as unrealized loss % of total exposure
-            double drawdown = 0;
-            if (summary.totalUnrealizedPnL() != null && summary.totalUnrealizedPnL().doubleValue() < 0
-                    && summary.totalExposure() != null && summary.totalExposure().doubleValue() > 0) {
-                drawdown = Math.abs(summary.totalUnrealizedPnL().doubleValue()
-                    / summary.totalExposure().doubleValue()) * 100;
-            }
-
             return new AgentContext.PortfolioState(
                 summary.totalUnrealizedPnL() != null ? summary.totalUnrealizedPnL().doubleValue() : 0,
-                drawdown,
+                summary.dailyDrawdownPct(),
                 (int) summary.openPositionCount(),
                 correlated,
                 marginPct

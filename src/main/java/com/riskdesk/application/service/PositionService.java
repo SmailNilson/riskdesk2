@@ -91,7 +91,7 @@ public class PositionService {
         return new PortfolioSummary(
                 unrealizedPnL, realizedPnL,
                 unrealizedPnL.add(realizedPnL),
-                count, totalExposure, marginUsedPct, views);
+                count, totalExposure, marginUsedPct, accountMargin, views);
     }
 
     public List<PositionView> getOpenPositions() {
@@ -139,6 +139,7 @@ public class PositionService {
             snapshot.positions().size(),
             snapshot.grossPositionValue(),
             marginUsedPct,
+            snapshot.netLiquidation(),
             snapshot.positions().stream().map(PositionView::fromIbkr).toList()
         );
     }
