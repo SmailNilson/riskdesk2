@@ -101,6 +101,32 @@ trailing MFE/stop ratchet on consecutive 1m closes, variant panel uses its prese
 BASELINE not swept.
 
 
+## Mobile layout — focused tabbed UI below `lg` (2026-06-11)
+
+The dashboard now has a dedicated mobile layout (viewport < 1024px) instead of stacking
+all ~25 desktop panels in one column. Desktop (≥ `lg`) is unchanged.
+
+- **`useIsMobile()`** (`frontend/app/hooks/useIsMobile.ts`): SSR-safe `matchMedia` hook
+  mirroring Tailwind's `lg` breakpoint. Returns `null` until the viewport is known, so
+  neither panel tree mounts prematurely — a phone never mounts the desktop panels (and
+  their WS subscriptions / polling), not even for one frame.
+- **Bottom tab bar** (5 tabs, only the active tab's panels are mounted):
+  Chart (= **TickChart**, not the heavy lightweight-charts `Chart`), WTX (WTX · 5m,
+  WTX · 10m, top-train-Z35 on MNQ), Quant (Quant7GatesSimulationPanel), Playbook,
+  Portf (IbkrPortfolioPanel).
+- **Deliberately desktop-only**: AlertsFeed, full Chart, IndicatorPanel, DxyPanel,
+  OrderFlowPanel, FootprintChart, FlashCrashPanel, BacktestPanel, CorrelationPanel,
+  StrategyPanel, ExternalSetupPanel, WtxRsiStrategyPanel, PerfectSetupPanel — none of
+  them mount on mobile.
+- **Header**: desktop control cluster is `hidden lg:flex`; mobile gets theme + a "⋯"
+  overflow menu (timezone, purge, MarketableSettingsControl) and a dedicated full-width
+  instrument/timeframe selector row with larger touch targets. Shared header widgets were
+  extracted as `TabGroup` / `TimezoneSelect` / `PurgeButton` / `ThemeToggle` in `Dashboard.tsx`.
+- IndicatorPanel Breaks/FVG confidence gauges now `flex-wrap`/`flex-1` — they were the
+  only horizontal overflow at 380px.
+- Validated in-browser at 380px (all 6 tabs, no horizontal overflow, real prod data) and
+  1280px (desktop regression). `npm run lint` + `npm run build` pass.
+
 ## Quant 7-Gates: ~3 s fast exit path (SL/TP between scans) (2026-06-11)
 
 Sim #903 (SHORT MNQ) closed 93 pts past its SL (-272.5 pts vs the planned ~-180): exits

@@ -472,12 +472,12 @@ function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
       {(s.recentBreaks ?? []).length > 0 && (
         <Section title={`Breaks (${(s.recentBreaks ?? []).length})`}>
           {(s.recentBreaks ?? []).map((brk, i) => (
-            <div key={`brk-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+            <div key={`brk-${i}`} className="flex flex-wrap items-center gap-2 text-xs font-mono py-0.5">
               <Badge label={`${brk.type}`} color={brk.trend === 'BULLISH' ? 'green' : 'red'} />
               <span className="text-zinc-400 tabular-nums">{brk.level.toFixed(priceDecimals)}</span>
               <span className="text-[10px] text-zinc-600">{brk.structureLevel?.toLowerCase()}</span>
               {brk.breakConfidenceScore != null ? (
-                <div className="flex items-center gap-1 min-w-[50px]">
+                <div className="flex flex-1 items-center gap-1 min-w-[50px]">
                   <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${barColor(brk.breakConfidenceScore)}`} style={{ width: `${Math.min(brk.breakConfidenceScore, 100)}%` }} />
                   </div>
@@ -553,11 +553,11 @@ function IndicatorPanel({ snapshot: s, currentPrice, children }: Props) {
       {(s.activeFairValueGaps ?? []).length > 0 && (
         <Section title={`FVG (${(s.activeFairValueGaps ?? []).length})`}>
           {[...(s.activeFairValueGaps ?? [])].sort((a, b) => b.top - a.top).map((fvg, i) => (
-            <div key={`fvg-${i}`} className="flex items-center gap-2 text-xs font-mono py-0.5">
+            <div key={`fvg-${i}`} className="flex flex-wrap items-center gap-2 text-xs font-mono py-0.5">
               <Badge label={fvg.bias} color={fvg.bias === 'BULLISH' ? 'green' : 'red'} />
               <span className="text-zinc-400 tabular-nums">{fvg.bottom.toFixed(priceDecimals)}–{fvg.top.toFixed(priceDecimals)}</span>
               {fvg.fvgQualityScore != null && (
-                <div className="flex items-center gap-1 min-w-[50px]">
+                <div className="flex flex-1 items-center gap-1 min-w-[50px]">
                   <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${barColor(fvg.fvgQualityScore)}`} style={{ width: `${Math.min(fvg.fvgQualityScore, 100)}%` }} />
                   </div>
