@@ -98,7 +98,7 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
     try {
       const [config, decisions] = await Promise.all([
         api.getPlaybookAutomation(instrument, timeframe),
-        api.getPlaybookAutomationDecisions(instrument, timeframe, 10),
+        api.getPlaybookAutomationDecisions(instrument, timeframe, 50),
       ]);
       setAutomation(config ?? { ...DEFAULT_AUTOMATION, instrument, timeframe });
       setAutomationDecisions(decisions);

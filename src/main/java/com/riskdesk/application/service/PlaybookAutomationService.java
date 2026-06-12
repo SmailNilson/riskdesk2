@@ -153,12 +153,48 @@ public class PlaybookAutomationService {
             return;
         }
 
+        // One contract at a time: while a PLAYBOOK paper position is open (PENDING_ENTRY
+        // or ACTIVE) on this panel, new qualified decisions are logged but neither
+        // simulated nor routed — mirrors the one-position portfolio mode the backtest
+        // validated, and keeps the panel stats honest (no overlapping sims on one move).
+        if (hasOpenPlaybookSimulation(event.instrument(), event.timeframe())) {
+            PlaybookDecision skipped = decisionRepository.save(decision.withRouting(
+                PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN,
+                "a PLAYBOOK position is already open on " + event.instrument() + " " + event.timeframe(),
+                null));
+            publishDecision(skipped);
+            return;
+        }
+
         PlaybookRoutingDecision policyDecision = ROUTING_POLICY.evaluate(decision, state);
         if (policyDecision.paperSimulationAllowed()) {
             ensureSimulation(decision, state);
         }
         PlaybookDecision routed = applyRouting(decision, state, instrument);
         publishDecision(routed);
+    }
+
+    /**
+     * True when an open ({@code PENDING_ENTRY} or {@code ACTIVE}) PLAYBOOK simulation
+     * exists for this instrument+timeframe. The simulation aggregate does not carry the
+     * timeframe, so each open sim's originating decision is resolved to scope the check
+     * to the panel — open playbook sims are few (K=1 by construction), so this stays cheap.
+     */
+    private boolean hasOpenPlaybookSimulation(String instrument, String timeframe) {
+        try {
+            return simulationRepository.findByStatuses(List.of(
+                    TradeSimulationStatus.PENDING_ENTRY,
+                    TradeSimulationStatus.ACTIVE)).stream()
+                .filter(sim -> sim.reviewType() == ReviewType.PLAYBOOK)
+                .filter(sim -> instrument.equalsIgnoreCase(sim.instrument()))
+                .anyMatch(sim -> decisionRepository.findById(sim.reviewId())
+                    .map(d -> timeframe.equalsIgnoreCase(d.timeframe()))
+                    .orElse(false));
+        } catch (Exception e) {
+            log.warn("PLAYBOOK open-position check failed for {} {} — allowing decision: {}",
+                instrument, timeframe, e.getMessage());
+            return false;
+        }
     }
 
     public PlaybookAutomationState getState(String instrument, String timeframe) {
