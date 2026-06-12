@@ -666,8 +666,31 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
     roundToTick(long ? ticket.price + meta.tpOffset : ticket.price - meta.tpOffset, meta.tick, meta.decimals).toFixed(meta.decimals),
   );
   const [localError, setLocalError] = useState<string | null>(null);
+  // The Dashboard prop is null until the IBKR Portfolio panel has loaded (or when its zone is
+  // collapsed) and the server-side auto-arm fallback account is empty in prod — both led to a
+  // blind 409. Resolve the broker's own selected account directly so the ticket never depends
+  // on another panel being mounted.
+  const [account, setAccount] = useState<string | null>(brokerAccountId);
+  const [accountLoading, setAccountLoading] = useState(brokerAccountId == null);
+  useEffect(() => {
+    if (brokerAccountId != null) { setAccount(brokerAccountId); setAccountLoading(false); return; }
+    let cancelled = false;
+    setAccountLoading(true);
+    api.getIbkrPortfolio()
+      .then(p => {
+        if (cancelled) return;
+        setAccount(p.selectedAccountId ?? p.accounts?.[0]?.id ?? null);
+      })
+      .catch(() => { if (!cancelled) setAccount(null); })
+      .finally(() => { if (!cancelled) setAccountLoading(false); });
+    return () => { cancelled = true; };
+  }, [brokerAccountId]);
 
   const submit = async () => {
+    if (!account) {
+      setLocalError('Aucun compte IBKR résolu — ouvrez le panel IBKR Portfolio ou configurez riskdesk.quant.auto-arm.broker-account-id');
+      return;
+    }
     const entryPrice = Number(price);
     const stopLoss = Number(sl);
     const takeProfit = Number(tp);
@@ -694,7 +717,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
       takeProfit1: takeProfit,
       takeProfit2: null,
       quantity,
-      brokerAccountId,
+      brokerAccountId: account,
       submitImmediately: true,
     });
   };
@@ -705,7 +728,9 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
     <div className="absolute top-2 right-2 z-20 w-52 rounded border border-zinc-700 bg-zinc-900 shadow-xl p-2.5 text-[11px]">
       <div className={`font-semibold mb-1.5 ${long ? 'text-emerald-300' : 'text-red-300'}`}>
         {long ? 'ACHAT' : 'VENTE'} {instrument}
-        <span className="text-zinc-500 font-normal"> · {brokerAccountId ?? 'compte par défaut'}</span>
+        <span className={`font-normal ${account ? 'text-zinc-500' : 'text-amber-400'}`}>
+          {' '}· {accountLoading ? 'compte…' : account ?? 'aucun compte IBKR'}
+        </span>
       </div>
       <div className="flex gap-1 mb-1.5">
         {(['LIMIT', 'MARKET'] as const).map(t => (
@@ -746,7 +771,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
       <div className="flex gap-1.5">
         <button
           onClick={() => void submit()}
-          disabled={submitting}
+          disabled={submitting || accountLoading}
           className={`flex-1 py-1 rounded font-semibold text-[11px] disabled:opacity-50 ${
             long ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-red-700 hover:bg-red-600 text-white'
           }`}
