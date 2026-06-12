@@ -538,7 +538,17 @@ public class TradeSimulationService {
 
         Instant now = Instant.now();
         List<TradeSimulation> surviving = cancelExpiredPendingEntries(openPlaybookSims, now);
-        surviving = reverseConflictingTrades(surviving, now);
+        // The confirmation and legacy paper streams run side by side on the same panel
+        // (champion/challenger) — an opposite-direction signal in one stream must not
+        // reverse the other stream's open position, so reversal is applied per stream.
+        Map<Boolean, List<TradeSimulation>> byStream = surviving.stream()
+            .collect(java.util.stream.Collectors.partitioningBy(sim ->
+                playbookDecisionRepository.findById(sim.reviewId())
+                    .map(PlaybookDecision::isStopEntry)
+                    .orElse(false)));
+        List<TradeSimulation> merged = new ArrayList<>(reverseConflictingTrades(byStream.get(true), now));
+        merged.addAll(reverseConflictingTrades(byStream.get(false), now));
+        surviving = merged;
 
         for (TradeSimulation sim : surviving) {
             try {

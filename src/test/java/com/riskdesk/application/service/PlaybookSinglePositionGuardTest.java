@@ -12,6 +12,7 @@ import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.TradeSimulationStatus;
 import com.riskdesk.domain.playbook.automation.PlaybookAutomationState;
 import com.riskdesk.domain.playbook.automation.PlaybookDecision;
+import com.riskdesk.domain.playbook.automation.PlaybookExecutionProfile;
 import com.riskdesk.domain.playbook.automation.PlaybookRoutingOutcome;
 import com.riskdesk.domain.playbook.automation.port.PlaybookAutomationStatePort;
 import com.riskdesk.domain.playbook.automation.port.PlaybookDecisionRepositoryPort;
@@ -48,7 +49,7 @@ class PlaybookSinglePositionGuardTest {
 
     private final InMemoryDecisions decisions = new InMemoryDecisions();
     private final InMemorySims sims = new InMemorySims();
-    private final PlaybookAutomationService service = newService();
+    private final PlaybookAutomationService service = newService(PlaybookExecutionProfile.LEGACY);
 
     @Test
     void secondDecisionWhilePositionOpenIsLoggedButNotSimulated() {
@@ -84,6 +85,47 @@ class PlaybookSinglePositionGuardTest {
         assertEquals(PlaybookRoutingOutcome.PAPER_ONLY, latestDecision().routingOutcome());
     }
 
+    @Test
+    void confirmationProfileRunsBothStreamsWithIsolatedGuards() {
+        PlaybookAutomationService dual = newService(PlaybookExecutionProfile.MNQ_10M_CONFIRMATION);
+
+        // T0 = 14:00Z = 10:00 ET (Friday) — inside RTH so the LONG confirmation gate passes
+        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0));
+        assertEquals(2, decisions.rows.size()); // confirmation + legacy shadow
+        assertEquals(2, sims.rows.size());
+        assertEquals(1, decisions.rows.values().stream().filter(PlaybookDecision::isStopEntry).count());
+
+        // both streams hold a position: the confirmation candidate is suppressed by its
+        // OWN zone dedup (no row at all), the legacy shadow is logged but not simulated
+        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(600)));
+        assertEquals(3, decisions.rows.size());
+        assertEquals(2, sims.rows.size());
+        assertEquals(1, decisions.rows.values().stream()
+            .filter(d -> d.routingOutcome() == PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN).count());
+
+        // resolve the CONFIRMATION position
+        long confDecisionId = decisions.rows.values().stream()
+            .filter(PlaybookDecision::isStopEntry).findFirst().orElseThrow().id();
+        TradeSimulation confSim = sims.findByReviewId(confDecisionId, ReviewType.PLAYBOOK).orElseThrow();
+        sims.save(new TradeSimulation(confSim.id(), confSim.reviewId(), confSim.reviewType(),
+            confSim.instrument(), confSim.action(), TradeSimulationStatus.WIN, T0, T0.plusSeconds(900),
+            BigDecimal.ZERO, null, null, null, confSim.createdAt()));
+
+        // 3h later (zone cooldown expired, still RTH): the confirmation stream re-enters,
+        // the legacy stream is still blocked by its own open position
+        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(3 * 3_600)));
+        assertEquals(5, decisions.rows.size());
+        assertEquals(3, sims.rows.size()); // a new CONFIRMATION sim only
+        PlaybookDecision newConf = decisions.rows.values().stream()
+            .filter(PlaybookDecision::isStopEntry)
+            .max(Comparator.comparing(PlaybookDecision::id)).orElseThrow();
+        assertEquals(PlaybookRoutingOutcome.PAPER_ONLY, newConf.routingOutcome());
+        PlaybookDecision newLegacy = decisions.rows.values().stream()
+            .filter(d -> !d.isStopEntry())
+            .max(Comparator.comparing(PlaybookDecision::id)).orElseThrow();
+        assertEquals(PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN, newLegacy.routingOutcome());
+    }
+
     private PlaybookDecision latestDecision() {
         return decisions.rows.values().stream()
             .max(Comparator.comparing(PlaybookDecision::id))
@@ -92,10 +134,10 @@ class PlaybookSinglePositionGuardTest {
 
     // ── wiring ───────────────────────────────────────────────────────────────
 
-    private PlaybookAutomationService newService() {
+    private PlaybookAutomationService newService(PlaybookExecutionProfile armedProfile) {
         return new PlaybookAutomationService(
             stubPlaybookService(),
-            statePort(),
+            statePort(armedProfile),
             decisions,
             sims,
             null,
@@ -111,6 +153,11 @@ class PlaybookSinglePositionGuardTest {
     private static PlaybookService stubPlaybookService() {
         return new PlaybookService(null, null) {
             @Override
+            public java.math.BigDecimal computeAtr(Instrument instrument, String timeframe) {
+                return new BigDecimal("40");
+            }
+
+            @Override
             public PlaybookEvaluation evaluate(Instrument instrument, String timeframe) {
                 SetupCandidate setup = new SetupCandidate(SetupType.ZONE_RETEST, "OB 29600",
                     new BigDecimal("29620"), new BigDecimal("29580"), new BigDecimal("29600"),
@@ -125,10 +172,11 @@ class PlaybookSinglePositionGuardTest {
         };
     }
 
-    private static PlaybookAutomationStatePort statePort() {
+    private static PlaybookAutomationStatePort statePort(PlaybookExecutionProfile armedProfile) {
         return new PlaybookAutomationStatePort() {
             @Override public Optional<PlaybookAutomationState> load(String instrument, String timeframe) {
-                return Optional.of(PlaybookAutomationState.initial(instrument, timeframe));
+                return Optional.of(PlaybookAutomationState.initial(instrument, timeframe)
+                    .withSettings(null, null, null, null, armedProfile, null));
             }
             @Override public PlaybookAutomationState save(PlaybookAutomationState state) { return state; }
         };

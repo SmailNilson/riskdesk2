@@ -1694,7 +1694,8 @@ export interface PlaybookAutomationView {
 export type PlaybookExecutionProfile =
   | 'LEGACY'
   | 'MGC_10M_SCALP_0_5R'
-  | 'MGC_10M_NORMAL_1R_BENCHMARK';
+  | 'MGC_10M_NORMAL_1R_BENCHMARK'
+  | 'MNQ_10M_CONFIRMATION';
 
 export interface PlaybookAutomationUpdateRequest {
   paperThreshold?: number;
@@ -1761,6 +1762,8 @@ export interface PlaybookAutomationDecisionView {
   pnl: number | null;
   rrRatio: number | null;
   verdict: string | null;
+  entryType?: 'LIMIT' | 'STOP' | string | null;
+  invalidationPrice?: number | null;
   profitabilitySummary: PlaybookAutomationProfitabilitySummaryView | null;
 }
 
