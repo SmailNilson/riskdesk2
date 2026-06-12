@@ -135,21 +135,46 @@ public class PlaybookAutomationService {
         }
 
         PriceSnapshot price = currentPrice(instrument);
-        PlaybookDecision candidate;
         if (state.armedProfile() == PlaybookExecutionProfile.MNQ_10M_CONFIRMATION) {
-            candidate = buildConfirmationDecision(
+            // Champion/challenger A/B: the confirmation stream is the armed mechanism,
+            // and the legacy stream keeps running as a paper benchmark on the SAME
+            // signals. The streams are isolated end to end (distinct decision keys,
+            // per-stream one-position guard, per-stream reversal in the scheduler).
+            PlaybookDecision confirmation = buildConfirmationDecision(
                 event.instrument(), event.timeframe(), event.timestamp(), instrument, evaluation, price);
-            if (candidate == null) {
-                return; // a confirmation gate failed (score/session/zone/ATR) or the zone is deduped
+            if (confirmation != null) {
+                processCandidate(confirmation, state, instrument, event);
             }
-        } else {
-            candidate = buildDecision(
+            PlaybookDecision legacyShadow = buildDecision(
                 event.instrument(), event.timeframe(), event.timestamp(), evaluation, price);
+            processCandidate(legacyShadow, state, instrument, event);
+        } else {
+            processCandidate(
+                buildDecision(event.instrument(), event.timeframe(), event.timestamp(), evaluation, price),
+                state, instrument, event);
         }
+    }
 
+    private void processCandidate(PlaybookDecision candidate,
+                                  PlaybookAutomationState state,
+                                  Instrument instrument,
+                                  CandleClosed event) {
         boolean existing = decisionRepository.findByDecisionKey(candidate.decisionKey()).isPresent();
         PlaybookDecision decision = decisionRepository.createIfAbsent(candidate);
         if (existing || !sameInstant(candidate.createdAt(), decision.createdAt())) {
+            return;
+        }
+
+        // One contract at a time PER STREAM: while a PLAYBOOK paper position of the same
+        // stream (confirmation vs legacy) is open on this panel, new qualified decisions
+        // are logged but neither simulated nor routed — mirrors the one-position portfolio
+        // mode the backtest validated, and keeps the panel stats honest.
+        if (hasOpenPlaybookSimulation(event.instrument(), event.timeframe(), decision.isStopEntry())) {
+            PlaybookDecision skipped = decisionRepository.save(decision.withRouting(
+                PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN,
+                "a PLAYBOOK position is already open on " + event.instrument() + " " + event.timeframe(),
+                null));
+            publishDecision(skipped);
             return;
         }
 
@@ -159,6 +184,29 @@ public class PlaybookAutomationService {
         }
         PlaybookDecision routed = applyRouting(decision, state, instrument);
         publishDecision(routed);
+    }
+
+    /**
+     * True when an open ({@code PENDING_ENTRY} or {@code ACTIVE}) PLAYBOOK simulation
+     * exists for this instrument+timeframe. The simulation aggregate does not carry the
+     * timeframe, so each open sim's originating decision is resolved to scope the check
+     * to the panel — open playbook sims are few (K=1 by construction), so this stays cheap.
+     */
+    private boolean hasOpenPlaybookSimulation(String instrument, String timeframe, boolean stopStream) {
+        try {
+            return simulationRepository.findByStatuses(List.of(
+                    TradeSimulationStatus.PENDING_ENTRY,
+                    TradeSimulationStatus.ACTIVE)).stream()
+                .filter(sim -> sim.reviewType() == ReviewType.PLAYBOOK)
+                .filter(sim -> instrument.equalsIgnoreCase(sim.instrument()))
+                .anyMatch(sim -> decisionRepository.findById(sim.reviewId())
+                    .map(d -> timeframe.equalsIgnoreCase(d.timeframe()) && d.isStopEntry() == stopStream)
+                    .orElse(false));
+        } catch (Exception e) {
+            log.warn("PLAYBOOK open-position check failed for {} {} — allowing decision: {}",
+                instrument, timeframe, e.getMessage());
+            return false;
+        }
     }
 
     public PlaybookAutomationState getState(String instrument, String timeframe) {
@@ -522,7 +570,7 @@ public class PlaybookAutomationService {
         }
 
         String setupIdentity = buildSetupIdentity(instrumentName, timeframe, candleTs, setup, direction);
-        String key = "playbook:" + setupIdentity;
+        String key = "playbook:" + setupIdentity + ":CONF";
         return new PlaybookDecision(
             null,
             key,
@@ -561,6 +609,9 @@ public class PlaybookAutomationService {
         BigDecimal tolerance = atr.multiply(CONFIRMATION_ZONE_TOLERANCE_ATR);
         Instant cooldownFloor = now.minus(CONFIRMATION_ZONE_COOLDOWN);
         for (PlaybookDecision prev : recentDecisions(instrument, timeframe, 20)) {
+            if (!prev.isStopEntry()) {
+                continue; // the legacy challenger stream must not block confirmation entries
+            }
             if (!direction.equalsIgnoreCase(prev.direction())) {
                 continue;
             }
@@ -571,9 +622,10 @@ public class PlaybookAutomationService {
             if (open) {
                 return true;
             }
+            // cooldown in market time (candle ts), not wall time — deterministic in replays/tests
             if (prev.entryPrice() != null
-                && prev.createdAt() != null
-                && prev.createdAt().isAfter(cooldownFloor)
+                && prev.evaluatedCandleTs() != null
+                && prev.evaluatedCandleTs().isAfter(cooldownFloor)
                 && prev.entryPrice().subtract(entry).abs().compareTo(tolerance) <= 0) {
                 return true;
             }

@@ -98,7 +98,7 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
     try {
       const [config, decisions] = await Promise.all([
         api.getPlaybookAutomation(instrument, timeframe),
-        api.getPlaybookAutomationDecisions(instrument, timeframe, 10),
+        api.getPlaybookAutomationDecisions(instrument, timeframe, 50),
       ]);
       setAutomation(config ?? { ...DEFAULT_AUTOMATION, instrument, timeframe });
       setAutomationDecisions(decisions);
@@ -271,7 +271,8 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
     () => computeTradeStats(playbook?.plan ?? null, playbook?.filters?.tradeDirection ?? null, automationState.quantity, livePrice ?? null),
     [playbook?.plan, playbook?.filters?.tradeDirection, automationState.quantity, livePrice],
   );
-  const profileControlsAvailable = instrument === 'MGC' && timeframe === '10m';
+  const profileControlsAvailable =
+    (instrument === 'MGC' || instrument === 'MNQ') && timeframe === '10m';
   const currentSetupSupportsProfileTargets =
     profileControlsAvailable
     && playbook?.bestSetup?.type === 'BREAK_RETEST';
@@ -463,6 +464,7 @@ export default function PlaybookPanel({ instrument, timeframe, selectedBrokerAcc
 
       {/* Automation footer — condensed to one line, drawer reveals full controls */}
       <AutomationFooter
+        instrument={instrument}
         autoIbkrOn={autoIbkrOn}
         automationBusy={automationBusy}
         automation={automationState}
@@ -737,10 +739,12 @@ function Tick({ pct, color, label, tall }: { pct: string; color: string; label?:
 // ── Automation Footer ────────────────────────────────────────────────────────
 
 function AutomationFooter({
+  instrument,
   autoIbkrOn, automationBusy, automation, qtyDraft, setQtyDraft, commitQty,
   onToggleAutoIbkr, latestDecision, decisions, summary, collapsed, setCollapsed, activeBrokerAccountId,
   profileControlsAvailable, profileTargets, onChangeExecutionProfile, onValidateScalpProfile,
 }: {
+  instrument: string;
   autoIbkrOn: boolean;
   automationBusy: boolean;
   automation: PlaybookAutomationView;
@@ -815,7 +819,12 @@ function AutomationFooter({
                   title={autoIbkrOn ? 'Disable Auto-IBKR before changing execution profile' : 'Profile armed for PLAYBOOK Auto-IBKR'}
                 >
                   <option value="LEGACY">Legacy</option>
-                  <option value="MGC_10M_SCALP_0_5R">MGC 10m Scalp 0.5R</option>
+                  {instrument === 'MGC' && (
+                    <option value="MGC_10M_SCALP_0_5R">MGC 10m Scalp 0.5R</option>
+                  )}
+                  {instrument === 'MNQ' && (
+                    <option value="MNQ_10M_CONFIRMATION">MNQ 10m Confirmation (paper)</option>
+                  )}
                 </select>
                 {armedProfile === 'MGC_10M_SCALP_0_5R' && !automation.scalpProfileValidated && (
                   <button
@@ -877,11 +886,49 @@ function AutomationFooter({
             </label>
             <span className="text-zinc-600">Thresholds are read-only (driven by backend config)</span>
           </div>
-          <ProfitabilitySummary summary={summary} />
-          <RecentSimulationResults decisions={decisions} />
+          <StreamedResults decisions={decisions} summary={summary} />
         </div>
       )}
     </div>
+  );
+}
+
+function StreamedResults({
+  decisions,
+  summary,
+}: {
+  decisions: PlaybookAutomationDecisionView[];
+  summary: PlaybookAutomationProfitabilitySummaryView | null;
+}) {
+  const confirmation = decisions.filter(d => d.entryType === 'STOP');
+  const legacy = decisions.filter(d => d.entryType !== 'STOP');
+  if (confirmation.length === 0) {
+    return (
+      <>
+        <ProfitabilitySummary summary={summary} />
+        <RecentSimulationResults decisions={decisions} />
+      </>
+    );
+  }
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <span className="rounded border border-cyan-800/60 bg-cyan-950/40 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-300">
+          CONFIRMATION
+        </span>
+        <span className="text-[9px] text-zinc-600">stop à la sortie de zone · brackets ATR</span>
+      </div>
+      <ProfitabilitySummary summary={summarizeAutomationDecisions(confirmation)} />
+      <RecentSimulationResults decisions={confirmation} />
+      <div className="flex items-center gap-2 pt-1">
+        <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-400">
+          LEGACY · challenger
+        </span>
+        <span className="text-[9px] text-zinc-600">limit en zone · benchmark paper</span>
+      </div>
+      <ProfitabilitySummary summary={summarizeAutomationDecisions(legacy)} />
+      <RecentSimulationResults decisions={legacy} />
+    </>
   );
 }
 
@@ -1117,6 +1164,8 @@ function formatProfileLabel(profile: PlaybookExecutionProfile): string {
       return 'Scalp 0.5R';
     case 'MGC_10M_NORMAL_1R_BENCHMARK':
       return '1R benchmark';
+    case 'MNQ_10M_CONFIRMATION':
+      return 'Confirmation (paper)';
     case 'LEGACY':
     default:
       return 'Legacy';
