@@ -84,6 +84,28 @@ public class HistoricalDataService implements ApplicationRunner {
     @Value("${riskdesk.market-data.historical.backfill-days-4h:730}")
     private int backfillDays4h;
 
+    // Post-rollover deep-backfill lookback per timeframe (days). On a roll the new front month has
+    // no stored history, so each timeframe is range-backfilled over [now - lookback, now]. Coarser
+    // timeframes reach further back (fewer bars/day); 1m is kept short — its day-by-day IBKR walk is
+    // the most pacing-expensive. All are clamped to backfill-range-max-days at use.
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-1m:14}")
+    private int rolloverBackfillDays1m;
+
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-5m:60}")
+    private int rolloverBackfillDays5m;
+
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-10m:90}")
+    private int rolloverBackfillDays10m;
+
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-1h:200}")
+    private int rolloverBackfillDays1h;
+
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-4h:200}")
+    private int rolloverBackfillDays4h;
+
+    @Value("${riskdesk.market-data.historical.rollover-backfill-days-1d:200}")
+    private int rolloverBackfillDays1d;
+
     @Value("${riskdesk.market-data.historical.mentor-refresh-timeout-ms:2500}")
     private long mentorRefreshTimeoutMs;
 
@@ -193,37 +215,59 @@ public class HistoricalDataService implements ApplicationRunner {
     }
 
     /**
-     * On contract rollover, preserve all existing candles. New contract data
-     * accumulates naturally via on-demand loading.
+     * On contract rollover, preserve all existing candles and <b>deep-backfill the new contract's
+     * history</b> for every supported timeframe.
      *
-     * <p>Warm-up gap-fill covers ALL intraday timeframes so charts and indicators
-     * have continuous history on the new contract immediately. Previously only
-     * 10m was warmed, which left 5m / 1h / 4h charts starved until the next
-     * mentor refresh or manual poll — the exact failure mode observed on MCL
-     * after 2026-04-10.</p>
+     * <p><b>Why a range backfill, not a gap-fill.</b> A forward {@link #gapFillTimeframe} only appends
+     * bars newer than the stored high-water mark. After a roll, the live accumulator quickly writes a
+     * handful of new-contract-month bars on the fast timeframes (1m/5m/10m); their presence makes the
+     * high-water mark "now", so a gap-fill adds nothing and the new contract's prior weeks are never
+     * fetched. The chart filters strictly by the active contract month and only falls back to the full
+     * history when <i>zero</i> bars match — so those timeframes collapse to the few live bars while
+     * coarser ones (no new-month bar closed yet) still show the previous contract via the fallback.
+     * This was the "no 5m/10m data after rollover" failure.</p>
+     *
+     * <p>The range backfill sources {@code [now - lookback, now]} from the new front-month contract
+     * (tagging bars with the new month, walking into expired contracts only to extend further back),
+     * so every timeframe has full new-contract history immediately. It is idempotent (existing
+     * timestamps are skipped) and async — each job queues on the dedicated single-threaded backfill
+     * executor, keeping IBKR pacing safe.</p>
      */
     @EventListener
     public void onContractRollover(ContractRolloverEvent event) {
+        if (!enabled) {
+            return;
+        }
         Instrument instrument = event.instrument();
-        log.info("Rollover for {} -> {}. Historical candles preserved; warming all intraday timeframes.",
+        log.info("Rollover for {} -> {}. Historical candles preserved; deep-backfilling all timeframes on the new contract.",
                 instrument, event.newContractMonth());
-        CompletableFuture.runAsync(() -> {
-            for (String timeframe : TIMEFRAMES) {
-                if (!historicalProvider.supports(instrument, timeframe)) continue;
-                try {
-                    int saved = gapFillTimeframe(instrument, timeframe, "rollover-warmup");
-                    if (saved > 0) {
-                        log.info("Rollover warm-up: {} {} gap-filled {} new candles.",
-                            instrument, timeframe, saved);
-                    }
-                } catch (Exception e) {
-                    log.warn("Rollover warm-up failed for {} {}: {}", instrument, timeframe, e.getMessage());
-                }
+        Instant to = Instant.now();
+        for (String timeframe : TIMEFRAMES) {
+            if (!historicalProvider.supports(instrument, timeframe)) continue;
+            Instant from = to.minus(Duration.ofDays(rolloverBackfillDays(timeframe)));
+            try {
+                startBackfillRange(instrument, timeframe, from, to, true, false, false, null);
+            } catch (Exception e) {
+                log.warn("Rollover deep-backfill dispatch failed for {} {}: {}", instrument, timeframe, e.getMessage());
             }
-        }).exceptionally(ex -> {
-            log.warn("Rollover warm-up failed: {}", ex.getMessage());
-            return null;
-        });
+        }
+    }
+
+    /**
+     * Per-timeframe lookback (days) for the post-rollover deep backfill, clamped to the range-backfill
+     * window cap so a misconfiguration can never exceed {@link #backfillRangeMaxDays}.
+     */
+    private int rolloverBackfillDays(String timeframe) {
+        int days = switch (timeframe) {
+            case "1m"  -> rolloverBackfillDays1m;
+            case "5m"  -> rolloverBackfillDays5m;
+            case "10m" -> rolloverBackfillDays10m;
+            case "1h"  -> rolloverBackfillDays1h;
+            case "4h"  -> rolloverBackfillDays4h;
+            case "1d"  -> rolloverBackfillDays1d;
+            default    -> 60;
+        };
+        return Math.min(Math.max(days, 1), backfillRangeMaxDays);
     }
 
     /** Trigger a manual full refresh asynchronously. Returns immediately. */

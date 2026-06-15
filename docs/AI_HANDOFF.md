@@ -1,6 +1,32 @@
 # AI Handoff
 
-Last updated: 2026-06-12
+Last updated: 2026-06-15
+
+## Rollover now deep-backfills the new contract (fixes "no 5m/10m data after roll") (2026-06-15)
+
+After a contract roll, charts for some timeframes (notably 5m/10m) collapsed to a
+handful of bars. Root cause: `CandleController` filters strictly by the **active
+contract month** and only falls back to full history when *zero* bars match. The
+live accumulator quickly writes a few new-month bars on fast timeframes (1m/5m/10m),
+which suppresses the fallback — but the new contract's *prior weeks* were never
+fetched, because the old rollover warm-up used a forward `gapFillTimeframe` (appends
+only past the high-water mark, which those live bars had already advanced to now).
+Coarser timeframes (no new-month bar closed yet) still showed the previous contract
+via the fallback, masking the gap.
+
+- **Fix**: `HistoricalDataService.onContractRollover` now dispatches an idempotent
+  **range backfill** (`startBackfillRange`, async) per supported timeframe over
+  `[now - lookback, now]` on the new front-month contract, instead of a forward
+  gap-fill. Each job queues on the dedicated single-threaded backfill executor
+  (IBKR-pacing safe). Lookback per timeframe is configurable
+  (`riskdesk.market-data.historical.rollover-backfill-days-{1m,5m,10m,1h,4h,1d}`,
+  defaults 14/60/90/200/200/200), clamped to `backfill-range-max-days`.
+- **Note**: `30m` is not IBKR-backfillable (`HistoricalDataProvider.supports`
+  excludes it) — it rebuilds live only; not in the rollover loop.
+- **Manual recovery** if a roll predates this fix (or after a purge): the purge
+  endpoint only deletes, it never refills — run
+  `POST /api/candles/backfill/{inst}/{tf}?from=…&to=…&async=true` per timeframe,
+  or purge + `POST /api/backtest/refresh-db` (empty timeframe → deep backfill).
 
 ## CVD-divergence paper trading loop + event persistence (2026-06-12)
 
