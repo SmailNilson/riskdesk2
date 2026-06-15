@@ -18,7 +18,7 @@ import DepthBookWidget from './DepthBookWidget';
 import DepthFlowStrip from './DepthFlowStrip';
 import DepthHeatmap from './DepthHeatmap';
 import WallTrackerPanel from './WallTrackerPanel';
-import { api } from '@/app/lib/api';
+import { api, type CvdDivergencePaperResponse } from '@/app/lib/api';
 import QuantTelemetryDashboard from './quant/QuantTelemetryDashboard';
 import { QUANT_INSTRUMENTS, type QuantInstrument } from './quant/types';
 
@@ -514,6 +514,140 @@ function CycleRowView({ event }: { event: CycleRow }) {
 }
 
 // ---------------------------------------------------------------------------
+// DIV Paper — RTH-gated "trade the DIV badge" simulation stats
+// ---------------------------------------------------------------------------
+
+const CLOSE_REASON_LABEL: Record<string, string> = {
+  BADGE_EXPIRED: 'badge expiré',
+  FLIPPED: 'inversion',
+  SESSION_END: 'fin RTH',
+};
+
+function PnlText({ points, currency }: { points: number | null; currency: number | null }) {
+  if (points == null) return <span className="text-zinc-600">—</span>;
+  const cls = points > 0 ? 'text-emerald-400' : points < 0 ? 'text-red-400' : 'text-zinc-400';
+  const sign = points > 0 ? '+' : '';
+  return (
+    <span className={cls}>
+      {sign}{points.toFixed(2)}pt
+      {currency != null ? ` · ${sign}$${currency.toFixed(0)}` : ''}
+    </span>
+  );
+}
+
+function DivPaperTradeRow({ trade }: { trade: CvdDivergencePaperResponse['trades'][number] }) {
+  const isLong = trade.direction === 'LONG';
+  const open = trade.status === 'OPEN';
+  return (
+    <div className="flex items-center gap-2 text-[11px] font-mono py-0.5 px-1 rounded hover:bg-zinc-800/50">
+      <span className={`shrink-0 font-semibold ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
+        {isLong ? '▲ LONG' : '▼ SHORT'}
+      </span>
+      <span className="text-zinc-500 shrink-0">{trade.entryPrice.toFixed(2)}</span>
+      {open ? (
+        <span className="px-1 py-0.5 rounded text-[9px] font-semibold bg-amber-900/60 text-amber-300 shrink-0 animate-pulse">
+          OUVERT
+        </span>
+      ) : (
+        <>
+          <span className="text-zinc-600 shrink-0">→ {trade.exitPrice?.toFixed(2)}</span>
+          <PnlText points={trade.pnlPoints} currency={trade.pnlCurrency} />
+          {trade.closeReason && (
+            <span className="text-zinc-600 truncate">
+              {CLOSE_REASON_LABEL[trade.closeReason] ?? trade.closeReason}
+            </span>
+          )}
+        </>
+      )}
+      <span className="ml-auto text-zinc-600 shrink-0" title={trade.entryTime}>
+        {formatRelativeTime(trade.entryTime)}
+      </span>
+    </div>
+  );
+}
+
+function DivPaperPanel({ instrument }: { instrument: string }) {
+  const [data, setData] = useState<CvdDivergencePaperResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      api
+        .getCvdDivergencePaperTrades(instrument, 7)
+        .then(res => { if (!cancelled) { setData(res); setLoading(false); } })
+        .catch(() => { if (!cancelled) setLoading(false); });
+    };
+    load();
+    // Trades open/close on the 5s server scheduler — refresh at 30s.
+    const id = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [instrument]);
+
+  if (loading && !data) {
+    return <p className="text-xs text-zinc-600 italic">Chargement des trades paper…</p>;
+  }
+  const stats = data?.stats;
+  if (!stats || stats.total === 0) {
+    return (
+      <p className="text-xs text-zinc-600 italic">
+        Aucun trade paper sur 7j — un trade s&apos;ouvre quand un DIV fire en session NY.
+      </p>
+    );
+  }
+
+  const pnlCls = stats.totalPnlPoints > 0
+    ? 'text-emerald-400'
+    : stats.totalPnlPoints < 0 ? 'text-red-400' : 'text-zinc-300';
+  const pnlSign = stats.totalPnlPoints > 0 ? '+' : '';
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {/* Stat strip */}
+      <div className="grid grid-cols-4 gap-1.5 text-center">
+        <div className="bg-zinc-800/50 rounded p-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-zinc-500">PnL 7j</div>
+          <div className={`text-sm font-mono font-semibold ${pnlCls}`}>
+            {pnlSign}{stats.totalPnlPoints.toFixed(1)}pt
+          </div>
+          <div className={`text-[10px] font-mono ${pnlCls}`}>
+            {pnlSign}${stats.totalPnlCurrency.toFixed(0)}
+          </div>
+        </div>
+        <div className="bg-zinc-800/50 rounded p-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-zinc-500">Win rate</div>
+          <div className="text-sm font-mono font-semibold text-zinc-200">
+            {stats.winRatePct != null ? `${stats.winRatePct.toFixed(0)}%` : '—'}
+          </div>
+          <div className="text-[10px] font-mono text-zinc-500">
+            {stats.wins}W / {stats.losses}L
+          </div>
+        </div>
+        <div className="bg-zinc-800/50 rounded p-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-zinc-500">Clôturés</div>
+          <div className="text-sm font-mono font-semibold text-zinc-200">{stats.closed}</div>
+          <div className="text-[10px] font-mono text-amber-400">{stats.open} ouvert(s)</div>
+        </div>
+        <div className="bg-zinc-800/50 rounded p-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-zinc-500">L / S</div>
+          <div className="text-[11px] font-mono text-emerald-400">
+            L {stats.LONG.totalPnlPoints > 0 ? '+' : ''}{stats.LONG.totalPnlPoints.toFixed(0)}
+          </div>
+          <div className="text-[11px] font-mono text-red-400">
+            S {stats.SHORT.totalPnlPoints > 0 ? '+' : ''}{stats.SHORT.totalPnlPoints.toFixed(0)}
+          </div>
+        </div>
+      </div>
+
+      {/* Recent trades */}
+      <div className="flex flex-col gap-0.5 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+        {data!.trades.map(t => <DivPaperTradeRow key={t.id} trade={t} />)}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Panel
 // ---------------------------------------------------------------------------
 
@@ -765,6 +899,17 @@ function OrderFlowPanel({ selectedInstrument }: OrderFlowPanelProps) {
           }
         </div>
       </div>
+
+      {/* Section 1a: DIV Paper — RTH-gated "trade the DIV badge" simulation (paper only) */}
+      {selectedInstrument && (
+        <div>
+          <h4 className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+            DIV Paper — {selectedInstrument}
+            <span className="text-zinc-600 normal-case tracking-normal"> (simulation · session NY · 7j)</span>
+          </h4>
+          <DivPaperPanel instrument={selectedInstrument} />
+        </div>
+      )}
 
       {/* Section 1b: Big Prints (outsized AllLast prints ≥ p99 — sweep-like events) */}
       <div>

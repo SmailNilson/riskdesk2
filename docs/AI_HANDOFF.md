@@ -2,6 +2,24 @@
 
 Last updated: 2026-06-15
 
+## DIV Paper panel — viewer for the CVD-divergence paper loop (2026-06-15)
+
+Frontend-only. Surfaces the RTH-gated "trade the DIV badge" paper simulation
+(backend shipped in PR #463) so its edge can be read without curl-ing the API.
+
+- New section `DIV Paper — {instrument}` in `OrderFlowPanel.tsx`, placed right
+  under the Delta bars (where the DIV badge lives). Desktop-only, like the rest
+  of the panel — it never mounts on mobile.
+- `DivPaperPanel` polls `GET /api/order-flow/cvd-divergence/paper/{instrument}?days=7`
+  every 30s (trades open/close on the server's 5s scheduler). Stat strip: 7-day
+  PnL (points + $), win rate (W/L), closed + open count, LONG/SHORT split.
+  Recent trades list with direction, entry→exit, signed PnL, close reason
+  (badge expiré / inversion / fin RTH), open trades flagged `OUVERT`.
+- API client: `getCvdDivergencePaperTrades` + `CvdDivergencePaperResponse` type
+  in `lib/api.ts`. No backend change.
+- Reminder for readers: paper fills are last-price (no slippage) and the pivot
+  confirms ~5 bars late by construction — judge on multi-week windows.
+
 ## Rollover now deep-backfills the new contract (fixes "no 5m/10m data after roll") (2026-06-15)
 
 After a contract roll, charts for some timeframes (notably 5m/10m) collapsed to a
