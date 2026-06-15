@@ -283,6 +283,16 @@ export default function Dashboard() {
                   />
                 </MobileCollapse>
               )}
+              {instrument === 'MNQ' && (
+                <MobileCollapse title="top-train-Z40" titleClassName="text-violet-400" subtitle={`${instrument} · 10m-z40`}>
+                  <WtxStrategyPanel
+                    instrument={instrument}
+                    timeframe="10m-z40"
+                    displayName="top-train-Z40"
+                    liveSignals={wtxSignals}
+                  />
+                </MobileCollapse>
+              )}
             </>
           )}
           {mobileTab === 'quant' && <Quant7GatesSimulationPanel />}
@@ -409,6 +419,16 @@ export default function Dashboard() {
               instrument={instrument}
               timeframe="10m-z35"
               displayName="top-train-Z35"
+              liveSignals={wtxSignals}
+            />
+          )}
+          {/* Variant signal top-train-Z40 — deeper ±40 zone, SL 3.5×ATR, same WaveTrend 5/14/2 /
+              SL_ONLY ride, key "10m-z40" (walk-forward champion neighbour of Z35). */}
+          {instrument === 'MNQ' && (
+            <WtxStrategyPanel
+              instrument={instrument}
+              timeframe="10m-z40"
+              displayName="top-train-Z40"
               liveSignals={wtxSignals}
             />
           )}

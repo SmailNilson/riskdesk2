@@ -58,6 +58,19 @@ public record WtxParamOverride(
             null);
 
     /**
+     * Named preset {@code top-train-Z40} — the walk-forward champion neighbour of Z35 from the
+     * same real-1m grid study (MNQ 10m): identical WaveTrend 5/14/2 and zone-only entries, but a
+     * deeper ±40 zone and a tighter 4.0→3.5×ATR SL_ONLY ride. On the full jan→juin 2026 front-data
+     * window it edged the shipped Z35 (+11.5k vs +9.3k, PF 2.15 vs 1.72, positive every month) — a
+     * crest, not an isolated peak (5 neighbouring SLs in the train top-20). Same session policy as
+     * Z35 (null = inherit the global gate, ON). Paper by default; validate forward before live.
+     */
+    public static final WtxParamOverride TOP_TRAIN_Z40 = new WtxParamOverride(
+            5, 14, 2, new BigDecimal("3.5"),
+            BigDecimal.valueOf(40), BigDecimal.valueOf(-40), Boolean.FALSE, Boolean.FALSE,
+            null);
+
+    /**
      * Resolve a named preset (case/whitespace-insensitive). {@code "clear"} (or {@code "none"})
      * maps to {@link #NONE} so one endpoint both applies and removes presets. Unknown names
      * resolve to {@link Optional#empty()} — the caller decides how to surface the error.
@@ -66,6 +79,7 @@ public record WtxParamOverride(
         if (name == null) return Optional.empty();
         return switch (name.trim().toLowerCase(Locale.ROOT)) {
             case "top-train-z35" -> Optional.of(TOP_TRAIN_Z35);
+            case "top-train-z40" -> Optional.of(TOP_TRAIN_Z40);
             case "clear", "none" -> Optional.of(NONE);
             default -> Optional.empty();
         };

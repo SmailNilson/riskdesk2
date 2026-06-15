@@ -136,18 +136,14 @@ public class PlaybookAutomationService {
 
         PriceSnapshot price = currentPrice(instrument);
         if (state.armedProfile() == PlaybookExecutionProfile.MNQ_10M_CONFIRMATION) {
-            // Champion/challenger A/B: the confirmation stream is the armed mechanism,
-            // and the legacy stream keeps running as a paper benchmark on the SAME
-            // signals. The streams are isolated end to end (distinct decision keys,
-            // per-stream one-position guard, per-stream reversal in the scheduler).
+            // Confirmation is the sole mechanism on this panel — the legacy challenger
+            // stream was retired once the backtest favoured confirmation. A null means a
+            // confirmation gate failed (score/session/zone/ATR) or the zone is deduped.
             PlaybookDecision confirmation = buildConfirmationDecision(
                 event.instrument(), event.timeframe(), event.timestamp(), instrument, evaluation, price);
             if (confirmation != null) {
                 processCandidate(confirmation, state, instrument, event);
             }
-            PlaybookDecision legacyShadow = buildDecision(
-                event.instrument(), event.timeframe(), event.timestamp(), evaluation, price);
-            processCandidate(legacyShadow, state, instrument, event);
         } else {
             processCandidate(
                 buildDecision(event.instrument(), event.timeframe(), event.timestamp(), evaluation, price),
@@ -449,15 +445,18 @@ public class PlaybookAutomationService {
                 persisted.getId());
         }
         try {
-            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
-                persisted.getId(),
-                persisted.getExecutionKey(),
-                persisted.getBrokerAccountId(),
-                persisted.getInstrument(),
-                persisted.getAction(),
-                persisted.getQuantity(),
-                persisted.getNormalizedEntryPrice()
-            ));
+            // Confirmation decisions are STOP entries — the trigger is the zone break (entryPrice).
+            // A resting buy-limit above market would fill immediately, the opposite of the breakout.
+            BrokerEntryOrderRequest entryRequest = decision.isStopEntry()
+                ? new BrokerEntryOrderRequest(
+                    persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
+                    persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
+                    null, BrokerEntryOrderRequest.ORDER_TYPE_STOP, persisted.getNormalizedEntryPrice())
+                : new BrokerEntryOrderRequest(
+                    persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
+                    persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
+                    persisted.getNormalizedEntryPrice());
+            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(entryRequest);
             // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
             // the row ACTIVE NOW instead of ENTRY_SUBMITTED waiting on an orderStatus(Filled) callback that
             // root cause R2 can drop. Mirrors DefaultOrderRouter.submitPersistedEntry.

@@ -296,14 +296,14 @@ public class WtxStrategyController {
         Object raw = body == null ? null : body.get("preset");
         if (raw == null || raw.toString().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Missing 'preset' field",
-                    "known", List.of("top-train-z35", "clear")));
+                    "known", List.of("top-train-z35", "top-train-z40", "clear")));
         }
         return WtxParamOverride.preset(raw.toString())
                 .map(preset -> ResponseEntity.ok(
                         toStateView(wtxStrategyService.applyPreset(instrument, timeframe, preset))))
                 .orElseGet(() -> ResponseEntity.badRequest().body(Map.of(
                         "error", "Unknown preset: " + raw,
-                        "known", List.of("top-train-z35", "clear"))));
+                        "known", List.of("top-train-z35", "top-train-z40", "clear"))));
     }
 
     /**

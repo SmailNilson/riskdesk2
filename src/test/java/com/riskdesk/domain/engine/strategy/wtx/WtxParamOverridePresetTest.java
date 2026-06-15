@@ -34,9 +34,28 @@ class WtxParamOverridePresetTest {
     }
 
     @Test
+    void topTrainZ40_isZ35WithDeeperZoneAndTighterStop() {
+        WtxParamOverride p = WtxParamOverride.TOP_TRAIN_Z40;
+        // Same WaveTrend + zone-only entries as Z35…
+        assertEquals(5, p.n1());
+        assertEquals(14, p.n2());
+        assertEquals(2, p.signalPeriod());
+        assertEquals(Boolean.FALSE, p.useCompra1());
+        assertEquals(Boolean.FALSE, p.useVenta1());
+        org.junit.jupiter.api.Assertions.assertNull(p.sessionFilterEnabled());
+        // …but a deeper ±40 zone and a tighter 3.5×ATR ride.
+        assertEquals(0, BigDecimal.valueOf(40).compareTo(p.nsc()));
+        assertEquals(0, BigDecimal.valueOf(-40).compareTo(p.nsv()));
+        assertEquals(0, new BigDecimal("3.5").compareTo(p.slAtrMult()));
+        assertFalse(p.isEmpty());
+    }
+
+    @Test
     void presetLookup_isCaseAndWhitespaceInsensitive() {
         assertEquals(Optional.of(WtxParamOverride.TOP_TRAIN_Z35), WtxParamOverride.preset("top-train-z35"));
         assertEquals(Optional.of(WtxParamOverride.TOP_TRAIN_Z35), WtxParamOverride.preset("  TOP-TRAIN-Z35  "));
+        assertEquals(Optional.of(WtxParamOverride.TOP_TRAIN_Z40), WtxParamOverride.preset("top-train-z40"));
+        assertEquals(Optional.of(WtxParamOverride.TOP_TRAIN_Z40), WtxParamOverride.preset("  TOP-TRAIN-Z40  "));
     }
 
     @Test

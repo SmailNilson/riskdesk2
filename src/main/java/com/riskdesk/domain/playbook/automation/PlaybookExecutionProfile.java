@@ -9,10 +9,12 @@ public enum PlaybookExecutionProfile {
     /**
      * Confirmation-entry profile for MNQ 10m (see {@link ConfirmationEntryPlanner}):
      * STOP entry at the zone exit, zone-broken invalidation, ATR(1.5/2.25) brackets,
-     * direction-specific session gates. Paper-only until forward validation completes
-     * (executable=false) — backtest provenance in PR #450 / docs/AI_HANDOFF.md.
+     * direction-specific session gates. Live-executable: routes a real IBKR STOP entry
+     * when Auto-IBKR is armed on the panel. Backtest provenance in PR #450 /
+     * docs/AI_HANDOFF.md — forward (paper) validation is still in progress, so arming
+     * Auto-IBKR is the operator's call.
      */
-    MNQ_10M_CONFIRMATION(false, false, false);
+    MNQ_10M_CONFIRMATION(true, false, false);
 
     private final boolean executable;
     private final boolean manualValidationRequired;
