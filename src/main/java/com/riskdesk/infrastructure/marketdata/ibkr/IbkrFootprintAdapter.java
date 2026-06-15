@@ -76,6 +76,16 @@ public class IbkrFootprintAdapter implements FootprintPort {
     }
 
     /**
+     * Discards the instrument's footprint aggregator on a contract rollover so the new contract's
+     * first bar isn't built from old-contract price buckets. Recreated lazily on the next tick.
+     */
+    public void purgeInstrument(Instrument instrument) {
+        if (aggregators.remove(instrument) != null) {
+            log.info("Footprint: cleared aggregator for {} on contract rollover", instrument);
+        }
+    }
+
+    /**
      * Returns a snapshot of the current clock-aligned footprint bar for the instrument.
      * If no tick data has been accumulated in the current bar window, returns empty.
      */

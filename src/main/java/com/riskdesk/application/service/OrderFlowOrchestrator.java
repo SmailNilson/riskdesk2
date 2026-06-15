@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.analysis.port.CandleRepositoryPort;
+import com.riskdesk.domain.contract.event.ContractRolloverEvent;
 import com.riskdesk.domain.engine.indicators.AtrCalculator;
 import com.riskdesk.domain.marketdata.model.SessionCvd;
 import com.riskdesk.domain.marketdata.model.TickAggregation;
@@ -379,6 +380,83 @@ public class OrderFlowOrchestrator {
                 log.warn("Failed to subscribe depth for {}: {}", instrument, e.getMessage());
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Contract rollover — re-point the order-flow feeds at the new contract
+    // -------------------------------------------------------------------------
+
+    /**
+     * On a confirmed contract rollover, switch this instrument's tick-by-tick and market-depth
+     * subscriptions to the new contract.
+     * <p>
+     * Why this is needed: {@code RolloverDetectionService.confirmRollover()} only refreshes the
+     * live-price/quote streams (via {@code IbGatewayContractResolver.refreshToMonth} →
+     * {@code IbGatewayNativeClient.cancelInstrumentSubscriptions}). The order-flow tick stream runs
+     * on a <b>separate</b> {@link TickByTickClient} socket and market depth is a separate native
+     * subscription — neither is touched by that path. The 30s {@link #ensureTickByTickSubscriptions}
+     * / {@link #ensureDepthSubscriptions} loops only act on instruments <i>missing</i> from the
+     * subscribed sets, so they never re-point an already-subscribed instrument. And the tick
+     * watchdog can't rescue it either: the expired contract keeps trading right up to expiry, so the
+     * old stream never goes silent. The net effect without this listener is that the TickChart,
+     * delta panels, footprint and order book stay pinned to the <b>old</b> contract indefinitely
+     * even though the headline price has rolled.
+     * <p>
+     * {@code RolloverDetectionService} refreshes the resolver cache <i>before</i> publishing this
+     * event, so re-resolution here returns the new contract. We also purge all per-instrument flow
+     * state so no aggregation window, delta, tick-bar or detector straddles the old→new price gap
+     * (which would otherwise fabricate a move the size of the calendar spread).
+     */
+    @EventListener
+    public void onContractRollover(ContractRolloverEvent event) {
+        Instrument instrument = event.instrument();
+        if (instrument == null || !instrument.isExchangeTradedFuture()) return;
+
+        log.info("Order flow: contract rollover {} {} → {} — re-pointing tick-by-tick + depth feeds",
+                 instrument, event.oldContractMonth(), event.newContractMonth());
+
+        // --- Tick-by-tick: cancel the old-contract stream and clear subscription bookkeeping ---
+        try {
+            tickByTickClient.cancelTickByTick(instrument);
+        } catch (Exception e) {
+            log.warn("Rollover: failed to cancel tick-by-tick for {}: {}", instrument, e.getMessage());
+        }
+        evictTickState(instrument);
+        // Clear the delta-staleness backoff so the re-subscribe is never locked out by strikes
+        // accumulated on the now-cancelled old-contract stream.
+        deltaStaleStrikes.remove(instrument);
+
+        // --- Market depth: drop the native subscription and its bookkeeping ---
+        try {
+            nativeClient.unsubscribeDepth(instrument);
+        } catch (Exception e) {
+            log.warn("Rollover: failed to unsubscribe depth for {}: {}", instrument, e.getMessage());
+        }
+        subscribedDepth.remove(instrument);
+        depthSubscribedAt.remove(instrument);
+        depthStaleStrikes.remove(instrument);
+
+        // --- Purge per-instrument flow state so nothing spans the old→new contract price gap ---
+        TickDataPort tickDataPort = tickDataPortProvider.getIfAvailable();
+        if (tickDataPort != null) {
+            tickDataPort.purgeInstrument(instrument);
+        }
+        flashCrashFSMs.remove(instrument);
+        flashPrevVelocity.remove(instrument);
+        flashVolumeHistory.remove(instrument);
+        flashThresholdsCache.remove(instrument);
+        momentumDetectors.remove(instrument);
+        distributionDetectors.remove(instrument);
+        cycleDetectors.remove(instrument);
+        cvdDetectors.remove(instrument);
+        tape5Baselines.remove(instrument);
+        tape30Baselines.remove(instrument);
+        volumeHistory.remove(instrument);
+        atrCache.remove(instrument);
+
+        // --- Re-subscribe immediately on the new contract rather than waiting up to 30s ---
+        ensureTickByTickSubscriptions();
+        ensureDepthSubscriptions();
     }
 
     // -------------------------------------------------------------------------
