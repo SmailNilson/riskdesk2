@@ -658,6 +658,11 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
     const stopLoss = Number(sl);
     const takeProfit = Number(tp);
     const quantity = Math.max(1, Math.floor(Number(qty) || 1));
+    if (!brokerAccountId) {
+      // No resolved IBKR account → the backend would 409 ("a brokerAccountId is
+      // required"). Tell the operator to pick one in the IBKR Portfolio panel.
+      setLocalError('Aucun compte IBKR — ouvrez le panel IBKR Portfolio et sélectionnez un compte'); return;
+    }
     if (entryType === 'LIMIT' && (!Number.isFinite(entryPrice) || entryPrice <= 0)) {
       setLocalError('Prix limite invalide'); return;
     }
@@ -691,7 +696,9 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
     <div className="absolute top-2 right-2 z-20 w-52 rounded border border-zinc-700 bg-zinc-900 shadow-xl p-2.5 text-[11px]">
       <div className={`font-semibold mb-1.5 ${long ? 'text-emerald-300' : 'text-red-300'}`}>
         {long ? 'ACHAT' : 'VENTE'} {instrument}
-        <span className="text-zinc-500 font-normal"> · {brokerAccountId ?? 'compte par défaut'}</span>
+        {brokerAccountId
+          ? <span className="text-zinc-500 font-normal"> · {brokerAccountId}</span>
+          : <span className="text-amber-400 font-normal"> · ⚠ aucun compte IBKR</span>}
       </div>
       <div className="flex gap-1 mb-1.5">
         {(['LIMIT', 'MARKET'] as const).map(t => (
@@ -732,8 +739,8 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
       <div className="flex gap-1.5">
         <button
           onClick={() => void submit()}
-          disabled={submitting}
-          className={`flex-1 py-1 rounded font-semibold text-[11px] disabled:opacity-50 ${
+          disabled={submitting || !brokerAccountId}
+          className={`flex-1 py-1 rounded font-semibold text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${
             long ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-red-700 hover:bg-red-600 text-white'
           }`}
         >
