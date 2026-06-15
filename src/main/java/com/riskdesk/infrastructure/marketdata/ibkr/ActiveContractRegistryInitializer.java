@@ -81,8 +81,26 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
                 : null;
 
             if (resolved != null) {
-                registry.initialize(instrument, resolved);
-                log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
+                // Never let startup OI/volume resolution drag the active contract BACKWARD relative
+                // to a previously-persisted month. A futures contract only ever rolls forward, so an
+                // EARLIER IBKR pick means the DB holds a deliberate forward roll — e.g. an operator
+                // who rolled early, before open interest migrated to the back month. Without this,
+                // a manual roll to a still-thin back month (MNQ Jun→Sep days before expiry, when the
+                // June front month still carries ~10× the OI) is silently reverted to the front month
+                // on every restart, because resolveFromIbkr() picks highest-OI.
+                String fromDb = registry.getContractMonth(instrument).orElse(null);
+                if (fromDb != null && isEarlierMonth(resolved, fromDb)) {
+                    registry.initialize(instrument, fromDb);
+                    // resolveFromIbkr() already pointed the resolver's contract cache at the EARLIER
+                    // (front-month) contract via setResolved(); realign it to the kept month so live
+                    // subscriptions don't split-brain onto the contract we just declined.
+                    resolver.refreshToMonth(instrument, fromDb);
+                    log.warn("ActiveContractRegistry: {} → {} (kept DB forward-roll; IBKR resolved earlier {} by OI/volume — not rolling backward)",
+                        instrument, fromDb, resolved);
+                } else {
+                    registry.initialize(instrument, resolved);
+                    log.info("ActiveContractRegistry: {} → {} (IBKR)", instrument, resolved);
+                }
             } else {
                 // Second-tier fallback: the registry constructor has already hydrated
                 // itself from the persistence port, so any previously-confirmed contract
@@ -255,5 +273,27 @@ public class ActiveContractRegistryInitializer implements ApplicationRunner {
         if (raw == null) return null;
         String digits = raw.replaceAll("[^0-9]", "");
         return digits.length() >= 6 ? digits.substring(0, 6) : null;
+    }
+
+    /**
+     * True when contract month {@code candidate} is strictly earlier than {@code reference}.
+     * Both are compared as 6-digit YYYYMM (delivery month — {@link #resolveFromIbkr} already applies
+     * the ENERGY expiry→delivery adjustment, so both sides are delivery months for every instrument).
+     * Returns false if either can't be parsed, so an unparseable value never blocks resolution.
+     */
+    static boolean isEarlierMonth(String candidate, String reference) {
+        Integer c = parseYyyyMm(candidate);
+        Integer r = parseYyyyMm(reference);
+        return c != null && r != null && c < r;
+    }
+
+    private static Integer parseYyyyMm(String month) {
+        String norm = normalizeMonth(month);
+        if (norm == null) return null;
+        try {
+            return Integer.parseInt(norm);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }
