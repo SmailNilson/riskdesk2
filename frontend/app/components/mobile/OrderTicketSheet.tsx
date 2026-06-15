@@ -30,7 +30,8 @@ interface Props {
   instrument: string;
   /** Latest live price — prefills the limit price and anchors SL/TP. */
   lastPrice: number | null;
-  /** Target IBKR account (falls back to the server-configured one when null). */
+  /** Target IBKR account. Required — there is no server-side default fallback,
+   *  so the submit button stays disabled until the Dashboard resolves one. */
   brokerAccountId?: string | null;
   onClose: () => void;
   /** Called after a successful placement (the sheet closes itself). */
@@ -104,7 +105,9 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
   const geometryOk = refPrice != null && sl != null && tp != null && qty >= 1 && (
     side === 'LONG' ? (sl < refPrice && tp > refPrice) : (sl > refPrice && tp < refPrice)
   );
-  const valid = geometryOk && (entryType !== 'LIMIT' || (price != null && price > 0));
+  // A resolved IBKR account is required — the server has no default fallback
+  // (riskdesk.quant.auto-arm.broker-account-id is empty), so a null account 409s.
+  const valid = geometryOk && !!brokerAccountId && (entryType !== 'LIMIT' || (price != null && price > 0));
 
   const riskUsd = refPrice != null && sl != null
     ? Math.abs(refPrice - sl) / spec.tick * spec.tickValue * qty : null;
@@ -308,6 +311,11 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
             )}
             {error && (
               <p className="text-[11px] text-red-400 bg-red-950/50 border border-red-900 rounded-lg px-3 py-2 mt-2 break-words">{error}</p>
+            )}
+            {!brokerAccountId && (
+              <p className="text-[11px] text-amber-400 bg-amber-950/40 border border-amber-900 rounded-lg px-3 py-2 mt-2">
+                Aucun compte IBKR résolu — vérifiez la connexion IBKR avant de trader.
+              </p>
             )}
 
             <button

@@ -130,6 +130,27 @@ export default function Dashboard() {
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadSnapshot(); }, [loadSnapshot]);
 
+  // Resolve the broker's default account up-front, independent of the IBKR
+  // portfolio panel. That panel lifts its selected account to this state, but it
+  // is UNMOUNTED when the left zone is collapsed (CollapsibleZone drops children),
+  // so a user trading from the chart with the left zone closed would send a null
+  // account and the backend 409s ("a brokerAccountId … is required"). Only fills
+  // when the user hasn't already picked one, so a manual portfolio selection wins.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snap = await api.getIbkrPortfolio();
+        if (cancelled) return;
+        const acct = snap.selectedAccountId;
+        if (acct) setSelectedIbkrAccountId(prev => prev ?? acct);
+      } catch {
+        /* IBKR unavailable — the chart-trading ticket guards on a null account. */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Refresh summary every 5s (syncs with backend polling)
   useEffect(() => {
     const id = setInterval(loadSummary, 5000);
