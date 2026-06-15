@@ -115,6 +115,26 @@ public class IbkrTickDataAdapter implements TickDataPort {
     }
 
     /**
+     * Drops <b>all</b> per-instrument tick state on a contract rollover: the rolling aggregation
+     * window, the tick-rule reference/direction, the freshness markers and the derived
+     * tick-bar / footprint / big-print builders. A fresh aggregator is recreated lazily on the
+     * first trade of the new contract, so the new-contract window never inherits an old-contract
+     * tick — preventing a delta/high-low/tick-bar that spans the calendar-spread price gap.
+     */
+    @Override
+    public void purgeInstrument(Instrument instrument) {
+        aggregators.remove(instrument);
+        lastTradePrice.remove(instrument);
+        lastTickRuleDir.remove(instrument);
+        lastClassifiedAt.remove(instrument);
+        lastGenuineWindowEnd.remove(instrument);
+        footprintAdapter.purgeInstrument(instrument);
+        tickBarAdapter.purgeInstrument(instrument);
+        bigPrintAdapter.purgeInstrument(instrument);
+        log.info("Tick data purged for {} on contract rollover — new contract starts clean", instrument);
+    }
+
+    /**
      * Final resolution of one trade tick: the classification actually fed to the aggregator and
      * whether it came from the trade-to-trade tick rule ({@code tickRule=true}) or the Lee-Ready
      * quote rule ({@code tickRule=false}). Returned to the caller so the per-tick diagnostic log

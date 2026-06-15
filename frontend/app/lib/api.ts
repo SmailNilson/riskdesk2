@@ -900,6 +900,53 @@ export interface CycleEventHistory {
   completedAt: string | null;
 }
 
+// ── CVD-divergence paper trades (GET /api/order-flow/cvd-divergence/paper/{instrument}) ──
+/**
+ * One simulated trade of the RTH-gated "trade the DIV badge" paper loop
+ * (UC-OF-CVD-PAPER). Pure simulation — never routed to a broker.
+ */
+export interface CvdDivergencePaperTrade {
+  id: number;
+  instrument: string;
+  direction: 'LONG' | 'SHORT';
+  divergenceType: 'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE';
+  entryTime: string;
+  entryPrice: number;
+  lastSignalTime: string;
+  status: 'OPEN' | 'CLOSED';
+  exitTime: string | null;
+  exitPrice: number | null;
+  closeReason: 'BADGE_EXPIRED' | 'FLIPPED' | 'SESSION_END' | null;
+  pnlPoints: number | null;
+  pnlCurrency: number | null;
+}
+
+export interface CvdDivergencePaperDirectionStats {
+  closed: number;
+  wins: number;
+  totalPnlPoints: number;
+}
+
+export interface CvdDivergencePaperStats {
+  total: number;
+  open: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  winRatePct: number | null;
+  totalPnlPoints: number;
+  totalPnlCurrency: number;
+  LONG: CvdDivergencePaperDirectionStats;
+  SHORT: CvdDivergencePaperDirectionStats;
+}
+
+export interface CvdDivergencePaperResponse {
+  instrument: string;
+  days: number;
+  stats: CvdDivergencePaperStats;
+  trades: CvdDivergencePaperTrade[];
+}
+
 // ── Wall Tracker (GET /api/order-flow/walls/{instrument}) — UC-OF-012 ─────────
 /** A wall currently flagged in the book (live episode, no outcome yet). */
 export interface ActiveWall {
@@ -1151,6 +1198,11 @@ export const api = {
     get<MomentumEventHistory[]>(`/api/order-flow/momentum/${instrument}?limit=${limit}`),
   getCycleEvents: (instrument: string, limit = 20) =>
     get<CycleEventHistory[]>(`/api/order-flow/cycle/${instrument}?limit=${limit}`),
+  // RTH-gated DIV-badge paper trades + aggregate stats (pure simulation).
+  getCvdDivergencePaperTrades: (instrument: string, days = 7) =>
+    get<CvdDivergencePaperResponse>(
+      `/api/order-flow/cvd-divergence/paper/${instrument}?days=${days}`,
+    ),
   getTrailingStats: (days = 7) =>
     get<TrailingStopStats>(`/api/mentor/simulation/trailing-stats?days=${days}`),
   getCorrelationStatus: () =>
@@ -1699,7 +1751,8 @@ export interface PlaybookAutomationView {
 export type PlaybookExecutionProfile =
   | 'LEGACY'
   | 'MGC_10M_SCALP_0_5R'
-  | 'MGC_10M_NORMAL_1R_BENCHMARK';
+  | 'MGC_10M_NORMAL_1R_BENCHMARK'
+  | 'MNQ_10M_CONFIRMATION';
 
 export interface PlaybookAutomationUpdateRequest {
   paperThreshold?: number;
@@ -1766,6 +1819,8 @@ export interface PlaybookAutomationDecisionView {
   pnl: number | null;
   rrRatio: number | null;
   verdict: string | null;
+  entryType?: 'LIMIT' | 'STOP' | string | null;
+  invalidationPrice?: number | null;
   profitabilitySummary: PlaybookAutomationProfitabilitySummaryView | null;
 }
 

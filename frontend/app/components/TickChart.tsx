@@ -16,6 +16,7 @@ import {
 import { TickBar, useOrderFlow } from '@/app/hooks/useOrderFlow';
 import { useActivePositions } from '@/app/hooks/useActivePositions';
 import { api, ActivePositionView, IndicatorSnapshot } from '@/app/lib/api';
+import { isStaleSeed } from '@/app/lib/tickBarSession';
 
 interface TickChartProps {
   selectedInstrument?: string;
@@ -147,14 +148,18 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  * SL/TP lines are VIRTUAL — informative levels, not broker bracket orders.
  *
  * Data: REST seed (/api/order-flow/tick-bars) + live merge from /topic/tick-bars
- * (handled in useOrderFlow, keyed by bar seq).
+ * (handled in useOrderFlow, keyed by bar seq). seq is only unique within one
+ * backend session — the ring restarts at 0 on redeploy — so useOrderFlow bumps
+ * `tickBarResets` (ring restart detected or STOMP reconnect) to trigger a seed
+ * refetch, and a seed recognized as previous-session is dropped from the merge
+ * (mixing sessions left old high-seq bars as frozen ghosts at the timeline end).
  *
  * lightweight-charts requires strictly increasing times; consecutive tick bars can
  * close within the same second on a busy tape, so times are de-duplicated by
  * bumping +1s when needed (label drift of a few seconds is acceptable here).
  */
 function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartProps) {
-  const { tickBars } = useOrderFlow();
+  const { tickBars, tickBarResets } = useOrderFlow();
   const { positions, close, cancelEntry, refresh } = useActivePositions();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -178,28 +183,37 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
 
   const meta = selectedInstrument ? INSTRUMENT_META[selectedInstrument] : undefined;
 
-  // REST seed on instrument switch (the WS tail only carries the last bars).
+  // Trading/selector UI resets only on instrument switch — not on a re-seed.
   useEffect(() => {
     setBarSize(null); // base size differs per instrument — reset the selector
     setMenu(null);
     setTicket(null);
     setConfirmAction(null);
+  }, [selectedInstrument]);
+
+  // REST seed on instrument switch (the WS tail only carries the last bars) and
+  // on tick-bar resets (STOMP reconnect / backend ring restart): the old seed's
+  // seqs belong to the previous backend session and must not merge with the new.
+  useEffect(() => {
     if (!selectedInstrument) { setSeedBars([]); return; }
     let cancelled = false;
     api.getTickBars(selectedInstrument, MAX_BASE_BARS).then(bars => {
       if (!cancelled) setSeedBars(Array.isArray(bars) ? (bars as unknown as TickBar[]) : []);
     }).catch(() => { if (!cancelled) setSeedBars([]); });
     return () => { cancelled = true; };
-  }, [selectedInstrument]);
+  }, [selectedInstrument, tickBarResets]);
 
   // Merge REST seed + live bars by seq. Guard on instrument so a stale seed from
-  // the previously selected instrument never mixes in while the new fetch resolves.
+  // the previously selected instrument never mixes in while the new fetch resolves,
+  // and drop a seed from a previous backend session (higher seq but strictly older
+  // closeTime — impossible within one session) so it can't ghost the timeline
+  // while its refetch is still in flight.
   const baseBars = useMemo(() => {
     if (!selectedInstrument) return [] as TickBar[];
     const live = tickBars.get(selectedInstrument) ?? [];
-    const bySeq = new Map<number, TickBar>(
-      seedBars.filter(b => b.instrument === selectedInstrument).map(b => [b.seq, b]),
-    );
+    let seed = seedBars.filter(b => b.instrument === selectedInstrument);
+    if (isStaleSeed(seed, live)) seed = [];
+    const bySeq = new Map<number, TickBar>(seed.map(b => [b.seq, b]));
     for (const bar of live) bySeq.set(bar.seq, bar);
     return Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq).slice(-MAX_BASE_BARS);
   }, [seedBars, tickBars, selectedInstrument]);

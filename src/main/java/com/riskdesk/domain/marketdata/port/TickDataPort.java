@@ -85,4 +85,16 @@ public interface TickDataPort {
     default Optional<TapeSpeed> tapeSpeed(Instrument instrument, long windowSeconds) {
         return Optional.empty();
     }
+
+    /**
+     * Discards all per-instrument tick state — rolling aggregation window, tick-rule reference
+     * price, freshness markers and any derived bar/footprint/big-print builders. Called on a
+     * <b>contract rollover</b> so the new contract starts from a clean slate and no aggregation,
+     * delta, tick-bar or detector window straddles the old→new contract price gap (which would
+     * otherwise fabricate a spurious move the size of the calendar spread). Default no-op for
+     * adapters that hold no per-instrument state (e.g. CLV estimation).
+     */
+    default void purgeInstrument(Instrument instrument) {
+        // no-op
+    }
 }

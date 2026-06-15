@@ -1,6 +1,146 @@
 # AI Handoff
 
-Last updated: 2026-06-11
+Last updated: 2026-06-15
+
+## DIV Paper panel — viewer for the CVD-divergence paper loop (2026-06-15)
+
+Frontend-only. Surfaces the RTH-gated "trade the DIV badge" paper simulation
+(backend shipped in PR #463) so its edge can be read without curl-ing the API.
+
+- New section `DIV Paper — {instrument}` in `OrderFlowPanel.tsx`, placed right
+  under the Delta bars (where the DIV badge lives). Desktop-only, like the rest
+  of the panel — it never mounts on mobile.
+- `DivPaperPanel` polls `GET /api/order-flow/cvd-divergence/paper/{instrument}?days=7`
+  every 30s (trades open/close on the server's 5s scheduler). Stat strip: 7-day
+  PnL (points + $), win rate (W/L), closed + open count, LONG/SHORT split.
+  Recent trades list with direction, entry→exit, signed PnL, close reason
+  (badge expiré / inversion / fin RTH), open trades flagged `OUVERT`.
+- API client: `getCvdDivergencePaperTrades` + `CvdDivergencePaperResponse` type
+  in `lib/api.ts`. No backend change.
+- Reminder for readers: paper fills are last-price (no slippage) and the pivot
+  confirms ~5 bars late by construction — judge on multi-week windows.
+
+## Rollover now deep-backfills the new contract (fixes "no 5m/10m data after roll") (2026-06-15)
+
+After a contract roll, charts for some timeframes (notably 5m/10m) collapsed to a
+handful of bars. Root cause: `CandleController` filters strictly by the **active
+contract month** and only falls back to full history when *zero* bars match. The
+live accumulator quickly writes a few new-month bars on fast timeframes (1m/5m/10m),
+which suppresses the fallback — but the new contract's *prior weeks* were never
+fetched, because the old rollover warm-up used a forward `gapFillTimeframe` (appends
+only past the high-water mark, which those live bars had already advanced to now).
+Coarser timeframes (no new-month bar closed yet) still showed the previous contract
+via the fallback, masking the gap.
+
+- **Fix**: `HistoricalDataService.onContractRollover` now dispatches an idempotent
+  **range backfill** (`startBackfillRange`, async) per supported timeframe over
+  `[now - lookback, now]` on the new front-month contract, instead of a forward
+  gap-fill. Each job queues on the dedicated single-threaded backfill executor
+  (IBKR-pacing safe). Lookback per timeframe is configurable
+  (`riskdesk.market-data.historical.rollover-backfill-days-{1m,5m,10m,1h,4h,1d}`,
+  defaults 14/60/90/200/200/200), clamped to `backfill-range-max-days`.
+- **Note**: `30m` is not IBKR-backfillable (`HistoricalDataProvider.supports`
+  excludes it) — it rebuilds live only; not in the rollover loop.
+- **Manual recovery** if a roll predates this fix (or after a purge): the purge
+  endpoint only deletes, it never refills — run
+  `POST /api/candles/backfill/{inst}/{tf}?from=…&to=…&async=true` per timeframe,
+  or purge + `POST /api/backtest/refresh-db` (empty timeframe → deep backfill).
+
+## CVD-divergence paper trading loop + event persistence (2026-06-12)
+
+The DIV badge (CVD pivot divergence, `/topic/cvd-divergence`) now drives an
+**RTH-gated paper-trading simulation** so the signal's edge can be measured
+before any real wiring is considered. Prior order-flow event studies showed no
+detector has standalone directional edge (some are inverted) — this loop exists
+to test the DIV badge against that bar, not to trade it.
+
+- **Rule under test**: divergence fires inside RTH (09:30–16:00 ET) → simulated
+  1-contract entry at last price in the divergence direction (bearish → SHORT,
+  bullish → LONG). Same-direction events refresh the hold window (mirrors the
+  frontend badge refresh); an opposite divergence closes and flips. Close when
+  the badge window (`riskdesk.order-flow.cvd.paper-hold-seconds`, default 600s)
+  lapses or RTH ends — whichever first.
+- **`CvdDivergencePaperTradingService`** (application): event listener + 5s
+  expiry scheduler. **Pure paper — never touches the execution path.** Closes
+  defer (retry next pass) when no live price is available. Config:
+  `riskdesk.order-flow.cvd.paper-trading-enabled` (default `true`).
+- **`CvdDivergenceDetected`** now carries `lastPrice` (price at detection — the
+  paper fill reference; distinct from the pivot price, which is ~5 bars older).
+  The WS payload gained a `price` field.
+- **Persistence**: `cvd_divergence_paper_trades` (trades) and
+  `order_flow_cvd_divergence_events` (ALL divergence events, all sessions, with
+  an `rth` flag — fodder for a future event study). Both purge at 90 days with
+  the other order-flow events.
+- **Endpoint**: `GET /api/order-flow/cvd-divergence/paper/{instrument}?days=7`
+  → trades + stats (win rate, PnL points/currency, per-direction split).
+- Caveats for whoever reads the stats: fills are last-price with no
+  spread/slippage model, and the detector confirms pivots `pivotBars` (5)
+  minutes late by construction — judge the edge accordingly, and only on
+  multi-week windows (one good day proves nothing).
+
+## Mobile manual trading — order ticket bottom sheet (2026-06-12)
+
+Mobile users can now place and manage manual orders. Frontend-only — rides the
+existing Quant manual-trade API; no backend change.
+
+- **`OrderTicketSheet`** (`frontend/app/components/mobile/`): bottom sheet opened
+  from "Passer un ordre" (Chart tab) or "Nouvel ordre" (Portf tab). Side
+  (Acheter/Vendre), LIMIT/MARKET, qty stepper (1–10), tick-aligned price steppers,
+  **SL/TP required** (backend rejects without them — prefilled at ≈ $50 risk /
+  $100 reward per contract), live risk line (risk-at-stop $, target $, R:R,
+  $/tick from the per-instrument contract specs mirroring `Instrument.java`).
+  Submission is **hold-to-confirm (1 s)** — release early cancels. Geometry is
+  validated client-side (and again server-side): wrong-side SL/TP disables the
+  button with an explanation.
+- **`MobilePositionsCard`** (Portf tab): working entries (Soumis → Présenté →
+  Exécuté mini-stepper, one-tap Annuler), open positions (P&L, SL/TP, Clôturer
+  with inline confirm — close goes out as marketable limit), `EXIT_SUBMITTED`
+  shown as "clôture en cours". Live via `useActivePositions`
+  (`/topic/positions` push + REST seed).
+- API: `POST /api/quant/manual-trade/{instrument}` (`ManualTradeRequest` with
+  `submitImmediately=true` — without it a LIMIT row rests as
+  PENDING_ENTRY_SUBMISSION and never reaches IBKR — and `brokerAccountId` from
+  the Dashboard account selector), `GET /api/quant/positions/active`,
+  `POST /api/quant/positions/{id}/close` for live positions and `cancelEntry`
+  for resting orders. `takeProfit2` exists in the API but is deliberately not
+  in the mobile ticket v1. The mobile TickChart also receives
+  `brokerAccountId`, so the chart click-to-trade MVP (entry below) works on
+  mobile too.
+- After a successful placement the app switches to the Portf tab to show the
+  working order.
+
+## Mobile cockpit design system (2026-06-12)
+
+Second pass on the mobile UI (see entry below for the tabbed layout itself):
+
+- `MobileVitalStrip` — one-line status + total P&L (always visible), expandable
+  2×2 secondary metrics, amber offline banner. Replaces MetricsBar + ticker below `lg`.
+- `MobileInstrumentPills` — live price inside each instrument pill
+  (tick-direction colored, muted when STALE/FALLBACK_DB); the separate ticker
+  row is desktop-only now.
+- `TabIcons` — inline Lucide-geometry stroke icons (no icon-lib dependency)
+  with an emerald active-indicator bar.
+- `MobileCollapse` — collapsed-by-default wrapper that only mounts children
+  while open; wraps WTX 10m and top-train-Z35 on the WTX tab.
+- `useIsMobile` gained a `resize` fallback for viewports that don't dispatch
+  matchMedia change events.
+## Risk gate daily-drawdown formula fixed (2026-06-12)
+
+**Bug.** The AGENTS panel showed "DAILY DRAWDOWN 83.7% > 3% — NO MORE TRADES TODAY" on a
+micro-contract account with a small dollar loss. The drawdown was computed as
+`|totalUnrealizedPnL| / totalExposure × 100` (duplicated in
+`AgentOrchestratorService.buildPortfolioState` and `PortfolioStateBuilder`). On the IBKR
+path `totalExposure` maps to the `GrossPositionValue` account tag, which **excludes
+futures** — near-zero denominator → absurd percentages → spurious kill-switch blocks.
+It also ignored today's realized P&L (not actually "daily").
+
+**Fix.** `PortfolioSummary` gained an `accountEquity` field (IBKR: `netLiquidation`;
+local fallback: configured account margin) and a single derived
+`PortfolioSummary.dailyDrawdownPct()`: `max(0, -(todayRealizedPnL + totalUnrealizedPnL))
+/ accountEquity × 100`. Unknown/zero equity → 0 (fail-open, consistent with the
+risk gates' abstain-on-unknown posture). Both consumers now delegate to it. The 3%
+threshold and blocking policy are unchanged. Tests: `PortfolioSummaryDrawdownTest`,
+`PortfolioStateBuilderDrawdownTest`.
 
 ## Chart trading MVP — click-to-trade sur le Tick Chart (2026-06-11)
 
@@ -82,6 +222,32 @@ SL-consistent realized P&L, no double exit when the 10m close carries the same b
 trailing MFE/stop ratchet on consecutive 1m closes, variant panel uses its preset stop,
 BASELINE not swept.
 
+
+## Mobile layout — focused tabbed UI below `lg` (2026-06-11)
+
+The dashboard now has a dedicated mobile layout (viewport < 1024px) instead of stacking
+all ~25 desktop panels in one column. Desktop (≥ `lg`) is unchanged.
+
+- **`useIsMobile()`** (`frontend/app/hooks/useIsMobile.ts`): SSR-safe `matchMedia` hook
+  mirroring Tailwind's `lg` breakpoint. Returns `null` until the viewport is known, so
+  neither panel tree mounts prematurely — a phone never mounts the desktop panels (and
+  their WS subscriptions / polling), not even for one frame.
+- **Bottom tab bar** (5 tabs, only the active tab's panels are mounted):
+  Chart (= **TickChart**, not the heavy lightweight-charts `Chart`), WTX (WTX · 5m,
+  WTX · 10m, top-train-Z35 on MNQ), Quant (Quant7GatesSimulationPanel), Playbook,
+  Portf (IbkrPortfolioPanel).
+- **Deliberately desktop-only**: AlertsFeed, full Chart, IndicatorPanel, DxyPanel,
+  OrderFlowPanel, FootprintChart, FlashCrashPanel, BacktestPanel, CorrelationPanel,
+  StrategyPanel, ExternalSetupPanel, WtxRsiStrategyPanel, PerfectSetupPanel — none of
+  them mount on mobile.
+- **Header**: desktop control cluster is `hidden lg:flex`; mobile gets theme + a "⋯"
+  overflow menu (timezone, purge, MarketableSettingsControl) and a dedicated full-width
+  instrument/timeframe selector row with larger touch targets. Shared header widgets were
+  extracted as `TabGroup` / `TimezoneSelect` / `PurgeButton` / `ThemeToggle` in `Dashboard.tsx`.
+- IndicatorPanel Breaks/FVG confidence gauges now `flex-wrap`/`flex-1` — they were the
+  only horizontal overflow at 380px.
+- Validated in-browser at 380px (all 6 tabs, no horizontal overflow, real prod data) and
+  1280px (desktop regression). `npm run lint` + `npm run build` pass.
 
 ## Quant 7-Gates: ~3 s fast exit path (SL/TP between scans) (2026-06-11)
 

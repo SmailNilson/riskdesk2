@@ -1,6 +1,7 @@
 package com.riskdesk.application.service;
 
 import com.riskdesk.domain.orderflow.event.AbsorptionDetected;
+import com.riskdesk.domain.orderflow.event.CvdDivergenceDetected;
 import com.riskdesk.domain.orderflow.event.DistributionSetupDetected;
 import com.riskdesk.domain.orderflow.event.FlashCrashPhaseChanged;
 import com.riskdesk.domain.orderflow.event.FootprintBarClosed;
@@ -17,7 +18,11 @@ import com.riskdesk.domain.orderflow.model.SmartMoneyCycleSignal;
 import com.riskdesk.domain.orderflow.model.FootprintBar;
 import com.riskdesk.domain.orderflow.model.SpoofingSignal;
 import com.riskdesk.domain.orderflow.model.WallEpisode;
+import com.riskdesk.domain.orderflow.model.CvdDivergenceSignal;
+import com.riskdesk.domain.shared.TradingSessionResolver;
 import com.riskdesk.infrastructure.persistence.JpaAbsorptionEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaCvdDivergenceEventRepository;
+import com.riskdesk.infrastructure.persistence.JpaCvdDivergencePaperTradeRepository;
 import com.riskdesk.infrastructure.persistence.JpaCycleEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaDistributionEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaFlashCrashEventRepository;
@@ -27,6 +32,7 @@ import com.riskdesk.infrastructure.persistence.JpaMomentumEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaSpoofingEventRepository;
 import com.riskdesk.infrastructure.persistence.JpaWallEpisodeRepository;
 import com.riskdesk.infrastructure.persistence.entity.AbsorptionEventEntity;
+import com.riskdesk.infrastructure.persistence.entity.CvdDivergenceEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.CycleEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.DistributionEventEntity;
 import com.riskdesk.infrastructure.persistence.entity.FlashCrashEventEntity;
@@ -73,6 +79,8 @@ public class OrderFlowEventPersistenceService {
     private final JpaCycleEventRepository cycleRepository;
     private final JpaWallEpisodeRepository wallEpisodeRepository;
     private final com.riskdesk.infrastructure.persistence.JpaQuantScanSnapshotRepository quantScanSnapshotRepository;
+    private final JpaCvdDivergenceEventRepository cvdDivergenceRepository;
+    private final JpaCvdDivergencePaperTradeRepository cvdPaperTradeRepository;
     private final ObjectMapper objectMapper;
 
     public OrderFlowEventPersistenceService(JpaAbsorptionEventRepository absorptionRepository,
@@ -85,6 +93,8 @@ public class OrderFlowEventPersistenceService {
                                             JpaCycleEventRepository cycleRepository,
                                             JpaWallEpisodeRepository wallEpisodeRepository,
                                             com.riskdesk.infrastructure.persistence.JpaQuantScanSnapshotRepository quantScanSnapshotRepository,
+                                            JpaCvdDivergenceEventRepository cvdDivergenceRepository,
+                                            JpaCvdDivergencePaperTradeRepository cvdPaperTradeRepository,
                                             ObjectMapper objectMapper) {
         this.absorptionRepository = absorptionRepository;
         this.spoofingRepository = spoofingRepository;
@@ -96,7 +106,32 @@ public class OrderFlowEventPersistenceService {
         this.cycleRepository = cycleRepository;
         this.wallEpisodeRepository = wallEpisodeRepository;
         this.quantScanSnapshotRepository = quantScanSnapshotRepository;
+        this.cvdDivergenceRepository = cvdDivergenceRepository;
+        this.cvdPaperTradeRepository = cvdPaperTradeRepository;
         this.objectMapper = objectMapper;
+    }
+
+    @Async
+    @EventListener
+    @Transactional
+    public void onCvdDivergenceDetected(CvdDivergenceDetected event) {
+        try {
+            CvdDivergenceSignal signal = event.signal();
+            cvdDivergenceRepository.save(new CvdDivergenceEventEntity(
+                    event.instrument(),
+                    event.timestamp(),
+                    signal.type(),
+                    signal.prevPivotPrice(),
+                    signal.newPivotPrice(),
+                    signal.prevPivotCvd(),
+                    signal.newPivotCvd(),
+                    signal.pivotTimestamp(),
+                    event.lastPrice(),
+                    TradingSessionResolver.isWithinRth(event.timestamp())
+            ));
+        } catch (Exception e) {
+            log.warn("Failed to persist CVD divergence event for {}: {}", event.instrument(), e.getMessage());
+        }
     }
 
     @Async
@@ -336,11 +371,15 @@ public class OrderFlowEventPersistenceService {
             int cycle = cycleRepository.deleteByTimestampBefore(cutoff);
             int walls = wallEpisodeRepository.deleteByTimestampBefore(cutoff);
             int quantScans = quantScanSnapshotRepository.deleteByScannedAtBefore(cutoff);
-            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle + walls + quantScans > 0) {
+            int cvdDivergences = cvdDivergenceRepository.deleteByTimestampBefore(cutoff);
+            int cvdPaperTrades = cvdPaperTradeRepository.deleteByEntryTimeBefore(cutoff);
+            if (absorption + spoofing + iceberg + flashCrash + footprint + distribution + momentum + cycle
+                    + walls + quantScans + cvdDivergences + cvdPaperTrades > 0) {
                 log.info("Purged order flow events: {} absorption, {} spoofing, {} iceberg, {} flash crash, " +
-                         "{} footprint, {} distribution, {} momentum, {} cycle, {} wall episodes, {} quant scans",
+                         "{} footprint, {} distribution, {} momentum, {} cycle, {} wall episodes, {} quant scans, " +
+                         "{} cvd divergences, {} cvd paper trades",
                          absorption, spoofing, iceberg, flashCrash, footprint,
-                         distribution, momentum, cycle, walls, quantScans);
+                         distribution, momentum, cycle, walls, quantScans, cvdDivergences, cvdPaperTrades);
             }
         } catch (Exception e) {
             log.error("Failed to purge expired order flow events: {}", e.getMessage(), e);

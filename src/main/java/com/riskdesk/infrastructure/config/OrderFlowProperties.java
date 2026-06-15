@@ -637,6 +637,17 @@ public class OrderFlowProperties {
         private int pivotBars = 5;
         /** Minimum |CVD difference| (contracts) between the two pivots — filters flat-CVD noise. */
         private long minCvdSwing = 200;
+        /**
+         * Paper-trading loop on divergence events (UC-OF-CVD-PAPER): RTH-only simulated
+         * entries in the divergence direction, closed when the badge window lapses with
+         * no refresh. Pure simulation — never routes a broker order.
+         */
+        private boolean paperTradingEnabled = true;
+        /**
+         * Seconds a paper trade stays open after the last divergence event before the
+         * badge-expiry close. Mirrors the frontend DIV badge window (600s).
+         */
+        private int paperHoldSeconds = 600;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -644,6 +655,10 @@ public class OrderFlowProperties {
         public void setPivotBars(int v) { this.pivotBars = v; }
         public long getMinCvdSwing() { return minCvdSwing; }
         public void setMinCvdSwing(long v) { this.minCvdSwing = v; }
+        public boolean isPaperTradingEnabled() { return paperTradingEnabled; }
+        public void setPaperTradingEnabled(boolean v) { this.paperTradingEnabled = v; }
+        public int getPaperHoldSeconds() { return paperHoldSeconds; }
+        public void setPaperHoldSeconds(int v) { this.paperHoldSeconds = v; }
     }
 
     /**
