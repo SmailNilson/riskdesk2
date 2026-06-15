@@ -50,6 +50,17 @@ public class IbkrTickBarAdapter implements TickBarPort {
         }
     }
 
+    /**
+     * Discards the instrument's tick-bar aggregator on a contract rollover, so the new contract
+     * builds fresh bars instead of folding the old→new price gap into one giant seam bar. A new
+     * aggregator is recreated lazily on the next trade.
+     */
+    public void purgeInstrument(Instrument instrument) {
+        if (aggregators.remove(instrument) != null) {
+            log.info("TickChart: cleared tick-bar aggregator for {} on contract rollover", instrument);
+        }
+    }
+
     @Override
     public List<TickBar> recentBars(Instrument instrument, int limit) {
         TickBarAggregator aggregator = aggregators.get(instrument);

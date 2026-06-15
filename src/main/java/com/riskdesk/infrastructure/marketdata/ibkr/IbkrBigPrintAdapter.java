@@ -80,4 +80,13 @@ public class IbkrBigPrintAdapter implements BigPrintPort {
         BigPrintDetector detector = detectors.get(instrument);
         return detector == null ? 0L : detector.bigPrintDelta5m(now);
     }
+
+    /**
+     * Discards the instrument's big-print detector and rate-limit marker on a contract rollover so
+     * the new contract's size percentiles aren't skewed by old-contract prints. Recreated lazily.
+     */
+    public void purgeInstrument(Instrument instrument) {
+        detectors.remove(instrument);
+        lastEventAtMs.remove(instrument);
+    }
 }
