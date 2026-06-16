@@ -97,4 +97,77 @@ class TickBarAggregatorTest {
         assertThrows(IllegalArgumentException.class, () -> new TickBarAggregator(Instrument.MNQ, 0, 10));
         assertThrows(IllegalArgumentException.class, () -> new TickBarAggregator(Instrument.MNQ, 10, 0));
     }
+
+    @Test
+    void restore_seedsCompletedBarsOldestFirst_andResumesSeqMonotonically() {
+        TickBarAggregator agg = new TickBarAggregator(Instrument.MNQ, 2, 10);
+        // Supplied out of order to verify restore sorts by seq.
+        agg.restore(List.of(bar(2, 2), bar(0, 2), bar(1, 2)));
+
+        List<TickBar> restored = agg.recentBars(10);
+        assertEquals(3, restored.size());
+        assertEquals(0, restored.get(0).seq());
+        assertEquals(1, restored.get(1).seq());
+        assertEquals(2, restored.get(2).seq());
+        assertTrue(restored.stream().allMatch(TickBar::complete));
+
+        // New bar continues the sequence at maxSeq + 1 (not back at 0).
+        agg.onTick(100.0, 1, "BUY", t0);
+        Optional<TickBar> closed = agg.onTick(101.0, 1, "BUY", t0.plusSeconds(1));
+        assertTrue(closed.isPresent());
+        assertEquals(3, closed.get().seq());
+    }
+
+    @Test
+    void restore_capsAtMaxBars_keepingNewest_andResumesSeq() {
+        TickBarAggregator agg = new TickBarAggregator(Instrument.MNQ, 2, 3);
+        agg.restore(List.of(bar(0, 2), bar(1, 2), bar(2, 2), bar(3, 2), bar(4, 2)));
+
+        List<TickBar> restored = agg.recentBars(100);
+        assertEquals(3, restored.size());
+        assertEquals(2, restored.get(0).seq()); // 0,1 evicted
+        assertEquals(4, restored.get(2).seq());
+
+        agg.onTick(100.0, 1, "BUY", t0);
+        Optional<TickBar> closed = agg.onTick(101.0, 1, "BUY", t0.plusSeconds(1));
+        assertEquals(5, closed.orElseThrow().seq()); // continues from the highest restored seq
+    }
+
+    @Test
+    void restore_skipsBarsWithMismatchedTicksPerBar() {
+        TickBarAggregator agg = new TickBarAggregator(Instrument.MNQ, 200, 10);
+        // bar at seq 2 was built with a different bar size (stale config / pre-rollover) → skipped.
+        agg.restore(List.of(bar(0, 200), bar(1, 200), bar(2, 100)));
+
+        List<TickBar> restored = agg.recentBars(10);
+        assertEquals(2, restored.size());
+        assertEquals(0, restored.get(0).seq());
+        assertEquals(1, restored.get(1).seq());
+    }
+
+    @Test
+    void restore_emptyOrNull_isNoOp() {
+        TickBarAggregator agg = new TickBarAggregator(Instrument.MNQ, 2, 10);
+        agg.restore(List.of());
+        agg.restore(null);
+        assertTrue(agg.isEmpty());
+        assertTrue(agg.recentBars(10).isEmpty());
+    }
+
+    @Test
+    void restore_afterTicksProcessed_throws() {
+        TickBarAggregator agg = new TickBarAggregator(Instrument.MNQ, 2, 10);
+        agg.onTick(100.0, 1, "BUY", t0);
+        assertFalse(agg.isEmpty());
+        assertThrows(IllegalStateException.class, () -> agg.restore(List.of(bar(0, 2))));
+    }
+
+    /** A completed bar at the given seq/bar-size with arbitrary but consistent OHLC. */
+    private TickBar bar(long seq, int ticksPerBar) {
+        long openTime = t0.getEpochSecond() + seq * 10;
+        long closeTime = openTime + 5;
+        return new TickBar(Instrument.MNQ.name(), ticksPerBar, seq,
+            openTime, closeTime, 100.0, 101.0, 99.0, 100.5,
+            ticksPerBar, ticksPerBar - 1, 1, ticksPerBar - 2, ticksPerBar, true);
+    }
 }
