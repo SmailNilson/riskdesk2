@@ -164,6 +164,13 @@ public class TradeSimulationService {
 
         SimulationResult fixedResult = null;
         int activationIndex = -1;
+        // STOP entries trigger only when price reaches the level FROM the pre-trigger side
+        // (a buy-stop arms with price below it, a sell-stop with price above it). We must
+        // observe price on that side before honouring a fill — otherwise a level price has
+        // already left behind (e.g. a sell-stop placed when price is already below it) would
+        // phantom-fill on the first candle and ride to TP as a fake WIN. Live never fills such
+        // a stop cleanly. Tracked across the pending scan; irrelevant once active.
+        boolean preTriggerSideSeen = false;
 
         for (int i = 0; i < orderedCandles.size(); i++) {
             Candle candle = orderedCandles.get(i);
@@ -181,7 +188,13 @@ public class TradeSimulationService {
                     break;
                 }
 
-                if (touchesEntry(plan, candle)) {
+                if (plan.isStopEntry() && reachesPreTriggerSide(plan, candle)) {
+                    preTriggerSideSeen = true;
+                }
+                boolean entryFillable = plan.isStopEntry()
+                    ? (preTriggerSideSeen && touchesEntry(plan, candle))
+                    : touchesEntry(plan, candle);
+                if (entryFillable) {
                     active = true;
                     activationTime = candle.getTimestamp();
                     activationIndex = i;
@@ -714,6 +727,19 @@ public class TradeSimulationService {
         }
         return candle.getLow().compareTo(plan.takeProfit()) <= 0
             && candle.getHigh().compareTo(plan.entryPrice()) < 0;
+    }
+
+    /**
+     * True when the candle shows price on the STOP entry's pre-trigger side — i.e. the
+     * side the order is waiting on before it can be triggered. A buy-stop arms while price
+     * is at/below the trigger; a sell-stop while price is at/above it. Once observed, a
+     * subsequent break through the level is a genuine trigger; until then a touch is just
+     * a level price has already passed (no clean live fill).
+     */
+    private boolean reachesPreTriggerSide(TradePlan plan, Candle candle) {
+        return plan.isLong()
+            ? candle.getLow().compareTo(plan.entryPrice()) <= 0
+            : candle.getHigh().compareTo(plan.entryPrice()) >= 0;
     }
 
     private boolean touchesEntry(TradePlan plan, Candle candle) {

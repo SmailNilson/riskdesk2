@@ -84,11 +84,45 @@ class StopEntrySimulationTest {
 
     @Test
     void stopEntryNeverReportsMissed() {
-        // Candle gaps above entry straight to the target zone: for a stop entry this is
-        // a same-candle fill + win, not a MISSED (which only exists for limit entries).
+        // Price opens already above the buy-stop and never trades back down to the
+        // pre-trigger side: the breakout already happened, so there is no clean trigger.
+        // A stop entry must NOT phantom-fill + win here (and never reports MISSED, which is
+        // a limit-only state) — it simply stays pending, exactly like a live order that
+        // can't trigger from the wrong side of the market.
         List<Candle> candles = List.of(
             candle(0, "28790", "28805", "28788", "28800"));
         SimulationResult result = service.evaluateWithPlan(longStopPlan(), pending(), candles);
+        assertEquals(TradeSimulationStatus.PENDING_ENTRY, result.status());
+    }
+
+    @Test
+    void sellStopDoesNotPhantomFillWhenPriceAlreadyBelowTrigger() {
+        // Reproduces the reported discrepancy: a SHORT sell-stop placed at 30522.75 while
+        // price is already below it. Price never trades back up to the trigger but drifts
+        // down to the TP (30416.71). Live never fills the stop cleanly, so the paper replay
+        // must NOT mark this a WIN — it stays pending (and later cancels on timeout).
+        TradePlan shortPlan = new TradePlan(false,
+            new BigDecimal("30522.75"), new BigDecimal("30593.44"), new BigDecimal("30416.71"),
+            PlaybookDecision.ENTRY_TYPE_STOP, new BigDecimal("30650"));
+        List<Candle> candles = List.of(
+            candle(0, "30500.00", "30510.00", "30470.00", "30480.00"),   // already below trigger
+            candle(1, "30480.00", "30485.00", "30430.00", "30440.00"),   // still below, no break from above
+            candle(2, "30440.00", "30445.00", "30410.00", "30415.00"));  // dips through TP — but never armed
+        SimulationResult result = service.evaluateWithPlan(shortPlan, pending(), candles);
+        assertEquals(TradeSimulationStatus.PENDING_ENTRY, result.status());
+    }
+
+    @Test
+    void sellStopFillsAfterCleanBreakFromAbove() {
+        // Control for the case above: when price IS first seen on the pre-trigger side
+        // (above the sell-stop) and then breaks down through it, the fill is genuine.
+        TradePlan shortPlan = new TradePlan(false,
+            new BigDecimal("30522.75"), new BigDecimal("30593.44"), new BigDecimal("30416.71"),
+            PlaybookDecision.ENTRY_TYPE_STOP, new BigDecimal("30650"));
+        List<Candle> candles = List.of(
+            candle(0, "30540.00", "30560.00", "30530.00", "30535.00"),   // above trigger — armed
+            candle(1, "30535.00", "30538.00", "30410.00", "30420.00"));  // breaks down through entry → TP
+        SimulationResult result = service.evaluateWithPlan(shortPlan, pending(), candles);
         assertEquals(TradeSimulationStatus.WIN, result.status());
     }
 
