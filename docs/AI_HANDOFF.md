@@ -28,6 +28,34 @@ now durable.
 - Tests: `TickBarAggregatorTest` (restore/seq-continuity/cap/skip-mismatch/guard),
   `TickBarStoreRepositoryIntegrationTest` (round-trip/limit/filter/purge). ArchUnit green.
 
+## PLAYBOOK live routing robustness + loss-cap 1200 + "Live" label (2026-06-16)
+
+Follow-up after the first live confirmation entries on prod (v1.11.135):
+
+**1. Routing no longer fails silently.** A confirmation SHORT showed `routingOutcome=None`
+("No routing yet") with a resolved simulation — the candle was processed during the
+v1.11.135 redeploy and `applyRouting` was interrupted. Root cause for the silent-null
+class: `routeLive` can throw BEFORE its own try/catch (`PlaybookProfilePlanner`,
+`executionKey`, `findCrossStrategyConflict` → `executionRepository`, margin preflight),
+and the exception bubbles out of the `@EventListener` leaving the decision with a null
+outcome and no trace. `PlaybookAutomationService.onCandleClosed` now wraps `applyRouting`
+in a try/catch that logs the error and lands an explicit `FAILED` outcome + message.
+Pinned by `PlaybookSinglePositionGuardTest#liveRoutingException_marksDecisionFailed_neverNullOutcome`.
+
+**2. Daily loss cap 300 → 1200 USD.** `riskdesk.execution.loss-cap.threshold-usd` raised.
+The cap stays `enabled=true`, account blank (= default managed account). Note: if the cap
+already tripped today at the old 300 threshold, it re-arms at the next 17:00 ET boundary or
+via the manual re-arm endpoint — the new threshold applies from re-arm.
+
+**3. UI label paper → Live.** `MNQ_10M_CONFIRMATION` now renders as "Confirmation (Live)"
+(profile chip + execution-profile dropdown option) since it routes real IBKR STOP entries
+when Auto-IBKR is armed.
+
+Note on STOP rejects: a sell-stop placed above market (price already broke below zoneLow by
+routing time) is rejected by IBKR → `IbkrOrderRejectionException` → `handleBrokerRejection`
+→ `FAILED_BROKER_REJECT` (visible), which is correct — we don't want to chase a zone that
+already broke. Not a silent failure.
+
 ## PLAYBOOK confirmation → live auto-trade (STOP entries) + WTX z40 preset (2026-06-15)
 
 Three operator-requested changes after the confirmation-vs-legacy A/B and the

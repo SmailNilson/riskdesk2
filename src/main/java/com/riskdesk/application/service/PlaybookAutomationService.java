@@ -178,7 +178,20 @@ public class PlaybookAutomationService {
         if (policyDecision.paperSimulationAllowed()) {
             ensureSimulation(decision, state);
         }
-        PlaybookDecision routed = applyRouting(decision, state, instrument);
+        // applyRouting → routeLive can throw before its own try/catch (profile planner, execution
+        // repository, margin preflight…). Without this guard the exception bubbles out of the
+        // @EventListener and the decision is left with a null routingOutcome forever ("No routing
+        // yet"), with no trace of why the live entry never fired. Always land an explicit outcome.
+        PlaybookDecision routed;
+        try {
+            routed = applyRouting(decision, state, instrument);
+        } catch (RuntimeException e) {
+            log.error("PLAYBOOK routing failed for {} {} (decisionKey={}) — marking FAILED: {}",
+                event.instrument(), event.timeframe(), decision.decisionKey(), e.toString(), e);
+            routed = decisionRepository.save(decision.withRouting(
+                PlaybookRoutingOutcome.FAILED,
+                truncate("routing error: " + e.getMessage(), 200), null));
+        }
         publishDecision(routed);
     }
 

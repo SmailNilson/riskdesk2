@@ -142,6 +142,50 @@ class PlaybookSinglePositionGuardTest {
             emptyProvider());
     }
 
+    @Test
+    void liveRoutingException_marksDecisionFailed_neverNullOutcome() {
+        // Reproduces the "No routing yet" report: the live path is taken (Auto-IBKR ON,
+        // executable profile, LIVE price source) but routeLive throws before its own try
+        // (executionRepository is null → NPE in findCrossStrategyConflict). The decision
+        // must land FAILED, not a silent null routingOutcome.
+        IbkrProperties props = new IbkrProperties();
+        props.setEnabled(true);
+
+        com.riskdesk.application.service.MarketDataService mds =
+            org.mockito.Mockito.mock(com.riskdesk.application.service.MarketDataService.class);
+        org.mockito.Mockito.when(mds.currentPrice(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(new com.riskdesk.application.service.MarketDataService.StoredPrice(
+                new BigDecimal("29600"), T0, "LIVE_TEST"));
+
+        PlaybookAutomationStatePort liveState = new PlaybookAutomationStatePort() {
+            @Override public Optional<PlaybookAutomationState> load(String instrument, String timeframe) {
+                return Optional.of(PlaybookAutomationState.initial(instrument, timeframe)
+                    .withSettings(true, true, 1, "DU1",
+                        PlaybookExecutionProfile.MNQ_10M_CONFIRMATION, null));
+            }
+            @Override public PlaybookAutomationState save(PlaybookAutomationState state) { return state; }
+        };
+
+        PlaybookAutomationService live = new PlaybookAutomationService(
+            stubPlaybookService(), liveState, decisions, sims,
+            null, null, props, new PlaybookAutomationProperties(),
+            emptyProvider(), providerOf(mds), emptyProvider(), emptyProvider());
+
+        live.onCandleClosed(new CandleClosed("MNQ", "10m", T0));
+
+        PlaybookDecision routed = latestDecision();
+        assertEquals(PlaybookRoutingOutcome.FAILED, routed.routingOutcome());
+    }
+
+    private static <T> ObjectProvider<T> providerOf(T value) {
+        return new ObjectProvider<>() {
+            @Override public T getObject(Object... args) { return value; }
+            @Override public T getObject() { return value; }
+            @Override public T getIfAvailable() { return value; }
+            @Override public T getIfUnique() { return value; }
+        };
+    }
+
     private static PlaybookService stubPlaybookService() {
         return new PlaybookService(null, null) {
             @Override
