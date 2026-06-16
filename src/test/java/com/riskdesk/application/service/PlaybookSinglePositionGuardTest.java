@@ -36,6 +36,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the one-position-at-a-time rule: while a PLAYBOOK simulation is open
@@ -86,44 +87,35 @@ class PlaybookSinglePositionGuardTest {
     }
 
     @Test
-    void confirmationProfileRunsBothStreamsWithIsolatedGuards() {
-        PlaybookAutomationService dual = newService(PlaybookExecutionProfile.MNQ_10M_CONFIRMATION);
+    void confirmationProfileIsSoleStream_legacyChallengerRetired() {
+        PlaybookAutomationService confirm = newService(PlaybookExecutionProfile.MNQ_10M_CONFIRMATION);
 
-        // T0 = 14:00Z = 10:00 ET (Friday) — inside RTH so the LONG confirmation gate passes
-        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0));
-        assertEquals(2, decisions.rows.size()); // confirmation + legacy shadow
+        // T0 = 14:00Z = 10:00 ET (Friday) — inside RTH so the LONG confirmation gate passes.
+        // Only the confirmation stream runs now — no legacy shadow decision.
+        confirm.onCandleClosed(new CandleClosed("MNQ", "10m", T0));
+        assertEquals(1, decisions.rows.size());
+        assertEquals(1, sims.rows.size());
+        assertTrue(decisions.rows.values().iterator().next().isStopEntry());
+        assertEquals(PlaybookRoutingOutcome.PAPER_ONLY, latestDecision().routingOutcome());
+
+        // Next candle: the zone is already attempted (open confirmation sim) → the candidate
+        // is suppressed in buildConfirmationDecision before any row is written.
+        confirm.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(600)));
+        assertEquals(1, decisions.rows.size());
+        assertEquals(1, sims.rows.size());
+
+        // Resolve the confirmation position.
+        TradeSimulation open = sims.rows.values().iterator().next();
+        sims.save(new TradeSimulation(open.id(), open.reviewId(), open.reviewType(),
+            open.instrument(), open.action(), TradeSimulationStatus.WIN, T0, T0.plusSeconds(900),
+            BigDecimal.ZERO, null, null, null, open.createdAt()));
+
+        // 3h later (zone cooldown expired, still RTH): a fresh confirmation entry is taken.
+        confirm.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(3 * 3_600)));
+        assertEquals(2, decisions.rows.size());
         assertEquals(2, sims.rows.size());
-        assertEquals(1, decisions.rows.values().stream().filter(PlaybookDecision::isStopEntry).count());
-
-        // both streams hold a position: the confirmation candidate is suppressed by its
-        // OWN zone dedup (no row at all), the legacy shadow is logged but not simulated
-        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(600)));
-        assertEquals(3, decisions.rows.size());
-        assertEquals(2, sims.rows.size());
-        assertEquals(1, decisions.rows.values().stream()
-            .filter(d -> d.routingOutcome() == PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN).count());
-
-        // resolve the CONFIRMATION position
-        long confDecisionId = decisions.rows.values().stream()
-            .filter(PlaybookDecision::isStopEntry).findFirst().orElseThrow().id();
-        TradeSimulation confSim = sims.findByReviewId(confDecisionId, ReviewType.PLAYBOOK).orElseThrow();
-        sims.save(new TradeSimulation(confSim.id(), confSim.reviewId(), confSim.reviewType(),
-            confSim.instrument(), confSim.action(), TradeSimulationStatus.WIN, T0, T0.plusSeconds(900),
-            BigDecimal.ZERO, null, null, null, confSim.createdAt()));
-
-        // 3h later (zone cooldown expired, still RTH): the confirmation stream re-enters,
-        // the legacy stream is still blocked by its own open position
-        dual.onCandleClosed(new CandleClosed("MNQ", "10m", T0.plusSeconds(3 * 3_600)));
-        assertEquals(5, decisions.rows.size());
-        assertEquals(3, sims.rows.size()); // a new CONFIRMATION sim only
-        PlaybookDecision newConf = decisions.rows.values().stream()
-            .filter(PlaybookDecision::isStopEntry)
-            .max(Comparator.comparing(PlaybookDecision::id)).orElseThrow();
-        assertEquals(PlaybookRoutingOutcome.PAPER_ONLY, newConf.routingOutcome());
-        PlaybookDecision newLegacy = decisions.rows.values().stream()
-            .filter(d -> !d.isStopEntry())
-            .max(Comparator.comparing(PlaybookDecision::id)).orElseThrow();
-        assertEquals(PlaybookRoutingOutcome.SKIPPED_POSITION_OPEN, newLegacy.routingOutcome());
+        assertTrue(decisions.rows.values().stream().allMatch(PlaybookDecision::isStopEntry));
+        assertEquals(PlaybookRoutingOutcome.PAPER_ONLY, latestDecision().routingOutcome());
     }
 
     private PlaybookDecision latestDecision() {

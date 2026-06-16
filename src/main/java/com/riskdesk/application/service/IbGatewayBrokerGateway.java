@@ -142,18 +142,18 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         var resolved = contractResolver.resolve(instrument)
             .orElseThrow(() -> new IllegalStateException("Unable to resolve IBKR contract for " + instrument));
 
-        var submission = nativeClient.placeLimitOrder(
-            resolved.contract(),
-            request.brokerAccountId(),
-            // Both row-action conventions exist in trade_executions ("LONG"/"SHORT" from the
-            // bridges/router, "BUY"/"SELL" from older manual/auto-arm rows) — map BOTH sell tokens,
-            // otherwise a legacy "SELL" row would be submitted as a BUY.
-            "SHORT".equalsIgnoreCase(request.action()) || "SELL".equalsIgnoreCase(request.action())
-                ? Action.SELL : Action.BUY,
-            request.quantity(),
-            request.limitPrice(),
-            request.executionKey()
-        );
+        // Both row-action conventions exist in trade_executions ("LONG"/"SHORT" from the
+        // bridges/router, "BUY"/"SELL" from older manual/auto-arm rows) — map BOTH sell tokens,
+        // otherwise a legacy "SELL" row would be submitted as a BUY.
+        Action side = "SHORT".equalsIgnoreCase(request.action()) || "SELL".equalsIgnoreCase(request.action())
+            ? Action.SELL : Action.BUY;
+
+        // STOP entries (PLAYBOOK confirmation) trigger on the zone break; LIMIT is the legacy default.
+        var submission = request.isStop()
+            ? nativeClient.placeStopOrder(resolved.contract(), request.brokerAccountId(),
+                side, request.quantity(), request.stopPrice(), request.executionKey())
+            : nativeClient.placeLimitOrder(resolved.contract(), request.brokerAccountId(),
+                side, request.quantity(), request.limitPrice(), request.executionKey());
 
         return new BrokerEntryOrderSubmission(
             submission.orderId(),

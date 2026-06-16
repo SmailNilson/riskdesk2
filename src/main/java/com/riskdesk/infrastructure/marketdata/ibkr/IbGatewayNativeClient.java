@@ -787,14 +787,48 @@ public class IbGatewayNativeClient {
                                                  int quantity,
                                                  BigDecimal limitPrice,
                                                  String orderRef) {
+        return placeEntryOrder(contract, requestedAccountId, action, quantity,
+                OrderType.LMT, limitPrice, orderRef);
+    }
+
+    /**
+     * Submit a STOP entry order: a buy-stop ({@code action=BUY}) triggers when the market
+     * trades up to {@code stopPrice}, a sell-stop ({@code action=SELL}) when it trades down to
+     * it. Used by the PLAYBOOK confirmation profile, whose entry is a break of the zone — a
+     * resting buy-limit above the market would fill immediately, the opposite of the intended
+     * breakout. Shares the exact submission/ack path with {@link #placeLimitOrder}; only the
+     * IBKR order type (STP, with the trigger on {@code auxPrice}) differs.
+     */
+    public NativeOrderSubmission placeStopOrder(Contract contract,
+                                                String requestedAccountId,
+                                                Action action,
+                                                int quantity,
+                                                BigDecimal stopPrice,
+                                                String orderRef) {
+        return placeEntryOrder(contract, requestedAccountId, action, quantity,
+                OrderType.STP, stopPrice, orderRef);
+    }
+
+    /**
+     * Shared entry-order submission. {@code orderType} selects LMT (price on {@code lmtPrice})
+     * or STP (trigger on {@code auxPrice}); everything else — validation, idempotency, the
+     * read-only kill-switch, the ack latch and the typed rejection mapping — is identical.
+     */
+    private NativeOrderSubmission placeEntryOrder(Contract contract,
+                                                  String requestedAccountId,
+                                                  Action action,
+                                                  int quantity,
+                                                  OrderType orderType,
+                                                  BigDecimal price,
+                                                  String orderRef) {
         if (contract == null) {
             throw new IllegalArgumentException("contract is required");
         }
         if (quantity < 1) {
             throw new IllegalArgumentException("quantity must be >= 1");
         }
-        if (limitPrice == null || limitPrice.signum() <= 0) {
-            throw new IllegalArgumentException("limitPrice must be > 0");
+        if (price == null || price.signum() <= 0) {
+            throw new IllegalArgumentException("price must be > 0");
         }
         if (orderRef == null || orderRef.isBlank()) {
             throw new IllegalArgumentException("orderRef is required");
@@ -834,9 +868,13 @@ public class IbGatewayNativeClient {
         order.account(accountId);
         order.orderRef(orderRef);
         order.action(action);
-        order.orderType(OrderType.LMT);
+        order.orderType(orderType);
         order.totalQuantity(Decimal.get(quantity));
-        order.lmtPrice(limitPrice.doubleValue());
+        if (orderType == OrderType.STP) {
+            order.auxPrice(price.doubleValue());   // STP trigger
+        } else {
+            order.lmtPrice(price.doubleValue());   // LMT price
+        }
         order.tif("DAY");
         order.transmit(true);
 

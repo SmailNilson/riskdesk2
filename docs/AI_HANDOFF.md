@@ -2,6 +2,44 @@
 
 Last updated: 2026-06-15
 
+## PLAYBOOK confirmation → live auto-trade (STOP entries) + WTX z40 preset (2026-06-15)
+
+Three operator-requested changes after the confirmation-vs-legacy A/B and the
+confirmation-vs-Z35 comparison landed:
+
+**1. PLAYBOOK confirmation is now live-executable.** `MNQ_10M_CONFIRMATION`
+flipped `executable=false → true` (enum + `PlaybookProfilePlanner`). When Auto-IBKR
+is armed on the MNQ 10m panel it routes a **real IBKR STOP entry**, not a limit.
+The forward paper validation (bilan scheduled 13 Jul) is NOT complete — arming
+Auto-IBKR is the operator's explicit call.
+
+**2. STOP entry order support added to the broker path** (it was LIMIT-only):
+- `IbGatewayNativeClient` — `placeLimitOrder`/`placeStopOrder` now delegate to a
+  shared `placeEntryOrder(... OrderType ...)`; STOP sets `OrderType.STP` +
+  `order.auxPrice(trigger)`, LIMIT keeps `LMT` + `lmtPrice`. Same validation /
+  idempotency / read-only kill-switch / ack-latch / typed-rejection path.
+- `BrokerEntryOrderRequest` gained `orderType` + `stopPrice` (legacy 7-arg
+  constructor defaults to LIMIT — all existing callers unchanged).
+- `IbGatewayBrokerGateway.submitEntryOrder` dispatches STOP→`placeStopOrder`.
+- `PlaybookAutomationService.routeLive` builds a STOP request (trigger =
+  entryPrice) when `decision.isStopEntry()`. A buy-limit at zoneHigh above market
+  would fill immediately — the opposite of the breakout — so this is load-bearing.
+  Pinned by `IbGatewayBrokerGatewayStopOrderTest`.
+
+**3. Legacy challenger retired on MNQ 10m.** When CONFIRMATION is armed,
+`onCandleClosed` no longer writes the legacy shadow decision — confirmation is the
+sole stream. LEGACY remains the default profile for every other instrument/timeframe
+(unchanged). The panel's two-block A/B view degrades to a single block; any residual
+legacy rows in the 50-decision window show under a "LEGACY · retiré" block.
+
+**4. WTX z40 preset added below Z35.** `WtxParamOverride.TOP_TRAIN_Z40` = Z35 with a
+deeper ±40 zone and tighter 3.5×ATR ride (same WaveTrend 5/14/2, SL_ONLY, session
+policy). Registered as variant panel `10m-z40` (`riskdesk.wtx.variants[1]`), resolver
+case `top-train-z40`, controller known-lists updated, and rendered directly below the
+Z35 panel in `Dashboard.tsx` (mobile + desktop) with identical functionality. Paper by
+default; walk-forward backtest provenance: +$11.5k vs Z35 +$9.3k, PF 2.15 (PR #450
+comparison). Validate forward before live.
+
 ## DIV Paper panel — viewer for the CVD-divergence paper loop (2026-06-15)
 
 Frontend-only. Surfaces the RTH-gated "trade the DIV badge" paper simulation
