@@ -2,6 +2,32 @@
 
 Last updated: 2026-06-16
 
+## Tick chart survives redeploy — completed bars persisted + reloaded on startup (2026-06-16)
+
+Backend-only. The tick chart (`/api/order-flow/tick-bars/{instrument}` seed + live
+`/topic/tick-bars`) was 100% in-memory: `TickBarAggregator`'s ring buffer started
+empty on every redeploy, so the chart was blank until fresh trades rebuilt it. It is
+now durable.
+
+- **New domain port** `TickBarStorePort` (`domain/orderflow/port`) — save/loadRecent/
+  purgeInstrument/purgeOlderThan. The pure `TickBarAggregator` gained
+  `restore(List<TickBar>)` + `isEmpty()`; restore seeds completed bars oldest-first and
+  **resumes `nextSeq` at maxSeq+1** so the per-instrument seq stays **monotonic across
+  restarts** — load-bearing: the frontend merges by seq and `isStaleSeed`/`isRingRestart`
+  would drop a restored seed whose seq regressed. No frontend change needed.
+- **New table `tick_bar`** (`TickBarEntity` + `JpaTickBarRepository` +
+  `JpaTickBarStoreAdapter`), unique `(instrument, ticks_per_bar, seq)`. `open_time`/
+  `close_time` kept as epoch-second BIGINTs for exact DTO round-trip; `close_at`
+  TIMESTAMPTZ for the indexed retention purge.
+- **`IbkrTickBarAdapter`** now buffers each completed bar lock-free and flushes to the
+  store every 2s (off the EReader thread); re-seeds every instrument's ring buffer on
+  `ApplicationReadyEvent`; on rollover `purgeInstrument` also clears the DB + pending
+  buffer (no stale-contract seam); daily retention purge at 03:23 UTC.
+- **Config** `riskdesk.order-flow.tick-chart.persistence.{enabled=true,retention-days=14}`
+  (+ `flush-interval-ms`, `purge-cron`). `enabled=false` → pure in-memory (old behavior).
+- Tests: `TickBarAggregatorTest` (restore/seq-continuity/cap/skip-mismatch/guard),
+  `TickBarStoreRepositoryIntegrationTest` (round-trip/limit/filter/purge). ArchUnit green.
+
 ## PLAYBOOK live routing robustness + loss-cap 1200 + "Live" label (2026-06-16)
 
 Follow-up after the first live confirmation entries on prod (v1.11.135):

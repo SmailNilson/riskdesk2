@@ -6,6 +6,7 @@ import com.riskdesk.domain.orderflow.model.TickBar;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
@@ -50,6 +51,47 @@ public class TickBarAggregator {
         this.instrument = instrument;
         this.ticksPerBar = ticksPerBar;
         this.maxBars = maxBars;
+    }
+
+    /**
+     * Re-seeds this aggregator with previously-completed bars (e.g. reloaded from
+     * persistence after a restart) so the tick chart survives a redeploy.
+     *
+     * <p>Bars are inserted oldest-first and capped at {@code maxBars}. {@code nextSeq}
+     * resumes at the highest restored {@code seq + 1} so the per-instrument sequence
+     * stays monotonic across restarts — the frontend merges by seq and treats a seq
+     * regression as a fresh backend session, which would drop the restored history.</p>
+     *
+     * <p>Must be called before any live tick is processed (guard with {@link #isEmpty()}).
+     * Null bars, in-progress bars, and bars built with a different {@code ticksPerBar}
+     * (stale config or pre-rollover contract) are skipped.</p>
+     *
+     * @param completed completed bars in any order
+     * @throws IllegalStateException if called after ticks have been processed
+     */
+    public void restore(List<TickBar> completed) {
+        if (!isEmpty()) {
+            throw new IllegalStateException("restore() must be called before any tick is processed");
+        }
+        if (completed == null || completed.isEmpty()) {
+            return;
+        }
+        completed.stream()
+            .filter(b -> b != null && b.complete() && b.ticksPerBar() == ticksPerBar)
+            .sorted(Comparator.comparingLong(TickBar::seq))
+            .forEach(completedBars::addLast);
+        while (completedBars.size() > maxBars) {
+            completedBars.pollFirst();
+        }
+        TickBar last = completedBars.peekLast();
+        if (last != null) {
+            nextSeq = last.seq() + 1;
+        }
+    }
+
+    /** True when no completed bar is buffered and no in-progress bar has started. */
+    public boolean isEmpty() {
+        return completedBars.isEmpty() && tickCount == 0;
     }
 
     /**

@@ -619,12 +619,30 @@ public class OrderFlowProperties {
          */
         private int maxBars = 3000;
 
+        /** Durable storage so the tick chart survives a redeploy (reloaded on startup). */
+        private Persistence persistence = new Persistence();
+
         public int getDefaultTicksPerBar() { return defaultTicksPerBar; }
         public void setDefaultTicksPerBar(int v) { this.defaultTicksPerBar = v; }
         public Map<String, Integer> getTicksPerBar() { return ticksPerBar; }
         public void setTicksPerBar(Map<String, Integer> v) { this.ticksPerBar = v; }
         public int getMaxBars() { return maxBars; }
         public void setMaxBars(int v) { this.maxBars = v; }
+        public Persistence getPersistence() { return persistence; }
+        public void setPersistence(Persistence v) { this.persistence = v; }
+
+        /** Tick-chart persistence: completed bars stored in PostgreSQL and reloaded on startup. */
+        public static class Persistence {
+            /** When true, completed bars are persisted and the ring buffer is re-seeded on startup. */
+            private boolean enabled = true;
+            /** Days to keep persisted bars before the daily purge removes them. */
+            private int retentionDays = 14;
+
+            public boolean isEnabled() { return enabled; }
+            public void setEnabled(boolean v) { this.enabled = v; }
+            public int getRetentionDays() { return retentionDays; }
+            public void setRetentionDays(int v) { this.retentionDays = v; }
+        }
     }
 
     /**
