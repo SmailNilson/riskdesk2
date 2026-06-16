@@ -823,7 +823,7 @@ function AutomationFooter({
                     <option value="MGC_10M_SCALP_0_5R">MGC 10m Scalp 0.5R</option>
                   )}
                   {instrument === 'MNQ' && (
-                    <option value="MNQ_10M_CONFIRMATION">MNQ 10m Confirmation (paper)</option>
+                    <option value="MNQ_10M_CONFIRMATION">MNQ 10m Confirmation (Live)</option>
                   )}
                 </select>
                 {armedProfile === 'MGC_10M_SCALP_0_5R' && !automation.scalpProfileValidated && (
@@ -1167,7 +1167,7 @@ function formatProfileLabel(profile: PlaybookExecutionProfile): string {
     case 'MGC_10M_NORMAL_1R_BENCHMARK':
       return '1R benchmark';
     case 'MNQ_10M_CONFIRMATION':
-      return 'Confirmation (paper)';
+      return 'Confirmation (Live)';
     case 'LEGACY':
     default:
       return 'Legacy';
