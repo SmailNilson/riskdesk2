@@ -376,14 +376,33 @@ export default function Dashboard() {
             track to be at least as wide as its intrinsic content, and the
             side zones would lose their requested widths. */}
         <section className="flex flex-col gap-3 min-w-0">
-          <Chart
-            instrument={instrument}
-            timeframe={timeframe}
-            timezone={timezone.tz}
-            theme={theme}
-            snapshot={snapshot}
-            livePrice={prices[instrument]}
-          />
+          {/* MNQ : le graphique chandelier est remplacé par Tick Chart → Footprint
+              → PLAYBOOK MNQ 10m. Le reste de la colonne (OrderFlow, Tick, Footprint,
+              FlashCrash, PerfectSetup, PLAYBOOK du bas) reste tel quel ci-dessous.
+              Les autres instruments conservent le Chart lightweight-charts. */}
+          {instrument === 'MNQ' ? (
+            <>
+              <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
+              <FootprintChart selectedInstrument={instrument} />
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+                <PlaybookPanel
+                  instrument={instrument}
+                  timeframe="10m"
+                  selectedBrokerAccountId={selectedIbkrAccountId}
+                  livePrice={prices[instrument]?.price ?? null}
+                />
+              </div>
+            </>
+          ) : (
+            <Chart
+              instrument={instrument}
+              timeframe={timeframe}
+              timezone={timezone.tz}
+              theme={theme}
+              snapshot={snapshot}
+              livePrice={prices[instrument]}
+            />
+          )}
           <OrderFlowPanel selectedInstrument={instrument} />
           <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
           <FootprintChart selectedInstrument={instrument} />
