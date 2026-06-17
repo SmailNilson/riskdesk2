@@ -788,7 +788,7 @@ public class IbGatewayNativeClient {
                                                  BigDecimal limitPrice,
                                                  String orderRef) {
         return placeEntryOrder(contract, requestedAccountId, action, quantity,
-                OrderType.LMT, limitPrice, orderRef);
+                OrderType.LMT, limitPrice, null, orderRef);
     }
 
     /**
@@ -806,13 +806,37 @@ public class IbGatewayNativeClient {
                                                 BigDecimal stopPrice,
                                                 String orderRef) {
         return placeEntryOrder(contract, requestedAccountId, action, quantity,
-                OrderType.STP, stopPrice, orderRef);
+                OrderType.STP, stopPrice, null, orderRef);
     }
 
     /**
-     * Shared entry-order submission. {@code orderType} selects LMT (price on {@code lmtPrice})
-     * or STP (trigger on {@code auxPrice}); everything else — validation, idempotency, the
-     * read-only kill-switch, the ack latch and the typed rejection mapping — is identical.
+     * Submit a STOP-LIMIT entry order: triggers on {@code triggerPrice} (the zone break) like a
+     * plain stop, but once triggered rests as a LIMIT at {@code limitPrice} instead of becoming a
+     * market order. This caps how far the fill may slip past the trigger on a fast break — at the
+     * cost of no fill if price gaps clean through the limit (an acceptable MISSED, the same
+     * "don't chase" intent as the late-entry skip). {@code limitPrice} sits beyond the trigger in
+     * the trade direction: below for a sell-stop, above for a buy-stop.
+     */
+    public NativeOrderSubmission placeStopLimitOrder(Contract contract,
+                                                     String requestedAccountId,
+                                                     Action action,
+                                                     int quantity,
+                                                     BigDecimal triggerPrice,
+                                                     BigDecimal limitPrice,
+                                                     String orderRef) {
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            throw new IllegalArgumentException("limitPrice must be > 0 for a STOP-LIMIT order");
+        }
+        return placeEntryOrder(contract, requestedAccountId, action, quantity,
+                OrderType.STP_LMT, triggerPrice, limitPrice, orderRef);
+    }
+
+    /**
+     * Shared entry-order submission. {@code orderType} selects LMT (price on {@code lmtPrice}),
+     * STP (trigger on {@code auxPrice}), or STP_LMT (trigger on {@code auxPrice} + cap on
+     * {@code lmtPrice}, supplied via {@code auxLimitPrice}); everything else — validation,
+     * idempotency, the read-only kill-switch, the ack latch and the typed rejection mapping — is
+     * identical.
      */
     private NativeOrderSubmission placeEntryOrder(Contract contract,
                                                   String requestedAccountId,
@@ -820,6 +844,7 @@ public class IbGatewayNativeClient {
                                                   int quantity,
                                                   OrderType orderType,
                                                   BigDecimal price,
+                                                  BigDecimal auxLimitPrice,
                                                   String orderRef) {
         if (contract == null) {
             throw new IllegalArgumentException("contract is required");
@@ -872,6 +897,9 @@ public class IbGatewayNativeClient {
         order.totalQuantity(Decimal.get(quantity));
         if (orderType == OrderType.STP) {
             order.auxPrice(price.doubleValue());   // STP trigger
+        } else if (orderType == OrderType.STP_LMT) {
+            order.auxPrice(price.doubleValue());          // trigger (zone break)
+            order.lmtPrice(auxLimitPrice.doubleValue());  // fill cap once triggered
         } else {
             order.lmtPrice(price.doubleValue());   // LMT price
         }

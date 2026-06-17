@@ -148,12 +148,16 @@ public class IbGatewayBrokerGateway implements IbkrBrokerGateway {
         Action side = "SHORT".equalsIgnoreCase(request.action()) || "SELL".equalsIgnoreCase(request.action())
             ? Action.SELL : Action.BUY;
 
-        // STOP entries (PLAYBOOK confirmation) trigger on the zone break; LIMIT is the legacy default.
-        var submission = request.isStop()
-            ? nativeClient.placeStopOrder(resolved.contract(), request.brokerAccountId(),
-                side, request.quantity(), request.stopPrice(), request.executionKey())
-            : nativeClient.placeLimitOrder(resolved.contract(), request.brokerAccountId(),
-                side, request.quantity(), request.limitPrice(), request.executionKey());
+        // STOP_LIMIT (PLAYBOOK confirmation): trigger on the zone break, fill capped at limitPrice.
+        // Plain STOP: market trigger, no cap (legacy/fallback). LIMIT: legacy default.
+        var submission = request.isStopLimit()
+            ? nativeClient.placeStopLimitOrder(resolved.contract(), request.brokerAccountId(),
+                side, request.quantity(), request.stopPrice(), request.limitPrice(), request.executionKey())
+            : request.isStop()
+                ? nativeClient.placeStopOrder(resolved.contract(), request.brokerAccountId(),
+                    side, request.quantity(), request.stopPrice(), request.executionKey())
+                : nativeClient.placeLimitOrder(resolved.contract(), request.brokerAccountId(),
+                    side, request.quantity(), request.limitPrice(), request.executionKey());
 
         return new BrokerEntryOrderSubmission(
             submission.orderId(),
