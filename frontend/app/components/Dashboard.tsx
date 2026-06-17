@@ -376,10 +376,11 @@ export default function Dashboard() {
             track to be at least as wide as its intrinsic content, and the
             side zones would lose their requested widths. */}
         <section className="flex flex-col gap-3 min-w-0">
-          {/* MNQ : le graphique chandelier est remplacé par Tick Chart → Footprint
-              → PLAYBOOK MNQ 10m. Le reste de la colonne (OrderFlow, Tick, Footprint,
-              FlashCrash, PerfectSetup, PLAYBOOK du bas) reste tel quel ci-dessous.
-              Les autres instruments conservent le Chart lightweight-charts. */}
+          {/* MNQ : Tick Chart → Footprint → PLAYBOOK 10m EN TÊTE, puis le candle
+              chart et l'order flow. Pas de doublon — ni Tick/Footprint plus bas,
+              ni PLAYBOOK du bas (le PLAYBOOK 10m du haut fait foi).
+              Les autres instruments gardent la disposition d'origine
+              (Chart → OrderFlow → Tick → Footprint → … → PLAYBOOK timeframe). */}
           {instrument === 'MNQ' ? (
             <>
               <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
@@ -392,33 +393,46 @@ export default function Dashboard() {
                   livePrice={prices[instrument]?.price ?? null}
                 />
               </div>
+              <Chart
+                instrument={instrument}
+                timeframe={timeframe}
+                timezone={timezone.tz}
+                theme={theme}
+                snapshot={snapshot}
+                livePrice={prices[instrument]}
+              />
+              <OrderFlowPanel selectedInstrument={instrument} />
             </>
           ) : (
-            <Chart
-              instrument={instrument}
-              timeframe={timeframe}
-              timezone={timezone.tz}
-              theme={theme}
-              snapshot={snapshot}
-              livePrice={prices[instrument]}
-            />
+            <>
+              <Chart
+                instrument={instrument}
+                timeframe={timeframe}
+                timezone={timezone.tz}
+                theme={theme}
+                snapshot={snapshot}
+                livePrice={prices[instrument]}
+              />
+              <OrderFlowPanel selectedInstrument={instrument} />
+              <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
+              <FootprintChart selectedInstrument={instrument} />
+            </>
           )}
-          <OrderFlowPanel selectedInstrument={instrument} />
-          <TickChart selectedInstrument={instrument} snapshot={snapshot} brokerAccountId={selectedIbkrAccountId} />
-          <FootprintChart selectedInstrument={instrument} />
           <FlashCrashPanel />
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
             <PerfectSetupPanel />
           </div>
-          {/* PLAYBOOK anchored at the bottom of the center column */}
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-            <PlaybookPanel
-              instrument={instrument}
-              timeframe={timeframe}
-              selectedBrokerAccountId={selectedIbkrAccountId}
-              livePrice={prices[instrument]?.price ?? null}
-            />
-          </div>
+          {/* PLAYBOOK bas — hors MNQ uniquement (MNQ a déjà PLAYBOOK 10m en tête) */}
+          {instrument !== 'MNQ' && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+              <PlaybookPanel
+                instrument={instrument}
+                timeframe={timeframe}
+                selectedBrokerAccountId={selectedIbkrAccountId}
+                livePrice={prices[instrument]?.price ?? null}
+              />
+            </div>
+          )}
         </section>
 
         {/* Right zone — AI Trade Desk */}
