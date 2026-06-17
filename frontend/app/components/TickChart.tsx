@@ -32,7 +32,7 @@ const MAX_BASE_BARS = 3000;
 /** Merged bars actually rendered. */
 const MAX_RENDERED_BARS = 300;
 /** User-selectable bar sizes offered on top of the per-instrument base size. */
-const EXTRA_BAR_SIZES = [1000, 2000];
+const EXTRA_BAR_SIZES = [1000, 2000, 5000, 10000];
 
 /** Tick size / display decimals / default SL-TP offsets (in points) per instrument.
  *  SL/TP pre-fill the ticket only — the operator edits them before confirming. */
@@ -131,7 +131,7 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  * compress in fast markets and stretch in quiet ones.
  *
  * Bar size is user-selectable: the per-instrument base (200 MNQ / 100 MCL) plus
- * 1000 and 2000 ticks, built by merging base bars client-side (exact: groups of
+ * 1000, 2000, 5000 and 10000 ticks, built by merging base bars client-side (exact: groups of
  * N consecutive base bars share boundaries with a native N×base aggregator).
  *
  * SMC overlay (toggleable): horizontal price lines for the 3 nearest active order
