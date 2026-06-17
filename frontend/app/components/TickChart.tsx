@@ -252,7 +252,7 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
         vertLines: { color: 'rgba(63,63,70,0.3)' },
         horzLines: { color: 'rgba(63,63,70,0.3)' },
       },
-      height: 260,
+      height: 286, // +10% vs 260 pour un Tick Chart plus lisible
       timeScale: { timeVisible: true, secondsVisible: true, borderColor: '#3f3f46' },
       rightPriceScale: { borderColor: '#3f3f46' },
     });
