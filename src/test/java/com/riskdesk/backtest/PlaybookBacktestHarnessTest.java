@@ -69,7 +69,8 @@ class PlaybookBacktestHarnessTest {
     public record DecisionRec(long candleTs, int score, boolean late, String dir, String setupType,
                               double entry, double sl, double tp1, double rr,
                               double zoneHigh, double zoneLow, double atr,
-                              Double ema20h, Double ema50h) {
+                              Double ema20h, Double ema50h,
+                              double premiumTop, double discountBottom, double equilibrium) {
         long decisionTime() { return candleTs + TEN_MIN; }
     }
 
@@ -235,7 +236,10 @@ class PlaybookBacktestHarnessTest {
             eval.bestSetup().zoneHigh() != null ? eval.bestSetup().zoneHigh().doubleValue() : 0,
             eval.bestSetup().zoneLow() != null ? eval.bestSetup().zoneLow().doubleValue() : 0,
             atr != null ? atr.doubleValue() : 0,
-            e20, e50);
+            e20, e50,
+            snap.premiumZoneTop() != null ? snap.premiumZoneTop().doubleValue() : 0,
+            snap.discountZoneBottom() != null ? snap.discountZoneBottom().doubleValue() : 0,
+            snap.equilibriumLevel() != null ? snap.equilibriumLevel().doubleValue() : 0);
     }
 
     private static double[] ema(double[] v, int p) {
@@ -765,6 +769,302 @@ class PlaybookBacktestHarnessTest {
 
         M.writerWithDefaultPrettyPrinter().writeValue(new File(DIR + "/pb_bt_results_mech.json"), results);
         System.out.println("\nfull results: " + DIR + "/pb_bt_results_mech.json");
+    }
+
+    // ── Premium/Discount exit study ────────────────────────────────────────────
+
+    /**
+     * One confirmation trade resolved with a chosen take-profit policy. SL is always the
+     * 1.5×ATR disaster stop; only the profit target changes:
+     *   ATR   — fill ± 2.25×ATR (the shipped baseline)
+     *   PD    — LONG exits at the range top (premiumTop), SHORT at the range bottom
+     *           (discountBottom), both frozen at the decision. Falls back to the ATR TP
+     *           when the PD level is on the wrong side of the fill (counted).
+     *   EQ    — the range equilibrium (mid) — an even earlier mean-reversion exit.
+     *   FIRST — whichever of {ATR target, PD level} is nearer the fill (exit soonest).
+     * Returns the Sim, or null when a gate fails. `fellBackToAtr[0]` is incremented on PD/FIRST
+     * fallback.
+     */
+    private Sim simConfirmExit(DecisionRec d, String policy, long[] t1, double[] o1,
+                               double[] h1, double[] l1, double[] c1, int[] fellBackToAtr) {
+        boolean isShort = "SHORT".equals(d.dir());
+        if (!inSession(d.decisionTime(), isShort ? "NO_ON" : "RTH")) return null;
+        if (d.score() < 5) return null;
+        if (d.zoneHigh() <= 0 || d.zoneLow() <= 0 || d.zoneHigh() <= d.zoneLow() || d.atr() <= 0) return null;
+
+        double atr = d.atr();
+        double trigger = isShort ? d.zoneLow() : d.zoneHigh();
+        double invalid = isShort ? d.zoneHigh() + 0.5 * atr : d.zoneLow() - 0.5 * atr;
+        Sim s = new Sim(d, trigger, Double.NaN, Double.NaN, Double.NaN, Double.NaN, isShort, isShort);
+
+        long start = d.decisionTime();
+        int i = firstIndexGeq(t1, start);
+        long deadline = start + 3_600L;
+        boolean active = false;
+        for (; i < t1.length; i++) {
+            long t = t1[i]; double op = o1[i], hi = h1[i], lo = l1[i];
+            if (!active) {
+                if (t > deadline) { s.status = St.CANCELLED; s.resolveTime = t; return s; }
+                if (isShort ? hi >= invalid : lo <= invalid) { s.status = St.CANCELLED; s.resolveTime = t; return s; }
+                boolean trig = isShort ? lo <= trigger : hi >= trigger;
+                if (!trig) continue;
+                active = true; s.fillTime = t;
+                s.fillPrice = isShort ? Math.min(trigger, op) : Math.max(trigger, op);
+                s.sl = isShort ? s.fillPrice + 1.5 * atr : s.fillPrice - 1.5 * atr;
+                s.tp = resolveTp(policy, s.fillPrice, atr, isShort, d, fellBackToAtr);
+                if (isShort ? hi >= s.sl : lo <= s.sl) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return s; }
+                if (isShort ? lo <= s.tp : hi >= s.tp) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return s; }
+                continue;
+            }
+            if (isShort ? hi >= s.sl : lo <= s.sl) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return s; }
+            if (isShort ? lo <= s.tp : hi >= s.tp) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return s; }
+        }
+        s.status = active ? St.OPEN : St.CANCELLED;
+        return s;
+    }
+
+    private static double resolveTp(String policy, double fill, double atr, boolean isShort,
+                                    DecisionRec d, int[] fellBackToAtr) {
+        double atrTp = isShort ? fill - 2.25 * atr : fill + 2.25 * atr;
+        if ("ATR".equals(policy)) return atrTp;
+        double pd = "EQ".equals(policy) ? d.equilibrium()
+            : (isShort ? d.discountBottom() : d.premiumTop());
+        boolean pdValid = pd > 0 && (isShort ? pd < fill : pd > fill);
+        if (!pdValid) { fellBackToAtr[0]++; return atrTp; }      // PD level wrong side → ATR
+        if ("FIRST".equals(policy)) {                            // nearer of {ATR, PD}
+            return isShort ? Math.max(atrTp, pd) : Math.min(atrTp, pd);
+        }
+        return pd;                                               // PD or EQ
+    }
+
+    private record ExitResult(String policy, int resolved, int wins, int losses, double wr,
+                              double net, double pf, double maxDd, double avgWin, double avgLoss,
+                              int fallback, int posMonths, int nMonths, double avgHoldMin) {}
+
+    private ExitResult runExitPolicy(List<DecisionRec> decisions, String policy,
+                                     long[] t1, double[] o1, double[] h1, double[] l1, double[] c1) {
+        List<Sim> sims = new ArrayList<>();
+        Sim last = null;
+        int[] fellBack = {0};
+        for (DecisionRec d : decisions) {
+            long now = d.decisionTime();
+            if (last != null && last.openAt(now)) continue;                 // K=1 dual-direction
+            if (zoneCooldownBlocked(sims, d, "SHORT".equals(d.dir()) ? d.zoneLow() : d.zoneHigh(), now)) continue;
+            Sim s = simConfirmExit(d, policy, t1, o1, h1, l1, c1, fellBack);
+            if (s == null) continue;
+            sims.add(s); last = s;
+        }
+        int w = 0, l = 0; double pnl = 0, gW = 0, gL = 0, eq = 0, pk = 0, dd = 0;
+        long holdSum = 0; int holdN = 0;
+        java.util.Map<String, Double> monthly = new java.util.TreeMap<>();
+        for (Sim s : sims) {
+            if (s.status != St.WIN && s.status != St.LOSS) continue;
+            double p = s.pnl() - 2.0;                                        // friction $2/RT
+            if (s.status == St.WIN) w++; else l++;
+            pnl += p; if (p > 0) gW += p; else gL -= p;
+            eq += p; pk = Math.max(pk, eq); dd = Math.max(dd, pk - eq);
+            if (s.fillTime > 0) { holdSum += (s.resolveTime - s.fillTime) / 60; holdN++; }
+            monthly.merge(Instant.ofEpochSecond(s.resolveTime).toString().substring(0, 7), p, Double::sum);
+        }
+        double wr = (w + l) == 0 ? 0 : 100.0 * w / (w + l);
+        double pf = gL == 0 ? 0 : gW / gL;
+        int posM = (int) monthly.values().stream().filter(v -> v > 0).count();
+        return new ExitResult(policy, w + l, w, l, wr, pnl, pf, dd,
+            w == 0 ? 0 : gW / w, l == 0 ? 0 : -gL / l, fellBack[0], posM, monthly.size(),
+            holdN == 0 ? 0 : (double) holdSum / holdN);
+    }
+
+    @Test
+    void runPremiumDiscountExitStudy() throws Exception {
+        // Phase-B tape: prefer 5m (the real TradeSimulationService resolution, 90d retention =
+        // ~3 months) over 1m (30d retention = ~1 month). Set -Dpb.exit.tape=1m to force 1m.
+        String tapeTf = System.getProperty("pb.exit.tape", "5m");
+        String tapeFile = "1m".equals(tapeTf) ? F_1M : DIR + "/mnq_5m.json";
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            new File(tapeFile).exists() && new File(F_10M).exists() && new File(F_1H).exists(),
+            "candle data absent — skipping");
+        List<Bar> tape = loadBars(tapeFile), b10m = loadBars(F_10M), b1h = loadBars(F_1H);
+        long[] t1 = tape.stream().mapToLong(Bar::t).toArray();
+        double[] o1 = tape.stream().mapToDouble(Bar::o).toArray();
+        double[] h1 = tape.stream().mapToDouble(Bar::h).toArray();
+        double[] l1 = tape.stream().mapToDouble(Bar::l).toArray();
+        double[] c1 = tape.stream().mapToDouble(Bar::c).toArray();
+
+        File cache = new File(DIR + "/pb_pd_decisions.json");
+        List<DecisionRec> decisions;
+        if (cache.exists()) {
+            decisions = M.readValue(cache, new TypeReference<>() {});
+            System.out.printf("phase A: loaded %d cached decisions%n", decisions.size());
+        } else {
+            long t0 = System.currentTimeMillis();
+            decisions = computeDecisions(toCandles(b10m, "10m"), toCandles(b1h, "1h"));
+            System.out.printf("phase A: %d decisions in %.0fs%n", decisions.size(),
+                (System.currentTimeMillis() - t0) / 1000.0);
+            M.writerWithDefaultPrettyPrinter().writeValue(cache, decisions);
+        }
+        decisions = filterConsistent(decisions, t1, o1);
+        long firstTape = t1[0];
+        long covered = decisions.stream().filter(d -> d.decisionTime() >= firstTape).count();
+        System.out.printf("exit tape=%s · decisions with coverage: %d / %d (tape starts %s)%n",
+            tapeTf, covered, decisions.size(), Instant.ofEpochSecond(firstTape));
+
+        System.out.printf("%n=== EXIT POLICY COMPARISON (confirmation profile, dual K=1, $2/RT) ===%n");
+        for (String policy : List.of("ATR", "PD", "EQ", "FIRST")) {
+            ExitResult r = runExitPolicy(decisions, policy, t1, o1, h1, l1, c1);
+            System.out.printf("  %-6s resolved=%-3d WR=%4.1f%% net=%+7.0f$ PF=%.2f maxDD=%5.0f "
+                    + "avgW=%5.0f avgL=%6.0f hold=%4.0fmin posM=%d/%d fallbackATR=%d%n",
+                r.policy(), r.resolved(), r.wr(), r.net(), r.pf(), r.maxDd(),
+                r.avgWin(), r.avgLoss(), r.avgHoldMin(), r.posMonths(), r.nMonths(), r.fallback());
+        }
+        System.out.println("\nLegend: ATR=fill±2.25×ATR (baseline) · PD=range top/bottom · "
+            + "EQ=equilibrium · FIRST=nearer of ATR/PD. SL=1.5×ATR for all.");
+    }
+
+    // ── LATE-ENTRY RETEST STUDY ───────────────────────────────────────────────
+    // Live routing SKIPS late confirmation entries (SKIPPED_LATE_ENTRY): price already
+    // moved >0.5×ATR past the plan entry. Question: instead of skipping, place a
+    // resting limit at a retest level back toward the broken zone and wait for a pullback.
+    //   SHORT: price already below zoneLow → sell-limit ABOVE current price (does NOT
+    //          fill immediately). LONG: price already above zoneHigh → buy-limit below.
+    // Policies: SKIP (baseline, 0 trades) · ZONE (limit = broken zone level) ·
+    //           MID (limit = halfway between current price and the zone).
+    // Same brackets as the confirmation profile: SL 1.5×ATR, TP 2.25×ATR.
+
+    private record RetestResult(String policy, int eligible, int filled, int missed,
+                                int wins, int losses, double wr, double net, double pf,
+                                double expectancy, double avgWin, double avgLoss,
+                                double maxDd, int posMonths, int nMonths) {}
+
+    /** Resting-limit retest fill for a LATE decision. curPrice = tape price at decision time. */
+    private Sim simLateRetest(DecisionRec d, String policy, double curPrice, long expiryS,
+                              long[] t1, double[] o1, double[] h1, double[] l1) {
+        boolean isShort = "SHORT".equals(d.dir());
+        if (!inSession(d.decisionTime(), isShort ? "NO_ON" : "RTH")) return null;
+        if (d.score() < 5) return null;
+        if (d.zoneHigh() <= 0 || d.zoneLow() <= 0 || d.zoneHigh() <= d.zoneLow() || d.atr() <= 0) return null;
+        if (Double.isNaN(curPrice)) return null;
+        double atr = d.atr();
+        double zone = isShort ? d.zoneLow() : d.zoneHigh();   // broken level we retest
+        // Must actually be on the broken side (the late case): price beyond the zone.
+        boolean broken = isShort ? curPrice < zone : curPrice > zone;
+        if (!broken) return null;
+        double limit = "ZONE".equals(policy) ? zone : curPrice + 0.5 * (zone - curPrice);
+        // Limit must sit on the favorable side of current price (above for short, below for long).
+        if (isShort ? limit <= curPrice : limit >= curPrice) return null;
+
+        Sim s = new Sim(d, limit, Double.NaN, Double.NaN, Double.NaN, Double.NaN, isShort, isShort);
+        long start = d.decisionTime();
+        int i = firstIndexGeq(t1, start);
+        long deadline = start + expiryS;
+        boolean active = false;
+        for (; i < t1.length; i++) {
+            long t = t1[i]; double hi = h1[i], lo = l1[i];
+            if (!active) {
+                if (t > deadline) { s.status = St.MISSED; s.resolveTime = t; return s; }
+                boolean reach = isShort ? hi >= limit : lo <= limit;   // pullback into the limit
+                if (!reach) continue;
+                active = true; s.fillTime = t;
+                s.fillPrice = limit;                                   // conservative limit fill (no favorable-gap credit)
+                s.sl = isShort ? s.fillPrice + 1.5 * atr : s.fillPrice - 1.5 * atr;
+                s.tp = isShort ? s.fillPrice - 2.25 * atr : s.fillPrice + 2.25 * atr;
+                if (isShort ? hi >= s.sl : lo <= s.sl) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return s; }
+                if (isShort ? lo <= s.tp : hi >= s.tp) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return s; }
+                continue;
+            }
+            if (isShort ? hi >= s.sl : lo <= s.sl) { s.status = St.LOSS; s.resolveTime = t; s.exitPrice = s.sl; return s; }
+            if (isShort ? lo <= s.tp : hi >= s.tp) { s.status = St.WIN; s.resolveTime = t; s.exitPrice = s.tp; return s; }
+        }
+        s.status = active ? St.OPEN : St.MISSED;
+        return s;
+    }
+
+    private RetestResult runLateRetest(List<DecisionRec> lateDecs, String policy, long expiryS, String dir,
+                                       long[] t1, double[] o1, double[] h1, double[] l1) {
+        List<Sim> sims = new ArrayList<>();
+        Sim last = null;
+        int eligible = 0, filled = 0, missed = 0;
+        for (DecisionRec d : lateDecs) {
+            if (!"ALL".equals(dir) && !dir.equals(d.dir())) continue;
+            long now = d.decisionTime();
+            int i0 = firstIndexGeq(t1, now);
+            double curPrice = i0 < t1.length ? o1[i0] : Double.NaN;
+            // Gate-check with ZONE geometry first so SKIP & RETEST share the same eligible set.
+            Sim probe = simLateRetest(d, "ZONE", curPrice, expiryS, t1, o1, h1, l1);
+            if (probe == null) continue;
+            eligible++;
+            if ("SKIP".equals(policy)) continue;                       // baseline: do not trade
+            if (last != null && last.openAt(now)) continue;            // K=1 among late trades
+            Sim s = simLateRetest(d, policy, curPrice, expiryS, t1, o1, h1, l1);
+            if (s == null) continue;
+            if (s.status == St.MISSED) { missed++; continue; }
+            filled++;
+            sims.add(s); last = s;
+        }
+        int w = 0, l = 0; double pnl = 0, gW = 0, gL = 0, eq = 0, pk = 0, dd = 0;
+        java.util.Map<String, Double> monthly = new java.util.TreeMap<>();
+        for (Sim s : sims) {
+            if (s.status != St.WIN && s.status != St.LOSS) continue;
+            double p = s.pnl() - 2.0;                                   // friction $2/RT
+            if (s.status == St.WIN) w++; else l++;
+            pnl += p; if (p > 0) gW += p; else gL -= p;
+            eq += p; pk = Math.max(pk, eq); dd = Math.max(dd, pk - eq);
+            monthly.merge(Instant.ofEpochSecond(s.resolveTime).toString().substring(0, 7), p, Double::sum);
+        }
+        int resolved = w + l;
+        double wr = resolved == 0 ? 0 : 100.0 * w / resolved;
+        double pf = gL == 0 ? 0 : gW / gL;
+        double exp = resolved == 0 ? 0 : pnl / resolved;
+        int posM = (int) monthly.values().stream().filter(v -> v > 0).count();
+        return new RetestResult(policy, eligible, filled, missed, w, l, wr, pnl, pf, exp,
+            w == 0 ? 0 : gW / w, l == 0 ? 0 : -gL / l, dd, posM, monthly.size());
+    }
+
+    @Test
+    void runLateRetestStudy() throws Exception {
+        String tapeTf = System.getProperty("pb.exit.tape", "5m");
+        String tapeFile = "1m".equals(tapeTf) ? F_1M : DIR + "/mnq_5m.json";
+        long expiryS = Long.getLong("pb.retest.expiry.min", 60L) * 60L;   // default 60 min = 6×10m bars
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            new File(tapeFile).exists() && new File(F_10M).exists() && new File(F_1H).exists(),
+            "candle data absent — skipping");
+        List<Bar> tape = loadBars(tapeFile), b10m = loadBars(F_10M), b1h = loadBars(F_1H);
+        long[] t1 = tape.stream().mapToLong(Bar::t).toArray();
+        double[] o1 = tape.stream().mapToDouble(Bar::o).toArray();
+        double[] h1 = tape.stream().mapToDouble(Bar::h).toArray();
+        double[] l1 = tape.stream().mapToDouble(Bar::l).toArray();
+
+        File cache = new File(DIR + "/pb_pd_decisions.json");
+        List<DecisionRec> decisions;
+        if (cache.exists()) {
+            decisions = M.readValue(cache, new TypeReference<>() {});
+            System.out.printf("phase A: loaded %d cached decisions%n", decisions.size());
+        } else {
+            decisions = computeDecisions(toCandles(b10m, "10m"), toCandles(b1h, "1h"));
+            M.writerWithDefaultPrettyPrinter().writeValue(cache, decisions);
+        }
+        decisions = filterConsistent(decisions, t1, o1);
+        List<DecisionRec> late = decisions.stream().filter(DecisionRec::late).toList();
+        long lateShort = late.stream().filter(d -> "SHORT".equals(d.dir())).count();
+        long lateLong = late.stream().filter(d -> "LONG".equals(d.dir())).count();
+        System.out.printf("tape=%s expiry=%dmin · LATE decisions: %d (SHORT=%d LONG=%d) of %d total%n",
+            tapeTf, expiryS / 60, late.size(), lateShort, lateLong, decisions.size());
+
+        for (String dir : List.of("SHORT", "LONG")) {
+            System.out.printf("%n=== LATE %s — RETEST vs SKIP (score>=5, sess %s, SL1.5/TP2.25×ATR, $2/RT) ===%n",
+                dir, "SHORT".equals(dir) ? "NO_ON" : "RTH");
+            for (String policy : List.of("SKIP", "ZONE", "MID")) {
+                RetestResult r = runLateRetest(late, policy, expiryS, dir, t1, o1, h1, l1);
+                double fillRate = r.eligible() == 0 ? 0 : 100.0 * r.filled() / r.eligible();
+                System.out.printf("  %-4s eligible=%-3d filled=%-3d(%4.0f%%) missed=%-3d | "
+                        + "WR=%4.1f%% net=%+7.0f$ PF=%.2f exp=%+5.0f$/t avgW=%5.0f avgL=%6.0f maxDD=%5.0f posM=%d/%d%n",
+                    r.policy(), r.eligible(), r.filled(), fillRate, r.missed(),
+                    r.wr(), r.net(), r.pf(), r.expectancy(), r.avgWin(), r.avgLoss(),
+                    r.maxDd(), r.posMonths(), r.nMonths());
+            }
+        }
+        System.out.println("\nLegend: ZONE=limit at broken zone level · MID=halfway current↔zone · "
+            + "SKIP=baseline (no trade). eligible=late signals that broke past the zone. "
+            + "exp=net/resolved trade (must beat $0 to add edge).");
     }
 
     // ── entry point ───────────────────────────────────────────────────────────
