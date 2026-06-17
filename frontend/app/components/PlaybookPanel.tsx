@@ -900,36 +900,21 @@ function StreamedResults({
   decisions: PlaybookAutomationDecisionView[];
   summary: PlaybookAutomationProfitabilitySummaryView | null;
 }) {
+  // Legacy paper history retired: when a confirmation (STOP-entry) stream exists,
+  // show only it. Pure-legacy profiles still render their own history unlabelled.
   const confirmation = decisions.filter(d => d.entryType === 'STOP');
-  const legacy = decisions.filter(d => d.entryType !== 'STOP');
-  // Single-stream panels (legacy-only, or confirmation-only once the challenger is retired)
-  // render one unlabelled block. Both present (transitional history) → two labelled blocks.
-  if (confirmation.length === 0 || legacy.length === 0) {
+  if (confirmation.length > 0) {
     return (
       <>
-        <ProfitabilitySummary summary={summary} />
-        <RecentSimulationResults decisions={decisions} />
+        <ProfitabilitySummary summary={summarizeAutomationDecisions(confirmation)} />
+        <RecentSimulationResults decisions={confirmation} />
       </>
     );
   }
   return (
     <>
-      <div className="flex items-center gap-2">
-        <span className="rounded border border-cyan-800/60 bg-cyan-950/40 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-300">
-          CONFIRMATION
-        </span>
-        <span className="text-[9px] text-zinc-600">stop à la sortie de zone · brackets ATR</span>
-      </div>
-      <ProfitabilitySummary summary={summarizeAutomationDecisions(confirmation)} />
-      <RecentSimulationResults decisions={confirmation} />
-      <div className="flex items-center gap-2 pt-1">
-        <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-400">
-          LEGACY · retiré
-        </span>
-        <span className="text-[9px] text-zinc-600">historique paper résiduel</span>
-      </div>
-      <ProfitabilitySummary summary={summarizeAutomationDecisions(legacy)} />
-      <RecentSimulationResults decisions={legacy} />
+      <ProfitabilitySummary summary={summary} />
+      <RecentSimulationResults decisions={decisions} />
     </>
   );
 }
