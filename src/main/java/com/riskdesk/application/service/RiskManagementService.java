@@ -30,7 +30,6 @@ public class RiskManagementService {
     private static final Logger log = LoggerFactory.getLogger(RiskManagementService.class);
 
     // Kill switches
-    private static final double MAX_DAILY_DRAWDOWN_PCT = 3.0;
     private static final int MAX_OPEN_POSITIONS = 3;
     private static final double HIGH_MARGIN_THRESHOLD = 80.0;
     private static final double MIN_RR_RATIO = 1.5;
@@ -53,13 +52,10 @@ public class RiskManagementService {
 
         var portfolio = context.portfolio();
         if (portfolio != null) {
-            // 1. Daily drawdown kill switch — absolute block
-            if (portfolio.dailyDrawdownPct() > MAX_DAILY_DRAWDOWN_PCT) {
-                blocked = true;
-                blockReason = String.format("DAILY DRAWDOWN %.1f%% > %.0f%% — NO MORE TRADES TODAY",
-                    portfolio.dailyDrawdownPct(), MAX_DAILY_DRAWDOWN_PCT);
-                warnings.add(blockReason);
-            }
+            // The daily-drawdown "NO MORE TRADES TODAY" kill switch was REMOVED here: it only fed
+            // the Agents panel (analysis), never gated auto-execution, so showing "BLOCKED" while the
+            // playbook kept routing was misleading. The real daily halt is the broker-truth
+            // DailyLossCapGuard (riskdesk.execution.loss-cap, USD) inside PlaybookAutomationService.
 
             // 2. Max open positions — halve size
             if (!blocked && portfolio.openPositionCount() >= MAX_OPEN_POSITIONS) {
