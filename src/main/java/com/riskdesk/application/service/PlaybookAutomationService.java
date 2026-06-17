@@ -458,17 +458,7 @@ public class PlaybookAutomationService {
                 persisted.getId());
         }
         try {
-            // Confirmation decisions are STOP entries — the trigger is the zone break (entryPrice).
-            // A resting buy-limit above market would fill immediately, the opposite of the breakout.
-            BrokerEntryOrderRequest entryRequest = decision.isStopEntry()
-                ? new BrokerEntryOrderRequest(
-                    persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
-                    persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
-                    null, BrokerEntryOrderRequest.ORDER_TYPE_STOP, persisted.getNormalizedEntryPrice())
-                : new BrokerEntryOrderRequest(
-                    persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
-                    persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
-                    persisted.getNormalizedEntryPrice());
+            BrokerEntryOrderRequest entryRequest = buildEntryRequest(decision, persisted, instrument);
             BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(entryRequest);
             // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
             // the row ACTIVE NOW instead of ENTRY_SUBMITTED waiting on an orderStatus(Filled) callback that
@@ -767,6 +757,70 @@ public class PlaybookAutomationService {
             throw new IllegalArgumentException("timeframe is required");
         }
         return timeframe.trim();
+    }
+
+    /**
+     * Builds the broker entry request for a persisted Playbook execution.
+     *
+     * <p>Confirmation decisions are STOP entries — the trigger is the zone break (entryPrice); a
+     * resting buy-limit above market would fill immediately, the opposite of the breakout. They are
+     * submitted as STOP-LIMIT so a fast break cannot slip the fill arbitrarily far past the trigger
+     * (a plain STOP becomes a market order). Falls back to a plain market STOP when the cap band is
+     * disabled or the stop distance is unusable. Legacy limit decisions are unchanged.
+     */
+    private BrokerEntryOrderRequest buildEntryRequest(PlaybookDecision decision,
+                                                      TradeExecutionRecord persisted,
+                                                      Instrument instrument) {
+        if (!decision.isStopEntry()) {
+            return new BrokerEntryOrderRequest(
+                persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
+                persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
+                persisted.getNormalizedEntryPrice());
+        }
+        BigDecimal trigger = persisted.getNormalizedEntryPrice();
+        BigDecimal cap = stopLimitCap(decision, trigger, instrument);
+        if (cap != null) {
+            return BrokerEntryOrderRequest.stopLimit(
+                persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
+                persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
+                trigger, cap);
+        }
+        return new BrokerEntryOrderRequest(
+            persisted.getId(), persisted.getExecutionKey(), persisted.getBrokerAccountId(),
+            persisted.getInstrument(), persisted.getAction(), persisted.getQuantity(),
+            null, BrokerEntryOrderRequest.ORDER_TYPE_STOP, trigger);
+    }
+
+    private BigDecimal stopLimitCap(PlaybookDecision decision, BigDecimal trigger, Instrument instrument) {
+        return confirmationStopLimitCap(trigger, decision.stopLoss(),
+            "SHORT".equalsIgnoreCase(decision.direction()), properties.getStopLimitBandAtr(), instrument);
+    }
+
+    /**
+     * Slippage-cap limit price for a confirmation STOP-LIMIT, or null to fall back to a plain STOP.
+     * Cap = trigger ∓ band×ATR (below for a sell-stop, above for a buy-stop); ATR is recovered from
+     * the plan's stop distance ({@code |trigger − SL| = STOP_ATR_MULTIPLE × ATR}). Returns null when
+     * the band is disabled (≤ 0), the stop distance is unusable, or the rounded cap lands on/through
+     * the trigger (no protection). Package-private static for direct unit testing.
+     */
+    static BigDecimal confirmationStopLimitCap(BigDecimal trigger, BigDecimal stopLoss, boolean isShort,
+                                               double bandAtr, Instrument instrument) {
+        if (bandAtr <= 0 || trigger == null || stopLoss == null) {
+            return null;
+        }
+        BigDecimal stopDistance = trigger.subtract(stopLoss).abs();
+        if (stopDistance.signum() <= 0) {
+            return null;
+        }
+        BigDecimal atr = stopDistance.divide(
+            com.riskdesk.domain.playbook.automation.ConfirmationEntryPlanner.STOP_ATR_MULTIPLE,
+            6, RoundingMode.HALF_UP);
+        BigDecimal band = atr.multiply(BigDecimal.valueOf(bandAtr));
+        BigDecimal cap = normalizeToTick(isShort ? trigger.subtract(band) : trigger.add(band), instrument);
+        if (cap.signum() <= 0 || (isShort ? cap.compareTo(trigger) >= 0 : cap.compareTo(trigger) <= 0)) {
+            return null;
+        }
+        return cap;
     }
 
     private static BigDecimal normalizeToTick(BigDecimal price, Instrument instrument) {

@@ -73,6 +73,23 @@ class IbGatewayBrokerGatewayStopOrderTest {
     }
 
     @Test
+    void stopLimitRequestSubmitsStopLimitOrderWithTriggerAndCap() {
+        resolveMnq();
+        when(nativeClient.placeStopLimitOrder(any(), any(), eq(Action.SELL), eq(1),
+            eq(new BigDecimal("30408.50")), eq(new BigDecimal("30403.50")), any())).thenReturn(ack);
+
+        // SHORT confirmation: sell-stop trigger at the zone break, fill capped just below it.
+        gateway.submitEntryOrder(BrokerEntryOrderRequest.stopLimit(
+            13L, "ek4", "DU123", "MNQ", "SHORT", 1,
+            new BigDecimal("30408.50"), new BigDecimal("30403.50")));
+
+        verify(nativeClient).placeStopLimitOrder(any(), eq("DU123"), eq(Action.SELL), eq(1),
+            eq(new BigDecimal("30408.50")), eq(new BigDecimal("30403.50")), eq("ek4"));
+        verify(nativeClient, never()).placeStopOrder(any(), any(), any(), anyInt(), any(), any());
+        verify(nativeClient, never()).placeLimitOrder(any(), any(), any(), anyInt(), any(), any());
+    }
+
+    @Test
     void legacyLimitRequestStillSubmitsLimitOrder() {
         resolveMnq();
         when(nativeClient.placeLimitOrder(any(), any(), any(), anyInt(), any(), any())).thenReturn(ack);
