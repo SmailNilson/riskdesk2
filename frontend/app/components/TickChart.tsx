@@ -237,11 +237,25 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
   // 5k/10k come pre-aggregated from the backend; 1k/2k and base are merged client-side.
   const isBackendSize = effectiveSize != null && BACKEND_BAR_SIZES.includes(effectiveSize);
 
+  // The polled coarse series is only usable once it matches the CURRENT instrument and
+  // size. Until then it's a stale leftover from the previous selection — a size switch
+  // (5k↔10k) or an instrument change — and must NOT be rendered under the new label.
+  const lastCoarse = coarseBars.length > 0 ? coarseBars[coarseBars.length - 1] : null;
+  const coarseReady = isBackendSize
+    && lastCoarse != null
+    && lastCoarse.ticksPerBar === effectiveSize
+    && lastCoarse.instrument === selectedInstrument;
+
   const bars = useMemo(() => {
-    if (isBackendSize) return coarseBars.slice(-MAX_RENDERED_BARS);
     if (baseSize == null || effectiveSize == null) return baseBars;
+    // Backend size with its series ready → render the deep pre-aggregated history.
+    if (coarseReady) return coarseBars.slice(-MAX_RENDERED_BARS);
+    // base / 1k / 2k → client-merge the base ring. Also the transient fallback for a
+    // backend size whose series hasn't arrived yet (first select) or is still the
+    // previous size/instrument (switch): a shallower merge of the base ring keeps the
+    // chart correct-and-live instead of showing stale bars or blanking out.
     return mergeTickBars(baseBars, effectiveSize / baseSize).slice(-MAX_RENDERED_BARS);
-  }, [isBackendSize, coarseBars, baseBars, baseSize, effectiveSize]);
+  }, [coarseReady, coarseBars, baseBars, baseSize, effectiveSize]);
 
   // Backend-served coarse sizes (5k/10k): fetch the pre-aggregated series directly and
   // poll it instead of client-merging thousands of base bars. recentBars() already

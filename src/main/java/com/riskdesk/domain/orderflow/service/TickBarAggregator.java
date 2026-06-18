@@ -94,6 +94,11 @@ public class TickBarAggregator {
         return completedBars.isEmpty() && tickCount == 0;
     }
 
+    /** Bar size (trades per bar) this aggregator produces. */
+    public int ticksPerBar() {
+        return ticksPerBar;
+    }
+
     /**
      * Records a classified trade. When this trade is the bar's Nth tick, the bar
      * completes and is returned (also retained in the ring buffer).
