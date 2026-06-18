@@ -1,6 +1,41 @@
 # AI Handoff
 
-Last updated: 2026-06-16
+Last updated: 2026-06-18
+
+## PLAYBOOK live invalidation parity — cancel resting confirmation STOP on zone break (2026-06-18)
+
+Backend-only. Closes a paper-vs-live divergence on the `MNQ_10M_CONFIRMATION` profile.
+
+**The gap.** The paper sim (`TradeSimulationService.touchesInvalidation`) CANCELS a pending
+confirmation STOP setup the instant price first breaks the *far* side of the zone
+(`zoneHigh + 0.5×ATR` for a SHORT, `zoneLow − 0.5×ATR` for a LONG) — the "never trade the reclaim"
+rule. But with Auto-IBKR armed, `routeLive` submits the entry as a **resting STOP-LIMIT** order at
+the broker (the order-type mismatch was already fixed — `buildEntryRequest` builds STP/STP_LMT, not
+the legacy marketable LIMIT). Nothing watched that resting order against the invalidation level: it
+would sit until it triggered (possibly on a reclaim, long after the zone broke) or the user
+cancelled it. Live could take a trade paper never took, so the paper stats over-represented live.
+
+**The fix.** New `PlaybookEntryInvalidationWatcher` (`application/execution`) — a `@Scheduled`
+(3s default) scan of resting/just-armed live `PLAYBOOK_AUTO` entries that have not filled. Per row
+it resolves the originating decision's `invalidationPrice` (via `reviewAlertKey` →
+`findByDecisionKey`), reads the **live** last price, and on a breach: cancels the resting broker
+order (`ibkrOrderService.cancelOrder`) and marks the row `CANCELLED`. It only cancels — never opens
+or modifies a position.
+
+- **Safety gates:** acts only when a broker `ibkrOrderId` exists (something is actually resting),
+  filled qty is 0, and the row is *still* pending after a fresh re-read immediately before the
+  terminal write — so a fill that races in wins and is left ACTIVE for the fill tracker. The broker
+  `Cancelled` callback that follows is idempotent (`ExecutionFillTrackingService` guards on status).
+  Only acts on a `LIVE*` price source (never cancels on CACHE/FALLBACK_DB).
+- **Config:** `riskdesk.playbook.invalidation-watch.{enabled=true,interval-ms=3000}`. Inert unless
+  Auto-IBKR routed a live row (paper-only sims are unaffected — they're handled by the sim engine).
+- **Residual paper/live gap (documented, not a bug):** the sim tests the level against candle
+  high/low (sees intrabar wicks); the watcher tests the polled last price. A brief wick between
+  polls can let the live order survive where the sim cancelled — conservative direction, bounded by
+  the poll interval.
+- Tests: `PlaybookEntryInvalidationWatcherTest` (10) — SHORT/LONG breach, no-breach wait,
+  raced-to-fill, filled-row skip, no-order-id skip, non-live-price skip, legacy-LIMIT skip,
+  IBKR-disabled / watcher-disabled no-op. ArchUnit green.
 
 ## Tick chart survives redeploy — completed bars persisted + reloaded on startup (2026-06-16)
 
