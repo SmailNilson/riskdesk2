@@ -102,6 +102,7 @@ export default function Dashboard() {
 
   // Trade Desk cockpit state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   // Focus mode collapses both rails so the user can concentrate on the chart.
   // We snapshot the previous collapsed-state and restore it on exit.
   const [focusMode, setFocusMode] = useState(false);
@@ -482,34 +483,61 @@ export default function Dashboard() {
       <RolloverBanner />
 
       {/* VitalHeader replaces the legacy header + MetricsBar + price ticker.
-          Two sticky levels (40px + 32px) with logo, instrument pills,
-          timeframe segmented, LIVE feed indicator, total P&L, margin badge,
-          settings button (placeholder), Cmd+K hint, and the price ticker. */}
-      <VitalHeader
-        instrument={instrument}
-        instruments={TICKER_INSTRUMENTS}
-        onInstrumentChange={(i) => setInstrument(i as Instrument)}
-        timeframe={timeframe}
-        timeframes={TIMEFRAMES}
-        onTimeframeChange={(tf) => setTimeframe(tf as Timeframe)}
-        connected={connected}
-        totalPnl={summary?.totalPnL ?? null}
-        marginUsedPct={summary?.marginUsedPct ?? null}
-        prices={headerPrices}
-        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-      />
+          Desktop only — mobile uses MobileVitalStrip below (24px hero P&L). */}
+      {isMobile === false && (
+        <VitalHeader
+          instrument={instrument}
+          instruments={TICKER_INSTRUMENTS}
+          onInstrumentChange={(i) => setInstrument(i as Instrument)}
+          timeframe={timeframe}
+          timeframes={TIMEFRAMES}
+          onTimeframeChange={(tf) => setTimeframe(tf as Timeframe)}
+          connected={connected}
+          totalPnl={summary?.totalPnL ?? null}
+          marginUsedPct={summary?.marginUsedPct ?? null}
+          prices={headerPrices}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        />
+      )}
 
-      {/* Secondary controls strip — keeps the legacy operator controls
-          reachable (timezone, marketable execution policy, purge, theme).
-          VitalHeader's settings ⚙ is a v1 placeholder, so we keep these here
-          on desktop instead of dropping them. Cmd+K covers most of these
-          for power users. */}
+      {/* Desktop secondary controls strip — timezone / marketable / purge / theme.
+          VitalHeader's settings ⚙ is a v1 placeholder, so we keep these here. */}
       {isMobile === false && (
         <div className="hidden lg:flex items-center justify-end gap-2 px-3 py-1.5 bg-zinc-900/40 border-b border-zinc-800/50">
           <TimezoneSelect value={timezone} onChange={setTimezone} />
           <PurgeButton instrument={instrument} purging={purging} purgeMsg={purgeMsg} onPurge={handlePurge} />
           <MarketableSettingsControl />
           <ThemeToggle theme={theme} onToggle={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} />
+        </div>
+      )}
+
+      {/* Mobile top bar — logo + theme toggle + overflow menu. Restores access
+          to timezone/purge/marketable controls that VitalHeader doesn't expose. */}
+      {isMobile && (
+        <header className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800">
+          <span className="text-sm font-mono font-medium tracking-wide text-zinc-300">RD</span>
+          <div className="flex items-center gap-2">
+            <ThemeToggle theme={theme} onToggle={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} />
+            <button
+              onClick={() => setMobileMenuOpen(v => !v)}
+              aria-label="Plus de contrôles"
+              aria-expanded={mobileMenuOpen}
+              className={`min-w-[44px] min-h-[44px] inline-flex items-center justify-center rounded-lg border text-base transition-colors select-none ${
+                mobileMenuOpen
+                  ? 'border-zinc-600 text-zinc-200 bg-zinc-800'
+                  : 'border-zinc-800 text-zinc-400'
+              }`}
+            >⋯</button>
+          </div>
+        </header>
+      )}
+
+      {/* Mobile overflow menu — secondary operator controls. */}
+      {isMobile && mobileMenuOpen && (
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-800">
+          <TimezoneSelect value={timezone} onChange={setTimezone} />
+          <PurgeButton instrument={instrument} purging={purging} purgeMsg={purgeMsg} onPurge={handlePurge} />
+          <MarketableSettingsControl />
         </div>
       )}
 
