@@ -45,6 +45,7 @@ class PlaybookEntryInvalidationWatcherTest {
     private IbkrOrderService orderService;
     private IbkrProperties props;
     private MarketDataService marketData;
+    private ExecutionTopicPublisher publisher;
     private PlaybookEntryInvalidationWatcher watcher;
 
     @BeforeEach
@@ -56,16 +57,14 @@ class PlaybookEntryInvalidationWatcherTest {
         props = new IbkrProperties();
         props.setEnabled(true);
 
+        publisher = mock(ExecutionTopicPublisher.class);
+
         @SuppressWarnings("unchecked")
         org.springframework.beans.factory.ObjectProvider<MarketDataService> mdp =
             mock(org.springframework.beans.factory.ObjectProvider.class);
         lenient().when(mdp.getIfAvailable()).thenReturn(marketData);
-        @SuppressWarnings("unchecked")
-        org.springframework.beans.factory.ObjectProvider<org.springframework.messaging.simp.SimpMessagingTemplate> msgp =
-            mock(org.springframework.beans.factory.ObjectProvider.class);
-        lenient().when(msgp.getIfAvailable()).thenReturn(null);
 
-        watcher = new PlaybookEntryInvalidationWatcher(repo, decisions, orderService, props, mdp, msgp, true);
+        watcher = new PlaybookEntryInvalidationWatcher(repo, decisions, orderService, props, mdp, publisher, true);
 
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
     }
@@ -97,9 +96,9 @@ class PlaybookEntryInvalidationWatcherTest {
     }
 
     private void liveQuote(String price) {
-        // a fresh tick — the watcher rejects quotes older than MAX_PRICE_AGE_SECONDS
+        // a fresh tick from a genuinely live source — the watcher rejects stale and non-live quotes
         when(marketData.currentPrice(Instrument.MNQ))
-            .thenReturn(new MarketDataService.StoredPrice(new BigDecimal(price), Instant.now(), "LIVE_IBKR"));
+            .thenReturn(new MarketDataService.StoredPrice(new BigDecimal(price), Instant.now(), "LIVE_PUSH"));
     }
 
     private void onlyResting(TradeExecutionRecord row) {
@@ -217,7 +216,7 @@ class PlaybookEntryInvalidationWatcherTest {
         when(decisions.findByDecisionKey(KEY)).thenReturn(Optional.of(stopDecision("SHORT", "30543.00")));
         // LIVE source but the quote is older than MAX_PRICE_AGE_SECONDS — the market may have moved on
         when(marketData.currentPrice(Instrument.MNQ)).thenReturn(new MarketDataService.StoredPrice(
-            new BigDecimal("30545.00"), Instant.now().minusSeconds(30), "LIVE_IBKR"));
+            new BigDecimal("30545.00"), Instant.now().minusSeconds(30), "LIVE_PUSH"));
 
         watcher.cancelInvalidatedEntries();
 
@@ -299,25 +298,14 @@ class PlaybookEntryInvalidationWatcherTest {
 
     @Test
     void watcherDisabled_isNoOp() {
+        @SuppressWarnings("unchecked")
+        org.springframework.beans.factory.ObjectProvider<MarketDataService> mdp =
+            mock(org.springframework.beans.factory.ObjectProvider.class);
         PlaybookEntryInvalidationWatcher off = new PlaybookEntryInvalidationWatcher(
-            repo, decisions, orderService, props,
-            providerOf(marketData), providerOfNull(), false);
+            repo, decisions, orderService, props, mdp, publisher, false);
 
         off.cancelInvalidatedEntries();
 
         verify(repo, never()).findByTriggerSourceAndStatus(any(), any());
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T> org.springframework.beans.factory.ObjectProvider<T> providerOf(T value) {
-        org.springframework.beans.factory.ObjectProvider<T> p =
-            mock(org.springframework.beans.factory.ObjectProvider.class);
-        lenient().when(p.getIfAvailable()).thenReturn(value);
-        return p;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T> org.springframework.beans.factory.ObjectProvider<T> providerOfNull() {
-        return mock(org.springframework.beans.factory.ObjectProvider.class);
     }
 }

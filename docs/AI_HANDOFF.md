@@ -44,9 +44,26 @@ or modifies a position.
   high/low (sees intrabar wicks); the watcher tests the polled last price. A brief wick between
   polls can let the live order survive where the sim cancelled — conservative direction, bounded by
   the poll interval.
-- Tests: `PlaybookEntryInvalidationWatcherTest` (10) — SHORT/LONG breach, no-breach wait,
-  raced-to-fill, filled-row skip, no-order-id skip, non-live-price skip, legacy-LIMIT skip,
-  IBKR-disabled / watcher-disabled no-op. ArchUnit green.
+- Tests: `PlaybookEntryInvalidationWatcherTest` (14) — SHORT/LONG breach, no-breach wait,
+  raced-to-fill, filled-row skip, no-order-id skip, non-live/stale-price skip, failed-cancel,
+  findById-miss, unrecognized-action, legacy-LIMIT skip, IBKR/watcher-disabled no-op. ArchUnit green.
+
+### Follow-on cleanups bundled with the review (2026-06-18)
+
+- **`@Scheduled` now multi-threaded** (`infrastructure/config/TaskSchedulingConfig`, `SchedulingConfigurer`
+  bound only to scheduled tasks). The whole app shared Spring's default **single** scheduler thread, so a
+  blocking IBKR call (up to ~15s order timeout) in any scheduler — `QuantAutoSubmitScheduler`,
+  `ReverseDeferredOpenScheduler`, `StaleCloseReconciler`, the new watcher — froze every other scheduled
+  job. Pool size `riskdesk.scheduling.pool-size` (default 4; set 1 to restore old behaviour). Each task
+  still never overlaps itself; the execution data layer already tolerates cross-thread concurrency
+  (`@Version`, `findByIdForUpdate`, idempotent `createIfAbsent`, EReader callbacks).
+- **`ExecutionTopicPublisher`** (`application/execution`) — single writer of `/topic/executions`.
+  `ExecutionFillTrackingService` and the watcher both delegate to it instead of each re-implementing the
+  STOMP publish.
+- **`LivePriceSource`** (`application/marketdata`) — canonical `{LIVE_PUSH, LIVE_PROVIDER}` allowlist, now
+  shared by `DefaultOrderRouter`, `QuantSimFastExitListener`, and the watcher. `PlaybookAutomationService`'s
+  routing gate deliberately keeps its looser `startsWith("LIVE")` prefix match (a different decision from
+  the watcher's strict irreversible-cancel gate).
 
 ## Tick chart survives redeploy — completed bars persisted + reloaded on startup (2026-06-16)
 

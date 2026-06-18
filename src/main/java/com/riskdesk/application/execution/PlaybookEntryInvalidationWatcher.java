@@ -1,6 +1,6 @@
 package com.riskdesk.application.execution;
 
-import com.riskdesk.application.dto.TradeExecutionView;
+import com.riskdesk.application.marketdata.LivePriceSource;
 import com.riskdesk.application.service.IbkrOrderService;
 import com.riskdesk.application.service.MarketDataService;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
@@ -15,7 +15,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -63,8 +62,6 @@ import java.util.List;
 public class PlaybookEntryInvalidationWatcher {
 
     private static final Logger log = LoggerFactory.getLogger(PlaybookEntryInvalidationWatcher.class);
-    private static final String EXECUTIONS_TOPIC = "/topic/executions";
-    private static final String LIVE_SOURCE_PREFIX = "LIVE";
     /** A cancel is irreversible, so only act on a quote no older than this (MarketDataService can
      *  return a LIVE-sourced cache entry up to 15s old, or any age on an instant-fetch failure). */
     private static final long MAX_PRICE_AGE_SECONDS = 10;
@@ -75,7 +72,7 @@ public class PlaybookEntryInvalidationWatcher {
     private final IbkrOrderService ibkrOrderService;
     private final IbkrProperties ibkrProperties;
     private final ObjectProvider<MarketDataService> marketDataServiceProvider;
-    private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
+    private final ExecutionTopicPublisher executionTopicPublisher;
     private final boolean enabled;
 
     public PlaybookEntryInvalidationWatcher(TradeExecutionRepositoryPort executionRepository,
@@ -83,7 +80,7 @@ public class PlaybookEntryInvalidationWatcher {
                                             IbkrOrderService ibkrOrderService,
                                             IbkrProperties ibkrProperties,
                                             ObjectProvider<MarketDataService> marketDataServiceProvider,
-                                            ObjectProvider<SimpMessagingTemplate> messagingProvider,
+                                            ExecutionTopicPublisher executionTopicPublisher,
                                             @Value("${riskdesk.playbook.invalidation-watch.enabled:true}")
                                             boolean enabled) {
         this.executionRepository = executionRepository;
@@ -91,7 +88,7 @@ public class PlaybookEntryInvalidationWatcher {
         this.ibkrOrderService = ibkrOrderService;
         this.ibkrProperties = ibkrProperties;
         this.marketDataServiceProvider = marketDataServiceProvider;
-        this.messagingProvider = messagingProvider;
+        this.executionTopicPublisher = executionTopicPublisher;
         this.enabled = enabled;
     }
 
@@ -215,7 +212,7 @@ public class PlaybookEntryInvalidationWatcher {
             + " before entry filled; resting order " + orderId + " cancelled"));
         fresh.setUpdatedAt(Instant.now());
         TradeExecutionRecord saved = executionRepository.save(fresh);
-        publish(saved);
+        executionTopicPublisher.publish(saved);
         log.info("PLAYBOOK invalidation-watch: cancelled resting entry row {} ({} {} {}) — "
                 + "price {} breached invalidation {}",
             saved.getId(), saved.getInstrument(), saved.getTimeframe(), saved.getAction(),
@@ -233,8 +230,7 @@ public class PlaybookEntryInvalidationWatcher {
         }
         // Only act on a genuinely live quote. A CACHE/FALLBACK_DB source could be stale and wrongly
         // drop a valid setup; cancelling is irreversible for that decision, so require LIVE.
-        String source = stored.source();
-        if (source == null || !source.startsWith(LIVE_SOURCE_PREFIX)) {
+        if (!LivePriceSource.isLive(stored.source())) {
             return null;
         }
         // …and a genuinely fresh one. currentPrice returns a LIVE-sourced cache entry up to ~15s old
@@ -261,17 +257,5 @@ public class PlaybookEntryInvalidationWatcher {
             return null;
         }
         return value.length() <= MAX_REASON_LEN ? value : value.substring(0, MAX_REASON_LEN);
-    }
-
-    private void publish(TradeExecutionRecord execution) {
-        try {
-            SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
-            if (messaging != null) {
-                messaging.convertAndSend(EXECUTIONS_TOPIC, TradeExecutionView.from(execution));
-            }
-        } catch (Exception e) {
-            log.debug("PLAYBOOK invalidation-watch: could not publish row {} on {}: {}",
-                execution.getId(), EXECUTIONS_TOPIC, e.getMessage());
-        }
     }
 }

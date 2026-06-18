@@ -741,6 +741,8 @@ public class PlaybookAutomationService {
         return normalized.length() > 48 ? normalized.substring(0, 48) : normalized;
     }
 
+    // Routing gate uses a prefix match (any LIVE* source) — deliberately looser than the strict
+    // LivePriceSource allowlist the invalidation watcher uses for its irreversible cancel decision.
     private static boolean isLiveSource(String source) {
         return source != null && source.startsWith("LIVE");
     }
