@@ -1,6 +1,6 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.application.dto.TradeExecutionView;
+import com.riskdesk.application.execution.ExecutionTopicPublisher;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.TradeExecutionRecord;
@@ -12,8 +12,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -23,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -49,17 +46,13 @@ class ExecutionFillTrackingServiceTest {
     private TradeExecutionRepositoryPort repository;
 
     @Mock
-    private ObjectProvider<SimpMessagingTemplate> messagingProvider;
-
-    @Mock
-    private SimpMessagingTemplate messaging;
+    private ExecutionTopicPublisher executionTopicPublisher;
 
     private ExecutionFillTrackingService service;
 
     @BeforeEach
     void setUp() {
-        service = new ExecutionFillTrackingService(repository, messagingProvider);
-        when(messagingProvider.getIfAvailable()).thenReturn(messaging);
+        service = new ExecutionFillTrackingService(repository, executionTopicPublisher);
     }
 
     @Test
@@ -111,7 +104,7 @@ class ExecutionFillTrackingServiceTest {
         assertEquals(EXEC_ID_1, saved.getLastExecId());
         assertEquals(Instant.parse("2026-04-23T15:30:00Z"), saved.getLastFillTime());
 
-        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+        verify(executionTopicPublisher, times(1)).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -148,7 +141,7 @@ class ExecutionFillTrackingServiceTest {
         );
 
         verify(repository, never()).save(any());
-        verify(messaging, never()).convertAndSend(eq("/topic/executions"), any(Object.class));
+        verify(executionTopicPublisher, never()).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -254,7 +247,7 @@ class ExecutionFillTrackingServiceTest {
         TradeExecutionRecord saved = captor.getValue();
         assertEquals(ExecutionStatus.ENTRY_SUBMITTED, saved.getStatus());
         assertEquals("IBKR entry order acknowledged: Submitted", saved.getStatusReason());
-        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+        verify(executionTopicPublisher, times(1)).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -280,7 +273,7 @@ class ExecutionFillTrackingServiceTest {
         assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
         assertEquals("Filled", saved.getOrderStatus());
         assertNotNull(saved.getEntryFilledAt());
-        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+        verify(executionTopicPublisher, times(1)).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -308,7 +301,7 @@ class ExecutionFillTrackingServiceTest {
         TradeExecutionRecord saved = captor.getValue();
         assertEquals(ExecutionStatus.CLOSED, saved.getStatus());
         assertNotNull(saved.getClosedAt());
-        verify(messaging, times(1)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+        verify(executionTopicPublisher, times(1)).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -417,7 +410,7 @@ class ExecutionFillTrackingServiceTest {
         );
 
         verify(repository, never()).save(any());
-        verify(messaging, never()).convertAndSend(eq("/topic/executions"), any(Object.class));
+        verify(executionTopicPublisher, never()).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -438,7 +431,7 @@ class ExecutionFillTrackingServiceTest {
         );
 
         verify(repository, never()).save(any());
-        verify(messaging, never()).convertAndSend(eq("/topic/executions"), any(Object.class));
+        verify(executionTopicPublisher, never()).publish(any(TradeExecutionRecord.class));
     }
 
     @Test
@@ -474,7 +467,7 @@ class ExecutionFillTrackingServiceTest {
         );
 
         verify(repository, times(2)).save(any(TradeExecutionRecord.class));
-        verify(messaging, times(2)).convertAndSend(eq("/topic/executions"), any(TradeExecutionView.class));
+        verify(executionTopicPublisher, times(2)).publish(any(TradeExecutionRecord.class));
         assertEquals(new BigDecimal("2"), stored.getFilledQuantity());
         assertEquals(EXEC_ID_2, stored.getLastExecId());
     }

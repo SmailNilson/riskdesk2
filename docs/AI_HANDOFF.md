@@ -1,6 +1,69 @@
 # AI Handoff
 
-Last updated: 2026-06-16
+Last updated: 2026-06-18
+
+## PLAYBOOK live invalidation parity — cancel resting confirmation STOP on zone break (2026-06-18)
+
+Backend-only. Closes a paper-vs-live divergence on the `MNQ_10M_CONFIRMATION` profile.
+
+**The gap.** The paper sim (`TradeSimulationService.touchesInvalidation`) CANCELS a pending
+confirmation STOP setup the instant price first breaks the *far* side of the zone
+(`zoneHigh + 0.5×ATR` for a SHORT, `zoneLow − 0.5×ATR` for a LONG) — the "never trade the reclaim"
+rule. But with Auto-IBKR armed, `routeLive` submits the entry as a **resting STOP-LIMIT** order at
+the broker (the order-type mismatch was already fixed — `buildEntryRequest` builds STP/STP_LMT, not
+the legacy marketable LIMIT). Nothing watched that resting order against the invalidation level: it
+would sit until it triggered (possibly on a reclaim, long after the zone broke) or the user
+cancelled it. Live could take a trade paper never took, so the paper stats over-represented live.
+
+**The fix.** New `PlaybookEntryInvalidationWatcher` (`application/execution`) — a `@Scheduled`
+(3s default) scan of resting/just-armed live `PLAYBOOK_AUTO` entries that have not filled. Per row
+it resolves the originating decision's `invalidationPrice` (via `reviewAlertKey` →
+`findByDecisionKey`), reads the **live** last price, and on a breach: cancels the resting broker
+order (`ibkrOrderService.cancelOrder`) and marks the row `CANCELLED`. It only cancels — never opens
+or modifies a position.
+
+- **Safety gates:** acts only when a broker `ibkrOrderId` exists (something is actually resting),
+  filled qty is 0, and the row is *still* `ENTRY_SUBMITTED` after a fresh re-read immediately before
+  the terminal write — so a fill that races in wins and is left ACTIVE for the fill tracker
+  (the row carries `@Version`, so a concurrent fill that commits makes the watcher's save fail-fast
+  rather than clobber). The broker `Cancelled` callback that follows is idempotent
+  (`ExecutionFillTrackingService` guards on status).
+- **Cancel-failure handling (review hardening):** if `cancelOrder` throws (already-filled reject or
+  gateway hiccup), the watcher does **not** write `CANCELLED` — that would desync app state from an
+  order still working at the broker, and `CANCELLED` is terminal so it'd never retry. It returns and
+  a later tick retries (the already-filled case self-heals once the fill callback lands). Likewise a
+  `findById` miss on re-read returns rather than writing blind on the stale snapshot.
+- **Price freshness (review hardening):** only acts on a `LIVE*` source **and** a quote no older than
+  `MAX_PRICE_AGE_SECONDS` (10s) — `MarketDataService.currentPrice` can return a LIVE-sourced cache
+  entry up to ~15s old (any age on instant-fetch failure), and cancelling on a price the market has
+  moved away from would drop a valid setup (the non-conservative direction). Unrecognized `action`
+  values are skipped rather than defaulting to a guessed side.
+- **Config:** `riskdesk.playbook.invalidation-watch.{enabled=true,interval-ms=3000}`. Inert unless
+  Auto-IBKR routed a live row (paper-only sims are unaffected — they're handled by the sim engine).
+- **Residual paper/live gap (documented, not a bug):** the sim tests the level against candle
+  high/low (sees intrabar wicks); the watcher tests the polled last price. A brief wick between
+  polls can let the live order survive where the sim cancelled — conservative direction, bounded by
+  the poll interval.
+- Tests: `PlaybookEntryInvalidationWatcherTest` (14) — SHORT/LONG breach, no-breach wait,
+  raced-to-fill, filled-row skip, no-order-id skip, non-live/stale-price skip, failed-cancel,
+  findById-miss, unrecognized-action, legacy-LIMIT skip, IBKR/watcher-disabled no-op. ArchUnit green.
+
+### Follow-on cleanups bundled with the review (2026-06-18)
+
+- **`@Scheduled` now multi-threaded** (`infrastructure/config/TaskSchedulingConfig`, `SchedulingConfigurer`
+  bound only to scheduled tasks). The whole app shared Spring's default **single** scheduler thread, so a
+  blocking IBKR call (up to ~15s order timeout) in any scheduler — `QuantAutoSubmitScheduler`,
+  `ReverseDeferredOpenScheduler`, `StaleCloseReconciler`, the new watcher — froze every other scheduled
+  job. Pool size `riskdesk.scheduling.pool-size` (default 4; set 1 to restore old behaviour). Each task
+  still never overlaps itself; the execution data layer already tolerates cross-thread concurrency
+  (`@Version`, `findByIdForUpdate`, idempotent `createIfAbsent`, EReader callbacks).
+- **`ExecutionTopicPublisher`** (`application/execution`) — single writer of `/topic/executions`.
+  `ExecutionFillTrackingService` and the watcher both delegate to it instead of each re-implementing the
+  STOMP publish.
+- **`LivePriceSource`** (`application/marketdata`) — canonical `{LIVE_PUSH, LIVE_PROVIDER}` allowlist, now
+  shared by `DefaultOrderRouter`, `QuantSimFastExitListener`, and the watcher. `PlaybookAutomationService`'s
+  routing gate deliberately keeps its looser `startsWith("LIVE")` prefix match (a different decision from
+  the watcher's strict irreversible-cancel gate).
 
 ## Tick chart survives redeploy — completed bars persisted + reloaded on startup (2026-06-16)
 

@@ -34,7 +34,7 @@ import java.util.Set;
 public class QuantSimFastExitListener {
 
     /** Sources considered live — fallback (FALLBACK_DB) and STALE never drive a fast exit. */
-    private static final Set<String> LIVE_SOURCES = Set.of("LIVE_PUSH", "LIVE_PROVIDER");
+    private static final Set<String> LIVE_SOURCES = com.riskdesk.application.marketdata.LivePriceSource.SOURCES;
 
     private final Quant7GatesSimulationService simulationService;
     private final LivePricePort livePricePort;

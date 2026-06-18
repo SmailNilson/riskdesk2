@@ -1,15 +1,13 @@
 package com.riskdesk.application.service;
 
-import com.riskdesk.application.dto.TradeExecutionView;
 import com.riskdesk.application.execution.DefaultOrderRouter;
 import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.application.execution.ExecutionTopicPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -42,7 +40,6 @@ import java.util.Optional;
 public class ExecutionFillTrackingService implements ExecutionFillListener {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionFillTrackingService.class);
-    private static final String EXECUTIONS_TOPIC = "/topic/executions";
     private static final String IBKR_STATUS_FILLED = "Filled";
     private static final String IBKR_STATUS_SUBMITTED = "Submitted";
     private static final String IBKR_STATUS_PRE_SUBMITTED = "PreSubmitted";
@@ -52,12 +49,12 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
     private static final String IBKR_STATUS_INACTIVE = "Inactive";
 
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
-    private final ObjectProvider<SimpMessagingTemplate> messagingProvider;
+    private final ExecutionTopicPublisher executionTopicPublisher;
 
     public ExecutionFillTrackingService(TradeExecutionRepositoryPort tradeExecutionRepository,
-                                        ObjectProvider<SimpMessagingTemplate> messagingProvider) {
+                                        ExecutionTopicPublisher executionTopicPublisher) {
         this.tradeExecutionRepository = tradeExecutionRepository;
-        this.messagingProvider = messagingProvider;
+        this.executionTopicPublisher = executionTopicPublisher;
     }
 
     @Override
@@ -115,7 +112,7 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         TradeExecutionRecord saved = tradeExecutionRepository.save(execution);
         log.info("IBKR execDetails applied — execution={} orderId={} execId={} cumQty={} avgPx={} side={}",
             saved.getId(), orderId, execId, cumQty, avgPrice, side);
-        publish(saved);
+        executionTopicPublisher.publish(saved);
     }
 
     @Override
@@ -225,7 +222,7 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         TradeExecutionRecord saved = tradeExecutionRepository.save(execution);
         log.info("IBKR orderStatus applied — execution={} orderId={} status={} filled={}/{} avgPx={}",
             saved.getId(), orderId, status, filled, remaining, avgFillPrice);
-        publish(saved);
+        executionTopicPublisher.publish(saved);
     }
 
     /**
@@ -280,17 +277,5 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
         return IBKR_STATUS_SUBMITTED.equalsIgnoreCase(status)
             || IBKR_STATUS_PRE_SUBMITTED.equalsIgnoreCase(status)
             || IBKR_STATUS_PENDING_SUBMIT.equalsIgnoreCase(status);
-    }
-
-    private void publish(TradeExecutionRecord execution) {
-        try {
-            SimpMessagingTemplate messaging = messagingProvider.getIfAvailable();
-            if (messaging != null) {
-                messaging.convertAndSend(EXECUTIONS_TOPIC, TradeExecutionView.from(execution));
-            }
-        } catch (Exception e) {
-            log.debug("Could not publish on {} for execution {}: {}",
-                EXECUTIONS_TOPIC, execution.getId(), e.getMessage());
-        }
     }
 }

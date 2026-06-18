@@ -59,7 +59,7 @@ public class DefaultOrderRouter implements OrderRouter {
      *  push or a fresh instant provider fetch. A {@code FALLBACK_DB} candle close or an ambiguous {@code
      *  CACHE} value is NOT executable: crossing it yields a falsely-"marketable" limit that can rest unfilled
      *  (the very bug this fixes), so such a price falls back to the passive intent limit. */
-    private static final Set<String> LIVE_PRICE_SOURCES = Set.of("LIVE_PUSH", "LIVE_PROVIDER");
+    private static final Set<String> LIVE_PRICE_SOURCES = com.riskdesk.application.marketdata.LivePriceSource.SOURCES;
 
     /** Max age of a live price still treated as the current market for crossing; older → passive fallback.
      *  Tracks {@code MarketDataService}'s fresh-cache horizon (15s) with a small margin, so an outage that
