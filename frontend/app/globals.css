@@ -2,22 +2,92 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════════════
+   Semantic tokens — read by tailwind.config.ts theme.extend.colors.
+   Existing `zinc-*` classes keep working; new components opt in via
+   `bg-surface-1`, `text-bull`, `bg-bull-bg`, etc.
+   Dark is the default; `.light` flips the values.
+   ═════════════════════════════════════════════════════════════ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Legacy — kept for any consumer still reading these vars directly. */
+  --background: #09090b;
+  --foreground: #fafafa;
+
+  /* Surfaces (page → panel → input → input-hover) */
+  --surface-0: #09090b;
+  --surface-1: #18181b;
+  --surface-2: #27272a;
+  --surface-3: #3f3f46;
+
+  /* Foreground */
+  --fg: #fafafa;
+  --fg-muted: #a1a1aa;
+  --fg-subtle: #71717a;
+
+  /* Borders */
+  --border-default: #27272a;
+  --border-strong: #3f3f46;
+
+  /* Semantic — bull/bear/warn/info/urgent. The *-bg variant is the soft fill. */
+  --bull: #10b981;
+  --bull-bg: rgb(16 185 129 / 0.15);
+  --bear: #ef4444;
+  --bear-bg: rgb(239 68 68 / 0.15);
+  --warn: #f59e0b;
+  --warn-bg: rgb(245 158 11 / 0.15);
+  --info: #3b82f6;
+  --info-bg: rgb(59 130 246 / 0.15);
+  --urgent: #d946ef;
+  --urgent-bg: rgb(217 70 239 / 0.15);
+
+  /* Focus ring — exposed via Tailwind `ring-focus` */
+  --focus-ring: #3b82f6;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+.light {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+
+  --surface-0: #f8fafc;
+  --surface-1: #ffffff;
+  --surface-2: #f1f5f9;
+  --surface-3: #e2e8f0;
+
+  --fg: #0f172a;
+  --fg-muted: #475569;
+  --fg-subtle: #64748b;
+
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --bull: #059669;
+  --bull-bg: rgb(5 150 105 / 0.12);
+  --bear: #dc2626;
+  --bear-bg: rgb(220 38 38 / 0.12);
+  --warn: #d97706;
+  --warn-bg: rgb(217 119 6 / 0.12);
+  --info: #2563eb;
+  --info-bg: rgb(37 99 235 / 0.12);
+  --urgent: #c026d3;
+  --urgent-bg: rgb(192 38 211 / 0.12);
+
+  --focus-ring: #2563eb;
+}
+
+@layer base {
+  body {
+    color: var(--foreground);
+    background: var(--background);
   }
-}
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Global focus-visible — keyboard only, never on mouse. Applies to
+     buttons, links, role=button, form controls and disclosure widgets. */
+  :where(button, [role="button"], a, input, select, textarea, summary):focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 
 @layer utilities {
@@ -27,8 +97,9 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   Light theme — activated by adding class="light" to the root wrapper
-   All zinc-* dark colours are remapped to slate-* equivalents.
+   Light theme legacy remap — kept until panels migrate to semantic
+   tokens (Vague 3). Targets existing `zinc-*` Tailwind classes so
+   the current dark-only components render correctly under `.light`.
    ═════════════════════════════════════════════════════════════ */
 
 /* ── Surfaces ─────────────────────────────────────────────── */

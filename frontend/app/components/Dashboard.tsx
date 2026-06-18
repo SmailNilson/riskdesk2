@@ -193,7 +193,7 @@ export default function Dashboard() {
             onClick={() => setMobileMenuOpen(v => !v)}
             aria-label="Plus de contrôles"
             aria-expanded={mobileMenuOpen}
-            className={`px-3 py-1.5 rounded-lg border text-sm transition-colors select-none ${
+            className={`min-w-[44px] min-h-[44px] inline-flex items-center justify-center rounded-lg border text-base transition-colors select-none ${
               mobileMenuOpen
                 ? 'border-zinc-600 text-zinc-200 bg-zinc-800'
                 : 'border-zinc-800 text-zinc-400'
@@ -511,7 +511,7 @@ function TabGroup<T extends string>({ options, value, onChange, grow = false }: 
       {options.map(opt => (
         <button key={opt}
           onClick={() => onChange(opt)}
-          className={`${grow ? 'flex-1 px-2 py-2' : 'px-3 py-1.5'} text-xs font-medium transition-colors ${
+          className={`${grow ? 'flex-1 px-2 py-2 min-h-[44px] inline-flex items-center justify-center' : 'px-3 py-1.5'} text-xs font-medium transition-colors ${
             value === opt
               ? 'bg-zinc-700 text-white'
               : 'text-zinc-500 hover:text-zinc-300'

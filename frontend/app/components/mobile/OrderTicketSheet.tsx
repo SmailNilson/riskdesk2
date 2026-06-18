@@ -191,7 +191,7 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
     entryType === 'LIMIT' ? `@ ${priceStr || '—'}` : 'au marché'
   }`;
 
-  const stepBtn = 'w-10 h-10 flex-shrink-0 rounded-lg border border-zinc-700 text-zinc-200 text-lg leading-none active:scale-95 transition-transform';
+  const stepBtn = 'w-11 h-11 flex-shrink-0 rounded-lg border border-zinc-700 text-zinc-200 text-lg leading-none active:scale-95 transition-transform';
   const fieldCls = 'w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-center font-mono tabular-nums text-sm text-white outline-none focus:border-zinc-600';
 
   return (
