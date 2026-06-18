@@ -1180,8 +1180,12 @@ export const api = {
   getOrderFlowDepth: (instrument: string) =>
     get<OrderFlowDepthSnapshot>(`/api/order-flow/depth/${instrument}`),
   // Tick chart bars (oldest first; last element may be the in-progress bar).
-  getTickBars: (instrument: string, limit = 200) =>
-    get<TickBarDto[]>(`/api/order-flow/tick-bars/${instrument}?limit=${limit}`),
+  // `size` selects a server-pre-aggregated bar size (e.g. 5000 / 10000 ticks);
+  // omitted ⇒ the instrument's base size.
+  getTickBars: (instrument: string, limit = 200, size?: number) =>
+    get<TickBarDto[]>(
+      `/api/order-flow/tick-bars/${instrument}?limit=${limit}${size ? `&size=${size}` : ''}`,
+    ),
   // Wall traceability: live walls + recent closed episodes with outcome.
   getWallTracker: (instrument: string, limit = 30) =>
     get<WallTrackerSnapshot>(`/api/order-flow/walls/${instrument}?limit=${limit}`),

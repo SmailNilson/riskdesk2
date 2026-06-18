@@ -40,7 +40,10 @@ public class IbkrTickBarAdapter implements TickBarPort {
 
     private static final Logger log = LoggerFactory.getLogger(IbkrTickBarAdapter.class);
 
-    private final ConcurrentHashMap<Instrument, TickBarAggregator> aggregators = new ConcurrentHashMap<>();
+    /** One aggregator per (instrument, bar size): the per-instrument base plus each
+     *  configured coarse size. Large sizes get their own small ring buffer so deep
+     *  history is available without keeping ~15k base bars for client-side merging. */
+    private final ConcurrentHashMap<AggKey, TickBarAggregator> aggregators = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<TickBar> pendingPersist = new ConcurrentLinkedQueue<>();
     private final OrderFlowProperties properties;
     private final TickBarStorePort store;
@@ -51,18 +54,23 @@ public class IbkrTickBarAdapter implements TickBarPort {
     }
 
     /**
-     * Routes a classified trade to the instrument's tick-bar aggregator. A bar that
-     * closes on this trade is queued for durable persistence.
+     * Routes a classified trade to every tick-bar aggregator for the instrument (base
+     * size + each configured coarse size). Bars that close on this trade are queued for
+     * durable persistence.
      */
     public void onTick(Instrument instrument, double price, long size,
                        String classification, Instant timestamp) {
-        TickBarAggregator aggregator = aggregators.computeIfAbsent(instrument, this::createAggregator);
-        Optional<TickBar> completed;
-        synchronized (aggregator) {
-            completed = aggregator.onTick(price, size, classification, timestamp);
-        }
-        if (persistenceEnabled() && completed.isPresent()) {
-            pendingPersist.add(completed.get());
+        for (int ticksPerBar : sizesFor(instrument)) {
+            AggKey key = new AggKey(instrument, ticksPerBar);
+            TickBarAggregator aggregator =
+                aggregators.computeIfAbsent(key, k -> createAggregator(k.instrument(), k.ticksPerBar()));
+            Optional<TickBar> completed;
+            synchronized (aggregator) {
+                completed = aggregator.onTick(price, size, classification, timestamp);
+            }
+            if (persistenceEnabled() && completed.isPresent()) {
+                pendingPersist.add(completed.get());
+            }
         }
     }
 
@@ -73,8 +81,8 @@ public class IbkrTickBarAdapter implements TickBarPort {
      * dropped so a later restart does not reload bars priced on the expired contract.
      */
     public void purgeInstrument(Instrument instrument) {
-        if (aggregators.remove(instrument) != null) {
-            log.info("TickChart: cleared tick-bar aggregator for {} on contract rollover", instrument);
+        if (aggregators.keySet().removeIf(k -> k.instrument() == instrument)) {
+            log.info("TickChart: cleared tick-bar aggregators for {} on contract rollover", instrument);
         }
         if (persistenceEnabled()) {
             pendingPersist.removeIf(b -> instrument.name().equals(b.instrument()));
@@ -88,7 +96,12 @@ public class IbkrTickBarAdapter implements TickBarPort {
 
     @Override
     public List<TickBar> recentBars(Instrument instrument, int limit) {
-        TickBarAggregator aggregator = aggregators.get(instrument);
+        return recentBars(instrument, ticksPerBarFor(instrument), limit);
+    }
+
+    @Override
+    public List<TickBar> recentBars(Instrument instrument, int ticksPerBar, int limit) {
+        TickBarAggregator aggregator = aggregators.get(new AggKey(instrument, ticksPerBar));
         if (aggregator == null) {
             return List.of();
         }
@@ -106,27 +119,30 @@ public class IbkrTickBarAdapter implements TickBarPort {
         if (!persistenceEnabled()) {
             return;
         }
-        int maxBars = properties.getTickChart().getMaxBars();
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-            try {
-                int ticksPerBar = ticksPerBarFor(instrument);
-                List<TickBar> bars = store.loadRecent(instrument, ticksPerBar, maxBars);
-                if (bars.isEmpty()) {
-                    continue;
-                }
-                aggregators.compute(instrument, (k, existing) -> {
-                    TickBarAggregator agg = existing != null ? existing : createAggregator(k);
-                    synchronized (agg) {
-                        if (agg.isEmpty()) {
-                            agg.restore(bars);
-                        }
+            for (int ticksPerBar : sizesFor(instrument)) {
+                try {
+                    int maxBars = maxBarsFor(instrument, ticksPerBar);
+                    List<TickBar> bars = store.loadRecent(instrument, ticksPerBar, maxBars);
+                    if (bars.isEmpty()) {
+                        continue;
                     }
-                    return agg;
-                });
-                log.info("TickChart: restored {} persisted bars for {} (next seq {})",
-                         bars.size(), instrument, bars.get(bars.size() - 1).seq() + 1);
-            } catch (Exception e) {
-                log.warn("TickChart: failed to restore persisted bars for {}: {}", instrument, e.getMessage());
+                    aggregators.compute(new AggKey(instrument, ticksPerBar), (k, existing) -> {
+                        TickBarAggregator agg =
+                            existing != null ? existing : createAggregator(k.instrument(), k.ticksPerBar());
+                        synchronized (agg) {
+                            if (agg.isEmpty()) {
+                                agg.restore(bars);
+                            }
+                        }
+                        return agg;
+                    });
+                    log.info("TickChart: restored {} persisted bars for {} @ {} ticks (next seq {})",
+                             bars.size(), instrument, ticksPerBar, bars.get(bars.size() - 1).seq() + 1);
+                } catch (Exception e) {
+                    log.warn("TickChart: failed to restore persisted bars for {} @ {} ticks: {}",
+                             instrument, ticksPerBar, e.getMessage());
+                }
             }
         }
     }
@@ -171,9 +187,8 @@ public class IbkrTickBarAdapter implements TickBarPort {
         }
     }
 
-    private TickBarAggregator createAggregator(Instrument instrument) {
-        int ticksPerBar = ticksPerBarFor(instrument);
-        int maxBars = properties.getTickChart().getMaxBars();
+    private TickBarAggregator createAggregator(Instrument instrument, int ticksPerBar) {
+        int maxBars = maxBarsFor(instrument, ticksPerBar);
         log.info("TickChart: created aggregator for {} (ticksPerBar={}, maxBars={})",
                  instrument, ticksPerBar, maxBars);
         return new TickBarAggregator(instrument, ticksPerBar, maxBars);
@@ -189,4 +204,32 @@ public class IbkrTickBarAdapter implements TickBarPort {
             ? configured
             : properties.getTickChart().getDefaultTicksPerBar();
     }
+
+    /**
+     * Bar sizes to maintain for an instrument: the per-instrument base, plus each
+     * configured coarse size that is a strict multiple of the base (so a coarse bar
+     * lines up with a whole number of base bars). The same multiple guard the client
+     * applies before offering a size button.
+     */
+    private List<Integer> sizesFor(Instrument instrument) {
+        int base = ticksPerBarFor(instrument);
+        List<Integer> sizes = new ArrayList<>();
+        sizes.add(base);
+        for (Integer coarse : properties.getTickChart().getCoarseSizes()) {
+            if (coarse != null && coarse > base && coarse % base == 0) {
+                sizes.add(coarse);
+            }
+        }
+        return sizes;
+    }
+
+    /** Ring depth: full {@code maxBars} for the base size, the smaller coarse depth otherwise. */
+    private int maxBarsFor(Instrument instrument, int ticksPerBar) {
+        return ticksPerBar == ticksPerBarFor(instrument)
+            ? properties.getTickChart().getMaxBars()
+            : properties.getTickChart().getCoarseMaxBars();
+    }
+
+    /** Composite key: one aggregator (and ring buffer) per instrument and bar size. */
+    private record AggKey(Instrument instrument, int ticksPerBar) {}
 }
