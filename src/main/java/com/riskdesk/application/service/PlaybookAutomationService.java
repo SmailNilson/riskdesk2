@@ -599,7 +599,8 @@ public class PlaybookAutomationService {
             null,
             null,
             PlaybookDecision.ENTRY_TYPE_STOP,
-            plan.invalidationPrice());
+            plan.invalidationPrice(),
+            price.price());
     }
 
     private boolean confirmationZoneAlreadyAttempted(String instrument,

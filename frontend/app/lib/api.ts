@@ -1798,6 +1798,10 @@ export interface PlaybookAutomationProfitabilitySummaryView {
   totalPnl?: number | null;
   averagePnl?: number | null;
   profitFactor?: number | null;
+  /** Total P&L valued at the realistic (live) fill — late-entry chase included. */
+  realisticTotalPnl?: number | null;
+  /** Profit factor on realistic P&L. */
+  realisticProfitFactor?: number | null;
 }
 
 export interface PlaybookAutomationDecisionView {
@@ -1821,6 +1825,10 @@ export interface PlaybookAutomationDecisionView {
   simulationStatus: PlaybookAutomationSimulationStatus | null;
   simulationPnl: number | null;
   pnl: number | null;
+  /** Fill the live broker would chase to on a late entry (else equals entryPrice). */
+  realisticEntryPrice: number | null;
+  /** Simulation P&L valued at {@link realisticEntryPrice}. */
+  realisticPnl: number | null;
   rrRatio: number | null;
   verdict: string | null;
   entryType?: 'LIMIT' | 'STOP' | string | null;

@@ -1019,12 +1019,26 @@ function ProfitabilitySummary({
   if (!summary) {
     return <div className="text-[10px] text-zinc-600 italic">No PLAYBOOK automation results yet</div>;
   }
+  const realisticPnl = summary.realisticTotalPnl;
+  const pnlDivergent = realisticPnl != null && Math.abs((realisticPnl ?? 0) - (summary.totalPnl ?? 0)) > 0.005;
+  const realisticPf = summary.realisticProfitFactor;
+  const pfDivergent = realisticPf != null && Math.abs((realisticPf ?? 0) - (summary.profitFactor ?? 0)) > 0.005;
   return (
     <div className="grid grid-cols-4 gap-2 text-[10px]">
       <Metric label="Decisions" value={formatMetric(summary.totalDecisions)} />
       <Metric label="Win rate" value={formatPct(summary.winRate)} />
-      <Metric label="P&L" value={formatCurrency(summary.totalPnl)} accent={(summary.totalPnl ?? 0) >= 0 ? 'good' : 'bad'} />
-      <Metric label="PF" value={formatMetric(summary.profitFactor, 2)} />
+      <Metric
+        label="P&L"
+        value={formatCurrency(summary.totalPnl)}
+        accent={(summary.totalPnl ?? 0) >= 0 ? 'good' : 'bad'}
+        sub={pnlDivergent ? `réel ${formatCurrency(realisticPnl)}` : undefined}
+        subAccent={(realisticPnl ?? 0) >= 0 ? 'good' : 'bad'}
+      />
+      <Metric
+        label="PF"
+        value={formatMetric(summary.profitFactor, 2)}
+        sub={pfDivergent ? `réel ${formatMetric(realisticPf, 2)}` : undefined}
+      />
     </div>
   );
 }
@@ -1049,48 +1063,92 @@ function RecentSimulationResults({
         <span>R:R</span>
         <span>P&L</span>
       </div>
-      {decisions.slice(0, 5).map(decision => (
-        <div
-          key={decision.id ?? `${decision.createdAt}-${decision.direction}`}
-          className="grid grid-cols-[3.5rem_4rem_1fr_1fr_1fr_1fr_3rem_4rem] gap-1 border-b border-zinc-900 px-2 py-1 font-mono text-[10px] last:border-b-0"
-          title={decision.verdict ?? undefined}
-        >
-          <span className={simulationTextColor(decision.simulationStatus)}>
-            {shortSimulationStatus(decision.simulationStatus)}
-          </span>
-          <span className={decision.direction === 'LONG' ? 'text-emerald-300' : decision.direction === 'SHORT' ? 'text-red-300' : 'text-zinc-500'}>
-            {decision.direction ?? '-'}
-          </span>
-          <span className="text-zinc-300">{formatPrice(decision.entryPrice)}</span>
-          <span className="text-red-300">{formatPrice(decision.stopLoss)}</span>
-          <span className="text-emerald-300">{formatPrice(decision.takeProfit1)}</span>
-          <span className="text-emerald-500/80">{formatPrice(decision.takeProfit2)}</span>
-          <span className={(decision.rrRatio ?? 0) >= 1 ? 'text-amber-300' : 'text-red-300'}>
-            {formatMetric(decision.rrRatio, 2)}
-          </span>
-          <span className={(decision.pnl ?? decision.simulationPnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}>
-            {formatCurrency(decision.pnl ?? decision.simulationPnl)}
-          </span>
+      {decisions.slice(0, 5).map(decision => {
+        const theoreticalPnl = decision.pnl ?? decision.simulationPnl;
+        const divergent = isRealisticDivergent(decision);
+        return (
+          <div
+            key={decision.id ?? `${decision.createdAt}-${decision.direction}`}
+            className="grid grid-cols-[3.5rem_4rem_1fr_1fr_1fr_1fr_3rem_4rem] items-start gap-1 border-b border-zinc-900 px-2 py-1 font-mono text-[10px] last:border-b-0"
+            title={decision.verdict ?? undefined}
+          >
+            <span className={simulationTextColor(decision.simulationStatus)}>
+              {shortSimulationStatus(decision.simulationStatus)}
+            </span>
+            <span className={decision.direction === 'LONG' ? 'text-emerald-300' : decision.direction === 'SHORT' ? 'text-red-300' : 'text-zinc-500'}>
+              {decision.direction ?? '-'}
+            </span>
+            <span className="flex flex-col leading-tight">
+              <span className="text-zinc-300">{formatPrice(decision.entryPrice)}</span>
+              {divergent && (
+                <span className="text-amber-400/80 text-[8px]" title="Remplissage réel estimé — entrée late décalée vers le marché">
+                  ≈{formatPrice(decision.realisticEntryPrice)}
+                </span>
+              )}
+            </span>
+            <span className="text-red-300">{formatPrice(decision.stopLoss)}</span>
+            <span className="text-emerald-300">{formatPrice(decision.takeProfit1)}</span>
+            <span className="text-emerald-500/80">{formatPrice(decision.takeProfit2)}</span>
+            <span className={(decision.rrRatio ?? 0) >= 1 ? 'text-amber-300' : 'text-red-300'}>
+              {formatMetric(decision.rrRatio, 2)}
+            </span>
+            <span className="flex flex-col leading-tight">
+              <span className={(theoreticalPnl ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}>
+                {formatCurrency(theoreticalPnl)}
+              </span>
+              {divergent && decision.realisticPnl != null && (
+                <span
+                  className={`text-[8px] ${(decision.realisticPnl ?? 0) >= 0 ? 'text-amber-400/80' : 'text-red-400/90'}`}
+                  title="P&L au remplissage réel (live)"
+                >
+                  ≈{formatCurrency(decision.realisticPnl)}
+                </span>
+              )}
+            </span>
+          </div>
+        );
+      })}
+      {decisions.some(isRealisticDivergent) && (
+        <div className="px-2 py-1 text-[8px] italic text-zinc-600">
+          ≈ = remplissage / P&L réel estimé (live) sur les entrées <span className="text-amber-400/80">late</span> — le prix planifié n&apos;est plus dispo, le live chasse le marché.
         </div>
-      ))}
+      )}
     </div>
   );
+}
+
+/** True when the realistic (live) fill differs from the planned entry — i.e. a late-entry chase. */
+function isRealisticDivergent(decision: PlaybookAutomationDecisionView): boolean {
+  const planned = decision.entryPrice;
+  const realistic = decision.realisticEntryPrice;
+  if (planned == null || realistic == null) return false;
+  return Math.abs(realistic - planned) > 0.005;
 }
 
 function Metric({
   label,
   value,
   accent,
+  sub,
+  subAccent,
 }: {
   label: string;
   value: string;
   accent?: 'good' | 'bad';
+  sub?: string;
+  subAccent?: 'good' | 'bad';
 }) {
   const color = accent === 'good' ? 'text-emerald-300' : accent === 'bad' ? 'text-red-300' : 'text-zinc-200';
+  const subColor = subAccent === 'good' ? 'text-amber-400/80' : subAccent === 'bad' ? 'text-red-400/90' : 'text-zinc-500';
   return (
     <div className="rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1">
       <div className="text-[9px] text-zinc-600 uppercase tracking-wider">{label}</div>
       <div className={`font-mono ${color}`}>{value}</div>
+      {sub && (
+        <div className={`font-mono text-[8px] ${subColor}`} title="Valeur au remplissage réel (live)">
+          {sub}
+        </div>
+      )}
     </div>
   );
 }
@@ -1129,6 +1187,12 @@ function summarizeAutomationDecisions(
   const totalPnl = pnlValues.reduce((sum, value) => sum + value, 0);
   const grossWins = pnlValues.filter(value => value > 0).reduce((sum, value) => sum + value, 0);
   const grossLosses = Math.abs(pnlValues.filter(value => value < 0).reduce((sum, value) => sum + value, 0));
+  const realisticValues = decisions
+    .map(d => d.realisticPnl ?? d.simulationPnl ?? d.pnl)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const realisticTotal = realisticValues.reduce((sum, value) => sum + value, 0);
+  const realisticGrossWins = realisticValues.filter(value => value > 0).reduce((sum, value) => sum + value, 0);
+  const realisticGrossLosses = Math.abs(realisticValues.filter(value => value < 0).reduce((sum, value) => sum + value, 0));
   return {
     totalDecisions: decisions.length,
     wins,
@@ -1137,6 +1201,9 @@ function summarizeAutomationDecisions(
     totalPnl: pnlValues.length > 0 ? totalPnl : null,
     averagePnl: pnlValues.length > 0 ? totalPnl / pnlValues.length : null,
     profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? Infinity : null,
+    realisticTotalPnl: realisticValues.length > 0 ? realisticTotal : null,
+    realisticProfitFactor:
+      realisticGrossLosses > 0 ? realisticGrossWins / realisticGrossLosses : realisticGrossWins > 0 ? Infinity : null,
   };
 }
 

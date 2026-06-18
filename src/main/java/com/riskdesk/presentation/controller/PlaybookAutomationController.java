@@ -75,9 +75,11 @@ public class PlaybookAutomationController {
         List<DecisionWithSimulation> rows = decisions.stream()
             .map(decision -> {
                 TradeSimulation sim = automationService.simulationFor(decision).orElse(null);
-                BigDecimal pnl = simulationPnl(decision, sim);
-                accumulator.accept(decision, sim, pnl);
-                return new DecisionWithSimulation(decision, sim, pnl);
+                BigDecimal pnl = simulationPnl(decision, sim, decision.entryPrice());
+                BigDecimal realisticEntry = decision.realisticEntryPrice();
+                BigDecimal realisticPnl = simulationPnl(decision, sim, realisticEntry);
+                accumulator.accept(decision, sim, pnl, realisticPnl);
+                return new DecisionWithSimulation(decision, sim, pnl, realisticEntry, realisticPnl);
             })
             .toList();
         PlaybookAutomationProfitabilitySummaryView summary = accumulator.toView(decisions.size());
@@ -91,12 +93,20 @@ public class PlaybookAutomationController {
                 state.brokerAccountId(),
                 row.simulation() == null ? null : row.simulation().simulationStatus(),
                 row.pnl(),
+                row.realisticEntry(),
+                row.realisticPnl(),
                 summary))
             .toList());
     }
 
-    private static BigDecimal simulationPnl(PlaybookDecision decision, TradeSimulation sim) {
-        if (decision == null || sim == null || sim.simulationStatus() == null || decision.entryPrice() == null) {
+    /**
+     * P&L of the resolved simulation valued from {@code entry}. Passing
+     * {@link PlaybookDecision#entryPrice()} gives the theoretical (paper) P&L;
+     * passing {@link PlaybookDecision#realisticEntryPrice()} gives the realistic
+     * P&L the live broker would have netted after a late-entry chase.
+     */
+    private static BigDecimal simulationPnl(PlaybookDecision decision, TradeSimulation sim, BigDecimal entry) {
+        if (decision == null || sim == null || sim.simulationStatus() == null || entry == null) {
             return null;
         }
         BigDecimal exit = null;
@@ -115,8 +125,8 @@ public class PlaybookAutomationController {
             return null;
         }
         BigDecimal points = "SHORT".equalsIgnoreCase(decision.direction())
-            ? decision.entryPrice().subtract(exit)
-            : exit.subtract(decision.entryPrice());
+            ? entry.subtract(exit)
+            : exit.subtract(entry);
         try {
             Instrument instrument = Instrument.valueOf(decision.instrument());
             return points.multiply(instrument.getContractMultiplier()).setScale(2, RoundingMode.HALF_UP);
@@ -125,7 +135,8 @@ public class PlaybookAutomationController {
         }
     }
 
-    private record DecisionWithSimulation(PlaybookDecision decision, TradeSimulation simulation, BigDecimal pnl) {
+    private record DecisionWithSimulation(PlaybookDecision decision, TradeSimulation simulation, BigDecimal pnl,
+                                          BigDecimal realisticEntry, BigDecimal realisticPnl) {
     }
 
     private static final class ProfitabilityAccumulator {
@@ -138,8 +149,12 @@ public class PlaybookAutomationController {
         private BigDecimal grossLosses = BigDecimal.ZERO;
         private BigDecimal totalPnl = BigDecimal.ZERO;
         private int pnlCount;
+        private BigDecimal realisticGrossWins = BigDecimal.ZERO;
+        private BigDecimal realisticGrossLosses = BigDecimal.ZERO;
+        private BigDecimal realisticTotalPnl = BigDecimal.ZERO;
+        private int realisticPnlCount;
 
-        void accept(PlaybookDecision decision, TradeSimulation sim, BigDecimal pnl) {
+        void accept(PlaybookDecision decision, TradeSimulation sim, BigDecimal pnl, BigDecimal realisticPnl) {
             if (sim != null) {
                 paperCount++;
                 if (sim.simulationStatus() == TradeSimulationStatus.WIN) {
@@ -162,6 +177,15 @@ public class PlaybookAutomationController {
                     grossLosses = grossLosses.add(pnl.abs());
                 }
             }
+            if (realisticPnl != null) {
+                realisticPnlCount++;
+                realisticTotalPnl = realisticTotalPnl.add(realisticPnl);
+                if (realisticPnl.signum() > 0) {
+                    realisticGrossWins = realisticGrossWins.add(realisticPnl);
+                } else if (realisticPnl.signum() < 0) {
+                    realisticGrossLosses = realisticGrossLosses.add(realisticPnl.abs());
+                }
+            }
         }
 
         PlaybookAutomationProfitabilitySummaryView toView(int totalDecisions) {
@@ -170,9 +194,7 @@ public class PlaybookAutomationController {
             BigDecimal average = pnlCount == 0
                 ? null
                 : totalPnl.divide(BigDecimal.valueOf(pnlCount), 2, RoundingMode.HALF_UP);
-            BigDecimal profitFactor = grossLosses.signum() == 0
-                ? (grossWins.signum() > 0 ? grossWins : null)
-                : grossWins.divide(grossLosses, 4, RoundingMode.HALF_UP);
+            BigDecimal profitFactor = profitFactor(grossWins, grossLosses);
             return new PlaybookAutomationProfitabilitySummaryView(
                 totalDecisions,
                 paperCount,
@@ -184,8 +206,16 @@ public class PlaybookAutomationController {
                 pnlCount == 0 ? null : totalPnl.setScale(2, RoundingMode.HALF_UP),
                 average,
                 profitFactor,
-                null
+                null,
+                realisticPnlCount == 0 ? null : realisticTotalPnl.setScale(2, RoundingMode.HALF_UP),
+                profitFactor(realisticGrossWins, realisticGrossLosses)
             );
+        }
+
+        private static BigDecimal profitFactor(BigDecimal grossWins, BigDecimal grossLosses) {
+            return grossLosses.signum() == 0
+                ? (grossWins.signum() > 0 ? grossWins : null)
+                : grossWins.divide(grossLosses, 4, RoundingMode.HALF_UP);
         }
     }
 }

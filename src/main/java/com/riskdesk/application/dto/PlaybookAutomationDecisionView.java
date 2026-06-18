@@ -29,6 +29,10 @@ public record PlaybookAutomationDecisionView(
     TradeSimulationStatus simulationStatus,
     BigDecimal simulationPnl,
     BigDecimal pnl,
+    /** Realistic fill the live broker would chase to on a late entry (else the plan entry). */
+    BigDecimal realisticEntryPrice,
+    /** Simulation P&L valued at {@link #realisticEntryPrice}. */
+    BigDecimal realisticPnl,
     BigDecimal rrRatio,
     String verdict,
     String priceSource,
@@ -46,6 +50,8 @@ public record PlaybookAutomationDecisionView(
                                                       String brokerAccountId,
                                                       TradeSimulationStatus simulationStatus,
                                                       BigDecimal simulationPnl,
+                                                      BigDecimal realisticEntryPrice,
+                                                      BigDecimal realisticPnl,
                                                       PlaybookAutomationProfitabilitySummaryView summary) {
         return new PlaybookAutomationDecisionView(
             decision.id(),
@@ -69,6 +75,8 @@ public record PlaybookAutomationDecisionView(
             simulationStatus,
             simulationPnl,
             simulationPnl,
+            realisticEntryPrice,
+            realisticPnl,
             decision.rrRatio(),
             decision.verdict(),
             decision.priceSource(),
