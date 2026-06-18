@@ -128,9 +128,13 @@ export default function DepthHeatmap({ instrument, depthData }: DepthHeatmapProp
     const priceTop = anchor + (WINDOW_TICKS / 2) * tick;
     const rowH = HEIGHT_PX / WINDOW_TICKS;
 
-    // x mapping: latest column at the right edge, fixed slot per column so the
-    // chart fills left→right over 20 min. Bucket columns into device pixels.
-    const slotW = widthPx / MAX_COLUMNS;
+    // x mapping: latest column at the right edge. Stretch the columns we already
+    // have across the full width so the movie is legible from the first snapshots
+    // instead of staying jammed in a thin right-hand sliver until ~20 min of
+    // history accumulates. Once the buffer is full this settles into a rolling
+    // 20-min window at widthPx / MAX_COLUMNS.
+    const slotCount = Math.min(Math.max(columns.length, 1), MAX_COLUMNS);
+    const slotW = widthPx / slotCount;
     const drawW = Math.max(slotW, 1 / dpr);
 
     const yFor = (price: number) => ((priceTop - price) / tick) * rowH;
