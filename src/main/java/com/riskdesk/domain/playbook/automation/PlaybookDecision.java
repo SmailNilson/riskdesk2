@@ -30,7 +30,8 @@ public record PlaybookDecision(
     String routingErrorMessage,
     Long executionId,
     String entryType,
-    BigDecimal invalidationPrice
+    BigDecimal invalidationPrice,
+    BigDecimal marketPrice
 ) {
     /** Limit-style entry: rests at the plan price and fills when price trades back through it. */
     public static final String ENTRY_TYPE_LIMIT = "LIMIT";
@@ -60,8 +61,34 @@ public record PlaybookDecision(
             routingErrorMessage, executionId, null, null);
     }
 
+    /** Compatibility constructor without {@code marketPrice} (defaults to {@code null}). */
+    public PlaybookDecision(Long id, String decisionKey, String instrument, String timeframe,
+                            String setupIdentity, String setupType, String zoneName, String direction,
+                            int checklistScore, String verdict, BigDecimal entryPrice, BigDecimal stopLoss,
+                            BigDecimal takeProfit1, BigDecimal takeProfit2, BigDecimal rrRatio,
+                            BigDecimal riskPercent, boolean lateEntry, String priceSource,
+                            Instant priceTimestamp, Instant evaluatedCandleTs, Instant createdAt,
+                            PlaybookRoutingOutcome routingOutcome, String routingErrorMessage, Long executionId,
+                            String entryType, BigDecimal invalidationPrice) {
+        this(id, decisionKey, instrument, timeframe, setupIdentity, setupType, zoneName, direction,
+            checklistScore, verdict, entryPrice, stopLoss, takeProfit1, takeProfit2, rrRatio, riskPercent,
+            lateEntry, priceSource, priceTimestamp, evaluatedCandleTs, createdAt, routingOutcome,
+            routingErrorMessage, executionId, entryType, invalidationPrice, null);
+    }
+
     public boolean isStopEntry() {
         return ENTRY_TYPE_STOP.equalsIgnoreCase(entryType);
+    }
+
+    /**
+     * The price the live broker would realistically fill at. For a {@link #lateEntry()}
+     * the planned {@link #entryPrice()} is already breached, so the live order chases to
+     * the market price observed at decision time ({@link #marketPrice()}); otherwise the
+     * STOP/LIMIT fills at the plan. Falls back to {@link #entryPrice()} when the market
+     * price is unavailable (degraded feed, legacy rows persisted before this field).
+     */
+    public BigDecimal realisticEntryPrice() {
+        return (lateEntry && marketPrice != null) ? marketPrice : entryPrice;
     }
 
     public PlaybookDecision withRouting(PlaybookRoutingOutcome outcome, String errorMessage, Long executionId) {
@@ -91,7 +118,8 @@ public record PlaybookDecision(
             errorMessage,
             executionId,
             entryType,
-            invalidationPrice
+            invalidationPrice,
+            marketPrice
         );
     }
 }

@@ -13,6 +13,10 @@ public record PlaybookAutomationProfitabilitySummaryView(
     BigDecimal totalPnl,
     BigDecimal averagePnl,
     BigDecimal profitFactor,
-    BigDecimal avgMaxDrawdownPoints
+    BigDecimal avgMaxDrawdownPoints,
+    /** Total P&L valued at the realistic (live) fill — late-entry chase included. */
+    BigDecimal realisticTotalPnl,
+    /** Profit factor on realistic P&L. */
+    BigDecimal realisticProfitFactor
 ) {
 }

@@ -35,6 +35,7 @@ final class PlaybookDecisionMapper {
         e.setExecutionId(d.executionId());
         e.setEntryType(d.entryType());
         e.setInvalidationPrice(d.invalidationPrice());
+        e.setMarketPrice(d.marketPrice());
         return e;
     }
 
@@ -65,7 +66,8 @@ final class PlaybookDecisionMapper {
             e.getRoutingErrorMessage(),
             e.getExecutionId(),
             e.getEntryType(),
-            e.getInvalidationPrice()
+            e.getInvalidationPrice(),
+            e.getMarketPrice()
         );
     }
 }

@@ -99,6 +99,10 @@ public class PlaybookDecisionEntity {
     @Column(name = "invalidation_price", precision = 19, scale = 6)
     private BigDecimal invalidationPrice;
 
+    /** Live market price at decision time — realistic fill for a late STOP entry (nullable). */
+    @Column(name = "market_price", precision = 19, scale = 6)
+    private BigDecimal marketPrice;
+
     @Column(name = "created_at", nullable = false, columnDefinition = "TIMESTAMP WITH TIME ZONE")
     private Instant createdAt;
 
@@ -175,5 +179,13 @@ public class PlaybookDecisionEntity {
 
     public void setInvalidationPrice(BigDecimal invalidationPrice) {
         this.invalidationPrice = invalidationPrice;
+    }
+
+    public BigDecimal getMarketPrice() {
+        return marketPrice;
+    }
+
+    public void setMarketPrice(BigDecimal marketPrice) {
+        this.marketPrice = marketPrice;
     }
 }

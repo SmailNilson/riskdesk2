@@ -65,6 +65,73 @@ class PlaybookDecisionTest {
     }
 
     @Test
+    void realisticEntryPrice_nonLateEntryUsesPlanEntryEvenWhenMarketPriceKnown() {
+        PlaybookDecision notLate = lateDecision(false, new BigDecimal("30624.00"));
+
+        // Stop/limit fills at the plan when not chasing — market price is ignored.
+        assertEquals(new BigDecimal("30598.75"), notLate.realisticEntryPrice());
+    }
+
+    @Test
+    void realisticEntryPrice_lateEntryChasesToMarketPrice() {
+        PlaybookDecision late = lateDecision(true, new BigDecimal("30624.00"));
+
+        // Price already ran past the plan — the live order fills at the market, not the plan.
+        assertEquals(new BigDecimal("30624.00"), late.realisticEntryPrice());
+    }
+
+    @Test
+    void realisticEntryPrice_lateEntryWithoutMarketPriceFallsBackToPlan() {
+        PlaybookDecision late = lateDecision(true, null);
+
+        assertEquals(new BigDecimal("30598.75"), late.realisticEntryPrice());
+    }
+
+    @Test
+    void withRouting_preservesMarketPrice() {
+        PlaybookDecision late = lateDecision(true, new BigDecimal("30624.00"));
+
+        PlaybookDecision routed = late.withRouting(PlaybookRoutingOutcome.SKIPPED_LATE_ENTRY, "late entry", null);
+
+        assertEquals(new BigDecimal("30624.00"), routed.marketPrice());
+        assertEquals(new BigDecimal("30624.00"), routed.realisticEntryPrice());
+    }
+
+    private static PlaybookDecision lateDecision(boolean lateEntry, BigDecimal marketPrice) {
+        Instant candleTs = Instant.parse("2026-05-22T13:30:00Z");
+        Instant createdAt = Instant.parse("2026-05-22T13:30:05Z");
+        return new PlaybookDecision(
+            8L,
+            "playbook:MNQ:10m:20260522T133000Z:LONG:CONF",
+            "MNQ",
+            "10m",
+            "ZONE_RETEST:Bullish OB:LONG",
+            "ZONE_RETEST",
+            "Bullish OB",
+            "LONG",
+            6,
+            "CONFIRMATION — TRADE",
+            new BigDecimal("30598.75"),
+            new BigDecimal("30519.72"),
+            new BigDecimal("30717.29"),
+            null,
+            new BigDecimal("1.50"),
+            new BigDecimal("0.50"),
+            lateEntry,
+            "LIVE_IBKR",
+            createdAt,
+            candleTs,
+            createdAt,
+            PlaybookRoutingOutcome.PAPER_ONLY,
+            null,
+            null,
+            PlaybookDecision.ENTRY_TYPE_STOP,
+            new BigDecimal("30558.00"),
+            marketPrice
+        );
+    }
+
+    @Test
     void constructor_requiresStableDecisionIdentity() {
         PlaybookDecision base = decision();
 
