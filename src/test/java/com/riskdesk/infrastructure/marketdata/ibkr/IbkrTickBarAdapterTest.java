@@ -11,7 +11,10 @@ import java.util.HashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Verifies the adapter maintains one aggregator per (instrument, size): the base size
@@ -38,6 +41,13 @@ class IbkrTickBarAdapterTest {
         for (int i = 0; i < n; i++) {
             adapter.onTick(Instrument.MNQ, 100.0 + i * 0.25, 1, "BUY", t0.plusSeconds(i));
         }
+    }
+
+    /** A completed MNQ bar at the given size/seq, as the persistence store would return it. */
+    private TickBar completed(int ticksPerBar, long seq) {
+        long ts = t0.getEpochSecond();
+        return new TickBar("MNQ", ticksPerBar, seq, ts, ts,
+            100.0, 101.0, 99.0, 100.5, 10, 6, 4, 2, ticksPerBar, true);
     }
 
     @Test
@@ -79,6 +89,53 @@ class IbkrTickBarAdapterTest {
 
         assertEquals(3, adapter.recentBars(Instrument.MNQ, 10, 100).size()); // base still aggregates
         assertTrue(adapter.recentBars(Instrument.MNQ, 15, 100).isEmpty());   // 15 % 10 != 0 → no aggregator
+    }
+
+    @Test
+    void exposesInProgressCoarseBarBeforeCompletion() {
+        IbkrTickBarAdapter adapter =
+            new IbkrTickBarAdapter(propsWith(10, List.of(20)), mock(TickBarStorePort.class));
+
+        feed(adapter, 25); // coarse 20 → 1 completed (seq 0) + 1 in-progress head (seq 1, 5 ticks)
+
+        List<TickBar> coarse = adapter.recentBars(Instrument.MNQ, 20, 100);
+        assertEquals(2, coarse.size());
+        assertTrue(coarse.get(0).complete());
+        assertEquals(20, coarse.get(0).tickCount());
+
+        TickBar head = coarse.get(1); // the live bar the 2s poll refreshes
+        assertFalse(head.complete());
+        assertEquals(5, head.tickCount());
+        assertEquals(1, head.seq());
+    }
+
+    @Test
+    void restoresEachSizeFromStoreAndContinuesSeq() {
+        OrderFlowProperties props = propsWith(10, List.of(20));
+        props.getTickChart().getPersistence().setEnabled(true);
+        TickBarStorePort store = mock(TickBarStorePort.class);
+        when(store.loadRecent(eq(Instrument.MNQ), eq(10), anyInt()))
+            .thenReturn(List.of(completed(10, 0), completed(10, 1)));
+        when(store.loadRecent(eq(Instrument.MNQ), eq(20), anyInt()))
+            .thenReturn(List.of(completed(20, 0)));
+        IbkrTickBarAdapter adapter = new IbkrTickBarAdapter(props, store);
+
+        adapter.restoreFromStore();
+
+        // Both sizes restored from their own ticks_per_bar stream.
+        List<TickBar> base = adapter.recentBars(Instrument.MNQ, 10, 100);
+        assertEquals(2, base.size());
+        assertEquals(1, base.get(base.size() - 1).seq());
+        List<TickBar> coarse = adapter.recentBars(Instrument.MNQ, 20, 100);
+        assertEquals(1, coarse.size());
+        assertEquals(20, coarse.get(0).ticksPerBar());
+
+        // A live tick resumes after the restored seq (monotonic across restart), not at 0.
+        adapter.onTick(Instrument.MNQ, 100.0, 1, "BUY", t0);
+        List<TickBar> after = adapter.recentBars(Instrument.MNQ, 10, 100);
+        TickBar head = after.get(after.size() - 1);
+        assertFalse(head.complete());
+        assertEquals(2, head.seq());
     }
 
     @Test
