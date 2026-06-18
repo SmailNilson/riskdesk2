@@ -3,6 +3,7 @@ package com.riskdesk.infrastructure.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -618,6 +619,20 @@ public class OrderFlowProperties {
          * bars of history (~140 bytes/bar → <1 MB for two instruments).
          */
         private int maxBars = 3000;
+        /**
+         * Extra absolute tick-per-bar sizes pre-aggregated server-side, in addition to the
+         * per-instrument base. A dedicated aggregator per size lets the client show deep
+         * history at large sizes (e.g. 300 bars at 10k) without keeping ~15k base bars and
+         * re-merging them every tick — a 10k bar compresses 50 base bars into one slot.
+         * Only sizes that are an exact multiple of an instrument's base (and larger) are
+         * aggregated for that instrument.
+         */
+        private List<Integer> coarseSizes = new ArrayList<>(List.of(5000, 10000));
+        /**
+         * Ring-buffer depth for each coarse aggregator (~300 rendered + margin). Far cheaper
+         * than inflating {@link #maxBars}: a few coarse buffers add tens of KB per instrument.
+         */
+        private int coarseMaxBars = 320;
 
         /** Durable storage so the tick chart survives a redeploy (reloaded on startup). */
         private Persistence persistence = new Persistence();
@@ -628,6 +643,10 @@ public class OrderFlowProperties {
         public void setTicksPerBar(Map<String, Integer> v) { this.ticksPerBar = v; }
         public int getMaxBars() { return maxBars; }
         public void setMaxBars(int v) { this.maxBars = v; }
+        public List<Integer> getCoarseSizes() { return coarseSizes; }
+        public void setCoarseSizes(List<Integer> v) { this.coarseSizes = v; }
+        public int getCoarseMaxBars() { return coarseMaxBars; }
+        public void setCoarseMaxBars(int v) { this.coarseMaxBars = v; }
         public Persistence getPersistence() { return persistence; }
         public void setPersistence(Persistence v) { this.persistence = v; }
 

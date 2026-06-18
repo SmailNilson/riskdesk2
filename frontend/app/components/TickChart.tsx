@@ -33,6 +33,14 @@ const MAX_BASE_BARS = 3000;
 const MAX_RENDERED_BARS = 300;
 /** User-selectable bar sizes offered on top of the per-instrument base size. */
 const EXTRA_BAR_SIZES = [1000, 2000, 5000, 10000];
+/** Large sizes served pre-aggregated by the backend: fetched directly (not merged
+ *  client-side) so deep history is available without keeping ~15k base bars. Sizes
+ *  NOT listed here (1000/2000) stay client-merged from the base ring buffer. */
+const BACKEND_BAR_SIZES = [5000, 10000];
+/** Poll cadence for the backend coarse series — only while a backend size is shown.
+ *  Coarse bars close slowly (every 5k–10k ticks), so a light poll keeps the
+ *  in-progress head fresh without a dedicated WebSocket stream. */
+const COARSE_POLL_MS = 2000;
 
 /** Tick size / display decimals / default SL-TP offsets (in points) per instrument.
  *  SL/TP pre-fill the ticket only — the operator edits them before confirming. */
@@ -169,6 +177,7 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
   const tradeLinesRef = useRef<IPriceLine[]>([]);
   const lastCloseRef = useRef<number | null>(null);
   const [seedBars, setSeedBars] = useState<TickBar[]>([]);
+  const [coarseBars, setCoarseBars] = useState<TickBar[]>([]); // backend-served 5k/10k series
   const [barSize, setBarSize] = useState<number | null>(null); // null = base size
   const [showSmc, setShowSmc] = useState(true);
 
@@ -225,11 +234,34 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
     return Array.from(new Set(opts));
   }, [baseSize]);
   const effectiveSize = barSize != null && sizeOptions.includes(barSize) ? barSize : baseSize;
+  // 5k/10k come pre-aggregated from the backend; 1k/2k and base are merged client-side.
+  const isBackendSize = effectiveSize != null && BACKEND_BAR_SIZES.includes(effectiveSize);
 
   const bars = useMemo(() => {
+    if (isBackendSize) return coarseBars.slice(-MAX_RENDERED_BARS);
     if (baseSize == null || effectiveSize == null) return baseBars;
     return mergeTickBars(baseBars, effectiveSize / baseSize).slice(-MAX_RENDERED_BARS);
-  }, [baseBars, baseSize, effectiveSize]);
+  }, [isBackendSize, coarseBars, baseBars, baseSize, effectiveSize]);
+
+  // Backend-served coarse sizes (5k/10k): fetch the pre-aggregated series directly and
+  // poll it instead of client-merging thousands of base bars. recentBars() already
+  // includes the in-progress head, so each poll refreshes the live bar. Only runs while
+  // a backend size is selected; clears immediately when switching back or to base.
+  useEffect(() => {
+    if (!selectedInstrument || !isBackendSize || effectiveSize == null) {
+      setCoarseBars([]);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      api.getTickBars(selectedInstrument, MAX_RENDERED_BARS, effectiveSize)
+        .then(b => { if (!cancelled) setCoarseBars(Array.isArray(b) ? (b as unknown as TickBar[]) : []); })
+        .catch(() => { /* keep last good series */ });
+    };
+    load();
+    const id = setInterval(load, COARSE_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [selectedInstrument, isBackendSize, effectiveSize]);
 
   const lastBar = bars.length > 0 ? bars[bars.length - 1] : null;
 

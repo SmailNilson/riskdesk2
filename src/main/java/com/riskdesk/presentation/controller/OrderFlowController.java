@@ -179,21 +179,27 @@ public class OrderFlowController {
     }
 
     /**
-     * GET /api/order-flow/tick-bars/{instrument}?limit=200
+     * GET /api/order-flow/tick-bars/{instrument}?limit=200&size=10000
      * Constant-tick-count bars for the tick chart, oldest first; the final element
      * is the in-progress bar (complete=false) when trades have accumulated.
+     * <p>{@code size} (optional) selects a server-pre-aggregated bar size (base size
+     * or a configured coarse size, e.g. 5000 / 10000). Omitted ⇒ the instrument base.</p>
      */
     @GetMapping("/tick-bars/{instrument}")
     public ResponseEntity<?> getTickBars(
             @PathVariable String instrument,
-            @RequestParam(name = "limit", required = false, defaultValue = "200") int limit) {
+            @RequestParam(name = "limit", required = false, defaultValue = "200") int limit,
+            @RequestParam(name = "size", required = false) Integer size) {
         TickBarPort tickBarPort = tickBarPortProvider.getIfAvailable();
         if (tickBarPort == null) {
             return ResponseEntity.ok(List.of());
         }
         try {
             Instrument inst = Instrument.valueOf(instrument.toUpperCase());
-            List<TickBar> bars = tickBarPort.recentBars(inst, Math.min(Math.max(limit, 1), 3000));
+            int cappedLimit = Math.min(Math.max(limit, 1), 3000);
+            List<TickBar> bars = size != null && size > 0
+                ? tickBarPort.recentBars(inst, size, cappedLimit)
+                : tickBarPort.recentBars(inst, cappedLimit);
             return ResponseEntity.ok(bars);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Unknown instrument: " + instrument));

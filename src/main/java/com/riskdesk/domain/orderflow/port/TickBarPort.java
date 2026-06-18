@@ -13,12 +13,26 @@ import java.util.List;
 public interface TickBarPort {
 
     /**
-     * The most recent tick bars, oldest first — completed bars followed by the
-     * in-progress bar ({@code complete=false}) when it has trades.
+     * The most recent tick bars at the instrument's base size, oldest first —
+     * completed bars followed by the in-progress bar ({@code complete=false}) when
+     * it has trades.
      *
      * @param instrument the instrument to query
      * @param limit      max bars returned
      * @return up to {@code limit} bars, empty when no tick data yet
      */
     List<TickBar> recentBars(Instrument instrument, int limit);
+
+    /**
+     * The most recent tick bars at a specific bar size, oldest first. Lets the
+     * frontend fetch large, server-pre-aggregated sizes (e.g. 5000 / 10000 ticks)
+     * directly instead of re-merging thousands of base bars client-side.
+     *
+     * @param instrument  the instrument to query
+     * @param ticksPerBar the bar size; must be the base size or one of the configured
+     *                    coarse sizes for this instrument, else empty is returned
+     * @param limit       max bars returned
+     * @return up to {@code limit} bars, empty when no aggregator exists for that size
+     */
+    List<TickBar> recentBars(Instrument instrument, int ticksPerBar, int limit);
 }
