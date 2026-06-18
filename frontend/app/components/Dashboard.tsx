@@ -39,7 +39,6 @@ import PlaybookPanel from './PlaybookPanel';
 import FootprintChart from './FootprintChart';
 import TickChart from './TickChart';
 import FlashCrashPanel from './FlashCrashPanel';
-import PerfectSetupPanel from './PerfectSetupPanel';
 import CorrelationPanel from './CorrelationPanel';
 import ExternalSetupPanel from './ExternalSetupPanel';
 import MarketableSettingsControl from './MarketableSettingsControl';
@@ -84,7 +83,7 @@ function toNum(v: number | string | null | undefined): number | null {
 }
 
 export default function Dashboard() {
-  const [instrument, setInstrument] = useState<Instrument>('MCL');
+  const [instrument, setInstrument] = useState<Instrument>('MNQ');
   const [timeframe, setTimeframe] = useState<Timeframe>('10m');
   const [timezone, setTimezone] = useState<TzEntry>(DEFAULT_TIMEZONE);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -773,9 +772,14 @@ export default function Dashboard() {
                 label: 'Setup',
                 content: (
                   <div className="flex flex-col gap-3 min-w-0 p-3">
-                    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                      <PerfectSetupPanel />
-                    </div>
+                    <Chart
+                      instrument={instrument}
+                      timeframe={timeframe}
+                      timezone={timezone.tz}
+                      theme={theme}
+                      snapshot={snapshot}
+                      livePrice={prices[instrument]}
+                    />
                     {/* PLAYBOOK timeframe panel — for MNQ the 10m one already
                         lives in Price; here we render the current-timeframe
                         playbook so all instruments have a reachable view. */}
