@@ -24,6 +24,21 @@ const SPECS: Record<string, ContractSpec> = {
 };
 
 const HOLD_MS = 1000;
+/** 0.5% of equity per 1R — conservative default for the mobile ticket. */
+const RISK_PCT_PER_R = 0.005;
+
+/**
+ * USD risk for a 1-point (price unit) move on one contract.
+ * Derived from the authoritative {@link ContractSpec} so MCL/MGC/MNQ/E6
+ * stay aligned with domain values (tickValue / tick).
+ *
+ * Unknown instrument → 1, which disables the R-multiples slider.
+ */
+function dollarPerPoint(instrument: string): number {
+  const s = SPECS[instrument];
+  if (!s || s.tick <= 0) return 1;
+  return s.tickValue / s.tick;
+}
 
 interface Props {
   open: boolean;
@@ -33,6 +48,9 @@ interface Props {
   /** Target IBKR account. Required — there is no server-side default fallback,
    *  so the submit button stays disabled until the Dashboard resolves one. */
   brokerAccountId?: string | null;
+  /** Account equity (USD) used to size qty from risk-R. When null/undefined,
+   *  the R-multiples slider is disabled and we fall back to manual qty. */
+  accountEquity?: number | null;
   onClose: () => void;
   /** Called after a successful placement (the sheet closes itself). */
   onPlaced: () => void;
@@ -50,8 +68,14 @@ function parseNum(s: string): number | null {
  * the backend (plan geometry is validated server-side too), so the ticket
  * prefills both at sensible distances instead of making them optional.
  * Submission is hold-to-confirm (1s) to prevent fat-finger orders.
+ *
+ * Sizing: an R-multiples slider (0.25R … 3R, 0.25 steps) computes qty from
+ * desired risk (RISK_PCT_PER_R × equity × R) divided by per-contract dollar
+ * risk (|entry − SL| × $/point). The user can still override qty manually
+ * via a collapsible "Saisie manuelle" detail — once they do, the slider
+ * stops writing to qty until they touch the slider again.
  */
-export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAccountId, onClose, onPlaced }: Props) {
+export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAccountId, accountEquity, onClose, onPlaced }: Props) {
   const spec = SPECS[instrument] ?? SPECS.MCL;
   const fmt = useCallback((v: number) => v.toFixed(spec.decimals), [spec.decimals]);
 
@@ -65,6 +89,10 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [holdPct, setHoldPct] = useState(0);
+  const [riskR, setRiskR] = useState(1);
+  /** When true, the user took control of qty via the manual stepper — the
+   *  R-slider effect stops syncing qty until the user touches the slider. */
+  const [manualQtyOverride, setManualQtyOverride] = useState(false);
 
   const rafRef = useRef<number | null>(null);
   const firedRef = useRef(false);
@@ -93,6 +121,8 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
     setSuccess(null);
     setError(null);
     setHoldPct(0);
+    setRiskR(1);
+    setManualQtyOverride(false);
     firedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, instrument]);
@@ -101,6 +131,26 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
   const sl = parseNum(slStr);
   const tp = parseNum(tpStr);
   const refPrice = entryType === 'LIMIT' ? price : (lastPrice != null ? roundTick(lastPrice) : null);
+
+  // Risk-based sizing inputs. We use refPrice (limit price or last) as the
+  // entry anchor so MARKET orders still get a size estimate from lastPrice.
+  const dpp = dollarPerPoint(instrument);
+  const slDistance = refPrice != null && sl != null ? Math.abs(refPrice - sl) : 0;
+  const targetDistance = refPrice != null && tp != null ? Math.abs(tp - refPrice) : 0;
+  const perContractRisk = slDistance * dpp;
+  const targetRiskUsd = (accountEquity ?? 0) * RISK_PCT_PER_R * riskR;
+  const sizingAvailable = accountEquity != null && accountEquity > 0 && dpp > 1 && perContractRisk > 0;
+  const computedQty = sizingAvailable ? Math.max(1, Math.round(targetRiskUsd / perContractRisk)) : qty;
+
+  // Sync qty ← computedQty when the R-slider, equity, or geometry changes,
+  // unless the user has taken manual control of the quantity stepper.
+  useEffect(() => {
+    if (manualQtyOverride) return;
+    if (!sizingAvailable) return;
+    if (computedQty === qty) return;
+    setQty(computedQty);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskR, priceStr, slStr, accountEquity, instrument, entryType]);
 
   const geometryOk = refPrice != null && sl != null && tp != null && qty >= 1 && (
     side === 'LONG' ? (sl < refPrice && tp > refPrice) : (sl > refPrice && tp < refPrice)
@@ -115,6 +165,12 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
     ? Math.abs(tp - refPrice) / spec.tick * spec.tickValue * qty : null;
   const rr = riskUsd && rewardUsd && riskUsd > 0 ? rewardUsd / riskUsd : null;
 
+  // Compact totals shown next to the slider — always reflect the *current*
+  // qty (computed or manual override) so the user sees the real PnL exposure.
+  const absRiskUsd = sizingAvailable ? qty * perContractRisk : 0;
+  const absTargetUsd = sizingAvailable ? qty * targetDistance * dpp : 0;
+  const targetRatio = slDistance > 0 ? targetDistance / slDistance : 0;
+
   const step = useCallback((setter: (f: (s: string) => string) => void, ticks: number) => {
     setter(prev => {
       const cur = parseNum(prev);
@@ -126,6 +182,16 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
   const changeSide = (next: 'LONG' | 'SHORT') => {
     setSide(next);
     applyDefaults(next, refPrice ?? (lastPrice != null ? roundTick(lastPrice) : null));
+  };
+
+  const handleManualQty = (next: number) => {
+    setManualQtyOverride(true);
+    setQty(next);
+  };
+
+  const handleRiskR = (next: number) => {
+    setManualQtyOverride(false);
+    setRiskR(next);
   };
 
   const submit = useCallback(async () => {
@@ -194,6 +260,15 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
   const stepBtn = 'w-11 h-11 flex-shrink-0 rounded-lg border border-zinc-700 text-zinc-200 text-lg leading-none active:scale-95 transition-transform';
   const fieldCls = 'w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-center font-mono tabular-nums text-sm text-white outline-none focus:border-zinc-600';
 
+  const sliderDisabled = !sizingAvailable;
+  const riskHint = accountEquity == null
+    ? 'Slider risque indisponible (compte non chargé).'
+    : dpp <= 1
+      ? 'Instrument non reconnu — slider risque désactivé.'
+      : slDistance <= 0
+        ? 'Renseignez le SL pour calculer la taille.'
+        : null;
+
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/60" onClick={submitting ? undefined : onClose} />
@@ -245,10 +320,9 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
                   className={`px-3 py-2 text-xs font-medium ${entryType === 'MARKET' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
                 >Marché</button>
               </div>
-              <span className="text-[11px] text-zinc-500 ml-auto">Quantité</span>
-              <button className={stepBtn} onClick={() => setQty(q => Math.max(1, q - 1))} aria-label="Réduire la quantité">−</button>
-              <span className="font-mono tabular-nums text-base font-semibold text-white min-w-[24px] text-center">{qty}</span>
-              <button className={stepBtn} onClick={() => setQty(q => Math.min(10, q + 1))} aria-label="Augmenter la quantité">+</button>
+              <span className="text-[11px] text-zinc-500 ml-auto font-mono tabular-nums">
+                Qté <span className="text-white text-sm font-semibold">{qty}</span>
+              </span>
             </div>
 
             {entryType === 'LIMIT' ? (
@@ -288,6 +362,75 @@ export default function OrderTicketSheet({ open, instrument, lastPrice, brokerAc
                 </div>
               </div>
             </div>
+
+            {/* R-multiples sizing — between entry geometry and the manual qty fallback. */}
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] uppercase tracking-widest text-zinc-500">Taille en risque</span>
+                <span className="font-mono tabular-nums text-sm text-white">{riskR.toFixed(2)}R</span>
+              </div>
+              <input
+                type="range"
+                min={0.25}
+                max={3}
+                step={0.25}
+                value={riskR}
+                onChange={e => handleRiskR(parseFloat(e.target.value))}
+                disabled={sliderDisabled}
+                className={`w-full accent-emerald-500 ${sliderDisabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                aria-label="Taille en R-multiples"
+              />
+              <div className="flex items-center justify-between mt-2 text-[11px] font-mono tabular-nums">
+                <span className="text-red-400">
+                  Risque {sizingAvailable ? `−$${absRiskUsd.toFixed(2)}` : '—'}
+                  {sizingAvailable && (
+                    <span className="text-zinc-500"> ({(RISK_PCT_PER_R * riskR * 100).toFixed(2)}%)</span>
+                  )}
+                </span>
+                {sizingAvailable && targetRatio > 0 ? (
+                  <span className="text-emerald-400">
+                    Cible +${absTargetUsd.toFixed(2)} <span className="text-zinc-500">({targetRatio.toFixed(1)}R)</span>
+                  </span>
+                ) : (
+                  <span className="text-zinc-600">Cible —</span>
+                )}
+              </div>
+              {riskHint && (
+                <p className="text-[11px] text-zinc-500 italic mt-1">{riskHint}</p>
+              )}
+              {manualQtyOverride && sizingAvailable && (
+                <p className="text-[11px] text-amber-400 mt-1">
+                  Quantité manuelle active — le slider ne pilote plus la taille.
+                </p>
+              )}
+            </div>
+
+            {/* Manual qty fallback — collapsed by default, sets manualQtyOverride. */}
+            <details className="mt-2 text-[11px]">
+              <summary className="text-zinc-500 cursor-pointer min-h-[36px] flex items-center select-none">
+                Saisie manuelle
+              </summary>
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-[11px] text-zinc-500">Quantité</span>
+                <button
+                  className={stepBtn}
+                  onClick={() => handleManualQty(Math.max(1, qty - 1))}
+                  aria-label="Réduire la quantité"
+                >−</button>
+                <span className="font-mono tabular-nums text-base font-semibold text-white min-w-[24px] text-center">{qty}</span>
+                <button
+                  className={stepBtn}
+                  onClick={() => handleManualQty(Math.min(10, qty + 1))}
+                  aria-label="Augmenter la quantité"
+                >+</button>
+                {manualQtyOverride && (
+                  <button
+                    className="ml-auto text-[11px] text-emerald-400 underline-offset-2 hover:underline"
+                    onClick={() => setManualQtyOverride(false)}
+                  >Repasser au slider</button>
+                )}
+              </div>
+            </details>
 
             <div className="flex flex-wrap gap-x-4 gap-y-1 bg-zinc-950 rounded-lg px-3 py-2 mt-3">
               <span className="text-[11px] text-zinc-500">
