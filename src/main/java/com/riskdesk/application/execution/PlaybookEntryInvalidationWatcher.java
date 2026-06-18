@@ -21,7 +21,6 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -39,11 +38,12 @@ import java.util.List;
  * (possibly on a reclaim, long after the zone broke) or the user cancels it — diverging from the
  * validated paper behaviour and taking a trade the backtest never took.</p>
  *
- * <p>This scheduler closes that gap. Each tick it scans the resting / just-armed live
- * {@link ExecutionTriggerSource#PLAYBOOK_AUTO} entries that have not yet filled, resolves the
- * originating decision's {@code invalidationPrice}, and — if the live price has breached it —
- * cancels the resting broker order and marks the row {@link ExecutionStatus#CANCELLED}. It only
- * cancels; it never opens or modifies a position.</p>
+ * <p>This scheduler closes that gap. Each tick it scans the resting live
+ * {@link ExecutionTriggerSource#PLAYBOOK_AUTO} entries ({@link ExecutionStatus#ENTRY_SUBMITTED},
+ * not yet filled), resolves the originating decision's {@code invalidationPrice}, and — if a fresh
+ * live price has breached it — cancels the resting broker order and, only once the broker accepts
+ * the cancel, marks the row {@link ExecutionStatus#CANCELLED}. It only cancels; it never opens or
+ * modifies a position.</p>
  *
  * <p><b>Safety.</b> It acts only on rows that (a) carry a broker {@code ibkrOrderId} (something is
  * actually resting), (b) have zero filled quantity, and (c) are still pending after a fresh re-read
@@ -65,6 +65,9 @@ public class PlaybookEntryInvalidationWatcher {
     private static final Logger log = LoggerFactory.getLogger(PlaybookEntryInvalidationWatcher.class);
     private static final String EXECUTIONS_TOPIC = "/topic/executions";
     private static final String LIVE_SOURCE_PREFIX = "LIVE";
+    /** A cancel is irreversible, so only act on a quote no older than this (MarketDataService can
+     *  return a LIVE-sourced cache entry up to 15s old, or any age on an instant-fetch failure). */
+    private static final long MAX_PRICE_AGE_SECONDS = 10;
     private static final int MAX_REASON_LEN = 256;
 
     private final TradeExecutionRepositoryPort executionRepository;
@@ -108,13 +111,15 @@ public class PlaybookEntryInvalidationWatcher {
         }
     }
 
-    /** Resting STOP entries (ENTRY_SUBMITTED) plus armed-but-not-yet-acked (PENDING_ENTRY_SUBMISSION). */
+    /**
+     * Resting STOP entries — status {@link ExecutionStatus#ENTRY_SUBMITTED}. A
+     * {@code PENDING_ENTRY_SUBMISSION} row is deliberately excluded: {@code routeLive} sets the
+     * broker {@code ibkrOrderId} only at the same instant it leaves that state, so such a row has
+     * nothing resting at the broker to cancel ({@code evaluateOne} would skip it anyway).
+     */
     private List<TradeExecutionRecord> pendingLivePlaybookEntries() {
-        List<TradeExecutionRecord> out = new ArrayList<>(executionRepository.findByTriggerSourceAndStatus(
-            ExecutionTriggerSource.PLAYBOOK_AUTO, ExecutionStatus.ENTRY_SUBMITTED));
-        out.addAll(executionRepository.findByTriggerSourceAndStatus(
-            ExecutionTriggerSource.PLAYBOOK_AUTO, ExecutionStatus.PENDING_ENTRY_SUBMISSION));
-        return out;
+        return executionRepository.findByTriggerSourceAndStatus(
+            ExecutionTriggerSource.PLAYBOOK_AUTO, ExecutionStatus.ENTRY_SUBMITTED);
     }
 
     private void evaluateOne(TradeExecutionRecord row) {
@@ -137,22 +142,39 @@ public class PlaybookEntryInvalidationWatcher {
         } catch (IllegalArgumentException | NullPointerException e) {
             return;
         }
+        Boolean shortSide = resolveShortSide(row.getAction());
+        if (shortSide == null) {
+            return; // unrecognized action — never cancel on a guessed direction
+        }
         BigDecimal price = livePrice(instrument);
         if (price == null) {
             return; // no fresh live price — never cancel on stale/unknown data
         }
-        if (!breached(row.getAction(), price, decision.invalidationPrice())) {
+        if (!breached(shortSide, price, decision.invalidationPrice())) {
             return;
         }
         cancelInvalidated(row, decision, price, orderId);
+    }
+
+    /** TRUE for a short, FALSE for a long, {@code null} for any action we don't recognize. */
+    private static Boolean resolveShortSide(String action) {
+        if (action == null) {
+            return null;
+        }
+        if ("SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action)) {
+            return Boolean.TRUE;
+        }
+        if ("LONG".equalsIgnoreCase(action) || "BUY".equalsIgnoreCase(action)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     /**
      * SHORT is invalidated when price rises to/through the level (zoneHigh + 0.5×ATR); LONG when it
      * falls to/through the level (zoneLow − 0.5×ATR). Mirrors {@code TradeSimulationService.touchesInvalidation}.
      */
-    private static boolean breached(String action, BigDecimal price, BigDecimal invalidation) {
-        boolean isShort = "SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action);
+    private static boolean breached(boolean isShort, BigDecimal price, BigDecimal invalidation) {
         return isShort
             ? price.compareTo(invalidation) >= 0
             : price.compareTo(invalidation) <= 0;
@@ -165,14 +187,23 @@ public class PlaybookEntryInvalidationWatcher {
         try {
             ibkrOrderService.cancelOrder(orderId);
         } catch (RuntimeException e) {
-            // Cancel may fail if the order just triggered/filled or the gateway hiccupped. Don't write
-            // CANCELLED on a failed cancel — re-read below decides, and a later tick retries.
-            log.warn("PLAYBOOK invalidation-watch: cancelOrder({}) failed for row {} — {}",
-                orderId, row.getId(), e.getMessage());
+            // The cancel did NOT go through: either the order just triggered/filled (an "already
+            // filled" reject) or the gateway hiccupped (order still resting). Do NOT mark the row
+            // CANCELLED — that would desync app state from a broker order that may still be working,
+            // and CANCELLED is terminal so the watcher would never retry. Return and let a later tick
+            // retry the actual cancel (the already-filled case self-heals once the fill callback lands).
+            log.warn("PLAYBOOK invalidation-watch: cancelOrder({}) failed for row {} — not cancelling, "
+                + "will retry next tick: {}", orderId, row.getId(), e.getMessage());
+            return;
         }
-        // Re-read immediately before the terminal write: a fill that raced in between the price read and
-        // the cancel must win — the position is real, so leave the row for the fill tracker (ACTIVE).
-        TradeExecutionRecord fresh = executionRepository.findById(row.getId()).orElse(row);
+        // Cancel accepted by the broker. Re-read before the terminal write: a fill that raced in just
+        // before the cancel must win — the position is real, so leave the row for the fill tracker.
+        TradeExecutionRecord fresh = executionRepository.findById(row.getId()).orElse(null);
+        if (fresh == null) {
+            // Can't confirm the row's current state — never write CANCELLED blind on the stale snapshot.
+            log.warn("PLAYBOOK invalidation-watch: row {} not found on re-read — not cancelling", row.getId());
+            return;
+        }
         if (!isPending(fresh.getStatus()) || hasFill(fresh)) {
             log.warn("PLAYBOOK invalidation-watch: row {} raced to {} (filledQty={}) — not cancelling",
                 fresh.getId(), fresh.getStatus(), fresh.getFilledQuantity());
@@ -206,12 +237,18 @@ public class PlaybookEntryInvalidationWatcher {
         if (source == null || !source.startsWith(LIVE_SOURCE_PREFIX)) {
             return null;
         }
+        // …and a genuinely fresh one. currentPrice returns a LIVE-sourced cache entry up to ~15s old
+        // (and any age on an instant-fetch failure); acting on that could cancel on a price the market
+        // has already moved away from. The source string alone is not a freshness guarantee.
+        Instant timestamp = stored.timestamp();
+        if (timestamp == null || timestamp.isBefore(Instant.now().minusSeconds(MAX_PRICE_AGE_SECONDS))) {
+            return null;
+        }
         return stored.price();
     }
 
     private static boolean isPending(ExecutionStatus status) {
-        return status == ExecutionStatus.ENTRY_SUBMITTED
-            || status == ExecutionStatus.PENDING_ENTRY_SUBMISSION;
+        return status == ExecutionStatus.ENTRY_SUBMITTED;
     }
 
     private static boolean hasFill(TradeExecutionRecord row) {

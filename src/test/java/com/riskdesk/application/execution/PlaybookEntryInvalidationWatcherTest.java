@@ -22,6 +22,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -67,10 +68,6 @@ class PlaybookEntryInvalidationWatcherTest {
         watcher = new PlaybookEntryInvalidationWatcher(repo, decisions, orderService, props, mdp, msgp, true);
 
         lenient().when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        // by default no PENDING_ENTRY_SUBMISSION rows; tests stub ENTRY_SUBMITTED as needed
-        lenient().when(repo.findByTriggerSourceAndStatus(
-            ExecutionTriggerSource.PLAYBOOK_AUTO, ExecutionStatus.PENDING_ENTRY_SUBMISSION))
-            .thenReturn(List.of());
     }
 
     private TradeExecutionRecord restingShort() {
@@ -100,8 +97,9 @@ class PlaybookEntryInvalidationWatcherTest {
     }
 
     private void liveQuote(String price) {
+        // a fresh tick — the watcher rejects quotes older than MAX_PRICE_AGE_SECONDS
         when(marketData.currentPrice(Instrument.MNQ))
-            .thenReturn(new MarketDataService.StoredPrice(new BigDecimal(price), TS, "LIVE_IBKR"));
+            .thenReturn(new MarketDataService.StoredPrice(new BigDecimal(price), Instant.now(), "LIVE_IBKR"));
     }
 
     private void onlyResting(TradeExecutionRecord row) {
@@ -210,6 +208,65 @@ class PlaybookEntryInvalidationWatcherTest {
 
         verify(orderService, never()).cancelOrder(anyInt());
         assertThat(row.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void stalePriceSource_neverCancels() {
+        TradeExecutionRecord row = restingShort();
+        onlyResting(row);
+        when(decisions.findByDecisionKey(KEY)).thenReturn(Optional.of(stopDecision("SHORT", "30543.00")));
+        // LIVE source but the quote is older than MAX_PRICE_AGE_SECONDS — the market may have moved on
+        when(marketData.currentPrice(Instrument.MNQ)).thenReturn(new MarketDataService.StoredPrice(
+            new BigDecimal("30545.00"), Instant.now().minusSeconds(30), "LIVE_IBKR"));
+
+        watcher.cancelInvalidatedEntries();
+
+        verify(orderService, never()).cancelOrder(anyInt());
+        assertThat(row.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED);
+    }
+
+    @Test
+    void failedCancel_doesNotMarkCancelled_andWillRetry() {
+        TradeExecutionRecord row = restingShort();
+        onlyResting(row);
+        when(decisions.findByDecisionKey(KEY)).thenReturn(Optional.of(stopDecision("SHORT", "30543.00")));
+        liveQuote("30545.00");
+        // gateway hiccup / already-filled reject — the cancel did NOT go through
+        when(orderService.cancelOrder(4242)).thenThrow(new RuntimeException("IBKR 161: order already filled"));
+
+        watcher.cancelInvalidatedEntries();
+
+        verify(orderService).cancelOrder(4242);
+        assertThat(row.getStatus()).isEqualTo(ExecutionStatus.ENTRY_SUBMITTED); // NOT CANCELLED — broker may still hold it
+        verify(repo, never()).save(any());
+        verify(repo, never()).findById(anyLong()); // returned before the re-read/terminal write
+    }
+
+    @Test
+    void rowNotFoundOnReread_doesNotWriteCancelledBlind() {
+        TradeExecutionRecord row = restingShort();
+        onlyResting(row);
+        when(decisions.findByDecisionKey(KEY)).thenReturn(Optional.of(stopDecision("SHORT", "30543.00")));
+        when(repo.findById(7L)).thenReturn(Optional.empty()); // can't confirm current state
+        liveQuote("30545.00");
+
+        watcher.cancelInvalidatedEntries();
+
+        verify(orderService).cancelOrder(4242);
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void unrecognizedAction_isSkipped() {
+        TradeExecutionRecord row = restingShort();
+        row.setAction("FLATTEN"); // neither LONG/BUY nor SHORT/SELL
+        onlyResting(row);
+        when(decisions.findByDecisionKey(KEY)).thenReturn(Optional.of(stopDecision("SHORT", "30543.00")));
+        liveQuote("30545.00");
+
+        watcher.cancelInvalidatedEntries();
+
+        verify(orderService, never()).cancelOrder(anyInt());
     }
 
     @Test

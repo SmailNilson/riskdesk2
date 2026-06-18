@@ -23,10 +23,21 @@ order (`ibkrOrderService.cancelOrder`) and marks the row `CANCELLED`. It only ca
 or modifies a position.
 
 - **Safety gates:** acts only when a broker `ibkrOrderId` exists (something is actually resting),
-  filled qty is 0, and the row is *still* pending after a fresh re-read immediately before the
-  terminal write — so a fill that races in wins and is left ACTIVE for the fill tracker. The broker
-  `Cancelled` callback that follows is idempotent (`ExecutionFillTrackingService` guards on status).
-  Only acts on a `LIVE*` price source (never cancels on CACHE/FALLBACK_DB).
+  filled qty is 0, and the row is *still* `ENTRY_SUBMITTED` after a fresh re-read immediately before
+  the terminal write — so a fill that races in wins and is left ACTIVE for the fill tracker
+  (the row carries `@Version`, so a concurrent fill that commits makes the watcher's save fail-fast
+  rather than clobber). The broker `Cancelled` callback that follows is idempotent
+  (`ExecutionFillTrackingService` guards on status).
+- **Cancel-failure handling (review hardening):** if `cancelOrder` throws (already-filled reject or
+  gateway hiccup), the watcher does **not** write `CANCELLED` — that would desync app state from an
+  order still working at the broker, and `CANCELLED` is terminal so it'd never retry. It returns and
+  a later tick retries (the already-filled case self-heals once the fill callback lands). Likewise a
+  `findById` miss on re-read returns rather than writing blind on the stale snapshot.
+- **Price freshness (review hardening):** only acts on a `LIVE*` source **and** a quote no older than
+  `MAX_PRICE_AGE_SECONDS` (10s) — `MarketDataService.currentPrice` can return a LIVE-sourced cache
+  entry up to ~15s old (any age on instant-fetch failure), and cancelling on a price the market has
+  moved away from would drop a valid setup (the non-conservative direction). Unrecognized `action`
+  values are skipped rather than defaulting to a guessed side.
 - **Config:** `riskdesk.playbook.invalidation-watch.{enabled=true,interval-ms=3000}`. Inert unless
   Auto-IBKR routed a live row (paper-only sims are unaffected — they're handled by the sim engine).
 - **Residual paper/live gap (documented, not a bug):** the sim tests the level against candle
