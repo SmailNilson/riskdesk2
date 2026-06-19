@@ -306,6 +306,17 @@ public class ActivePositionsService {
                 publishSafely(changeEvent(refreshed, now));
                 return Optional.of(view(refreshed));
             }
+            case SKIPPED_IBKR_DISABLED -> {
+                // IBKR-less env (paper / tests): degrade like closePosition rather than a confusing 409 — mark
+                // the exit locally (the open-opposite leg can't happen without a broker).
+                exec.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+                exec.setStatusReason("Reverse requested by " + who + " (IBKR disabled — local close mark only).");
+                exec.setExitSubmittedAt(now);
+                exec.setUpdatedAt(now);
+                TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+                publishSafely(changeEvent(saved, now));
+                return Optional.of(view(saved));
+            }
             case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
                 "entry order not (fully) filled — cancel the entry instead of reversing: " + result.message());
             default -> throw new IllegalStateException(
@@ -349,8 +360,16 @@ public class ActivePositionsService {
         }
         int positionQty = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
         if (qty >= positionQty) {
-            // Reducing the whole position (or more) is a full close — reuse the flatten path.
+            // Reducing the whole position (or more) is a full close — reuse the flatten path (allowed for any
+            // source, exactly like the "Fermer" button is a manual override that can flatten anything).
             return closePosition(executionId, requestedBy);
+        }
+        // A TRUE partial scale-out is a manual chart feature. A strategy (WTX / playbook / auto-arm) manages its
+        // own sizing; a partial reduce here would desync it and overwrite the entry fill metadata its reconciler
+        // reads back as the position basis. Refuse non-manual rows (a full close above stays available).
+        if (exec.getTriggerSource() != ExecutionTriggerSource.MANUAL_QUANT_PANEL) {
+            throw new IllegalStateException("execution " + executionId + " is " + exec.getTriggerSource()
+                + " — partial scale-out is only available for manual chart positions");
         }
 
         Instrument instrument = parseInstrument(exec.getInstrument());
@@ -371,6 +390,15 @@ public class ActivePositionsService {
                 TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
                 publishSafely(changeEvent(refreshed, now));
                 return Optional.of(view(refreshed));
+            }
+            case SKIPPED_IBKR_DISABLED -> {
+                // IBKR-less env: a partial reduce needs a broker fill to be real — there is nothing to decrement
+                // locally. Return the unchanged position (with a note) rather than a confusing 409.
+                exec.setStatusReason("Reduce requested by " + who + " (IBKR disabled — no-op, position unchanged).");
+                exec.setUpdatedAt(now);
+                TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+                publishSafely(changeEvent(saved, now));
+                return Optional.of(view(saved));
             }
             case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
                 "entry order not (fully) filled — cancel the entry instead of reducing: " + result.message());
@@ -408,31 +436,44 @@ public class ActivePositionsService {
             throw new IllegalStateException("execution " + executionId + " is " + current
                 + " — cannot modify protection on a terminal position");
         }
+        // Chart drag-to-edit owns the VIRTUAL SL/TP for MANUAL positions only. Strategy rows (WTX / playbook /
+        // auto-arm) store their OWN protective / trailing levels in these same fields and their reconcilers read
+        // them back — letting the chart overwrite them would corrupt live strategy state. Refuse non-manual rows.
+        if (exec.getTriggerSource() != ExecutionTriggerSource.MANUAL_QUANT_PANEL) {
+            throw new IllegalStateException("execution " + executionId + " is " + exec.getTriggerSource()
+                + " — SL/TP can only be edited on a manual chart position");
+        }
 
+        Instrument instrument = parseInstrument(exec.getInstrument());
         BigDecimal ref = exec.getNormalizedEntryPrice();
         boolean shortSide = "SHORT".equalsIgnoreCase(exec.getAction()) || "SELL".equalsIgnoreCase(exec.getAction());
+        // Normalize to the contract tick BEFORE validating geometry. Validating the raw value then storing the
+        // rounded one (HALF_UP) could snap a just-inside level ONTO the entry — e.g. MNQ entry 27000.00, SL
+        // 26999.90 passes "< entry" but rounds to 27000.00 == entry — silently defeating the side check and
+        // leaving the position with no protection (an immediate breach once the watcher is on).
+        BigDecimal sl = stopLoss == null ? null : normalizeTick(stopLoss, instrument);
+        BigDecimal tp = takeProfit == null ? null : normalizeTick(takeProfit, instrument);
         if (ref != null && ref.signum() > 0) {
-            if (stopLoss != null && !shortSide && stopLoss.compareTo(ref) >= 0) {
+            if (sl != null && !shortSide && sl.compareTo(ref) >= 0) {
                 throw new IllegalArgumentException("LONG stopLoss must be below the entry " + ref);
             }
-            if (stopLoss != null && shortSide && stopLoss.compareTo(ref) <= 0) {
+            if (sl != null && shortSide && sl.compareTo(ref) <= 0) {
                 throw new IllegalArgumentException("SHORT stopLoss must be above the entry " + ref);
             }
-            if (takeProfit != null && !shortSide && takeProfit.compareTo(ref) <= 0) {
+            if (tp != null && !shortSide && tp.compareTo(ref) <= 0) {
                 throw new IllegalArgumentException("LONG takeProfit must be above the entry " + ref);
             }
-            if (takeProfit != null && shortSide && takeProfit.compareTo(ref) >= 0) {
+            if (tp != null && shortSide && tp.compareTo(ref) >= 0) {
                 throw new IllegalArgumentException("SHORT takeProfit must be below the entry " + ref);
             }
         }
 
-        Instrument instrument = parseInstrument(exec.getInstrument());
         Instant now = clock.instant();
-        if (stopLoss != null) {
-            exec.setVirtualStopLoss(normalizeTick(stopLoss, instrument));
+        if (sl != null) {
+            exec.setVirtualStopLoss(sl);
         }
-        if (takeProfit != null) {
-            exec.setVirtualTakeProfit(normalizeTick(takeProfit, instrument));
+        if (tp != null) {
+            exec.setVirtualTakeProfit(tp);
         }
         exec.setUpdatedAt(now);
         TradeExecutionRecord saved = tradeExecutionRepository.save(exec);

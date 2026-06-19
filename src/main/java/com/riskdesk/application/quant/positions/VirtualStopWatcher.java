@@ -1,10 +1,12 @@
 package com.riskdesk.application.quant.positions;
 
+import com.riskdesk.application.marketdata.LivePriceSource;
 import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.model.TradeExecutionRecord;
+import com.riskdesk.domain.quant.model.LivePriceSnapshot;
 import com.riskdesk.domain.quant.port.LivePricePort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -33,6 +36,9 @@ import java.util.List;
 public class VirtualStopWatcher {
 
     private static final Logger log = LoggerFactory.getLogger(VirtualStopWatcher.class);
+
+    /** Max quote age for an auto-close decision (mirrors {@code PlaybookEntryInvalidationWatcher}). */
+    private static final long MAX_PRICE_AGE_SECONDS = 10;
 
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final LivePricePort livePricePort;
@@ -88,6 +94,7 @@ public class VirtualStopWatcher {
         Instrument instrument = parseInstrument(row.getInstrument());
         if (instrument == null) return null;
         BigDecimal live = livePricePort.current(instrument)
+            .filter(VirtualStopWatcher::isActionable)
             .map(snap -> BigDecimal.valueOf(snap.price()))
             .orElse(null);
         if (live == null || live.signum() <= 0) return null;
@@ -101,6 +108,21 @@ public class VirtualStopWatcher {
             if (tp != null && live.compareTo(tp) >= 0) return "TP";
         }
         return null;
+    }
+
+    /**
+     * Auto-close is IRREVERSIBLE, so only act on a GENUINELY LIVE and FRESH quote — never a stale cache
+     * ({@code CACHE} / {@code FALLBACK_DB}) nor a LIVE-sourced cache entry the market has already moved past.
+     * Mirrors {@code PlaybookEntryInvalidationWatcher}'s guard for its equally-irreversible cancel: require a
+     * live source AND a timestamp within {@link #MAX_PRICE_AGE_SECONDS}. Without this, a momentarily stale tick
+     * beyond the virtual SL/TP would flatten a healthy position.
+     */
+    private static boolean isActionable(LivePriceSnapshot snap) {
+        if (snap == null || !LivePriceSource.isLive(snap.source())) {
+            return false;
+        }
+        Instant ts = snap.timestamp();
+        return ts != null && ts.isAfter(Instant.now().minusSeconds(MAX_PRICE_AGE_SECONDS));
     }
 
     private static Instrument parseInstrument(String name) {

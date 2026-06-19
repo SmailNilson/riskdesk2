@@ -291,9 +291,10 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
     [positions, selectedInstrument],
   );
 
-  /** The single broker-live position on this instrument — target of the chart "move SL/TP here" menu. */
+  /** The live MANUAL position on this instrument — target of the chart "move SL/TP here" menu. Strategy rows
+   *  (WTX / playbook / auto-arm) own their SL/TP via their own reconcilers and must not be retargeted here. */
   const activePosition = useMemo(
-    () => openPositions.find(p => p.status === 'ACTIVE') ?? null,
+    () => openPositions.find(p => p.status === 'ACTIVE' && p.triggerSource === 'MANUAL_QUANT_PANEL') ?? null,
     [openPositions],
   );
 
@@ -737,7 +738,9 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
             const confirmingReverse = confirmAction?.id === p.executionId && confirmAction.action === 'reverse';
             const confirmingClose = confirmAction?.id === p.executionId && confirmAction.action === 'close';
             const confirmingReduce = confirmAction?.id === p.executionId && confirmAction.action === 'reduce';
-            const canScaleOut = p.status === 'ACTIVE' && (p.quantity ?? 1) >= 2;
+            // Partial scale-out is a manual-chart feature only — the backend refuses it on strategy rows.
+            const canScaleOut = p.status === 'ACTIVE' && (p.quantity ?? 1) >= 2
+              && p.triggerSource === 'MANUAL_QUANT_PANEL';
             return (
               <div key={p.executionId} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${

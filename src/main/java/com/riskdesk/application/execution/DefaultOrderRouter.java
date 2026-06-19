@@ -826,6 +826,12 @@ public class DefaultOrderRouter implements OrderRouter {
                 if (partial) {
                     // Resting reduce — remember the close size so the fill tracker decrements on its fill.
                     row.setClosingQuantity(qty);
+                } else {
+                    // FULL close / flatten / reverse-close — the entire remaining position is leaving. Clear any
+                    // STALE reduce marker left by a prior unfilled REDUCE on this row: otherwise, when this full
+                    // close fills, the fill tracker sees closingQuantity < quantity, mis-reads the full close as a
+                    // partial, decrements and revives the row to ACTIVE — a phantom position over a flat broker.
+                    row.setClosingQuantity(null);
                 }
             }
             row.setIbkrOrderId(toIbkrOrderId(sub.brokerOrderId()));
@@ -855,6 +861,9 @@ public class DefaultOrderRouter implements OrderRouter {
                 if (remainAfterReduce != null && remainAfterReduce > 0) {
                     // A resting partial reduce — the fill tracker decrements on its fill.
                     row.setClosingQuantity(qty);
+                } else {
+                    // Full close re-fired on a late ack — clear any stale reduce marker (see the sync branch).
+                    row.setClosingQuantity(null);
                 }
             }
             // else: REJECTED / CANCELLED / timed-out-without-id — even if IBKR allocated an order id it is

@@ -1417,4 +1417,24 @@ class DefaultOrderRouterTest {
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
         assertThat(cap.getValue().getClosingQuantity()).isNull();
     }
+
+    @Test
+    void close_refireClearsStaleClosingQuantityFromPriorReduce() {
+        // A prior partial REDUCE stamped closingQuantity then got stuck (dropped ack). A full close re-fired over
+        // the same stuck row MUST clear closingQuantity — otherwise the later full-close fill is mis-read as a
+        // partial (closingQuantity < quantity) and the row is wrongly revived to ACTIVE (phantom over a flat broker).
+        TradeExecutionRecord stuck = exitSubmittedRow(120); // EXIT_SUBMITTED past grace, action LONG, qty 2
+        stuck.setClosingQuantity(1);                         // stale marker left by the earlier reduce
+        stubActive(stuck);
+        stubBroker("2");                                     // IBKR still holds long 2 → stuck-close re-fire
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(961L, "Filled"));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        assertThat(cap.getValue().getClosingQuantity()).isNull(); // stale marker cleared on the full close
+    }
 }

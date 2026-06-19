@@ -401,6 +401,7 @@ class ActivePositionsServiceTest {
     void modify_protection_updates_both_levels_and_publishes() {
         TradeExecutionRecord active = makeRecord(40L, "MNQ", "BUY", new BigDecimal("27000"));
         active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
         when(repo.findByIdForUpdate(40L)).thenReturn(Optional.of(active));
         when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -417,6 +418,7 @@ class ActivePositionsServiceTest {
     void modify_protection_long_sl_above_entry_throws() {
         TradeExecutionRecord active = makeRecord(41L, "MNQ", "BUY", new BigDecimal("27000"));
         active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
         when(repo.findByIdForUpdate(41L)).thenReturn(Optional.of(active));
 
         assertThatThrownBy(() -> service.modifyProtection(41L, new BigDecimal("27050"), null, "operator"))
@@ -429,6 +431,7 @@ class ActivePositionsServiceTest {
     void modify_protection_updates_only_take_profit_when_sl_null() {
         TradeExecutionRecord active = makeRecord(42L, "MNQ", "BUY", new BigDecimal("27000"));
         active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
         when(repo.findByIdForUpdate(42L)).thenReturn(Optional.of(active));
         when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -460,6 +463,7 @@ class ActivePositionsServiceTest {
     void reduce_partial_routes_reduce_intent_for_held_side() {
         TradeExecutionRecord active = makeRecord(50L, "MNQ", "BUY", new BigDecimal("27000"));
         active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
         active.setQuantity(3);
         when(repo.findByIdForUpdate(50L)).thenReturn(Optional.of(active));
         when(livePricePort.current(Instrument.MNQ))
@@ -515,6 +519,84 @@ class ActivePositionsServiceTest {
         assertThatThrownBy(() -> service.reducePosition(53L, 0, "operator"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("reduce quantity must be >= 1");
+    }
+
+    @Test
+    void modify_protection_refuses_strategy_owned_row() {
+        // A strategy (WTX/auto-arm/playbook) stores its OWN trailing SL/TP in these fields — the chart must
+        // not overwrite them. makeRecord defaults to QUANT_AUTO_ARM (a strategy source).
+        TradeExecutionRecord strategy = makeRecord(60L, "MNQ", "BUY", new BigDecimal("27000"));
+        strategy.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(60L)).thenReturn(Optional.of(strategy));
+
+        assertThatThrownBy(() -> service.modifyProtection(60L, new BigDecimal("26950"), null, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("manual chart position");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void modify_protection_rejects_stop_loss_that_rounds_onto_entry() {
+        // MNQ tick 0.25, entry 27000.00. SL 26999.90 passes a raw "< entry" check but normalizes (HALF_UP) to
+        // 27000.00 == entry — the geometry check must run on the NORMALIZED value and reject it.
+        TradeExecutionRecord active = makeRecord(61L, "MNQ", "BUY", new BigDecimal("27000.00"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        when(repo.findByIdForUpdate(61L)).thenReturn(Optional.of(active));
+
+        assertThatThrownBy(() -> service.modifyProtection(61L, new BigDecimal("26999.90"), null, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("LONG stopLoss must be below");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void reduce_partial_refuses_strategy_owned_row() {
+        // A partial scale-out on a strategy row would desync it — only a full close is allowed as an override.
+        TradeExecutionRecord strategy = makeRecord(62L, "MNQ", "BUY", new BigDecimal("27000"));
+        strategy.setStatus(ExecutionStatus.ACTIVE);
+        strategy.setQuantity(3);
+        when(repo.findByIdForUpdate(62L)).thenReturn(Optional.of(strategy));
+
+        assertThatThrownBy(() -> service.reducePosition(62L, 1, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("manual chart position");
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reverse_falls_back_to_local_mark_when_ibkr_disabled() {
+        TradeExecutionRecord active = makeRecord(63L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(63L)).thenReturn(Optional.of(active));
+        when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED, "IBKR off"));
+
+        Optional<ActivePositionView> result = service.reversePosition(63L, "operator");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().status()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(active.getStatusReason()).contains("IBKR disabled");
+    }
+
+    @Test
+    void reduce_partial_is_noop_when_ibkr_disabled() {
+        TradeExecutionRecord active = makeRecord(64L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        active.setQuantity(3);
+        when(repo.findByIdForUpdate(64L)).thenReturn(Optional.of(active));
+        when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.of(RoutingOutcome.SKIPPED_IBKR_DISABLED, "IBKR off"));
+
+        Optional<ActivePositionView> result = service.reducePosition(64L, 1, "operator");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().status()).isEqualTo(ExecutionStatus.ACTIVE); // unchanged — no broker, no fill
+        assertThat(active.getQuantity()).isEqualTo(3);
+        assertThat(active.getStatusReason()).contains("IBKR disabled");
     }
 
     private static TradeExecutionRecord makeRecord(long id, String instrument, String action, BigDecimal entry) {
