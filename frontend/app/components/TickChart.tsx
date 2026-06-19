@@ -174,7 +174,7 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  */
 function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartProps) {
   const { tickBars, tickBarResets } = useOrderFlow();
-  const { positions, close, cancelEntry, reverse, refresh } = useActivePositions();
+  const { positions, close, cancelEntry, reverse, modifyProtection, refresh } = useActivePositions();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -289,6 +289,12 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
   const openPositions = useMemo(
     () => positions.filter(p => p.instrument === selectedInstrument && !TERMINAL_STATUSES.has(p.status)),
     [positions, selectedInstrument],
+  );
+
+  /** The single broker-live position on this instrument — target of the chart "move SL/TP here" menu. */
+  const activePosition = useMemo(
+    () => openPositions.find(p => p.status === 'ACTIVE') ?? null,
+    [openPositions],
   );
 
   // Chart lifecycle
@@ -503,6 +509,31 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
     void refresh();
   }, [confirmAction, cancelEntry, close, reverse, refresh]);
 
+  /** Move the live position's virtual SL or TP to the clicked price. Pre-checks the side so a
+   *  wrong-side click gives instant feedback instead of a backend 400 round-trip. */
+  const handleMoveProtection = useCallback(async (p: ActivePositionView, kind: 'sl' | 'tp', price: number) => {
+    setMenu(null);
+    const entry = num(p.entryPrice);
+    const long = p.direction === 'LONG';
+    if (entry != null) {
+      const wrong = kind === 'sl'
+        ? (long ? price >= entry : price <= entry)
+        : (long ? price <= entry : price >= entry);
+      if (wrong) {
+        setNotice({ kind: 'err', text: kind === 'sl'
+          ? `SL doit être ${long ? 'sous' : 'au-dessus de'} l'entrée`
+          : `TP doit être ${long ? 'au-dessus de' : 'sous'} l'entrée` });
+        return;
+      }
+    }
+    const result = await modifyProtection(p.executionId, kind === 'sl' ? { stopLoss: price } : { takeProfit: price });
+    const label = kind === 'sl' ? 'SL' : 'TP';
+    setNotice(result
+      ? { kind: 'ok', text: `${label} déplacé à ${price.toFixed(meta?.decimals ?? 2)}` }
+      : { kind: 'err', text: `Déplacement ${label} refusé` });
+    void refresh();
+  }, [modifyProtection, refresh, meta]);
+
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/60">
@@ -624,6 +655,25 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
               >
                 Vendre MKT <span className="text-zinc-500">· au marché</span>
               </button>
+              {activePosition && (
+                <>
+                  <div className="px-3 py-1 text-[10px] text-zinc-500 bg-zinc-800/50 border-t border-zinc-800">
+                    POSITION {activePosition.direction} {activePosition.quantity ?? 1}
+                  </div>
+                  <button
+                    className="block w-full text-left px-3 py-1.5 text-sky-300 hover:bg-sky-900/40 border-t border-zinc-800"
+                    onClick={() => void handleMoveProtection(activePosition, 'sl', menu.price)}
+                  >
+                    Déplacer SL ici @ {menu.price.toFixed(meta.decimals)}
+                  </button>
+                  <button
+                    className="block w-full text-left px-3 py-1.5 text-sky-300 hover:bg-sky-900/40 border-t border-zinc-800"
+                    onClick={() => void handleMoveProtection(activePosition, 'tp', menu.price)}
+                  >
+                    Déplacer TP ici @ {menu.price.toFixed(meta.decimals)}
+                  </button>
+                </>
+              )}
               <button
                 className="block w-full text-left px-3 py-1 text-zinc-500 hover:text-zinc-300 border-t border-zinc-800"
                 onClick={() => setMenu(null)}

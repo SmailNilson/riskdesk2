@@ -32,6 +32,11 @@ export interface UseActivePositionsResult {
   cancelEntry: (executionId: number) => Promise<ActivePositionView | null>;
   /** Flips a live position to the opposite side at the same size (REVERSE intent). */
   reverse: (executionId: number) => Promise<ActivePositionView | null>;
+  /** Moves the virtual SL and/or TP of a non-terminal position (no broker order). */
+  modifyProtection: (
+    executionId: number,
+    body: { stopLoss?: number; takeProfit?: number },
+  ) => Promise<ActivePositionView | null>;
   /** Forces a REST refresh — useful after a manual action that the WS may not echo immediately. */
   refresh: () => Promise<void>;
   /** True when the STOMP connection is up. */
@@ -172,5 +177,25 @@ export function useActivePositions(): UseActivePositionsResult {
     []
   );
 
-  return { positions, loading, error, close, cancelEntry, reverse, refresh, connected };
+  const modifyProtection = useCallback(
+    async (
+      executionId: number,
+      body: { stopLoss?: number; takeProfit?: number },
+    ): Promise<ActivePositionView | null> => {
+      try {
+        const result = await api.modifyProtectionActivePosition(executionId, body);
+        setPositions((prev) =>
+          prev.map((p) => (p.executionId === executionId ? result : p))
+        );
+        return result;
+      } catch (err) {
+        console.warn('modifyProtectionActivePosition failed', err);
+        setError(err instanceof Error ? err.message : 'modify failed');
+        return null;
+      }
+    },
+    []
+  );
+
+  return { positions, loading, error, close, cancelEntry, reverse, modifyProtection, refresh, connected };
 }
