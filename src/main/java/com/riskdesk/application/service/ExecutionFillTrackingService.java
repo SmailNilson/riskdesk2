@@ -206,10 +206,9 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                 || IBKR_STATUS_INACTIVE.equalsIgnoreCase(status))
             && execution.getStatus() != ExecutionStatus.CANCELLED
             && execution.getStatus() != ExecutionStatus.CLOSED) {
-            // Only act when nothing has been filled — a partial fill followed by a cancel leaves the
-            // position open and is handled in 3c.
-            if (execution.getFilledQuantity() == null
-                || execution.getFilledQuantity().signum() == 0) {
+            boolean nothingFilled = execution.getFilledQuantity() == null
+                || execution.getFilledQuantity().signum() == 0;
+            if (nothingFilled) {
                 if (execution.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
                     // A CLOSE/exit order that cancelled WITHOUT a fill did NOT flatten — the position is
                     // still live. Revive the row to ACTIVE (not CANCELLED) so it stays managed; otherwise
@@ -232,7 +231,39 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                     execution.setStatusReason("IBKR order " + status);
                 }
                 dirty = true;
+            } else if (execution.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                // Slice 3c — a close/reduce leg PARTIALLY filled then cancelled (cumulative filled > 0). The
+                // filled contracts LEFT the position; the remainder is STILL LIVE. The `filled` we received IS
+                // broker truth for how much of this leg executed, so decrement the row's quantity by it (the
+                // quantity stays the FULL pre-exit size while EXIT_SUBMITTED, for both a full close and a reduce)
+                // and revive to ACTIVE — or finalize CLOSED if the partial actually covered the whole position.
+                // Without this the row stays stuck EXIT_SUBMITTED with a now-wrong quantity (and, for a reduce, a
+                // stale closingQuantity) while the broker holds a different size. Detach BOTH dead ids so a
+                // replayed cancel can't re-target the revived row (same reasoning as the no-fill revive above).
+                int filledQty = execution.getFilledQuantity().intValue();
+                int rowQty = execution.getQuantity() != null ? execution.getQuantity() : 0;
+                int remainder = rowQty - filledQty;
+                execution.setClosingQuantity(null);
+                execution.setIbkrOrderId(null);
+                execution.setPermId(null);
+                if (remainder > 0) {
+                    execution.setQuantity(remainder);
+                    execution.setStatus(ExecutionStatus.ACTIVE);
+                    execution.setStatusReason("IBKR close " + status + " after partial fill " + filledQty
+                        + " — position still live, reduced to " + remainder);
+                } else {
+                    // filled >= quantity — the partial fill(s) actually covered the position: it is flat now.
+                    execution.setStatus(ExecutionStatus.CLOSED);
+                    execution.setStatusReason("IBKR close " + status + " after fill " + filledQty
+                        + " covered the position — closed");
+                    if (execution.getClosedAt() == null) {
+                        execution.setClosedAt(lastFillTime == null ? Instant.now() : lastFillTime);
+                    }
+                }
+                dirty = true;
             }
+            // else: a non-exit (entry) order partially filled then cancelled leaves a partly-OPEN position —
+            // out of scope here (entry partial-fill reconciliation is separate); left unchanged.
         }
 
         if (!dirty) {
