@@ -98,6 +98,34 @@ class IbGatewayNativeClientReadOnlyTest {
         assertThat(new IbkrProperties().isOutsideRth()).isTrue();
     }
 
+    // ---- cancel error-code classification: warnings must NOT fail a cancel -------------------
+    // cancelOrderById only fails a cancel on a GENUINE order-error code; IBKR informational / warning
+    // messages on the order channel (399 order warning, farm-connection notices, the 2100-band) must be
+    // ignored so a cancellable resting order is not wrongly refused ("Annulation refusée"). The cancel
+    // submission itself is integration-level (live socket), so this classifier is the unit-level guard.
+
+    @Test
+    void informationalCancelCodes_areNotFailures() {
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(399)).isTrue();   // order-message warning
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(2104)).isTrue();  // market-data farm OK
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(2106)).isTrue();  // HMDS farm OK
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(2158)).isTrue();  // sec-def farm OK
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(366)).isTrue();   // no historical data noise
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(2100)).isTrue();  // warning band lower bound
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(2169)).isTrue();  // warning band upper bound
+    }
+
+    @Test
+    void genuineCancelFailureCodes_areNotInformational() {
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(202)).isFalse();   // success, handled separately
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(161)).isFalse();   // not in a cancellable state
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(135)).isFalse();   // can't find order id
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(10147)).isFalse(); // orderId not found
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(10148)).isFalse(); // cannot be cancelled
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(201)).isFalse();   // order rejected
+        assertThat(IbGatewayNativeClient.isInformationalCancelCode(321)).isFalse();   // read-only / validation
+    }
+
     // NOTE: the kill-switch gate (properties.isNativeReadOnly() -> reject) lives in placeLimitOrder
     // AFTER ensureConnected() and the existing-order idempotency lookup, so a retry/recovery for an
     // already-live orderRef still reuses the broker order id instead of being rejected (Codex review,

@@ -166,6 +166,19 @@ public class IbGatewayNativeClient {
     }
 
     /**
+     * IBKR codes that can arrive on the order-CANCEL error channel but are NOT cancel failures:
+     * order-message warnings (399 — e.g. an "outside RTH" notice, now more frequent since orders carry
+     * {@code outsideRth}), the connection / market-data farm notices we already ignore globally
+     * ({@link #NOISY_INFO_CODES}), and IBKR's documented 2100–2169 warning band. A cancel must wait for the
+     * REAL outcome (a 202 "Order Canceled" or a {@code Cancelled}/{@code PendingCancel} orderStatus) rather
+     * than mis-reporting one of these warnings as "cancel rejected" — which wrongly refused the cancel of a
+     * perfectly cancellable resting order. Mirrors the placement path's {@link #isOrderErrorCode} discipline.
+     */
+    static boolean isInformationalCancelCode(int code) {
+        return code == 399 || NOISY_INFO_CODES.contains(code) || (code >= 2100 && code <= 2169);
+    }
+
+    /**
      * Heuristic: does the broker text look like a margin / equity / buying-power complaint?
      * Used as a fallback when {@code errorCode} is not surfaced through the {@code message()}
      * callback (e.g. when the reject arrives via {@code orderState.rejectReason()} instead).
@@ -1091,14 +1104,23 @@ public class IbGatewayNativeClient {
 
             @Override
             public void handle(int errorCode, String errorMsg) {
-                // 202 = "Order Canceled" — IBKR surfaces the SUCCESSFUL cancel through the error
-                // callback. Anything else (161 already-filled, 135 unknown id, …) is a real failure.
+                // 202 = "Order Canceled" — IBKR surfaces the SUCCESSFUL cancel through the error callback.
                 if (errorCode == 202) {
                     status.compareAndSet(null, "Cancelled");
-                } else {
-                    error.compareAndSet(null, "IBKR cancel rejected (code=" + errorCode + "): "
-                        + (errorMsg == null || errorMsg.isBlank() ? "no detail" : errorMsg));
+                    latch.countDown();
+                    return;
                 }
+                // IBKR informational / warning messages (order warning 399, farm-connection notices, the
+                // 2100-band) are NOT cancel results — ignore them and keep waiting for the real outcome
+                // (a 202 or a Cancelled/PendingCancel orderStatus). Treating them as failures wrongly refused
+                // the cancel of a perfectly cancellable resting order ("Annulation refusée").
+                if (isInformationalCancelCode(errorCode)) {
+                    log.debug("IB Gateway cancel notice for order {} (code={}): {}", ibkrOrderId, errorCode, errorMsg);
+                    return;
+                }
+                // Genuine cancel failure (161 not-cancellable, 135 / 10147 / 10148 unknown id, 201 reject, …).
+                error.compareAndSet(null, "IBKR cancel rejected (code=" + errorCode + "): "
+                    + (errorMsg == null || errorMsg.isBlank() ? "no detail" : errorMsg));
                 latch.countDown();
             }
         };
