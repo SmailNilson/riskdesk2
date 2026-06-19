@@ -181,6 +181,87 @@ class QuantManualTradeServiceTest {
             .hasMessageContaining("Cannot resolve a live price");
     }
 
+    @Test
+    void place_long_stop_persists_stop_order_type_and_trigger() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP,
+            null, new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, null, new BigDecimal("20050.00"));
+
+        TradeExecutionRecord placed = service.place(Instrument.MNQ, req, "operator");
+
+        assertThat(placed.getStatus()).isEqualTo(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        assertThat(placed.getOrderType()).isEqualTo("STOP");
+        assertThat(placed.getTriggerPrice()).isEqualByComparingTo("20050.00");
+        assertThat(placed.getNormalizedEntryPrice()).isEqualByComparingTo("20050.00");
+        assertThat(placed.getVirtualStopLoss()).isEqualByComparingTo("20025.00");
+        verify(executionManager, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void place_long_stop_limit_persists_cap_as_entry_and_trigger() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP_LIMIT,
+            new BigDecimal("20055.00"), new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, null, new BigDecimal("20050.00"));
+
+        TradeExecutionRecord placed = service.place(Instrument.MNQ, req, "operator");
+
+        assertThat(placed.getOrderType()).isEqualTo("STOP_LIMIT");
+        assertThat(placed.getTriggerPrice()).isEqualByComparingTo("20050.00");
+        assertThat(placed.getNormalizedEntryPrice()).isEqualByComparingTo("20055.00"); // limit cap
+    }
+
+    @Test
+    void place_stop_with_submit_immediately_submits_to_broker() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP,
+            null, new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, true, new BigDecimal("20050.00"));
+        TradeExecutionRecord submitted = new TradeExecutionRecord();
+        submitted.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        when(executionManager.submitEntryOrder(any(SubmitEntryOrderCommand.class))).thenReturn(submitted);
+
+        service.place(Instrument.MNQ, req, "chart");
+
+        verify(executionManager, times(1)).submitEntryOrder(any(SubmitEntryOrderCommand.class));
+        assertThat(repo.created.get(0).getOrderType()).isEqualTo("STOP");
+    }
+
+    @Test
+    void place_long_stop_below_live_price_throws_breakout() {
+        when(quantGateService.latestSnapshot(Instrument.MNQ)).thenReturn(snapshotAt(20100.0));
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP,
+            null, new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, null, new BigDecimal("20050.00")); // trigger below live → not a breakout
+        assertThatThrownBy(() -> service.place(Instrument.MNQ, req, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("above the live price");
+    }
+
+    @Test
+    void place_stop_without_trigger_throws() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP,
+            null, new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, null, null);
+        assertThatThrownBy(() -> service.place(Instrument.MNQ, req, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("triggerPrice is required");
+    }
+
+    @Test
+    void place_long_stop_limit_cap_below_trigger_throws() {
+        ManualTradeRequest req = new ManualTradeRequest(
+            ManualDirection.LONG, ManualEntryType.STOP_LIMIT,
+            new BigDecimal("20040.00"), new BigDecimal("20025.00"), new BigDecimal("20090.00"), null,
+            1, null, null, new BigDecimal("20050.00")); // cap 20040 < trigger 20050
+        assertThatThrownBy(() -> service.place(Instrument.MNQ, req, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("cap must be >= the trigger");
+    }
+
     private static QuantSnapshot snapshotAt(double price) {
         Map<Gate, GateResult> gates = new EnumMap<>(Gate.class);
         for (Gate g : Gate.values()) {

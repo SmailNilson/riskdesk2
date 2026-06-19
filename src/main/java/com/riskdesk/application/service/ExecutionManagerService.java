@@ -154,15 +154,7 @@ public class ExecutionManagerService {
 
         Instant requestedAt = command.requestedAt() == null ? Instant.now() : command.requestedAt();
         try {
-            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(new BrokerEntryOrderRequest(
-                execution.getId(),
-                execution.getExecutionKey(),
-                execution.getBrokerAccountId(),
-                execution.getInstrument(),
-                execution.getAction(),
-                execution.getQuantity(),
-                execution.getNormalizedEntryPrice()
-            ));
+            BrokerEntryOrderSubmission submission = ibkrOrderService.submitEntryOrder(buildEntryRequest(execution));
 
             // P2 — synchronous fill: when the broker reports the entry already Filled at submit return, mark
             // the row ACTIVE NOW instead of ENTRY_SUBMITTED. Persist the broker order id on ibkrOrderId too
@@ -190,6 +182,32 @@ public class ExecutionManagerService {
             tradeExecutionRepository.save(execution);
             throw new IllegalStateException(errorMessage, e);
         }
+    }
+
+    /**
+     * Build the broker entry order from the row's persisted order type. STOP arms a market trigger at
+     * {@code triggerPrice}; STOP_LIMIT arms the trigger and caps the fill at {@code normalizedEntryPrice};
+     * LIMIT (default / legacy / a manual MARKET resolved to a marketable limit) prices on
+     * {@code normalizedEntryPrice}. The gateway dispatches on the request's order type.
+     */
+    private static BrokerEntryOrderRequest buildEntryRequest(TradeExecutionRecord execution) {
+        String orderType = execution.getOrderType();
+        if (BrokerEntryOrderRequest.ORDER_TYPE_STOP.equalsIgnoreCase(orderType)) {
+            return new BrokerEntryOrderRequest(
+                execution.getId(), execution.getExecutionKey(), execution.getBrokerAccountId(),
+                execution.getInstrument(), execution.getAction(), execution.getQuantity(),
+                null, BrokerEntryOrderRequest.ORDER_TYPE_STOP, execution.getTriggerPrice());
+        }
+        if (BrokerEntryOrderRequest.ORDER_TYPE_STOP_LIMIT.equalsIgnoreCase(orderType)) {
+            return BrokerEntryOrderRequest.stopLimit(
+                execution.getId(), execution.getExecutionKey(), execution.getBrokerAccountId(),
+                execution.getInstrument(), execution.getAction(), execution.getQuantity(),
+                execution.getTriggerPrice(), execution.getNormalizedEntryPrice());
+        }
+        return new BrokerEntryOrderRequest(
+            execution.getId(), execution.getExecutionKey(), execution.getBrokerAccountId(),
+            execution.getInstrument(), execution.getAction(), execution.getQuantity(),
+            execution.getNormalizedEntryPrice());
     }
 
     public Optional<TradeExecutionRecord> findByMentorSignalReviewId(Long mentorSignalReviewId) {

@@ -26,6 +26,8 @@ final class TradeExecutionEntityMapper {
         entity.setStatus(execution.getStatus());
         entity.setStatusReason(execution.getStatusReason());
         entity.setNormalizedEntryPrice(execution.getNormalizedEntryPrice());
+        entity.setOrderType(execution.getOrderType());
+        entity.setTriggerPrice(execution.getTriggerPrice());
         entity.setVirtualStopLoss(execution.getVirtualStopLoss());
         entity.setVirtualTakeProfit(execution.getVirtualTakeProfit());
         entity.setDisasterStopPrice(execution.getDisasterStopPrice());
@@ -69,6 +71,8 @@ final class TradeExecutionEntityMapper {
         execution.setStatus(entity.getStatus());
         execution.setStatusReason(entity.getStatusReason());
         execution.setNormalizedEntryPrice(entity.getNormalizedEntryPrice());
+        execution.setOrderType(entity.getOrderType());
+        execution.setTriggerPrice(entity.getTriggerPrice());
         execution.setVirtualStopLoss(entity.getVirtualStopLoss());
         execution.setVirtualTakeProfit(entity.getVirtualTakeProfit());
         execution.setDisasterStopPrice(entity.getDisasterStopPrice());

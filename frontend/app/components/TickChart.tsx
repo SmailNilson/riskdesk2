@@ -68,8 +68,8 @@ function num(v: number | string | null | undefined): number | null {
 interface PendingTicket {
   direction: 'LONG' | 'SHORT';
   price: number;
-  /** Pre-selects the ticket order type — MARKET when the operator picked "… MKT" in the menu. */
-  entryType?: 'LIMIT' | 'MARKET';
+  /** Pre-selects the ticket order type — MARKET / STOP when the operator picked "… MKT/STOP" in the menu. */
+  entryType?: 'LIMIT' | 'MARKET' | 'STOP';
 }
 
 /** Row action awaiting its second (confirming) click — keyed by execution id + which action. */
@@ -595,6 +595,12 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
               </button>
               <button
                 className="block w-full text-left px-3 py-1.5 text-emerald-300/90 hover:bg-emerald-900/40 border-t border-zinc-800"
+                onClick={() => { setTicket({ direction: 'LONG', price: menu.price, entryType: 'STOP' }); setMenu(null); }}
+              >
+                Acheter STOP <span className="text-zinc-500">· cassure ↑</span>
+              </button>
+              <button
+                className="block w-full text-left px-3 py-1.5 text-emerald-300/90 hover:bg-emerald-900/40 border-t border-zinc-800"
                 onClick={() => { setTicket({ direction: 'LONG', price: menu.price, entryType: 'MARKET' }); setMenu(null); }}
               >
                 Acheter MKT <span className="text-zinc-500">· au marché</span>
@@ -604,6 +610,12 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
                 onClick={() => { setTicket({ direction: 'SHORT', price: menu.price, entryType: 'LIMIT' }); setMenu(null); }}
               >
                 Vendre LMT @ {menu.price.toFixed(meta.decimals)}
+              </button>
+              <button
+                className="block w-full text-left px-3 py-1.5 text-red-300/90 hover:bg-red-900/40 border-t border-zinc-800"
+                onClick={() => { setTicket({ direction: 'SHORT', price: menu.price, entryType: 'STOP' }); setMenu(null); }}
+              >
+                Vendre STOP <span className="text-zinc-500">· cassure ↓</span>
               </button>
               <button
                 className="block w-full text-left px-3 py-1.5 text-red-300/90 hover:bg-red-900/40 border-t border-zinc-800"
@@ -745,7 +757,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
   onSubmit: (payload: import('@/app/components/quant/types').ManualTradeRequest) => Promise<void>;
 }) {
   const long = ticket.direction === 'LONG';
-  const [entryType, setEntryType] = useState<'LIMIT' | 'MARKET'>(ticket.entryType ?? 'LIMIT');
+  const [entryType, setEntryType] = useState<'LIMIT' | 'MARKET' | 'STOP'>(ticket.entryType ?? 'LIMIT');
   const [price, setPrice] = useState(ticket.price.toFixed(meta.decimals));
   const [qty, setQty] = useState('1');
   const [sl, setSl] = useState(
@@ -766,13 +778,15 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
       // required"). Tell the operator to pick one in the IBKR Portfolio panel.
       setLocalError('Aucun compte IBKR — ouvrez le panel IBKR Portfolio et sélectionnez un compte'); return;
     }
-    if (entryType === 'LIMIT' && (!Number.isFinite(entryPrice) || entryPrice <= 0)) {
-      setLocalError('Prix limite invalide'); return;
+    if ((entryType === 'LIMIT' || entryType === 'STOP') && (!Number.isFinite(entryPrice) || entryPrice <= 0)) {
+      setLocalError(entryType === 'STOP' ? 'Prix stop (trigger) invalide' : 'Prix limite invalide'); return;
     }
     if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
       setLocalError('SL / TP invalides'); return;
     }
-    const ref = entryType === 'LIMIT' ? entryPrice : ticket.price;
+    // Reference for SL/TP geometry: the resting price the entry arms at — the trigger for STOP, the
+    // limit for LIMIT, the clicked price for MARKET (the server re-checks the stop breakout vs live).
+    const ref = entryType === 'MARKET' ? ticket.price : entryPrice;
     if (long && (stopLoss >= ref || takeProfit <= ref)) {
       setLocalError('LONG : SL doit être sous le prix, TP au-dessus'); return;
     }
@@ -784,6 +798,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
       direction: ticket.direction,
       entryType,
       entryPrice: entryType === 'LIMIT' ? entryPrice : null,
+      triggerPrice: entryType === 'STOP' ? entryPrice : null,
       stopLoss,
       takeProfit1: takeProfit,
       takeProfit2: null,
@@ -804,7 +819,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
           : <span className="text-amber-400 font-normal"> · ⚠ aucun compte IBKR</span>}
       </div>
       <div className="flex gap-1 mb-1.5">
-        {(['LIMIT', 'MARKET'] as const).map(t => (
+        {(['LIMIT', 'STOP', 'MARKET'] as const).map(t => (
           <button
             key={t}
             onClick={() => setEntryType(t)}
@@ -812,13 +827,13 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
               entryType === t ? 'bg-zinc-700 text-zinc-100' : 'bg-zinc-800 text-zinc-500 hover:text-zinc-300'
             }`}
           >
-            {t === 'LIMIT' ? 'LMT' : 'MKT'}
+            {t === 'LIMIT' ? 'LMT' : t === 'STOP' ? 'STOP' : 'MKT'}
           </button>
         ))}
       </div>
       <div className="grid grid-cols-2 gap-1.5 mb-1.5">
         <label className="text-zinc-500">
-          Prix
+          {entryType === 'STOP' ? 'Stop (trigger)' : 'Prix'}
           <input value={price} onChange={e => setPrice(e.target.value)} disabled={entryType === 'MARKET'}
             className={`${inputCls} ${entryType === 'MARKET' ? 'opacity-40' : ''}`} />
         </label>

@@ -21,6 +21,10 @@ public class TradeExecutionRecord {
     private ExecutionStatus status;
     private String statusReason;
     private BigDecimal normalizedEntryPrice;
+    /** Broker entry order type: {@code LIMIT} (default / null) | {@code STOP} | {@code STOP_LIMIT}. */
+    private String orderType;
+    /** Stop trigger for STOP / STOP_LIMIT entries (breakout arm price); null for LIMIT / MARKET. */
+    private BigDecimal triggerPrice;
     private BigDecimal virtualStopLoss;
     private BigDecimal virtualTakeProfit;
     private BigDecimal disasterStopPrice;
@@ -185,6 +189,22 @@ public class TradeExecutionRecord {
 
     public void setNormalizedEntryPrice(BigDecimal normalizedEntryPrice) {
         this.normalizedEntryPrice = normalizedEntryPrice;
+    }
+
+    public String getOrderType() {
+        return orderType;
+    }
+
+    public void setOrderType(String orderType) {
+        this.orderType = orderType;
+    }
+
+    public BigDecimal getTriggerPrice() {
+        return triggerPrice;
+    }
+
+    public void setTriggerPrice(BigDecimal triggerPrice) {
+        this.triggerPrice = triggerPrice;
     }
 
     public BigDecimal getVirtualStopLoss() {
