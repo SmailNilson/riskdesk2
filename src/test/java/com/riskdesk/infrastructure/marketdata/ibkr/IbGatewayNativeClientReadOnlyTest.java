@@ -88,6 +88,16 @@ class IbGatewayNativeClientReadOnlyTest {
         assertThat(new IbkrProperties().isNativeReadOnly()).isFalse();
     }
 
+    @Test
+    void outsideRthDefaultsOn() {
+        // RiskDesk trades ~24h CME Globex futures. outsideRth MUST default true so a DAY order placed
+        // outside the day session is not held Inactive ("IBKR order Inactive") — which would block overnight
+        // entries AND overnight stops / closes. placeEntryOrder applies properties.isOutsideRth() to the Order;
+        // that submission is integration-level (needs a live socket), so this default-on invariant is the
+        // unit-level guard, mirroring killSwitchDefaultsOff above.
+        assertThat(new IbkrProperties().isOutsideRth()).isTrue();
+    }
+
     // NOTE: the kill-switch gate (properties.isNativeReadOnly() -> reject) lives in placeLimitOrder
     // AFTER ensureConnected() and the existing-order idempotency lookup, so a retry/recovery for an
     // already-live orderRef still reuses the broker order id instead of being rejected (Codex review,

@@ -32,6 +32,14 @@ public class IbkrProperties {
      * previously dead config. See docs/PLAN_AUTO_IBKR_EXECUTION.md.
      */
     private boolean nativeReadOnly    = false;
+    /**
+     * Submit orders with IBKR's {@code outsideRth} flag set. RiskDesk trades CME Globex futures, which run
+     * a near-24h session; a {@code DAY} order placed OUTSIDE the day "regular trading hours" with this flag
+     * {@code false} (IBKR's default) is accepted but held <b>Inactive</b> until RTH — so an overnight entry
+     * never works and, worse, an overnight STOP / close is held too, leaving a live position unmanageable.
+     * Default {@code true} so entries AND exits are eligible to fill in the extended/overnight session.
+     */
+    private boolean outsideRth        = true;
     private boolean sslVerify         = false;
     private int     connectTimeoutMs  = 5000;
     private int     readTimeoutMs     = 10000;
@@ -66,6 +74,9 @@ public class IbkrProperties {
 
     public boolean isNativeReadOnly()           { return nativeReadOnly; }
     public void setNativeReadOnly(boolean v)    { nativeReadOnly = v; }
+
+    public boolean isOutsideRth()               { return outsideRth; }
+    public void setOutsideRth(boolean v)        { outsideRth = v; }
 
     public boolean isSslVerify()                { return sslVerify; }
     public void setSslVerify(boolean v)         { sslVerify = v; }

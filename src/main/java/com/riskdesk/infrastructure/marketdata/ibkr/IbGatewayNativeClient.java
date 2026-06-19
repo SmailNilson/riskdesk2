@@ -904,6 +904,10 @@ public class IbGatewayNativeClient {
             order.lmtPrice(price.doubleValue());   // LMT price
         }
         order.tif("DAY");
+        // CME Globex futures run a near-24h session. Without outsideRth, a DAY order placed outside the day
+        // "RTH" is held Inactive (surfaced to the UI as "IBKR order Inactive") — blocking overnight entries
+        // AND overnight stops / closes. Default true so entries and exits work in the extended session.
+        order.outsideRth(properties.isOutsideRth());
         order.transmit(true);
 
         CountDownLatch latch = new CountDownLatch(1);
