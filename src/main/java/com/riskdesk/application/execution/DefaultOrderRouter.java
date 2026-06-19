@@ -132,6 +132,7 @@ public class DefaultOrderRouter implements OrderRouter {
             case OPEN, REVERSE -> routeEntry(intent);
             case CLOSE -> executeClose(intent);
             case FLATTEN -> executeFlatten(intent);
+            case REDUCE -> executeReduce(intent);
         };
     }
 
@@ -671,6 +672,69 @@ public class DefaultOrderRouter implements OrderRouter {
     }
 
     /**
+     * REDUCE — partial close (scale-out): reduce the held side by {@code intent.quantity()} contracts and
+     * KEEP the remainder live. Mirrors {@link #executeExit}'s broker-truth guards (so a reduce is never naked,
+     * over-sized, or fired on the wrong side) but caps the close to the requested quantity and, when that is
+     * less than the position, leaves the row ACTIVE with a decremented quantity (via {@code submitCloseLeg}'s
+     * {@code remainAfterReduce}). A request for the whole position (or more) collapses to a full close.
+     * {@link #executeExit} is deliberately left untouched — full CLOSE / FLATTEN behaviour is unchanged.
+     */
+    private RoutingResult executeReduce(TradeIntent intent) {
+        var active = findOpenRow(intent);
+        if (active.isEmpty()) {
+            return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "no open execution row to reduce");
+        }
+        TradeExecutionRecord row = active.get();
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            // A close/reduce is already resting — a second reducing order could over-close. Skip as duplicate.
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                "an exit is already in flight (EXIT_SUBMITTED) — reduce skipped", row.getId(), row.getEntryOrderId());
+        }
+        BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
+        if (!pos.available()) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE,
+                "broker position truth unavailable — reduce skipped to avoid a blind reducing order",
+                row.getId(), row.getEntryOrderId());
+        }
+        if (pos.confirmedFlat()) {
+            if (!isInFlightEntry(row.getStatus())) {
+                voidRow(row, "OrderRouter REDUCE — IBKR already flat; stale " + row.getStatus() + " row voided");
+            }
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "IBKR already flat — reduce skipped", row.getId(), row.getEntryOrderId());
+        }
+        if (isInFlightEntry(row.getStatus())) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_ENTRY_IN_FLIGHT,
+                "entry still in flight (" + row.getStatus() + ") — reduce skipped", row.getId(), row.getEntryOrderId());
+        }
+        Side brokerSide;
+        if (pos.isLong()) {
+            brokerSide = Side.LONG;
+        } else if (pos.isShort()) {
+            brokerSide = Side.SHORT;
+        } else {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "IBKR holds offsetting live legs (net 0, not flat) — reduce skipped", row.getId(), row.getEntryOrderId());
+        }
+        if (intent.side() != brokerSide) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW,
+                "REDUCE " + intent.side() + " but IBKR holds " + brokerSide + " — no matching position",
+                row.getId(), row.getEntryOrderId());
+        }
+        String closeAction = brokerSide == Side.LONG ? "SHORT" : "LONG";
+        int rowQty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
+        int reduceQty = Math.min(intent.quantity(), Math.min(rowQty, pos.net().abs().intValue()));
+        if (reduceQty <= 0) {
+            return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_QTY,
+                "computed reduce quantity is non-positive", row.getId(), row.getEntryOrderId());
+        }
+        // Reducing the whole position (or more) is a full close, not a partial — remainAfterReduce stays null.
+        Integer remainAfterReduce = reduceQty < rowQty ? (rowQty - reduceQty) : null;
+        return submitCloseLeg(row, intent.instrument(), closeAction, reduceQty, intent.limitPrice(),
+            "OrderRouter REDUCE", intent.idempotencyKey(), remainAfterReduce);
+    }
+
+    /**
      * True when an {@code EXIT_SUBMITTED} close is STUCK and must be re-fired rather than skipped as a
      * duplicate exit: it has been non-terminal for longer than the retry grace AND IBKR still holds a live
      * position on this row's side, so the close clearly never completed (a marketable close that gapped out
@@ -727,6 +791,18 @@ public class DefaultOrderRouter implements OrderRouter {
      */
     private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
                                          int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator) {
+        return submitCloseLeg(row, instrument, closeAction, qty, price, reasonPrefix, exitDiscriminator, null);
+    }
+
+    /**
+     * @param remainAfterReduce when non-null and {@code > 0}, this leg is a PARTIAL close (REDUCE): on a
+     *        synchronous fill the row's {@code quantity} is set to this remainder and the row stays ACTIVE;
+     *        while it rests, {@code closingQuantity} is stamped so the fill tracker decrements on the async
+     *        fill. Null = a full close (the row goes CLOSED on fill) — the behaviour for every existing caller.
+     */
+    private RoutingResult submitCloseLeg(TradeExecutionRecord row, Instrument instrument, String closeAction,
+                                         int qty, BigDecimal price, String reasonPrefix, String exitDiscriminator,
+                                         Integer remainAfterReduce) {
         BigDecimal closePrice = marketableSettings.current().closeEnabled()
             ? marketableLimit(instrument, closeAction, price) : price;
         try {
@@ -739,16 +815,27 @@ public class DefaultOrderRouter implements OrderRouter {
             // and execDetails only updates fill fields, not lifecycle — leaving it EXIT_SUBMITTED would make
             // a later CLOSE/FLATTEN hit the duplicate-exit guard over an already-flat position.
             boolean filled = "Filled".equalsIgnoreCase(sub.brokerOrderStatus());
-            row.setStatus(filled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
+            boolean partial = remainAfterReduce != null && remainAfterReduce > 0;
+            if (filled && partial) {
+                // Partial close filled synchronously — decrement and keep the remainder live (ACTIVE).
+                row.setQuantity(remainAfterReduce);
+                row.setClosingQuantity(null);
+                row.setStatus(ExecutionStatus.ACTIVE);
+            } else {
+                row.setStatus(filled ? ExecutionStatus.CLOSED : ExecutionStatus.EXIT_SUBMITTED);
+                if (partial) {
+                    // Resting reduce — remember the close size so the fill tracker decrements on its fill.
+                    row.setClosingQuantity(qty);
+                }
+            }
             row.setIbkrOrderId(toIbkrOrderId(sub.brokerOrderId()));
-            row.setStatusReason(reasonPrefix + " — IBKR close " + (filled ? "filled" : "submitted") + ": "
-                + sub.brokerOrderStatus());
+            row.setStatusReason(reasonPrefix + " — IBKR " + (partial ? "partial close " : "close ")
+                + (filled ? "filled" : "submitted") + ": " + sub.brokerOrderStatus());
             row.setExitSubmittedAt(now);
-            // Stamp closedAt on a synchronous fill: we mark CLOSED here, so the later orderStatus(Filled)
-            // callback (if it arrives) skips its closedAt transition — the row is no longer EXIT_SUBMITTED.
-            // Without this, a synchronously-filled close has a null close timestamp (TradeExecutionView /
-            // close-time ordering). Mirrors the WTX close path and Quant doFlatten.
-            if (filled && row.getClosedAt() == null) {
+            // Stamp closedAt on a synchronous FULL-close fill: we mark CLOSED here, so the later
+            // orderStatus(Filled) callback (if it arrives) skips its closedAt transition. A partial close that
+            // filled stays ACTIVE (no closedAt). Mirrors the WTX close path and Quant doFlatten.
+            if (filled && !partial && row.getClosedAt() == null) {
                 row.setClosedAt(now);
             }
             row.setUpdatedAt(now);
@@ -765,6 +852,10 @@ public class DefaultOrderRouter implements OrderRouter {
                 row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
                 row.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
                 row.setExitSubmittedAt(now);
+                if (remainAfterReduce != null && remainAfterReduce > 0) {
+                    // A resting partial reduce — the fill tracker decrements on its fill.
+                    row.setClosingQuantity(qty);
+                }
             }
             // else: REJECTED / CANCELLED / timed-out-without-id — even if IBKR allocated an order id it is
             // NOT working, and the position is still open. Leave the row in its current (non-terminal) state
@@ -899,9 +990,10 @@ public class DefaultOrderRouter implements OrderRouter {
         return switch (intent.kind()) {
             case OPEN, REVERSE -> side == Side.LONG ? "LONG" : "SHORT";   // BUY a long / SELL a short
             case CLOSE -> side == Side.LONG ? "SHORT" : "LONG";           // closing a long is a SELL
-            // FLATTEN derives its close action from the held row, not the intent — brokerAction is never
-            // called for it.
+            // FLATTEN / REDUCE derive their close action from the held position, not the intent —
+            // brokerAction is never called for them.
             case FLATTEN -> throw new IllegalStateException("FLATTEN close action is derived from the held row");
+            case REDUCE -> throw new IllegalStateException("REDUCE close action is derived from the held position");
         };
     }
 

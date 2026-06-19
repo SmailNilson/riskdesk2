@@ -13,5 +13,12 @@ public enum IntentKind {
     /** Reduce / close the position on {@link TradeIntent#side()}. */
     CLOSE,
     /** Flatten the instrument regardless of current side (force-close: daily-loss cap, session end). */
-    FLATTEN
+    FLATTEN,
+    /**
+     * PARTIAL close (scale-out): reduce the open position on {@link TradeIntent#side()} by
+     * {@link TradeIntent#quantity()} contracts and KEEP the remainder live (the row stays ACTIVE with
+     * its quantity decremented). Unlike {@link #CLOSE}, which exits the whole row, REDUCE leaves a
+     * position behind when {@code quantity} is less than the current size.
+     */
+    REDUCE
 }

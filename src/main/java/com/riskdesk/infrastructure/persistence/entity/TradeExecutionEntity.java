@@ -102,6 +102,10 @@ public class TradeExecutionEntity {
     @Column(precision = 19, scale = 6)
     private BigDecimal triggerPrice;
 
+    /** Contracts of an in-flight partial close (REDUCE) resting at the broker; null otherwise. */
+    @Column
+    private Integer closingQuantity;
+
     /**
      * Nullable since WTX_AUTO / QUANT_AUTO_ARM rows are armed before any stop
      * loss is known (BASELINE has no SL; trailing arms only after activation).
@@ -331,6 +335,14 @@ public class TradeExecutionEntity {
 
     public void setTriggerPrice(BigDecimal triggerPrice) {
         this.triggerPrice = triggerPrice;
+    }
+
+    public Integer getClosingQuantity() {
+        return closingQuantity;
+    }
+
+    public void setClosingQuantity(Integer closingQuantity) {
+        this.closingQuantity = closingQuantity;
     }
 
     public BigDecimal getVirtualStopLoss() {

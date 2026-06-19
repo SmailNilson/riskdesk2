@@ -81,4 +81,15 @@ public record TradeIntent(
         return new TradeIntent(idempotencyKey, source, instrument, timeframe,
             IntentKind.FLATTEN, null, quantity, limitPrice, brokerAccountId);
     }
+
+    /**
+     * PARTIAL close (scale-out): reduce the {@code side} position by {@code quantity} contracts, keeping
+     * the remainder live. {@code side} is the side currently HELD (the row's direction), as for CLOSE.
+     */
+    public static TradeIntent reduce(String idempotencyKey, ExecutionTriggerSource source, Instrument instrument,
+                                     String timeframe, Side side, int quantity, BigDecimal limitPrice,
+                                     String brokerAccountId) {
+        return new TradeIntent(idempotencyKey, source, instrument, timeframe,
+            IntentKind.REDUCE, side, quantity, limitPrice, brokerAccountId);
+    }
 }

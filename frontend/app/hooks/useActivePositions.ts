@@ -37,6 +37,8 @@ export interface UseActivePositionsResult {
     executionId: number,
     body: { stopLoss?: number; takeProfit?: number },
   ) => Promise<ActivePositionView | null>;
+  /** Partially closes (scales out) a live position by qty contracts, keeping the remainder. */
+  reduce: (executionId: number, qty: number) => Promise<ActivePositionView | null>;
   /** Forces a REST refresh — useful after a manual action that the WS may not echo immediately. */
   refresh: () => Promise<void>;
   /** True when the STOMP connection is up. */
@@ -197,5 +199,22 @@ export function useActivePositions(): UseActivePositionsResult {
     []
   );
 
-  return { positions, loading, error, close, cancelEntry, reverse, modifyProtection, refresh, connected };
+  const reduce = useCallback(
+    async (executionId: number, qty: number): Promise<ActivePositionView | null> => {
+      try {
+        const result = await api.reduceActivePosition(executionId, qty);
+        setPositions((prev) =>
+          prev.map((p) => (p.executionId === executionId ? result : p))
+        );
+        return result;
+      } catch (err) {
+        console.warn('reduceActivePosition failed', err);
+        setError(err instanceof Error ? err.message : 'reduce failed');
+        return null;
+      }
+    },
+    []
+  );
+
+  return { positions, loading, error, close, cancelEntry, reverse, modifyProtection, reduce, refresh, connected };
 }

@@ -456,6 +456,67 @@ class ActivePositionsServiceTest {
             .hasMessageContaining("at least one");
     }
 
+    @Test
+    void reduce_partial_routes_reduce_intent_for_held_side() {
+        TradeExecutionRecord active = makeRecord(50L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setQuantity(3);
+        when(repo.findByIdForUpdate(50L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE")));
+        when(orderRouter.route(any())).thenReturn(RoutingResult.tracked(RoutingOutcome.ROUTED, 50L, 999L));
+        when(repo.findById(50L)).thenReturn(Optional.of(active));
+
+        Optional<ActivePositionView> result = service.reducePosition(50L, 1, "operator");
+
+        assertThat(result).isPresent();
+        ArgumentCaptor<TradeIntent> captor = ArgumentCaptor.forClass(TradeIntent.class);
+        verify(orderRouter).route(captor.capture());
+        TradeIntent intent = captor.getValue();
+        assertThat(intent.kind()).isEqualTo(IntentKind.REDUCE);
+        assertThat(intent.side()).isEqualTo(Side.LONG);   // reduce the HELD side (BUY = LONG)
+        assertThat(intent.quantity()).isEqualTo(1);
+        verify(eventPublisher, times(1)).publishEvent(any(ActivePositionChangedEvent.class));
+    }
+
+    @Test
+    void reduce_whole_size_delegates_to_full_close() {
+        TradeExecutionRecord active = makeRecord(51L, "MGC", "SELL", new BigDecimal("4650"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setQuantity(2);
+        when(repo.findByIdForUpdate(51L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MGC))
+            .thenReturn(Optional.of(new LivePriceSnapshot(4648.0, NOW, "LIVE")));
+        when(orderRouter.route(any())).thenReturn(RoutingResult.tracked(RoutingOutcome.ROUTED, 51L, 999L));
+        when(repo.findById(51L)).thenReturn(Optional.of(active));
+
+        service.reducePosition(51L, 2, "operator"); // qty == position → full close
+
+        ArgumentCaptor<TradeIntent> captor = ArgumentCaptor.forClass(TradeIntent.class);
+        verify(orderRouter).route(captor.capture());
+        assertThat(captor.getValue().kind()).isEqualTo(IntentKind.FLATTEN); // delegated to closePosition
+    }
+
+    @Test
+    void reduce_non_active_throws_conflict_without_routing() {
+        TradeExecutionRecord resting = makeRecord(52L, "MNQ", "BUY", new BigDecimal("27000"));
+        resting.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        resting.setQuantity(3);
+        when(repo.findByIdForUpdate(52L)).thenReturn(Optional.of(resting));
+
+        assertThatThrownBy(() -> service.reducePosition(52L, 1, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("only a live ACTIVE position");
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reduce_non_positive_qty_throws_illegal_argument() {
+        assertThatThrownBy(() -> service.reducePosition(53L, 0, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("reduce quantity must be >= 1");
+    }
+
     private static TradeExecutionRecord makeRecord(long id, String instrument, String action, BigDecimal entry) {
         TradeExecutionRecord r = new TradeExecutionRecord();
         r.setId(id);

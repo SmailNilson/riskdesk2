@@ -79,7 +79,9 @@ public class ExecutionReconciler {
     public ReconcilePlan reconcile(TradeIntent intent, BrokerPositionState pos) {
         return switch (intent.kind()) {
             case OPEN, REVERSE -> reconcileEntry(intent, pos);
-            case CLOSE -> reconcileClose(intent, pos);
+            // REDUCE is a directional partial close — same reconciliation as CLOSE. (The router's REDUCE
+            // path resolves broker truth directly and does not call reconcile; this keeps the switch total.)
+            case CLOSE, REDUCE -> reconcileClose(intent, pos);
             case FLATTEN -> reconcileFlatten(pos);
         };
     }

@@ -162,14 +162,32 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
 
         if (IBKR_STATUS_FILLED.equalsIgnoreCase(status)
             && execution.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
-            // A submitted exit/close order filled — the position is now flat. Without this
-            // branch an EXIT_SUBMITTED row would stay non-terminal forever (still in
-            // findAllActive / findActiveByInstrument*), so the position would look open and
-            // a later close signal could submit another flatten order.
-            execution.setStatus(ExecutionStatus.CLOSED);
-            execution.setStatusReason("IBKR exit order fully filled");
-            if (execution.getClosedAt() == null) {
-                execution.setClosedAt(lastFillTime == null ? Instant.now() : lastFillTime);
+            Integer closingQty = execution.getClosingQuantity();
+            Integer rowQty = execution.getQuantity();
+            if (closingQty != null && closingQty > 0 && rowQty != null && closingQty < rowQty) {
+                // A PARTIAL close (REDUCE) order filled — decrement and keep the remainder LIVE. Without this
+                // the whole row would be marked CLOSED while the broker still holds the remainder (drift).
+                execution.setQuantity(rowQty - closingQty);
+                execution.setClosingQuantity(null);
+                execution.setStatus(ExecutionStatus.ACTIVE);
+                execution.setStatusReason("IBKR partial close filled — reduced to " + execution.getQuantity());
+            } else {
+                if (closingQty != null && closingQty > 0) {
+                    // Defensive: closingQuantity was stamped but is NOT a strict partial (>= quantity). The
+                    // router only ever stamps it for a strict reduce, so this signals an inconsistency — flag
+                    // it but still close fully (the safe outcome) so the row never stays stuck non-terminal.
+                    log.warn("exit fill on execution {} had closingQuantity={} >= quantity={} — closing fully",
+                        execution.getId(), closingQty, rowQty);
+                }
+                // A submitted (full) exit/close order filled — the position is now flat. Without this
+                // branch an EXIT_SUBMITTED row would stay non-terminal forever (still in
+                // findAllActive / findActiveByInstrument*), so the position would look open and
+                // a later close signal could submit another flatten order.
+                execution.setStatus(ExecutionStatus.CLOSED);
+                execution.setStatusReason("IBKR exit order fully filled");
+                if (execution.getClosedAt() == null) {
+                    execution.setClosedAt(lastFillTime == null ? Instant.now() : lastFillTime);
+                }
             }
             dirty = true;
         } else if (IBKR_STATUS_FILLED.equalsIgnoreCase(status)
@@ -205,6 +223,9 @@ public class ExecutionFillTrackingService implements ExecutionFillListener {
                         + " without a fill — position still live, revived to ACTIVE");
                     execution.setIbkrOrderId(null);
                     execution.setPermId(null);
+                    // A partial reduce that cancelled without a fill leaves the position at its FULL size —
+                    // drop the stale reduce marker so the fill tracker won't later decrement on a replay.
+                    execution.setClosingQuantity(null);
                 } else {
                     // An entry order (or any non-exit) that cancelled without a fill never opened — terminal.
                     execution.setStatus(ExecutionStatus.CANCELLED);

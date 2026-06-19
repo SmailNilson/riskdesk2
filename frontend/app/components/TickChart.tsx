@@ -73,7 +73,7 @@ interface PendingTicket {
 }
 
 /** Row action awaiting its second (confirming) click — keyed by execution id + which action. */
-type RowAction = 'close' | 'cancel' | 'reverse';
+type RowAction = 'close' | 'cancel' | 'reverse' | 'reduce';
 
 /**
  * Re-aggregates base tick bars into larger constant-tick-count bars by grouping
@@ -174,7 +174,7 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  */
 function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartProps) {
   const { tickBars, tickBarResets } = useOrderFlow();
-  const { positions, close, cancelEntry, reverse, modifyProtection, refresh } = useActivePositions();
+  const { positions, close, cancelEntry, reverse, modifyProtection, reduce, refresh } = useActivePositions();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -495,19 +495,23 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
       return;
     }
     setConfirmAction(null);
+    const reduceQty = Math.max(1, Math.floor((p.quantity ?? 1) / 2));
     const result =
       action === 'cancel' ? await cancelEntry(p.executionId)
       : action === 'reverse' ? await reverse(p.executionId)
+      : action === 'reduce' ? await reduce(p.executionId, reduceQty)
       : await close(p.executionId);
     const okText = action === 'cancel' ? 'Annulation envoyée au broker'
       : action === 'reverse' ? 'Inversion envoyée au broker'
+      : action === 'reduce' ? `Réduction de ${reduceQty} envoyée au broker`
       : 'Clôture envoyée au broker';
     const errText = action === 'cancel' ? 'Annulation refusée — voir Active Positions'
       : action === 'reverse' ? 'Inversion refusée — voir Active Positions'
+      : action === 'reduce' ? 'Réduction refusée — voir Active Positions'
       : 'Clôture refusée — voir Active Positions';
     setNotice({ kind: result ? 'ok' : 'err', text: result ? okText : errText });
     void refresh();
-  }, [confirmAction, cancelEntry, close, reverse, refresh]);
+  }, [confirmAction, cancelEntry, close, reverse, reduce, refresh]);
 
   /** Move the live position's virtual SL or TP to the clicked price. Pre-checks the side so a
    *  wrong-side click gives instant feedback instead of a backend 400 round-trip. */
@@ -732,6 +736,8 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
             const confirmingCancel = confirmAction?.id === p.executionId && confirmAction.action === 'cancel';
             const confirmingReverse = confirmAction?.id === p.executionId && confirmAction.action === 'reverse';
             const confirmingClose = confirmAction?.id === p.executionId && confirmAction.action === 'close';
+            const confirmingReduce = confirmAction?.id === p.executionId && confirmAction.action === 'reduce';
+            const canScaleOut = p.status === 'ACTIVE' && (p.quantity ?? 1) >= 2;
             return (
               <div key={p.executionId} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -762,6 +768,17 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
                   </button>
                 ) : (
                   <>
+                    {canScaleOut && (
+                      <button
+                        onClick={() => void handleRowAction(p, 'reduce')}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                          confirmingReduce ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-sky-300 hover:bg-sky-900/50'
+                        }`}
+                        title="Fermer la moitié de la position (scale-out)"
+                      >
+                        {confirmingReduce ? 'Confirmer ?' : 'Fermer ½'}
+                      </button>
+                    )}
                     {p.status === 'ACTIVE' && (
                       <button
                         onClick={() => void handleRowAction(p, 'reverse')}

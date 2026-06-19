@@ -25,6 +25,12 @@ public class TradeExecutionRecord {
     private String orderType;
     /** Stop trigger for STOP / STOP_LIMIT entries (breakout arm price); null for LIMIT / MARKET. */
     private BigDecimal triggerPrice;
+    /**
+     * Contracts of an IN-FLIGHT partial close (scale-out / REDUCE). Set while a reducing leg rests
+     * ({@code EXIT_SUBMITTED}); when that leg fills the row's {@code quantity} is decremented by this and
+     * the row returns to ACTIVE (the fill tracker / router clear it). Null for a full close or no reduce.
+     */
+    private Integer closingQuantity;
     private BigDecimal virtualStopLoss;
     private BigDecimal virtualTakeProfit;
     private BigDecimal disasterStopPrice;
@@ -205,6 +211,14 @@ public class TradeExecutionRecord {
 
     public void setTriggerPrice(BigDecimal triggerPrice) {
         this.triggerPrice = triggerPrice;
+    }
+
+    public Integer getClosingQuantity() {
+        return closingQuantity;
+    }
+
+    public void setClosingQuantity(Integer closingQuantity) {
+        this.closingQuantity = closingQuantity;
     }
 
     public BigDecimal getVirtualStopLoss() {
