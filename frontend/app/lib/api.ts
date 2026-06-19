@@ -1429,6 +1429,11 @@ export const api = {
   // finalized to CANCELLED by the broker's Cancelled callback, echoed on /topic/positions.
   cancelEntryActivePosition: (executionId: number) =>
     post<ActivePositionView>(`/api/quant/positions/${executionId}/cancel-entry`, {}),
+  // Flips a live position to the opposite side at the same size via the unified router
+  // (REVERSE intent: close the current leg, open the opposite). 409 when there is no live
+  // position to reverse (use cancel-entry on a resting/unfilled order instead).
+  reverseActivePosition: (executionId: number) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/reverse`, {}),
 
   // ── Quant manual trade ticket (PR #306) ────────────────────────────────
   // Backend: com.riskdesk.presentation.quant.QuantManualTradeController

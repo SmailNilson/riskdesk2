@@ -9,6 +9,7 @@ import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.port.LivePricePort;
 import com.riskdesk.domain.quant.positions.ActivePositionChangedEvent;
@@ -241,6 +242,77 @@ public class ActivePositionsService {
     }
 
     /**
+     * Reverse a live position by execution id: flip to the opposite side at the same size, orchestrated
+     * atomically by the unified {@link OrderRouter} (REVERSE intent — broker-truth reconciliation,
+     * marketable exit pricing, deferred open after the close leg fills).
+     *
+     * <p>Only a broker-live position can be reversed. A row that never reached the broker
+     * ({@code PENDING_ENTRY_SUBMISSION}) or a resting, unfilled entry ({@code ENTRY_SUBMITTED} with no
+     * fills) has no position to flip — cancel it and place the opposite entry instead (surfaced as 409).</p>
+     *
+     * @return the updated execution view (the original row, flattened by the reverse — the freshly
+     *         opened opposite position arrives via {@code /topic/positions}), or empty if the id is unknown
+     * @throws IllegalStateException when there is no live position to reverse or the router refuses it
+     *                               (surfaced as 409)
+     */
+    public Optional<ActivePositionView> reversePosition(Long executionId, String requestedBy) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
+        if (opt.isEmpty()) {
+            return Optional.empty();
+        }
+        TradeExecutionRecord exec = opt.get();
+        ExecutionStatus current = exec.getStatus();
+        if (current == null) {
+            throw new IllegalStateException("execution status is null — cannot reverse");
+        }
+        if (isTerminal(current)) {
+            // Idempotence — surface the existing terminal row rather than 409.
+            return Optional.of(view(exec));
+        }
+        // Reverse only flips a CONFIRMED, live position. Every other non-terminal state is unsafe to
+        // reverse: a resting / unfilled entry has nothing to flip (cancel it instead), and an exit already
+        // in flight (EXIT_SUBMITTED / VIRTUAL_EXIT_TRIGGERED) must resolve first — the unified router does
+        // NOT re-fire a close leg for an already-EXIT_SUBMITTED row, so it would open the opposite leg on
+        // top of the still-unflattened position (stacked orders). Refuse here rather than route it.
+        if (current != ExecutionStatus.ACTIVE) {
+            String hint = (current == ExecutionStatus.EXIT_SUBMITTED || current == ExecutionStatus.VIRTUAL_EXIT_TRIGGERED)
+                ? "a close is already in progress — wait for it to resolve"
+                : "no live position to reverse; cancel the resting entry and place the opposite order";
+            throw new IllegalStateException("execution " + executionId + " is " + current + " — " + hint);
+        }
+
+        Instrument instrument = parseInstrument(exec.getInstrument());
+        if (instrument == null) {
+            throw new IllegalStateException("unknown instrument on execution row: " + exec.getInstrument());
+        }
+
+        Instant now = clock.instant();
+        String who = (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy;
+
+        TradeIntent intent = reverseIntent(exec, instrument, now);
+        RoutingResult result = orderRouter.route(intent);
+        log.info("Active position reverse routed executionId={} instrument={} toSide={} outcome={} message={} by={}",
+            exec.getId(), exec.getInstrument(), intent.side(), result.outcome(), result.message(), who);
+
+        switch (result.outcome()) {
+            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING, SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+                // The router mutated (closed the old row, opened the new side, or voided) — reload broker
+                // truth's version rather than the stale pre-route copy.
+                TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
+                publishSafely(changeEvent(refreshed, now));
+                return Optional.of(view(refreshed));
+            }
+            case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
+                "entry order not (fully) filled — cancel the entry instead of reversing: " + result.message());
+            default -> throw new IllegalStateException(
+                "reverse not executed (" + result.outcome() + "): " + result.message());
+        }
+    }
+
+    /**
      * FLATTEN intent for an operator close: per-request idempotency key (each click is a fresh
      * close attempt — required for the router's stuck-close re-fire), the row's own scope
      * (source / timeframe / account) so {@code findOpenRow} resolves this strategy's row, and the
@@ -264,6 +336,37 @@ public class ActivePositionsService {
         return TradeIntent.flatten(
             "panel-close:" + exec.getId() + ":" + now.toEpochMilli(),
             source, instrument, timeframe, quantity, limitPrice, exec.getBrokerAccountId());
+    }
+
+    /**
+     * REVERSE intent for an operator flip: target the side OPPOSITE the current position at the same
+     * size, with the latest live price as the marketable-limit reference (router crosses it when
+     * enabled). Mirrors {@link #flattenIntent}'s price / source / timeframe resolution.
+     */
+    private TradeIntent reverseIntent(TradeExecutionRecord exec, Instrument instrument, Instant now) {
+        BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            limitPrice = exec.getNormalizedEntryPrice();
+        }
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            throw new IllegalStateException("no usable price to build the reverse order for " + exec.getInstrument());
+        }
+        ExecutionTriggerSource source = exec.getTriggerSource() != null
+            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
+        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
+            ? "manual" : exec.getTimeframe();
+        int quantity = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
+        return TradeIntent.reverse(
+            "panel-reverse:" + exec.getId() + ":" + now.toEpochMilli(),
+            source, instrument, timeframe, oppositeSide(exec.getAction()), quantity, limitPrice,
+            exec.getBrokerAccountId());
+    }
+
+    /** Opposite of the row's current side. Accepts the LONG/SHORT and BUY/SELL action tokens. */
+    private static Side oppositeSide(String action) {
+        boolean shortNow = action != null
+            && ("SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action));
+        return shortNow ? Side.LONG : Side.SHORT;
     }
 
     private void cancelLocally(TradeExecutionRecord exec, String reason, Instant now) {

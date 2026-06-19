@@ -30,6 +30,8 @@ export interface UseActivePositionsResult {
   close: (executionId: number) => Promise<ActivePositionView | null>;
   /** Cancels an unfilled entry order (resting limit) for the given execution id. */
   cancelEntry: (executionId: number) => Promise<ActivePositionView | null>;
+  /** Flips a live position to the opposite side at the same size (REVERSE intent). */
+  reverse: (executionId: number) => Promise<ActivePositionView | null>;
   /** Forces a REST refresh — useful after a manual action that the WS may not echo immediately. */
   refresh: () => Promise<void>;
   /** True when the STOMP connection is up. */
@@ -151,5 +153,24 @@ export function useActivePositions(): UseActivePositionsResult {
     []
   );
 
-  return { positions, loading, error, close, cancelEntry, refresh, connected };
+  const reverse = useCallback(
+    async (executionId: number): Promise<ActivePositionView | null> => {
+      try {
+        const result = await api.reverseActivePosition(executionId);
+        // Optimistic local update — the WS frame (close of this row + the new opposite
+        // position) overwrites us shortly.
+        setPositions((prev) =>
+          prev.map((p) => (p.executionId === executionId ? result : p))
+        );
+        return result;
+      } catch (err) {
+        console.warn('reverseActivePosition failed', err);
+        setError(err instanceof Error ? err.message : 'reverse failed');
+        return null;
+      }
+    },
+    []
+  );
+
+  return { positions, loading, error, close, cancelEntry, reverse, refresh, connected };
 }
