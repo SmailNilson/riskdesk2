@@ -157,8 +157,9 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  * which submits a real IBKR order through POST /api/quant/manual-trade
  * (submitImmediately). Working orders and the live position are drawn as price
  * lines fed by /topic/positions; the rows under the chart cancel a resting entry
- * (broker cancel) or flatten a live position (unified-router marketable close).
- * SL/TP lines are VIRTUAL — informative levels, not broker bracket orders.
+ * (broker cancel), flatten a live position (unified-router marketable close), or
+ * reverse it. SL/TP lines are VIRTUAL — not broker brackets; the backend
+ * VirtualStopWatcher auto-closes on a cross when riskdesk.quant.virtual-stop is on.
  *
  * Data: REST seed (/api/order-flow/tick-bars) + live merge from /topic/tick-bars
  * (handled in useOrderFlow, keyed by bar seq). seq is only unique within one
@@ -851,7 +852,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
         </label>
       </div>
       <p className="text-[10px] text-zinc-600 mb-1.5">
-        SL/TP virtuels : tracés sur le chart, pas d&apos;ordres bracket broker — sortie via « Fermer ».
+        SL/TP virtuels : clôture auto côté app au franchissement (si surveillance activée) — pas un bracket broker.
       </p>
       {localError && <p className="text-[10px] text-red-400 mb-1.5">{localError}</p>}
       <div className="flex gap-1.5">

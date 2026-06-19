@@ -19,6 +19,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -313,6 +314,70 @@ public class ActivePositionsService {
     }
 
     /**
+     * Modify the VIRTUAL stop-loss / take-profit of a non-terminal position (chart drag-to-edit). Each
+     * supplied level is validated against the entry geometry (LONG: SL &lt; entry &lt; TP; SHORT mirror),
+     * normalized to the contract tick, persisted, and broadcast on {@code /topic/positions}. NO broker
+     * order is placed — the levels stay virtual; {@link VirtualStopWatcher} acts on them app-side when
+     * enabled. Pass either level (or both); at least one is required.
+     *
+     * @return the updated execution view, or empty if the id does not exist
+     * @throws IllegalArgumentException when neither level is supplied or a level is on the wrong side (400)
+     * @throws IllegalStateException    when the row is terminal (409)
+     */
+    public Optional<ActivePositionView> modifyProtection(Long executionId, BigDecimal stopLoss,
+                                                         BigDecimal takeProfit, String requestedBy) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        if (stopLoss == null && takeProfit == null) {
+            throw new IllegalArgumentException("at least one of stopLoss / takeProfit is required");
+        }
+        Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
+        if (opt.isEmpty()) {
+            return Optional.empty();
+        }
+        TradeExecutionRecord exec = opt.get();
+        ExecutionStatus current = exec.getStatus();
+        if (current == null || isTerminal(current)) {
+            throw new IllegalStateException("execution " + executionId + " is " + current
+                + " — cannot modify protection on a terminal position");
+        }
+
+        BigDecimal ref = exec.getNormalizedEntryPrice();
+        boolean shortSide = "SHORT".equalsIgnoreCase(exec.getAction()) || "SELL".equalsIgnoreCase(exec.getAction());
+        if (ref != null && ref.signum() > 0) {
+            if (stopLoss != null && !shortSide && stopLoss.compareTo(ref) >= 0) {
+                throw new IllegalArgumentException("LONG stopLoss must be below the entry " + ref);
+            }
+            if (stopLoss != null && shortSide && stopLoss.compareTo(ref) <= 0) {
+                throw new IllegalArgumentException("SHORT stopLoss must be above the entry " + ref);
+            }
+            if (takeProfit != null && !shortSide && takeProfit.compareTo(ref) <= 0) {
+                throw new IllegalArgumentException("LONG takeProfit must be above the entry " + ref);
+            }
+            if (takeProfit != null && shortSide && takeProfit.compareTo(ref) >= 0) {
+                throw new IllegalArgumentException("SHORT takeProfit must be below the entry " + ref);
+            }
+        }
+
+        Instrument instrument = parseInstrument(exec.getInstrument());
+        Instant now = clock.instant();
+        if (stopLoss != null) {
+            exec.setVirtualStopLoss(normalizeTick(stopLoss, instrument));
+        }
+        if (takeProfit != null) {
+            exec.setVirtualTakeProfit(normalizeTick(takeProfit, instrument));
+        }
+        exec.setUpdatedAt(now);
+        TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+        publishSafely(changeEvent(saved, now));
+        log.info("Protection modified executionId={} sl={} tp={} by={}",
+            saved.getId(), saved.getVirtualStopLoss(), saved.getVirtualTakeProfit(),
+            (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy);
+        return Optional.of(view(saved));
+    }
+
+    /**
      * FLATTEN intent for an operator close: per-request idempotency key (each click is a fresh
      * close attempt — required for the router's stuck-close re-fire), the row's own scope
      * (source / timeframe / account) so {@code findOpenRow} resolves this strategy's row, and the
@@ -367,6 +432,17 @@ public class ActivePositionsService {
         boolean shortNow = action != null
             && ("SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action));
         return shortNow ? Side.LONG : Side.SHORT;
+    }
+
+    /** Round a price to the instrument's tick (mirrors the manual-trade ticket); pass-through if unknown. */
+    private static BigDecimal normalizeTick(BigDecimal price, Instrument instrument) {
+        if (price == null || instrument == null) {
+            return price;
+        }
+        BigDecimal tick = instrument.getTickSize();
+        return price.divide(tick, 0, RoundingMode.HALF_UP)
+            .multiply(tick)
+            .setScale(tick.scale(), RoundingMode.HALF_UP);
     }
 
     private void cancelLocally(TradeExecutionRecord exec, String reason, Instant now) {

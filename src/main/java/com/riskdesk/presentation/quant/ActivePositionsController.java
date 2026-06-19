@@ -8,10 +8,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -30,6 +32,9 @@ import java.util.Optional;
  *   <li>{@code POST /api/quant/positions/{executionId}/reverse} — flip a live position
  *       to the opposite side at the same size via the unified router (REVERSE intent).
  *       409 when there is no live position to reverse.</li>
+ *   <li>{@code POST /api/quant/positions/{executionId}/modify-protection} — update the
+ *       VIRTUAL stop-loss / take-profit of a non-terminal position (no broker order).
+ *       400 on bad geometry, 409 on a terminal row.</li>
  * </ul>
  *
  * <p>Live updates after the initial load come through {@code /topic/positions}
@@ -93,5 +98,32 @@ public class ActivePositionsController {
             log.warn("Reverse rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
         }
+    }
+
+    @PostMapping("/{executionId}/modify-protection")
+    public ResponseEntity<ActivePositionView> modifyProtection(
+            @PathVariable Long executionId,
+            @RequestBody(required = false) ModifyProtectionRequest body,
+            @RequestHeader(value = "X-Requested-By", required = false) String requestedBy) {
+        try {
+            Optional<ActivePositionView> result = activePositionsService.modifyProtection(
+                executionId,
+                body == null ? null : body.stopLoss(),
+                body == null ? null : body.takeProfit(),
+                requestedBy);
+            return result
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (IllegalArgumentException e) {
+            log.warn("Modify-protection bad request for execution {} — {}", executionId, e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (IllegalStateException e) {
+            log.warn("Modify-protection rejected for execution {} — {}", executionId, e.getMessage());
+            return ResponseEntity.status(409).build();
+        }
+    }
+
+    /** Body for {@code POST /{executionId}/modify-protection} — either level may be null (update one). */
+    public record ModifyProtectionRequest(BigDecimal stopLoss, BigDecimal takeProfit) {
     }
 }

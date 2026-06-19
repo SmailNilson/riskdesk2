@@ -397,6 +397,65 @@ class ActivePositionsServiceTest {
             .hasMessageContaining("bridge down");
     }
 
+    @Test
+    void modify_protection_updates_both_levels_and_publishes() {
+        TradeExecutionRecord active = makeRecord(40L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(40L)).thenReturn(Optional.of(active));
+        when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        Optional<ActivePositionView> result =
+            service.modifyProtection(40L, new BigDecimal("26950"), new BigDecimal("27100"), "operator");
+
+        assertThat(result).isPresent();
+        assertThat(active.getVirtualStopLoss()).isEqualByComparingTo("26950");
+        assertThat(active.getVirtualTakeProfit()).isEqualByComparingTo("27100");
+        verify(eventPublisher, times(1)).publishEvent(any(ActivePositionChangedEvent.class));
+    }
+
+    @Test
+    void modify_protection_long_sl_above_entry_throws() {
+        TradeExecutionRecord active = makeRecord(41L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(41L)).thenReturn(Optional.of(active));
+
+        assertThatThrownBy(() -> service.modifyProtection(41L, new BigDecimal("27050"), null, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("LONG stopLoss must be below");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void modify_protection_updates_only_take_profit_when_sl_null() {
+        TradeExecutionRecord active = makeRecord(42L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(42L)).thenReturn(Optional.of(active));
+        when(repo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        service.modifyProtection(42L, null, new BigDecimal("27120"), "operator");
+
+        assertThat(active.getVirtualStopLoss()).isEqualByComparingTo("26975"); // unchanged (entry - 25)
+        assertThat(active.getVirtualTakeProfit()).isEqualByComparingTo("27120");
+    }
+
+    @Test
+    void modify_protection_terminal_row_throws_conflict() {
+        TradeExecutionRecord closed = makeRecord(43L, "MNQ", "BUY", new BigDecimal("27000"));
+        closed.setStatus(ExecutionStatus.CLOSED);
+        when(repo.findByIdForUpdate(43L)).thenReturn(Optional.of(closed));
+
+        assertThatThrownBy(() -> service.modifyProtection(43L, new BigDecimal("26950"), null, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("terminal");
+    }
+
+    @Test
+    void modify_protection_without_levels_throws() {
+        assertThatThrownBy(() -> service.modifyProtection(44L, null, null, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("at least one");
+    }
+
     private static TradeExecutionRecord makeRecord(long id, String instrument, String action, BigDecimal entry) {
         TradeExecutionRecord r = new TradeExecutionRecord();
         r.setId(id);
