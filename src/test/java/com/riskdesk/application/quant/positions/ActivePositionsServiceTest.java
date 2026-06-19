@@ -11,6 +11,7 @@ import com.riskdesk.domain.execution.port.TradeExecutionRepositoryPort;
 import com.riskdesk.domain.model.ExecutionStatus;
 import com.riskdesk.domain.model.ExecutionTriggerSource;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.model.Side;
 import com.riskdesk.domain.model.TradeExecutionRecord;
 import com.riskdesk.domain.quant.model.LivePriceSnapshot;
 import com.riskdesk.domain.quant.port.LivePricePort;
@@ -283,6 +284,117 @@ class ActivePositionsServiceTest {
         when(repo.findByIdForUpdate(999L)).thenReturn(Optional.empty());
         assertThat(service.closePosition(999L, "tester")).isEmpty();
         assertThat(service.cancelEntry(999L, "tester")).isEmpty();
+    }
+
+    @Test
+    void reverse_active_long_routes_reverse_to_short_through_router() {
+        TradeExecutionRecord active = makeRecord(30L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setBrokerAccountId("DU111");
+        active.setTimeframe("manual");
+        when(repo.findByIdForUpdate(30L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE_PUSH")));
+        when(orderRouter.route(any())).thenReturn(RoutingResult.tracked(RoutingOutcome.ROUTED, 30L, 777L));
+        when(repo.findById(30L)).thenReturn(Optional.of(active));
+
+        Optional<ActivePositionView> result = service.reversePosition(30L, "operator");
+
+        assertThat(result).isPresent();
+        ArgumentCaptor<TradeIntent> captor = ArgumentCaptor.forClass(TradeIntent.class);
+        verify(orderRouter).route(captor.capture());
+        TradeIntent intent = captor.getValue();
+        assertThat(intent.kind()).isEqualTo(IntentKind.REVERSE);
+        assertThat(intent.side()).isEqualTo(Side.SHORT);
+        assertThat(intent.instrument()).isEqualTo(Instrument.MNQ);
+        assertThat(intent.timeframe()).isEqualTo("manual");
+        assertThat(intent.brokerAccountId()).isEqualTo("DU111");
+        assertThat(intent.quantity()).isEqualTo(1);
+        assertThat(intent.limitPrice()).isEqualByComparingTo("27010.0");
+        verify(eventPublisher, times(1)).publishEvent(any(ActivePositionChangedEvent.class));
+    }
+
+    @Test
+    void reverse_active_short_targets_long_side() {
+        TradeExecutionRecord active = makeRecord(31L, "MGC", "SELL", new BigDecimal("4650"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(31L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MGC))
+            .thenReturn(Optional.of(new LivePriceSnapshot(4648.0, NOW, "LIVE_PUSH")));
+        when(orderRouter.route(any())).thenReturn(RoutingResult.tracked(RoutingOutcome.ROUTED, 31L, 778L));
+
+        service.reversePosition(31L, "operator");
+
+        ArgumentCaptor<TradeIntent> captor = ArgumentCaptor.forClass(TradeIntent.class);
+        verify(orderRouter).route(captor.capture());
+        assertThat(captor.getValue().kind()).isEqualTo(IntentKind.REVERSE);
+        assertThat(captor.getValue().side()).isEqualTo(Side.LONG);
+    }
+
+    @Test
+    void reverse_pending_throws_conflict_without_routing() {
+        TradeExecutionRecord pending = makeRecord(32L, "MNQ", "BUY", new BigDecimal("27000"));
+        pending.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
+        when(repo.findByIdForUpdate(32L)).thenReturn(Optional.of(pending));
+
+        assertThatThrownBy(() -> service.reversePosition(32L, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no live position to reverse");
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reverse_unfilled_resting_entry_throws_conflict() {
+        TradeExecutionRecord resting = makeRecord(33L, "MNQ", "BUY", new BigDecimal("27000"));
+        resting.setStatus(ExecutionStatus.ENTRY_SUBMITTED);
+        when(repo.findByIdForUpdate(33L)).thenReturn(Optional.of(resting));
+
+        assertThatThrownBy(() -> service.reversePosition(33L, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no live position to reverse");
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reverse_close_in_flight_throws_conflict_without_routing() {
+        // A close already resting at the broker (EXIT_SUBMITTED) must resolve before a reverse — the
+        // router would otherwise open the opposite leg on top of the un-flattened position.
+        TradeExecutionRecord exiting = makeRecord(36L, "MNQ", "BUY", new BigDecimal("27000"));
+        exiting.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        when(repo.findByIdForUpdate(36L)).thenReturn(Optional.of(exiting));
+
+        assertThatThrownBy(() -> service.reversePosition(36L, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("a close is already in progress");
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reverse_terminal_row_is_idempotent() {
+        TradeExecutionRecord closed = makeRecord(34L, "MNQ", "BUY", new BigDecimal("27000"));
+        closed.setStatus(ExecutionStatus.CLOSED);
+        when(repo.findByIdForUpdate(34L)).thenReturn(Optional.of(closed));
+
+        Optional<ActivePositionView> result = service.reversePosition(34L, "operator");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().status()).isEqualTo(ExecutionStatus.CLOSED);
+        verify(orderRouter, never()).route(any());
+    }
+
+    @Test
+    void reverse_failed_routing_throws_conflict() {
+        TradeExecutionRecord active = makeRecord(35L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        when(repo.findByIdForUpdate(35L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE_PUSH")));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.of(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE, "bridge down"));
+
+        assertThatThrownBy(() -> service.reversePosition(35L, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("bridge down");
     }
 
     private static TradeExecutionRecord makeRecord(long id, String instrument, String action, BigDecimal entry) {

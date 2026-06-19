@@ -68,7 +68,12 @@ function num(v: number | string | null | undefined): number | null {
 interface PendingTicket {
   direction: 'LONG' | 'SHORT';
   price: number;
+  /** Pre-selects the ticket order type — MARKET when the operator picked "… MKT" in the menu. */
+  entryType?: 'LIMIT' | 'MARKET';
 }
+
+/** Row action awaiting its second (confirming) click — keyed by execution id + which action. */
+type RowAction = 'close' | 'cancel' | 'reverse';
 
 /**
  * Re-aggregates base tick bars into larger constant-tick-count bars by grouping
@@ -168,7 +173,7 @@ function mergeTickBars(bars: TickBar[], factor: number): TickBar[] {
  */
 function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartProps) {
   const { tickBars, tickBarResets } = useOrderFlow();
-  const { positions, close, cancelEntry, refresh } = useActivePositions();
+  const { positions, close, cancelEntry, reverse, refresh } = useActivePositions();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -187,8 +192,8 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
   const [ticket, setTicket] = useState<PendingTicket | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  /** Two-step inline confirm for cancel/close row buttons: executionId pending confirmation. */
-  const [confirmAction, setConfirmAction] = useState<number | null>(null);
+  /** Two-step inline confirm for the per-row action buttons: which (id, action) awaits the 2nd click. */
+  const [confirmAction, setConfirmAction] = useState<{ id: number; action: RowAction } | null>(null);
 
   const meta = selectedInstrument ? INSTRUMENT_META[selectedInstrument] : undefined;
 
@@ -477,21 +482,25 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
     return () => clearTimeout(t);
   }, [confirmAction]);
 
-  const handleRowAction = useCallback(async (p: ActivePositionView) => {
-    if (confirmAction !== p.executionId) {
-      setConfirmAction(p.executionId);
+  const handleRowAction = useCallback(async (p: ActivePositionView, action: RowAction) => {
+    if (confirmAction?.id !== p.executionId || confirmAction.action !== action) {
+      setConfirmAction({ id: p.executionId, action });
       return;
     }
     setConfirmAction(null);
-    const resting = RESTING_STATUSES.has(p.status);
-    const result = resting ? await cancelEntry(p.executionId) : await close(p.executionId);
-    if (result) {
-      setNotice({ kind: 'ok', text: resting ? 'Annulation envoyée au broker' : 'Clôture envoyée au broker' });
-    } else {
-      setNotice({ kind: 'err', text: resting ? 'Annulation refusée — voir Active Positions' : 'Clôture refusée — voir Active Positions' });
-    }
+    const result =
+      action === 'cancel' ? await cancelEntry(p.executionId)
+      : action === 'reverse' ? await reverse(p.executionId)
+      : await close(p.executionId);
+    const okText = action === 'cancel' ? 'Annulation envoyée au broker'
+      : action === 'reverse' ? 'Inversion envoyée au broker'
+      : 'Clôture envoyée au broker';
+    const errText = action === 'cancel' ? 'Annulation refusée — voir Active Positions'
+      : action === 'reverse' ? 'Inversion refusée — voir Active Positions'
+      : 'Clôture refusée — voir Active Positions';
+    setNotice({ kind: result ? 'ok' : 'err', text: result ? okText : errText });
     void refresh();
-  }, [confirmAction, cancelEntry, close, refresh]);
+  }, [confirmAction, cancelEntry, close, reverse, refresh]);
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
@@ -580,15 +589,27 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
             >
               <button
                 className="block w-full text-left px-3 py-1.5 text-emerald-300 hover:bg-emerald-900/40 font-medium"
-                onClick={() => { setTicket({ direction: 'LONG', price: menu.price }); setMenu(null); }}
+                onClick={() => { setTicket({ direction: 'LONG', price: menu.price, entryType: 'LIMIT' }); setMenu(null); }}
               >
                 Acheter LMT @ {menu.price.toFixed(meta.decimals)}
               </button>
               <button
+                className="block w-full text-left px-3 py-1.5 text-emerald-300/90 hover:bg-emerald-900/40 border-t border-zinc-800"
+                onClick={() => { setTicket({ direction: 'LONG', price: menu.price, entryType: 'MARKET' }); setMenu(null); }}
+              >
+                Acheter MKT <span className="text-zinc-500">· au marché</span>
+              </button>
+              <button
                 className="block w-full text-left px-3 py-1.5 text-red-300 hover:bg-red-900/40 font-medium border-t border-zinc-800"
-                onClick={() => { setTicket({ direction: 'SHORT', price: menu.price }); setMenu(null); }}
+                onClick={() => { setTicket({ direction: 'SHORT', price: menu.price, entryType: 'LIMIT' }); setMenu(null); }}
               >
                 Vendre LMT @ {menu.price.toFixed(meta.decimals)}
+              </button>
+              <button
+                className="block w-full text-left px-3 py-1.5 text-red-300/90 hover:bg-red-900/40 border-t border-zinc-800"
+                onClick={() => { setTicket({ direction: 'SHORT', price: menu.price, entryType: 'MARKET' }); setMenu(null); }}
+              >
+                Vendre MKT <span className="text-zinc-500">· au marché</span>
               </button>
               <button
                 className="block w-full text-left px-3 py-1 text-zinc-500 hover:text-zinc-300 border-t border-zinc-800"
@@ -645,7 +666,9 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
             const resting = RESTING_STATUSES.has(p.status);
             const entry = num(p.entryPrice);
             const pnl = num(p.pnlDollars);
-            const confirming = confirmAction === p.executionId;
+            const confirmingCancel = confirmAction?.id === p.executionId && confirmAction.action === 'cancel';
+            const confirmingReverse = confirmAction?.id === p.executionId && confirmAction.action === 'reverse';
+            const confirmingClose = confirmAction?.id === p.executionId && confirmAction.action === 'close';
             return (
               <div key={p.executionId} className="flex items-center gap-2 px-3 py-1.5 text-[11px]">
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
@@ -665,18 +688,38 @@ function TickChart({ selectedInstrument, snapshot, brokerAccountId }: TickChartP
                   </span>
                 )}
                 <span className="flex-1" />
-                <button
-                  onClick={() => void handleRowAction(p)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-                    confirming
-                      ? 'bg-red-700 text-white'
-                      : resting
-                        ? 'bg-zinc-800 text-amber-300 hover:bg-amber-900/50'
-                        : 'bg-zinc-800 text-red-300 hover:bg-red-900/50'
-                  }`}
-                >
-                  {confirming ? 'Confirmer ?' : resting ? 'Annuler' : 'Fermer'}
-                </button>
+                {resting ? (
+                  <button
+                    onClick={() => void handleRowAction(p, 'cancel')}
+                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                      confirmingCancel ? 'bg-red-700 text-white' : 'bg-zinc-800 text-amber-300 hover:bg-amber-900/50'
+                    }`}
+                  >
+                    {confirmingCancel ? 'Confirmer ?' : 'Annuler'}
+                  </button>
+                ) : (
+                  <>
+                    {p.status === 'ACTIVE' && (
+                      <button
+                        onClick={() => void handleRowAction(p, 'reverse')}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                          confirmingReverse ? 'bg-amber-600 text-white' : 'bg-zinc-800 text-amber-300 hover:bg-amber-900/50'
+                        }`}
+                        title="Inverser : clôture la position et ouvre la taille opposée"
+                      >
+                        {confirmingReverse ? 'Confirmer ?' : 'Inverser'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => void handleRowAction(p, 'close')}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                        confirmingClose ? 'bg-red-700 text-white' : 'bg-zinc-800 text-red-300 hover:bg-red-900/50'
+                      }`}
+                    >
+                      {confirmingClose ? 'Confirmer ?' : 'Fermer'}
+                    </button>
+                  </>
+                )}
               </div>
             );
           })}
@@ -702,7 +745,7 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
   onSubmit: (payload: import('@/app/components/quant/types').ManualTradeRequest) => Promise<void>;
 }) {
   const long = ticket.direction === 'LONG';
-  const [entryType, setEntryType] = useState<'LIMIT' | 'MARKET'>('LIMIT');
+  const [entryType, setEntryType] = useState<'LIMIT' | 'MARKET'>(ticket.entryType ?? 'LIMIT');
   const [price, setPrice] = useState(ticket.price.toFixed(meta.decimals));
   const [qty, setQty] = useState('1');
   const [sl, setSl] = useState(
