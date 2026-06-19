@@ -678,6 +678,12 @@ public class DefaultOrderRouter implements OrderRouter {
      * less than the position, leaves the row ACTIVE with a decremented quantity (via {@code submitCloseLeg}'s
      * {@code remainAfterReduce}). A request for the whole position (or more) collapses to a full close.
      * {@link #executeExit} is deliberately left untouched — full CLOSE / FLATTEN behaviour is unchanged.
+     *
+     * <p>A prior exit stuck in {@code EXIT_SUBMITTED} (dropped ack/fill callback) is reconciled against broker
+     * truth before deciding — re-fired only when the broker still holds the full pre-exit size, otherwise the
+     * row is finalized to the reduced broker size WITHOUT a re-fire (a blind re-fire would over-reduce). This
+     * removes the asymmetry with {@link #executeExit}, which {@link #stuckCloseNeedsRetry}-recovers its stuck
+     * close, while keeping the reduce-specific over-reduction guard.</p>
      */
     private RoutingResult executeReduce(TradeIntent intent) {
         var active = findOpenRow(intent);
@@ -685,12 +691,64 @@ public class DefaultOrderRouter implements OrderRouter {
             return RoutingResult.of(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "no open execution row to reduce");
         }
         TradeExecutionRecord row = active.get();
-        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
-            // A close/reduce is already resting — a second reducing order could over-close. Skip as duplicate.
-            return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
-                "an exit is already in flight (EXIT_SUBMITTED) — reduce skipped", row.getId(), row.getEntryOrderId());
-        }
+        // Read broker truth ONCE up front — needed both for the stuck-exit reconciliation below and for the
+        // available / confirmed-flat / held-side branches that follow (mirrors executeExit).
         BrokerPositionState pos = reconciler.readPositionState(intent.brokerAccountId(), intent.instrument());
+        if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+            // A close/reduce is already resting at the broker — a second reducing order could over-close, so
+            // the default is to skip as a duplicate. BUT a reduce/close whose ack/fill callback was DROPPED
+            // leaves the row stuck EXIT_SUBMITTED forever, and the old unconditional skip then DEAD-LOCKED
+            // partial management (every later REDUCE skipped here) until a full close or the background
+            // reconciler intervened. So, like executeExit, once the exit is stuck past the grace AND IBKR still
+            // holds the row's side ({@link #stuckCloseNeedsRetry}), recover it — but a reduce needs an EXTRA
+            // safety step a full close does not: re-firing BLINDLY can OVER-REDUCE, because broker-still-open
+            // alone cannot tell "the reduce never filled" from "the reduce filled but its callback was lost"
+            // (the position is partly open on the same side either way). So reconcile the EXPECTED post-exit
+            // size against broker truth FIRST:
+            //   • broker still holds the FULL pre-exit size (brokerQty == rowQty) → the exit never reduced →
+            //     re-fire a fresh reduce;
+            //   • broker holds LESS (brokerQty < rowQty) → the exit ALREADY reduced (lost callback / partial
+            //     fill) → finalize the row to broker truth and DON'T re-fire (a later signal acts on it).
+            if (!stuckCloseNeedsRetry(row, pos)) {
+                // within grace / truth unavailable / broker flat / opposite side — keep the conservative skip
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                    "an exit is already in flight (EXIT_SUBMITTED) — reduce skipped", row.getId(), row.getEntryOrderId());
+            }
+            int brokerQty = pos.net().abs().intValue();
+            int rowQty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : 0;
+            if (brokerQty < rowQty) {
+                // The stuck exit already reduced the position (a lost fill callback, or a partial fill): the
+                // broker holds fewer than the row's pre-exit size. Re-firing would OVER-reduce. Finalize the
+                // row to broker truth (decremented, ACTIVE) and skip — a later signal acts on the reconciled
+                // row. Detach the dead close ids so a replayed callback can't re-target it (mirrors the fill
+                // tracker's revive). Clearing closingQuantity drops any stale in-flight reduce marker.
+                row.setQuantity(brokerQty);
+                row.setClosingQuantity(null);
+                row.setStatus(ExecutionStatus.ACTIVE);
+                row.setIbkrOrderId(null);
+                row.setPermId(null);
+                row.setStatusReason(truncate("OrderRouter REDUCE — prior exit already reduced to broker truth "
+                    + brokerQty + "; reconciled to ACTIVE, duplicate reduce skipped", 256));
+                row.setUpdatedAt(Instant.now());
+                executionRepository.save(row);
+                log.warn("OrderRouter REDUCE — prior exit stuck (execution {} EXIT_SUBMITTED past grace) but IBKR "
+                    + "holds {} < row {} — already reduced (lost callback); reconciled to ACTIVE, no duplicate",
+                    row.getId(), brokerQty, rowQty);
+                return RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE,
+                    "prior exit already reduced to " + brokerQty + " — reconciled, duplicate reduce skipped",
+                    row.getId(), row.getEntryOrderId());
+            }
+            // brokerQty >= rowQty: the stuck exit never reduced anything (broker still holds the full size, or
+            // more after external drift). Safe to re-fire a fresh reduce. Clear the stale in-flight marker and
+            // sync the row size up to broker truth on drift, then fall through to submit a fresh reduce leg.
+            row.setClosingQuantity(null);
+            if (brokerQty > rowQty) {
+                row.setQuantity(brokerQty);
+            }
+            log.warn("OrderRouter REDUCE — prior exit stuck (execution {} EXIT_SUBMITTED past grace, IBKR still "
+                + "holds {}) — re-firing a fresh reduce to break the dead-lock", row.getId(), brokerQty);
+            // fall through to submit a fresh reduce leg on this same (reconciled) row
+        }
         if (!pos.available()) {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_BRIDGE_UNAVAILABLE,
                 "broker position truth unavailable — reduce skipped to avoid a blind reducing order",

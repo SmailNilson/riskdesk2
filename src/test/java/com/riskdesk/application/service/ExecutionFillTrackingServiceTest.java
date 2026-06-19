@@ -519,6 +519,117 @@ class ExecutionFillTrackingServiceTest {
         assertNull(saved.getClosingQuantity());
     }
 
+    @Test
+    void partialReduceFillThenCancelled_decrementsByFilledAndRevivesActive() {
+        // Slice 3c — a resting reduce of 2 on a position of 3 PARTIALLY fills (1) then cancels. The 1 filled
+        // contract LEFT the position; the remaining 2 are still live. Decrement to 2 by the filled qty and
+        // revive ACTIVE — NOT left stuck EXIT_SUBMITTED with a now-wrong quantity. Dead ids detached.
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(60L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(3);
+        row.setClosingQuantity(2);
+        row.setIbkrOrderId(ORDER_ID);
+        row.setPermId(600_000_010L);
+        when(repository.findByPermId(600_000_010L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        // Cancelled with cumulative filled = 1 (a partial fill before the cancel).
+        service.onOrderStatus(ORDER_ID, 600_000_010L, "Cancelled",
+            new BigDecimal("1"), new BigDecimal("1"), new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
+        assertEquals(Integer.valueOf(2), saved.getQuantity());          // 3 − 1 filled
+        assertNull(saved.getClosingQuantity());                          // stale reduce marker cleared
+        assertNull(saved.getIbkrOrderId(), "dead close order id detached");
+        assertNull(saved.getPermId(), "dead close permId detached");
+        assertNull(saved.getClosedAt());                                 // still live — not terminal
+    }
+
+    @Test
+    void partialFullCloseFillThenCancelled_decrementsAndStaysActive() {
+        // A FULL close (no closingQuantity) of a position of 3 partially fills (1) then cancels — the row is
+        // reduced to 2 and revived ACTIVE, exactly like a reduce. Confirms the decrement is driven by the
+        // filled qty, independent of whether closingQuantity was set.
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(63L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(3); // closingQuantity null = it was a full close
+        when(repository.findByPermId(600_000_013L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(ORDER_ID, 600_000_013L, "Cancelled",
+            new BigDecimal("1"), new BigDecimal("2"), new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
+        assertEquals(Integer.valueOf(2), saved.getQuantity());
+        assertNull(saved.getClosingQuantity());
+    }
+
+    @Test
+    void partialCloseFillThenCancelled_fillCoveredPosition_marksClosed() {
+        // Defensive: a close reports Cancelled but its cumulative fill already covered the whole position
+        // (filled >= quantity) — finalize CLOSED with a close timestamp rather than revive a phantom remainder.
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(61L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(2);
+        when(repository.findByPermId(600_000_011L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(ORDER_ID, 600_000_011L, "Cancelled",
+            new BigDecimal("2"), BigDecimal.ZERO, new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.CLOSED, saved.getStatus());
+        assertNotNull(saved.getClosedAt());
+    }
+
+    @Test
+    void replayedCancelledAfterPartialRevive_keepsRowActive_noDoubleDecrement() {
+        // The partial-fill revive detaches BOTH dead ids, so a replayed Cancelled (IBKR re-delivers them)
+        // locates nothing and cannot decrement the live position a second time.
+        final long permId = 600_000_012L;
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(62L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(3);
+        row.setClosingQuantity(2);
+        row.setIbkrOrderId(ORDER_ID);
+        row.setPermId(permId);
+        when(repository.findByPermId(permId)).thenAnswer(inv ->
+            Long.valueOf(permId).equals(row.getPermId()) ? Optional.of(row) : Optional.empty());
+        when(repository.findByIbkrOrderId(ORDER_ID)).thenAnswer(inv ->
+            Integer.valueOf(ORDER_ID).equals(row.getIbkrOrderId()) ? Optional.of(row) : Optional.empty());
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        // First partial-fill cancel → decrement to 2, revive ACTIVE, detach ids.
+        service.onOrderStatus(ORDER_ID, permId, "Cancelled",
+            new BigDecimal("1"), new BigDecimal("1"), new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+        assertEquals(ExecutionStatus.ACTIVE, row.getStatus());
+        assertEquals(Integer.valueOf(2), row.getQuantity());
+        assertNull(row.getPermId());
+        assertNull(row.getIbkrOrderId());
+
+        // Replay the SAME callback — locate() finds nothing (ids detached) → ignored, no second decrement.
+        service.onOrderStatus(ORDER_ID, permId, "Cancelled",
+            new BigDecimal("1"), new BigDecimal("1"), new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+        assertEquals(Integer.valueOf(2), row.getQuantity(), "replay must not decrement again");
+        verify(repository, times(1)).save(any(TradeExecutionRecord.class));
+    }
+
     private static TradeExecutionRecord baseExecution() {
         TradeExecutionRecord execution = new TradeExecutionRecord();
         execution.setId(42L);

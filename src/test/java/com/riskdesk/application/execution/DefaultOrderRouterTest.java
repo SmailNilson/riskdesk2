@@ -1437,4 +1437,147 @@ class DefaultOrderRouterTest {
         assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
         assertThat(cap.getValue().getClosingQuantity()).isNull(); // stale marker cleared on the full close
     }
+
+    // ---- REDUCE stuck-exit reconciliation (slice 3c — removes the executeReduce stuck-close asymmetry) ----
+    // A reduce/close stuck in EXIT_SUBMITTED past the grace must be recovered like executeExit's stuck close,
+    // BUT a reduce needs an extra over-reduction guard: re-fire ONLY when broker truth still shows the full
+    // pre-exit size; if the broker already holds LESS, the prior exit reduced it (lost callback / partial) →
+    // finalize the row to broker truth and DON'T re-fire. Conservative skips otherwise (within grace,
+    // unavailable, flat, opposite side, retry disabled) — mirrors the CLOSE stuck-retry suite above.
+
+    @Test
+    void reduce_stuckExitSubmitted_pastGrace_ibkrHoldsFullSize_refiresFreshReduce() {
+        // Stuck EXIT_SUBMITTED 120s (past the 45s grace) and IBKR STILL holds the full long 2 — the prior
+        // reduce never filled (dropped ack/fill). Re-fire a FRESH reduce rather than skip as a duplicate.
+        TradeExecutionRecord stuck = exitSubmittedRow(120); // action LONG, qty 2
+        stuck.setClosingQuantity(1);                         // stale marker from the prior (stuck) reduce
+        stubActive(stuck);
+        stubBroker("2"); // IBKR still LONG 2 == row qty → never reduced
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(970L, "Submitted")); // rests
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED); // re-fired, NOT SKIPPED_DUPLICATE
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT"); // SELL to reduce the long
+        assertThat(req.getValue().quantity()).isEqualTo(1);      // the requested reduce, capped to broker net
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED); // fresh reduce rests
+        assertThat(cap.getValue().getClosingQuantity()).isEqualTo(1); // re-stamped for the fresh reduce leg
+        assertThat(cap.getValue().getQuantity()).isEqualTo(2);        // full size until the fresh reduce fills
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_pastGrace_ibkrAlreadyReduced_reconcilesToTruth_noRefire() {
+        // Stuck past grace but IBKR holds long 1 < row qty 2 — the prior reduce ALREADY filled (its callback
+        // was lost). Re-firing would OVER-reduce. Finalize the row to broker truth (1, ACTIVE), detach the dead
+        // ids, and skip — a later signal acts on the reconciled row. NO new order.
+        TradeExecutionRecord stuck = exitSubmittedRow(120); // qty 2
+        stuck.setClosingQuantity(1);
+        stuck.setIbkrOrderId(4242);
+        stuck.setPermId(990_000_001L);
+        stubActive(stuck);
+        stubBroker("1"); // IBKR LONG 1 < row qty 2 → already reduced
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any()); // no re-fire → no over-reduction
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.ACTIVE); // reconciled, no longer stuck
+        assertThat(saved.getQuantity()).isEqualTo(1);                    // synced down to broker truth
+        assertThat(saved.getClosingQuantity()).isNull();                 // stale in-flight marker dropped
+        assertThat(saved.getIbkrOrderId()).isNull();                     // dead close ids detached (anti-replay)
+        assertThat(saved.getPermId()).isNull();
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_pastGrace_ibkrDriftedLarger_syncsUpThenRefires() {
+        // Edge: stuck past grace but IBKR holds long 3 > row qty 2 (external drift). The prior reduce didn't
+        // shrink the position, so re-fire — but sync the row size up to broker truth first so the reduce qty
+        // is bounded by the real position.
+        TradeExecutionRecord stuck = exitSubmittedRow(120); // qty 2
+        stubActive(stuck);
+        stubBroker("3"); // IBKR LONG 3 > row qty 2
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(971L, "Submitted"));
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<BrokerEntryOrderRequest> req = ArgumentCaptor.forClass(BrokerEntryOrderRequest.class);
+        verify(ibkrOrderService).submitEntryOrder(req.capture());
+        assertThat(req.getValue().action()).isEqualTo("SHORT");
+        assertThat(req.getValue().quantity()).isEqualTo(1);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getQuantity()).isEqualTo(3);          // synced up to broker truth before reducing
+        assertThat(cap.getValue().getClosingQuantity()).isEqualTo(1);   // fresh reduce of 1 rests
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_withinGrace_skipsDuplicate() {
+        // Within grace the reduce is genuinely in flight — never double-submit on top of it.
+        stubActive(exitSubmittedRow(5)); // inside the 45s grace
+        stubBroker("2");
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_ibkrFlat_skipsDuplicate_reconcilerOwnsIt() {
+        // Past grace but IBKR flat → the exit already completed (lost fill callback). Don't re-fire a naked
+        // order; the flat-but-stuck row is finalized to CLOSED out-of-band by StaleCloseReconciler.
+        stubActive(exitSubmittedRow(120));
+        stubFlat(true);
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_brokerTruthUnavailable_skipsDuplicate() {
+        // Past grace but broker truth unreadable — never act on a guess. Stay a duplicate-skip.
+        stubActive(exitSubmittedRow(120));
+        when(reconciler.readPositionState(any(), any())).thenReturn(BrokerPositionState.unavailable());
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_ibkrHoldsOppositeSide_skipsDuplicate_noRefire() {
+        // Past grace but IBKR holds the OPPOSITE side (row LONG, broker SHORT) — a re-fire (SELL) would STACK
+        // the short. Never re-fire; keep the skip (the entry-path reconcile owns this deeper divergence).
+        stubActive(exitSubmittedRow(120)); // action LONG
+        stubBroker("-2");                   // IBKR SHORT 2
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void reduce_stuckExitSubmitted_retryDisabled_skipsDuplicate() {
+        // Kill-switch: stale-close-retry-seconds = 0 restores the legacy unconditional duplicate-skip.
+        execProps.getUnifiedRouter().setStaleCloseRetrySeconds(0);
+        stubActive(exitSubmittedRow(600));
+        stubBroker("2");
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_DUPLICATE);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
 }
