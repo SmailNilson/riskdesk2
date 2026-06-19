@@ -19,6 +19,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -305,11 +306,182 @@ public class ActivePositionsService {
                 publishSafely(changeEvent(refreshed, now));
                 return Optional.of(view(refreshed));
             }
+            case SKIPPED_IBKR_DISABLED -> {
+                // IBKR-less env (paper / tests): degrade like closePosition rather than a confusing 409 — mark
+                // the exit locally (the open-opposite leg can't happen without a broker).
+                exec.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+                exec.setStatusReason("Reverse requested by " + who + " (IBKR disabled — local close mark only).");
+                exec.setExitSubmittedAt(now);
+                exec.setUpdatedAt(now);
+                TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+                publishSafely(changeEvent(saved, now));
+                return Optional.of(view(saved));
+            }
             case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
                 "entry order not (fully) filled — cancel the entry instead of reversing: " + result.message());
             default -> throw new IllegalStateException(
                 "reverse not executed (" + result.outcome() + "): " + result.message());
         }
+    }
+
+    /**
+     * Partially close (scale out) a live position by {@code qty} contracts, keeping the remainder ACTIVE.
+     * Routes a {@link com.riskdesk.domain.execution.IntentKind#REDUCE} intent through the unified router
+     * (broker-truth reconciliation, marketable exit pricing). Reducing by the whole size (or more) is a full
+     * close, delegated to {@link #closePosition}. Only an ACTIVE position can be reduced — a resting / unfilled
+     * entry has nothing to scale out (cancel it instead).
+     *
+     * @return the updated execution view, or empty if the id does not exist
+     * @throws IllegalArgumentException when {@code qty < 1} (400)
+     * @throws IllegalStateException    when the row is not a live position or the router refuses it (409)
+     */
+    public Optional<ActivePositionView> reducePosition(Long executionId, int qty, String requestedBy) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        if (qty < 1) {
+            throw new IllegalArgumentException("reduce quantity must be >= 1");
+        }
+        Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
+        if (opt.isEmpty()) {
+            return Optional.empty();
+        }
+        TradeExecutionRecord exec = opt.get();
+        ExecutionStatus current = exec.getStatus();
+        if (current == null) {
+            throw new IllegalStateException("execution status is null — cannot reduce");
+        }
+        if (isTerminal(current)) {
+            return Optional.of(view(exec));
+        }
+        if (current != ExecutionStatus.ACTIVE) {
+            throw new IllegalStateException("execution " + executionId + " is " + current
+                + " — only a live ACTIVE position can be partially closed; cancel a resting entry instead");
+        }
+        int positionQty = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
+        if (qty >= positionQty) {
+            // Reducing the whole position (or more) is a full close — reuse the flatten path (allowed for any
+            // source, exactly like the "Fermer" button is a manual override that can flatten anything).
+            return closePosition(executionId, requestedBy);
+        }
+        // A TRUE partial scale-out is a manual chart feature. A strategy (WTX / playbook / auto-arm) manages its
+        // own sizing; a partial reduce here would desync it and overwrite the entry fill metadata its reconciler
+        // reads back as the position basis. Refuse non-manual rows (a full close above stays available).
+        if (exec.getTriggerSource() != ExecutionTriggerSource.MANUAL_QUANT_PANEL) {
+            throw new IllegalStateException("execution " + executionId + " is " + exec.getTriggerSource()
+                + " — partial scale-out is only available for manual chart positions");
+        }
+
+        Instrument instrument = parseInstrument(exec.getInstrument());
+        if (instrument == null) {
+            throw new IllegalStateException("unknown instrument on execution row: " + exec.getInstrument());
+        }
+
+        Instant now = clock.instant();
+        String who = (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy;
+
+        TradeIntent intent = reduceIntent(exec, instrument, qty, now);
+        RoutingResult result = orderRouter.route(intent);
+        log.info("Active position reduce routed executionId={} instrument={} qty={} outcome={} message={} by={}",
+            exec.getId(), exec.getInstrument(), qty, result.outcome(), result.message(), who);
+
+        switch (result.outcome()) {
+            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING, SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+                TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
+                publishSafely(changeEvent(refreshed, now));
+                return Optional.of(view(refreshed));
+            }
+            case SKIPPED_IBKR_DISABLED -> {
+                // IBKR-less env: a partial reduce needs a broker fill to be real — there is nothing to decrement
+                // locally. Return the unchanged position (with a note) rather than a confusing 409.
+                exec.setStatusReason("Reduce requested by " + who + " (IBKR disabled — no-op, position unchanged).");
+                exec.setUpdatedAt(now);
+                TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+                publishSafely(changeEvent(saved, now));
+                return Optional.of(view(saved));
+            }
+            case SKIPPED_ENTRY_IN_FLIGHT -> throw new IllegalStateException(
+                "entry order not (fully) filled — cancel the entry instead of reducing: " + result.message());
+            default -> throw new IllegalStateException(
+                "reduce not executed (" + result.outcome() + "): " + result.message());
+        }
+    }
+
+    /**
+     * Modify the VIRTUAL stop-loss / take-profit of a non-terminal position (chart drag-to-edit). Each
+     * supplied level is validated against the entry geometry (LONG: SL &lt; entry &lt; TP; SHORT mirror),
+     * normalized to the contract tick, persisted, and broadcast on {@code /topic/positions}. NO broker
+     * order is placed — the levels stay virtual; {@link VirtualStopWatcher} acts on them app-side when
+     * enabled. Pass either level (or both); at least one is required.
+     *
+     * @return the updated execution view, or empty if the id does not exist
+     * @throws IllegalArgumentException when neither level is supplied or a level is on the wrong side (400)
+     * @throws IllegalStateException    when the row is terminal (409)
+     */
+    public Optional<ActivePositionView> modifyProtection(Long executionId, BigDecimal stopLoss,
+                                                         BigDecimal takeProfit, String requestedBy) {
+        if (executionId == null) {
+            return Optional.empty();
+        }
+        if (stopLoss == null && takeProfit == null) {
+            throw new IllegalArgumentException("at least one of stopLoss / takeProfit is required");
+        }
+        Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
+        if (opt.isEmpty()) {
+            return Optional.empty();
+        }
+        TradeExecutionRecord exec = opt.get();
+        ExecutionStatus current = exec.getStatus();
+        if (current == null || isTerminal(current)) {
+            throw new IllegalStateException("execution " + executionId + " is " + current
+                + " — cannot modify protection on a terminal position");
+        }
+        // Chart drag-to-edit owns the VIRTUAL SL/TP for MANUAL positions only. Strategy rows (WTX / playbook /
+        // auto-arm) store their OWN protective / trailing levels in these same fields and their reconcilers read
+        // them back — letting the chart overwrite them would corrupt live strategy state. Refuse non-manual rows.
+        if (exec.getTriggerSource() != ExecutionTriggerSource.MANUAL_QUANT_PANEL) {
+            throw new IllegalStateException("execution " + executionId + " is " + exec.getTriggerSource()
+                + " — SL/TP can only be edited on a manual chart position");
+        }
+
+        Instrument instrument = parseInstrument(exec.getInstrument());
+        BigDecimal ref = exec.getNormalizedEntryPrice();
+        boolean shortSide = "SHORT".equalsIgnoreCase(exec.getAction()) || "SELL".equalsIgnoreCase(exec.getAction());
+        // Normalize to the contract tick BEFORE validating geometry. Validating the raw value then storing the
+        // rounded one (HALF_UP) could snap a just-inside level ONTO the entry — e.g. MNQ entry 27000.00, SL
+        // 26999.90 passes "< entry" but rounds to 27000.00 == entry — silently defeating the side check and
+        // leaving the position with no protection (an immediate breach once the watcher is on).
+        BigDecimal sl = stopLoss == null ? null : normalizeTick(stopLoss, instrument);
+        BigDecimal tp = takeProfit == null ? null : normalizeTick(takeProfit, instrument);
+        if (ref != null && ref.signum() > 0) {
+            if (sl != null && !shortSide && sl.compareTo(ref) >= 0) {
+                throw new IllegalArgumentException("LONG stopLoss must be below the entry " + ref);
+            }
+            if (sl != null && shortSide && sl.compareTo(ref) <= 0) {
+                throw new IllegalArgumentException("SHORT stopLoss must be above the entry " + ref);
+            }
+            if (tp != null && !shortSide && tp.compareTo(ref) <= 0) {
+                throw new IllegalArgumentException("LONG takeProfit must be above the entry " + ref);
+            }
+            if (tp != null && shortSide && tp.compareTo(ref) >= 0) {
+                throw new IllegalArgumentException("SHORT takeProfit must be below the entry " + ref);
+            }
+        }
+
+        Instant now = clock.instant();
+        if (sl != null) {
+            exec.setVirtualStopLoss(sl);
+        }
+        if (tp != null) {
+            exec.setVirtualTakeProfit(tp);
+        }
+        exec.setUpdatedAt(now);
+        TradeExecutionRecord saved = tradeExecutionRepository.save(exec);
+        publishSafely(changeEvent(saved, now));
+        log.info("Protection modified executionId={} sl={} tp={} by={}",
+            saved.getId(), saved.getVirtualStopLoss(), saved.getVirtualTakeProfit(),
+            (requestedBy == null || requestedBy.isBlank()) ? "operator" : requestedBy);
+        return Optional.of(view(saved));
     }
 
     /**
@@ -362,11 +534,48 @@ public class ActivePositionsService {
             exec.getBrokerAccountId());
     }
 
-    /** Opposite of the row's current side. Accepts the LONG/SHORT and BUY/SELL action tokens. */
-    private static Side oppositeSide(String action) {
+    /**
+     * REDUCE intent for an operator scale-out: reduce the HELD side by {@code qty} contracts at the latest
+     * live price (marketable). Mirrors {@link #flattenIntent}'s price / source / timeframe resolution.
+     */
+    private TradeIntent reduceIntent(TradeExecutionRecord exec, Instrument instrument, int qty, Instant now) {
+        BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            limitPrice = exec.getNormalizedEntryPrice();
+        }
+        if (limitPrice == null || limitPrice.signum() <= 0) {
+            throw new IllegalStateException("no usable price to build the reduce order for " + exec.getInstrument());
+        }
+        ExecutionTriggerSource source = exec.getTriggerSource() != null
+            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
+        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
+            ? "manual" : exec.getTimeframe();
+        return TradeIntent.reduce(
+            "panel-reduce:" + exec.getId() + ":" + now.toEpochMilli(),
+            source, instrument, timeframe, sideOf(exec.getAction()), qty, limitPrice, exec.getBrokerAccountId());
+    }
+
+    /** The row's current side. Accepts the LONG/SHORT and BUY/SELL action tokens. */
+    private static Side sideOf(String action) {
         boolean shortNow = action != null
             && ("SHORT".equalsIgnoreCase(action) || "SELL".equalsIgnoreCase(action));
-        return shortNow ? Side.LONG : Side.SHORT;
+        return shortNow ? Side.SHORT : Side.LONG;
+    }
+
+    /** Opposite of the row's current side. */
+    private static Side oppositeSide(String action) {
+        return sideOf(action) == Side.LONG ? Side.SHORT : Side.LONG;
+    }
+
+    /** Round a price to the instrument's tick (mirrors the manual-trade ticket); pass-through if unknown. */
+    private static BigDecimal normalizeTick(BigDecimal price, Instrument instrument) {
+        if (price == null || instrument == null) {
+            return price;
+        }
+        BigDecimal tick = instrument.getTickSize();
+        return price.divide(tick, 0, RoundingMode.HALF_UP)
+            .multiply(tick)
+            .setScale(tick.scale(), RoundingMode.HALF_UP);
     }
 
     private void cancelLocally(TradeExecutionRecord exec, String reason, Instant now) {

@@ -1,5 +1,6 @@
 package com.riskdesk.application.quant.automation;
 
+import com.riskdesk.application.dto.BrokerEntryOrderRequest;
 import com.riskdesk.application.quant.service.QuantGateService;
 import com.riskdesk.application.service.ExecutionManagerService;
 import com.riskdesk.application.service.SubmitEntryOrderCommand;
@@ -60,27 +61,71 @@ public class QuantManualTradeService {
             throw new IllegalArgumentException("direction is required (LONG or SHORT)");
         }
         ManualEntryType entryType = req.entryType() == null ? ManualEntryType.LIMIT : req.entryType();
-        if (entryType == ManualEntryType.LIMIT && req.entryPrice() == null) {
-            throw new IllegalArgumentException("entryPrice is required for LIMIT orders");
-        }
         if (req.stopLoss() == null) {
             throw new IllegalArgumentException("stopLoss is required");
         }
         if (req.takeProfit1() == null) {
             throw new IllegalArgumentException("takeProfit1 is required");
         }
+        boolean stop = entryType == ManualEntryType.STOP || entryType == ManualEntryType.STOP_LIMIT;
+        if (entryType == ManualEntryType.LIMIT && req.entryPrice() == null) {
+            throw new IllegalArgumentException("entryPrice is required for LIMIT orders");
+        }
+        if (stop && req.triggerPrice() == null) {
+            throw new IllegalArgumentException("triggerPrice is required for STOP / STOP_LIMIT orders");
+        }
+        if (entryType == ManualEntryType.STOP_LIMIT && req.entryPrice() == null) {
+            throw new IllegalArgumentException("entryPrice (limit cap) is required for STOP_LIMIT orders");
+        }
         int quantity = req.quantity() == null || req.quantity() < 1 ? 1 : req.quantity();
 
-        BigDecimal entryPrice = entryType == ManualEntryType.MARKET
-            ? resolveLivePrice(instrument)
-            : req.entryPrice();
-
-        if (entryPrice == null) {
+        // Reference price the SL/TP geometry is validated against — the resting price the entry arms at:
+        // the trigger for STOP/STOP_LIMIT, the limit for LIMIT, the live price for MARKET.
+        BigDecimal referencePrice = switch (entryType) {
+            case STOP, STOP_LIMIT -> req.triggerPrice();
+            case MARKET -> resolveLivePrice(instrument);
+            case LIMIT -> req.entryPrice();
+        };
+        if (referencePrice == null) {
             throw new IllegalStateException("Cannot resolve a live price for MARKET order on " + instrument
                 + " — no recent quant snapshot. Use LIMIT and supply an entryPrice.");
         }
 
-        validatePlanGeometry(req.direction(), entryPrice, req.stopLoss(), req.takeProfit1());
+        // Breakout geometry for stop entries: a buy STOP arms ABOVE the market, a sell STOP BELOW it.
+        // Enforced only when a live price is available; otherwise the operator's trigger is trusted.
+        if (stop) {
+            BigDecimal live = resolveLivePrice(instrument);
+            if (live != null && req.direction() == ManualDirection.LONG && req.triggerPrice().compareTo(live) <= 0) {
+                throw new IllegalArgumentException("LONG stop trigger must be above the live price " + live);
+            }
+            if (live != null && req.direction() == ManualDirection.SHORT && req.triggerPrice().compareTo(live) >= 0) {
+                throw new IllegalArgumentException("SHORT stop trigger must be below the live price " + live);
+            }
+            if (entryType == ManualEntryType.STOP_LIMIT && req.direction() == ManualDirection.LONG
+                && req.entryPrice().compareTo(req.triggerPrice()) < 0) {
+                throw new IllegalArgumentException("LONG STOP_LIMIT limit cap must be >= the trigger");
+            }
+            if (entryType == ManualEntryType.STOP_LIMIT && req.direction() == ManualDirection.SHORT
+                && req.entryPrice().compareTo(req.triggerPrice()) > 0) {
+                throw new IllegalArgumentException("SHORT STOP_LIMIT limit cap must be <= the trigger");
+            }
+        }
+
+        validatePlanGeometry(req.direction(), referencePrice, req.stopLoss(), req.takeProfit1());
+
+        // Broker order shape: STOP arms at the trigger (stop-market); STOP_LIMIT arms at the trigger and
+        // caps the fill at entryPrice; LIMIT/MARKET submit a (marketable) limit at the reference price.
+        String orderTypeToken = switch (entryType) {
+            case STOP -> BrokerEntryOrderRequest.ORDER_TYPE_STOP;
+            case STOP_LIMIT -> BrokerEntryOrderRequest.ORDER_TYPE_STOP_LIMIT;
+            case LIMIT, MARKET -> BrokerEntryOrderRequest.ORDER_TYPE_LIMIT;
+        };
+        BigDecimal normalizedEntry = switch (entryType) {
+            case STOP -> normalize(req.triggerPrice(), instrument);   // stop-market: order price = trigger
+            case STOP_LIMIT -> normalize(req.entryPrice(), instrument); // limit cap
+            case LIMIT, MARKET -> normalize(referencePrice, instrument);
+        };
+        BigDecimal triggerToPersist = stop ? normalize(req.triggerPrice(), instrument) : null;
 
         // Per-request account (chart trading passes the account selected in the IBKR panel) with
         // the auto-arm config as fallback for the legacy ticket flow.
@@ -108,7 +153,9 @@ public class QuantManualTradeService {
         candidate.setRequestedBy(requestedBy == null || requestedBy.isBlank() ? "manual-panel" : requestedBy);
         candidate.setStatus(ExecutionStatus.PENDING_ENTRY_SUBMISSION);
         candidate.setStatusReason("Manual trade ticket — " + entryType.name() + " by operator");
-        candidate.setNormalizedEntryPrice(normalize(entryPrice, instrument));
+        candidate.setNormalizedEntryPrice(normalizedEntry);
+        candidate.setOrderType(orderTypeToken);
+        candidate.setTriggerPrice(triggerToPersist);
         candidate.setVirtualStopLoss(normalize(req.stopLoss(), instrument));
         candidate.setVirtualTakeProfit(normalize(req.takeProfit1(), instrument));
         candidate.setCreatedAt(now);
@@ -180,7 +227,7 @@ public class QuantManualTradeService {
     }
 
     public enum ManualEntryType {
-        MARKET, LIMIT
+        MARKET, LIMIT, STOP, STOP_LIMIT
     }
 
     public record ManualTradeRequest(
@@ -192,13 +239,24 @@ public class QuantManualTradeService {
         BigDecimal takeProfit2,
         Integer quantity,
         String brokerAccountId,
-        Boolean submitImmediately
+        Boolean submitImmediately,
+        /** Stop trigger (breakout arm price) for STOP / STOP_LIMIT entries; null otherwise. Last for
+         *  backward-compatible JSON + the pre-STOP constructors below. */
+        BigDecimal triggerPrice
     ) {
-        /** Legacy 7-arg shape (pre chart-trading) — used by existing tests/callers. */
+        /** Legacy 7-arg shape (pre chart-trading) — no account / submit flag / trigger. */
         public ManualTradeRequest(ManualDirection direction, ManualEntryType entryType, BigDecimal entryPrice,
                                   BigDecimal stopLoss, BigDecimal takeProfit1, BigDecimal takeProfit2,
                                   Integer quantity) {
-            this(direction, entryType, entryPrice, stopLoss, takeProfit1, takeProfit2, quantity, null, null);
+            this(direction, entryType, entryPrice, stopLoss, takeProfit1, takeProfit2, quantity, null, null, null);
+        }
+
+        /** 9-arg chart-trading shape (pre STOP/STOP_LIMIT) — no trigger. */
+        public ManualTradeRequest(ManualDirection direction, ManualEntryType entryType, BigDecimal entryPrice,
+                                  BigDecimal stopLoss, BigDecimal takeProfit1, BigDecimal takeProfit2,
+                                  Integer quantity, String brokerAccountId, Boolean submitImmediately) {
+            this(direction, entryType, entryPrice, stopLoss, takeProfit1, takeProfit2, quantity,
+                brokerAccountId, submitImmediately, null);
         }
     }
 }

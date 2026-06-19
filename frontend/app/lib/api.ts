@@ -1434,6 +1434,15 @@ export const api = {
   // position to reverse (use cancel-entry on a resting/unfilled order instead).
   reverseActivePosition: (executionId: number) =>
     post<ActivePositionView>(`/api/quant/positions/${executionId}/reverse`, {}),
+  // Updates the VIRTUAL stop-loss / take-profit of a non-terminal position (chart move-to-price).
+  // Either level may be omitted to update only the other. No broker order — the levels stay virtual
+  // and the backend VirtualStopWatcher acts on them app-side when enabled. 400 on bad geometry.
+  modifyProtectionActivePosition: (executionId: number, body: { stopLoss?: number; takeProfit?: number }) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/modify-protection`, body),
+  // Partial close (scale-out): reduce a live position by qty contracts, keeping the remainder. A full-size
+  // qty is a full close. Routes a REDUCE intent through the unified router (marketable reducing leg).
+  reduceActivePosition: (executionId: number, qty: number) =>
+    post<ActivePositionView>(`/api/quant/positions/${executionId}/reduce?qty=${qty}`, {}),
 
   // ── Quant manual trade ticket (PR #306) ────────────────────────────────
   // Backend: com.riskdesk.presentation.quant.QuantManualTradeController

@@ -198,9 +198,11 @@ export const LONG_GATES: string[] = [
 // Manual trade ticket payload (PR #305) — POST /api/quant/manual-trade/{instrument}.
 export interface ManualTradeRequest {
   direction: 'LONG' | 'SHORT';
-  entryType: 'MARKET' | 'LIMIT';
-  /** Required when entryType=LIMIT. Server uses live price for MARKET. */
+  entryType: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
+  /** Required when entryType=LIMIT (limit price) or STOP_LIMIT (limit cap). Server uses live price for MARKET. */
   entryPrice: number | null;
+  /** Required when entryType=STOP or STOP_LIMIT — the stop trigger (breakout arm price). */
+  triggerPrice?: number | null;
   stopLoss: number;
   takeProfit1: number;
   takeProfit2: number | null;

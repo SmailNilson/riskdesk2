@@ -472,6 +472,53 @@ class ExecutionFillTrackingServiceTest {
         assertEquals(EXEC_ID_2, stored.getLastExecId());
     }
 
+    @Test
+    void partialReduceFill_decrementsQuantityAndStaysActive() {
+        // A resting partial close (REDUCE) of 1 on a position of 3 fills → quantity 2, row stays ACTIVE.
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(50L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(3);
+        row.setClosingQuantity(1);
+        when(repository.findByPermId(600_000_001L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(ORDER_ID, 600_000_001L, "Filled",
+            new BigDecimal("1"), BigDecimal.ZERO, new BigDecimal("18010.00"), Instant.parse("2026-06-03T15:30:00Z"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
+        assertEquals(Integer.valueOf(2), saved.getQuantity());
+        assertNull(saved.getClosingQuantity());
+        assertNull(saved.getClosedAt());
+    }
+
+    @Test
+    void partialReduceCancelledWithoutFill_revivesActiveAndClearsClosingQuantity() {
+        // A resting reduce that cancels without a fill leaves the position at its FULL size.
+        TradeExecutionRecord row = new TradeExecutionRecord();
+        row.setId(51L);
+        row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        row.setExecutionKey(ORDER_REF);
+        row.setQuantity(3);
+        row.setClosingQuantity(1);
+        when(repository.findByPermId(600_000_002L)).thenReturn(Optional.of(row));
+        when(repository.save(any(TradeExecutionRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.onOrderStatus(ORDER_ID, 600_000_002L, "Cancelled",
+            BigDecimal.ZERO, new BigDecimal("1"), null, Instant.parse("2026-06-03T15:30:00Z"));
+
+        ArgumentCaptor<TradeExecutionRecord> captor = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repository).save(captor.capture());
+        TradeExecutionRecord saved = captor.getValue();
+        assertEquals(ExecutionStatus.ACTIVE, saved.getStatus());
+        assertEquals(Integer.valueOf(3), saved.getQuantity());
+        assertNull(saved.getClosingQuantity());
+    }
+
     private static TradeExecutionRecord baseExecution() {
         TradeExecutionRecord execution = new TradeExecutionRecord();
         execution.setId(42L);

@@ -94,6 +94,18 @@ public class TradeExecutionEntity {
     @Column(nullable = false, precision = 19, scale = 6)
     private BigDecimal normalizedEntryPrice;
 
+    /** Broker entry order type: LIMIT (default / null) | STOP | STOP_LIMIT. Nullable = LIMIT for legacy rows. */
+    @Column(length = 16)
+    private String orderType;
+
+    /** Stop trigger for STOP / STOP_LIMIT entries (breakout arm price); null for LIMIT / MARKET. */
+    @Column(precision = 19, scale = 6)
+    private BigDecimal triggerPrice;
+
+    /** Contracts of an in-flight partial close (REDUCE) resting at the broker; null otherwise. */
+    @Column
+    private Integer closingQuantity;
+
     /**
      * Nullable since WTX_AUTO / QUANT_AUTO_ARM rows are armed before any stop
      * loss is known (BASELINE has no SL; trailing arms only after activation).
@@ -307,6 +319,30 @@ public class TradeExecutionEntity {
 
     public void setNormalizedEntryPrice(BigDecimal normalizedEntryPrice) {
         this.normalizedEntryPrice = normalizedEntryPrice;
+    }
+
+    public String getOrderType() {
+        return orderType;
+    }
+
+    public void setOrderType(String orderType) {
+        this.orderType = orderType;
+    }
+
+    public BigDecimal getTriggerPrice() {
+        return triggerPrice;
+    }
+
+    public void setTriggerPrice(BigDecimal triggerPrice) {
+        this.triggerPrice = triggerPrice;
+    }
+
+    public Integer getClosingQuantity() {
+        return closingQuantity;
+    }
+
+    public void setClosingQuantity(Integer closingQuantity) {
+        this.closingQuantity = closingQuantity;
     }
 
     public BigDecimal getVirtualStopLoss() {

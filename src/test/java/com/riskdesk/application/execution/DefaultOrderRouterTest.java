@@ -1331,4 +1331,110 @@ class DefaultOrderRouterTest {
         assertThat(deferred.getExecutionKey()).isEqualTo("wtx:MNQ:5m:2:REVERSE_SHORT");
         assertThat(deferred.getDeferredReverseCloseRowId()).isEqualTo(prior.getId()); // linked to the close ROW PK
     }
+
+    // ---- REDUCE (partial close / scale-out) -----------------------------------------------
+
+    private TradeIntent reduceLong(int qty) {
+        return TradeIntent.reduce("wtx:MNQ:5m:2:REDUCE_LONG", ExecutionTriggerSource.WTX_AUTO,
+            Instrument.MNQ, "5m", Side.LONG, qty, new BigDecimal("18010.00"), "DU1");
+    }
+
+    @Test
+    void reduce_partialSyncFill_decrementsAndStaysActive() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 3, 100L)); // held long 3
+        stubBroker("3");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Filled"));
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.ACTIVE);    // remainder stays live
+        assertThat(saved.getQuantity()).isEqualTo(2);                        // 3 − 1
+        assertThat(saved.getClosingQuantity()).isNull();                     // cleared on the sync fill
+        assertThat(saved.getClosedAt()).isNull();                            // a partial close is NOT terminal
+    }
+
+    @Test
+    void reduce_partialResting_stampsClosingQuantity() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 3, 100L));
+        stubBroker("3");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Submitted")); // rests
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(saved.getClosingQuantity()).isEqualTo(1);                 // fill tracker decrements on fill
+        assertThat(saved.getQuantity()).isEqualTo(3);                        // not decremented until the fill
+    }
+
+    @Test
+    void reduce_wholePosition_closesEntireRow() {
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
+        stubBroker("2");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Filled"));
+
+        RoutingResult r = router.route(reduceLong(2)); // qty == position → full close
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        assertThat(saved.getClosingQuantity()).isNull();
+        assertThat(saved.getClosedAt()).isNotNull();
+    }
+
+    @Test
+    void reduce_noActiveRow_skipsNoOpenRow() {
+        when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any()))
+            .thenReturn(Optional.empty());
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.SKIPPED_NO_OPEN_ROW);
+        verify(ibkrOrderService, never()).submitEntryOrder(any());
+    }
+
+    @Test
+    void fullClose_unaffectedByReduceChange_closesWithoutClosingQuantity() {
+        // Regression: a normal full CLOSE still goes straight to CLOSED and never sets closingQuantity.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 1, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Filled"));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        assertThat(cap.getValue().getClosingQuantity()).isNull();
+    }
+
+    @Test
+    void close_refireClearsStaleClosingQuantityFromPriorReduce() {
+        // A prior partial REDUCE stamped closingQuantity then got stuck (dropped ack). A full close re-fired over
+        // the same stuck row MUST clear closingQuantity — otherwise the later full-close fill is mis-read as a
+        // partial (closingQuantity < quantity) and the row is wrongly revived to ACTIVE (phantom over a flat broker).
+        TradeExecutionRecord stuck = exitSubmittedRow(120); // EXIT_SUBMITTED past grace, action LONG, qty 2
+        stuck.setClosingQuantity(1);                         // stale marker left by the earlier reduce
+        stubActive(stuck);
+        stubBroker("2");                                     // IBKR still holds long 2 → stuck-close re-fire
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(961L, "Filled"));
+
+        RoutingResult r = router.route(closeLong());
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        assertThat(cap.getValue().getStatus()).isEqualTo(ExecutionStatus.CLOSED);
+        assertThat(cap.getValue().getClosingQuantity()).isNull(); // stale marker cleared on the full close
+    }
 }
