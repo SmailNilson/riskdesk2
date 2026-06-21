@@ -34,6 +34,21 @@ public enum Instrument {
         return new ContractSpec(contractMultiplier, tickSize, tickValue);
     }
 
+    /**
+     * Round a price to this instrument's tick grid (HALF_UP). Single home for hardcoded-tick rounding
+     * shared by the manual-trade ticket and the active-positions SL/TP edit, so a rounding-policy change
+     * cannot drift between those paths. (The order router rounds with the broker's runtime
+     * {@code ContractDetails.minTick} instead — that is deliberately separate.)
+     */
+    public BigDecimal roundToTick(BigDecimal price) {
+        if (price == null) {
+            return null;
+        }
+        return price.divide(tickSize, 0, java.math.RoundingMode.HALF_UP)
+            .multiply(tickSize)
+            .setScale(tickSize.scale(), java.math.RoundingMode.HALF_UP);
+    }
+
     public boolean isDollarSensitive() {
         return this == MCL || this == MGC || this == E6 || this == MNQ;
     }

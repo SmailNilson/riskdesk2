@@ -5,6 +5,7 @@ import com.riskdesk.application.quant.positions.ActivePositionsService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -70,6 +71,9 @@ public class ActivePositionsController {
             return result
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.warn("Close conflicted for execution {} (concurrent update) — retry", executionId);
+            return ResponseEntity.status(409).build();
         } catch (IllegalStateException e) {
             log.warn("Close rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
@@ -84,6 +88,9 @@ public class ActivePositionsController {
             return result
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.warn("Cancel-entry conflicted for execution {} (concurrent update) — retry", executionId);
+            return ResponseEntity.status(409).build();
         } catch (IllegalStateException e) {
             log.warn("Cancel-entry rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
@@ -98,6 +105,9 @@ public class ActivePositionsController {
             return result
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.warn("Reverse conflicted for execution {} (concurrent update) — retry", executionId);
+            return ResponseEntity.status(409).build();
         } catch (IllegalStateException e) {
             log.warn("Reverse rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
@@ -121,6 +131,9 @@ public class ActivePositionsController {
         } catch (IllegalArgumentException e) {
             log.warn("Modify-protection bad request for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.badRequest().build();
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.warn("Modify-protection conflicted for execution {} (concurrent update) — retry", executionId);
+            return ResponseEntity.status(409).build();
         } catch (IllegalStateException e) {
             log.warn("Modify-protection rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();
@@ -140,6 +153,9 @@ public class ActivePositionsController {
         } catch (IllegalArgumentException e) {
             log.warn("Reduce bad request for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.badRequest().build();
+        } catch (ObjectOptimisticLockingFailureException e) {
+            log.warn("Reduce conflicted for execution {} (concurrent update) — retry", executionId);
+            return ResponseEntity.status(409).build();
         } catch (IllegalStateException e) {
             log.warn("Reduce rejected for execution {} — {}", executionId, e.getMessage());
             return ResponseEntity.status(409).build();

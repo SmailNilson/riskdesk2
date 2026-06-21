@@ -855,14 +855,27 @@ function TradeTicket({ instrument, meta, ticket, brokerAccountId, submitting, on
     if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
       setLocalError('SL / TP invalides'); return;
     }
-    // Reference for SL/TP geometry: the resting price the entry arms at — the trigger for STOP, the
-    // limit for LIMIT, the clicked price for MARKET (the server re-checks the stop breakout vs live).
-    const ref = entryType === 'MARKET' ? ticket.price : entryPrice;
-    if (long && (stopLoss >= ref || takeProfit <= ref)) {
-      setLocalError('LONG : SL doit être sous le prix, TP au-dessus'); return;
-    }
-    if (!long && (stopLoss <= ref || takeProfit >= ref)) {
-      setLocalError('SHORT : SL doit être au-dessus du prix, TP en dessous'); return;
+    if (entryType === 'MARKET') {
+      // A MARKET order fills at the LIVE price, not where the operator clicked, so the clicked price is the
+      // wrong reference for SL/TP geometry — the backend validates it against the live quote. Pre-check only
+      // internal consistency (SL and TP on the correct sides of each other) to avoid false rejects/accepts
+      // against an arbitrary clicked price.
+      if (long && stopLoss >= takeProfit) {
+        setLocalError('LONG : SL doit être sous le TP'); return;
+      }
+      if (!long && stopLoss <= takeProfit) {
+        setLocalError('SHORT : SL doit être au-dessus du TP'); return;
+      }
+    } else {
+      // LIMIT / STOP rest at a known price — validate SL/TP against that entry reference (the trigger for
+      // STOP, the limit for LIMIT). The server re-checks the stop breakout vs live.
+      const ref = entryPrice;
+      if (long && (stopLoss >= ref || takeProfit <= ref)) {
+        setLocalError('LONG : SL doit être sous le prix, TP au-dessus'); return;
+      }
+      if (!long && (stopLoss <= ref || takeProfit >= ref)) {
+        setLocalError('SHORT : SL doit être au-dessus du prix, TP en dessous'); return;
+      }
     }
     setLocalError(null);
     await onSubmit({

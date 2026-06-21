@@ -781,13 +781,17 @@ public class DefaultOrderRouter implements OrderRouter {
         }
         String closeAction = brokerSide == Side.LONG ? "SHORT" : "LONG";
         int rowQty = row.getQuantity() != null && row.getQuantity() > 0 ? row.getQuantity() : intent.quantity();
-        int reduceQty = Math.min(intent.quantity(), Math.min(rowQty, pos.net().abs().intValue()));
+        // The live size this row represents is bounded by broker truth: a stale-larger row (drift / an
+        // external partial close) must not drive the remainder, or the reduce would leave a phantom
+        // remainder ACTIVE over a flat / smaller broker position.
+        int effectiveQty = Math.min(rowQty, pos.net().abs().intValue());
+        int reduceQty = Math.min(intent.quantity(), effectiveQty);
         if (reduceQty <= 0) {
             return RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_QTY,
                 "computed reduce quantity is non-positive", row.getId(), row.getEntryOrderId());
         }
-        // Reducing the whole position (or more) is a full close, not a partial — remainAfterReduce stays null.
-        Integer remainAfterReduce = reduceQty < rowQty ? (rowQty - reduceQty) : null;
+        // Reducing the whole (broker-truth) position or more is a full close, not a partial — remainder null.
+        Integer remainAfterReduce = reduceQty < effectiveQty ? (effectiveQty - reduceQty) : null;
         return submitCloseLeg(row, intent.instrument(), closeAction, reduceQty, intent.limitPrice(),
             "OrderRouter REDUCE", intent.idempotencyKey(), remainAfterReduce);
     }
@@ -891,6 +895,9 @@ public class DefaultOrderRouter implements OrderRouter {
                     // partial, decrements and revives the row to ACTIVE — a phantom position over a flat broker.
                     row.setClosingQuantity(null);
                 }
+                if (row.getStatus() == ExecutionStatus.EXIT_SUBMITTED) {
+                    resetFillCounterForExitLeg(row);
+                }
             }
             row.setIbkrOrderId(toIbkrOrderId(sub.brokerOrderId()));
             row.setStatusReason(reasonPrefix + " — IBKR " + (partial ? "partial close " : "close ")
@@ -916,6 +923,7 @@ public class DefaultOrderRouter implements OrderRouter {
                 row.setStatus(ExecutionStatus.EXIT_SUBMITTED);
                 row.setIbkrOrderId(toIbkrOrderId(e.brokerOrderId()));
                 row.setExitSubmittedAt(now);
+                resetFillCounterForExitLeg(row);
                 if (remainAfterReduce != null && remainAfterReduce > 0) {
                     // A resting partial reduce — the fill tracker decrements on its fill.
                     row.setClosingQuantity(qty);
@@ -1012,6 +1020,19 @@ public class DefaultOrderRouter implements OrderRouter {
                 ? RoutingOutcome.FAILED_READ_ONLY : RoutingOutcome.FAILED_BROKER_REJECT;
             case UNKNOWN -> RoutingOutcome.FAILED;
         };
+    }
+
+    /**
+     * A row going EXIT_SUBMITTED now tracks the RESTING exit leg, not the entry. {@code filledQuantity} is a
+     * single broker-fill counter reused across the entry and every exit leg, so reset it to zero (and drop the
+     * entry's last execId) when an exit leg starts resting: the fill tracker then measures THIS leg's fills from
+     * zero. Without this, a cancel callback that carries no (or a null) {@code filled} leaves the entry's
+     * cumulative fill in place, and the partial-fill-then-cancel reconciliation reads it as "this close already
+     * filled" — wrongly marking a still-live position CLOSED (or computing a wrong remainder).
+     */
+    private static void resetFillCounterForExitLeg(TradeExecutionRecord row) {
+        row.setFilledQuantity(BigDecimal.ZERO);
+        row.setLastExecId(null);
     }
 
     /** Void a stale local row (DB-only, no broker call). */

@@ -1392,6 +1392,47 @@ class DefaultOrderRouterTest {
     }
 
     @Test
+    void reduce_rowLargerThanBroker_remainderBoundedToBrokerTruth() {
+        // Row records long 2 but the broker only holds 1 (drift / external partial close). Reducing 1 must
+        // leave the row CLOSED (broker flat after), not ACTIVE qty 1 — the remainder is bounded to broker
+        // truth, not the stale-larger rowQty, so no phantom remainder is left over a flat broker.
+        stubActive(activeRow(ExecutionStatus.ACTIVE, 2, 100L));
+        stubBroker("1");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Filled"));
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.CLOSED);   // broker flat after reducing its 1
+        assertThat(saved.getClosingQuantity()).isNull();
+    }
+
+    @Test
+    void reduce_resting_resetsFillCounterForExitLeg() {
+        // The row carried the ENTRY's cumulative fill (3). Once the reduce leg RESTS (EXIT_SUBMITTED) the row
+        // tracks THAT leg, so filledQuantity must reset to 0 — otherwise a later cancel callback with no/null
+        // `filled` would leave the stale 3 and the partial-fill-then-cancel reconciliation would wrongly mark
+        // a still-live position CLOSED.
+        TradeExecutionRecord row = activeRow(ExecutionStatus.ACTIVE, 3, 100L);
+        row.setFilledQuantity(new BigDecimal("3")); // entry fill carried on the row
+        stubActive(row);
+        stubBroker("3");
+        when(ibkrOrderService.submitEntryOrder(any())).thenReturn(submission(555L, "Submitted")); // rests
+
+        RoutingResult r = router.route(reduceLong(1));
+
+        assertThat(r.outcome()).isEqualTo(RoutingOutcome.ROUTED);
+        ArgumentCaptor<TradeExecutionRecord> cap = ArgumentCaptor.forClass(TradeExecutionRecord.class);
+        verify(repo).save(cap.capture());
+        TradeExecutionRecord saved = cap.getValue();
+        assertThat(saved.getStatus()).isEqualTo(ExecutionStatus.EXIT_SUBMITTED);
+        assertThat(saved.getFilledQuantity()).isEqualByComparingTo("0");
+    }
+
+    @Test
     void reduce_noActiveRow_skipsNoOpenRow() {
         when(repo.findActiveByInstrumentAndTimeframeAndTriggerSourceAndAccount(any(), any(), any(), any()))
             .thenReturn(Optional.empty());
