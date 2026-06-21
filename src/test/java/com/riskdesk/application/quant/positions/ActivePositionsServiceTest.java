@@ -599,6 +599,83 @@ class ActivePositionsServiceTest {
         assertThat(active.getStatusReason()).contains("IBKR disabled");
     }
 
+    @Test
+    void modify_protection_sl_at_or_beyond_live_price_throws() {
+        // SL 26950 is below the 27000 entry (passes the entry check) but at/above the 26940 LIVE price — with
+        // the watcher enabled it would flatten on the next tick, so it must be rejected as bad geometry.
+        TradeExecutionRecord active = makeRecord(45L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        when(repo.findByIdForUpdate(45L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(26940.0, NOW, "LIVE_PUSH")));
+
+        assertThatThrownBy(() -> service.modifyProtection(45L, new BigDecimal("26950"), null, "operator"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("live price");
+        verify(repo, never()).save(any());
+    }
+
+    @Test
+    void reduce_router_skipped_duplicate_throws_conflict_not_false_success() {
+        // A reduce the router did NOT apply (an exit already in flight) must surface as a 409 — the operator's
+        // scale-out genuinely did not happen, so a success toast would be misleading.
+        TradeExecutionRecord active = makeRecord(54L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        active.setQuantity(3);
+        when(repo.findByIdForUpdate(54L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE")));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "exit already in flight", 54L, 1L));
+        when(repo.findById(54L)).thenReturn(Optional.of(active)); // still non-terminal
+
+        assertThatThrownBy(() -> service.reducePosition(54L, 1, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("reduce not applied");
+    }
+
+    @Test
+    void reduce_router_skip_after_void_returns_terminal_view_idempotently() {
+        // If the router voided the row to terminal (broker already flat), surface it idempotently, not a 409.
+        TradeExecutionRecord active = makeRecord(55L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        active.setQuantity(3);
+        when(repo.findByIdForUpdate(55L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE")));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.tracked(RoutingOutcome.SKIPPED_NO_OPEN_ROW, "IBKR already flat", 55L, 1L));
+        TradeExecutionRecord voided = makeRecord(55L, "MNQ", "BUY", new BigDecimal("27000"));
+        voided.setStatus(ExecutionStatus.CANCELLED);
+        when(repo.findById(55L)).thenReturn(Optional.of(voided));
+
+        Optional<ActivePositionView> result = service.reducePosition(55L, 1, "operator");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().status()).isEqualTo(ExecutionStatus.CANCELLED);
+    }
+
+    @Test
+    void reverse_router_skipped_duplicate_throws_conflict_not_false_success() {
+        // A reverse that did NOT flip the position must not report success — surface a 409.
+        TradeExecutionRecord active = makeRecord(56L, "MNQ", "BUY", new BigDecimal("27000"));
+        active.setStatus(ExecutionStatus.ACTIVE);
+        active.setTriggerSource(ExecutionTriggerSource.MANUAL_QUANT_PANEL);
+        when(repo.findByIdForUpdate(56L)).thenReturn(Optional.of(active));
+        when(livePricePort.current(Instrument.MNQ))
+            .thenReturn(Optional.of(new LivePriceSnapshot(27010.0, NOW, "LIVE")));
+        when(orderRouter.route(any()))
+            .thenReturn(RoutingResult.tracked(RoutingOutcome.SKIPPED_DUPLICATE, "offsetting live legs", 56L, 1L));
+        when(repo.findById(56L)).thenReturn(Optional.of(active)); // still non-terminal
+
+        assertThatThrownBy(() -> service.reversePosition(56L, "operator"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("reverse not applied");
+    }
+
     private static TradeExecutionRecord makeRecord(long id, String instrument, String action, BigDecimal entry) {
         TradeExecutionRecord r = new TradeExecutionRecord();
         r.setId(id);

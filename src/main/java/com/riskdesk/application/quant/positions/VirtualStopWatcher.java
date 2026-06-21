@@ -15,7 +15,10 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * App-side auto-exit for MANUAL chart trades. Polls {@code ACTIVE} manual rows and, when the live
@@ -67,14 +70,24 @@ public class VirtualStopWatcher {
     /** Package-private so tests can drive a single iteration without a real scheduler. */
     void sweep() {
         if (!props.isEnabled()) return;
-        List<TradeExecutionRecord> active = tradeExecutionRepository.findByTriggerSourceAndStatus(
-            ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.ACTIVE);
-        for (TradeExecutionRecord row : active) {
+        List<TradeExecutionRecord> rows = new ArrayList<>(tradeExecutionRepository.findByTriggerSourceAndStatus(
+            ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.ACTIVE));
+        // Also re-drive EXIT_SUBMITTED manual rows whose virtual stop is STILL breached: a first auto-close can
+        // rest unfilled (e.g. its marketable limit gapped through), and the row then leaves ACTIVE — so without
+        // this the breached level would never be re-attempted until the slow background StaleCloseReconciler.
+        // closePosition is idempotent here: the router re-fires only a genuinely stuck close, else skips.
+        rows.addAll(tradeExecutionRepository.findByTriggerSourceAndStatus(
+            ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.EXIT_SUBMITTED));
+        if (rows.isEmpty()) return;
+        // Resolve each distinct instrument's live price ONCE per sweep — a (possibly blocking) provider fetch
+        // must not run per row. Caches nulls too. Mirrors ActivePositionsService.listActive's price cache.
+        Map<Instrument, BigDecimal> priceCache = new EnumMap<>(Instrument.class);
+        for (TradeExecutionRecord row : rows) {
             try {
-                String reason = breach(row);
+                String reason = breach(row, priceCache);
                 if (reason == null) continue;
-                log.info("virtual-stop {} breached executionId={} instrument={} — auto-closing (app-side)",
-                    reason, row.getId(), row.getInstrument());
+                log.info("virtual-stop {} breached executionId={} instrument={} status={} — auto-closing (app-side)",
+                    reason, row.getId(), row.getInstrument(), row.getStatus());
                 activePositionsService.closePosition(row.getId(), "virtual-stop:" + reason);
             } catch (RuntimeException e) {
                 // A bad row / failed close must not stop the rest of the batch or the scheduler.
@@ -87,16 +100,13 @@ public class VirtualStopWatcher {
      * "SL" / "TP" when the live price has crossed that virtual level for the row's side, else null.
      * The stop wins a tie (pessimistic — matches the simulation convention).
      */
-    private String breach(TradeExecutionRecord row) {
+    private String breach(TradeExecutionRecord row, Map<Instrument, BigDecimal> priceCache) {
         BigDecimal sl = row.getVirtualStopLoss();
         BigDecimal tp = row.getVirtualTakeProfit();
         if (sl == null && tp == null) return null;
         Instrument instrument = parseInstrument(row.getInstrument());
         if (instrument == null) return null;
-        BigDecimal live = livePricePort.current(instrument)
-            .filter(VirtualStopWatcher::isActionable)
-            .map(snap -> BigDecimal.valueOf(snap.price()))
-            .orElse(null);
+        BigDecimal live = cachedActionablePrice(instrument, priceCache);
         if (live == null || live.signum() <= 0) return null;
 
         boolean shortSide = "SHORT".equalsIgnoreCase(row.getAction()) || "SELL".equalsIgnoreCase(row.getAction());
@@ -123,6 +133,20 @@ public class VirtualStopWatcher {
         }
         Instant ts = snap.timestamp();
         return ts != null && ts.isAfter(Instant.now().minusSeconds(MAX_PRICE_AGE_SECONDS));
+    }
+
+    /** Per-sweep cached, freshness-gated live price for an instrument. Caches {@code null} too, so a stale /
+     *  missing instrument is resolved at most once per sweep rather than once per row. */
+    private BigDecimal cachedActionablePrice(Instrument instrument, Map<Instrument, BigDecimal> cache) {
+        if (cache.containsKey(instrument)) {
+            return cache.get(instrument);
+        }
+        BigDecimal price = livePricePort.current(instrument)
+            .filter(VirtualStopWatcher::isActionable)
+            .map(snap -> BigDecimal.valueOf(snap.price()))
+            .orElse(null);
+        cache.put(instrument, price);
+        return price;
     }
 
     private static Instrument parseInstrument(String name) {

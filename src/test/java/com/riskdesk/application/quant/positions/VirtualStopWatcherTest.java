@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -157,6 +158,39 @@ class VirtualStopWatcherTest {
         watcher.sweep();
         verify(repo).findByTriggerSourceAndStatus(
             eq(ExecutionTriggerSource.MANUAL_QUANT_PANEL), eq(ExecutionStatus.ACTIVE));
+    }
+
+    @Test
+    void still_breached_exit_submitted_row_is_redriven() {
+        // A first auto-close that rested (EXIT_SUBMITTED) and never filled must be re-attempted while the
+        // level is still breached — otherwise the virtual stop silently stops protecting after one try.
+        TradeExecutionRecord resting = makeActive(11L, "MNQ", "LONG", bd("20025"), bd("20090"));
+        resting.setStatus(ExecutionStatus.EXIT_SUBMITTED);
+        when(repo.findByTriggerSourceAndStatus(ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.ACTIVE))
+            .thenReturn(List.of());
+        when(repo.findByTriggerSourceAndStatus(ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.EXIT_SUBMITTED))
+            .thenReturn(List.of(resting));
+        when(livePricePort.current(Instrument.MNQ)).thenReturn(liveQuote(20020.0)); // still through the SL
+
+        watcher.sweep();
+
+        verify(activePositions).closePosition(11L, "virtual-stop:SL");
+    }
+
+    @Test
+    void live_price_resolved_once_per_instrument_across_rows() {
+        // Two rows on the same instrument must hit the live-price port only once per sweep (per-instrument cache).
+        TradeExecutionRecord a = makeActive(12L, "MNQ", "LONG", bd("20025"), bd("20090"));
+        TradeExecutionRecord b = makeActive(13L, "MNQ", "LONG", bd("20025"), bd("20090"));
+        when(repo.findByTriggerSourceAndStatus(ExecutionTriggerSource.MANUAL_QUANT_PANEL, ExecutionStatus.ACTIVE))
+            .thenReturn(List.of(a, b));
+        when(livePricePort.current(Instrument.MNQ)).thenReturn(liveQuote(20020.0));
+
+        watcher.sweep();
+
+        verify(livePricePort, times(1)).current(Instrument.MNQ);
+        verify(activePositions).closePosition(12L, "virtual-stop:SL");
+        verify(activePositions).closePosition(13L, "virtual-stop:SL");
     }
 
     private void stubActive(TradeExecutionRecord row) {

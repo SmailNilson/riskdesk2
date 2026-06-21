@@ -19,7 +19,6 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.EnumMap;
@@ -61,6 +60,18 @@ public class ActivePositionsService {
 
     private static final Logger log = LoggerFactory.getLogger(ActivePositionsService.class);
 
+    /**
+     * Per-execution mutual exclusion for the read → route → save use cases. {@code findByIdForUpdate}'s
+     * DB lock does NOT span these methods (no surrounding {@code @Transactional}), so without this two
+     * concurrent callers on the SAME row — e.g. the {@link VirtualStopWatcher} tick firing a close while the
+     * operator clicks reduce/close — would both read ACTIVE and both submit a closing order to the broker
+     * (over-close / flip) before either persisted EXIT_SUBMITTED. A striped lock serialises operations per
+     * execution id (this is a single-backend app). Wrapping the methods in {@code @Transactional} instead is
+     * unsafe here: the router runs broker I/O and calls {@code entityManager.clear()} on its create path.
+     */
+    private static final int ROW_LOCK_STRIPES = 64;
+    private final Object[] rowLocks = new Object[ROW_LOCK_STRIPES];
+
     private final TradeExecutionRepositoryPort tradeExecutionRepository;
     private final LivePricePort livePricePort;
     private final ApplicationEventPublisher eventPublisher;
@@ -80,6 +91,15 @@ public class ActivePositionsService {
         this.orderRouter = orderRouter;
         this.ibkrOrderService = ibkrOrderService;
         this.clock = clock;
+        for (int i = 0; i < ROW_LOCK_STRIPES; i++) {
+            rowLocks[i] = new Object();
+        }
+    }
+
+    /** Monitor for an execution id — same id always maps to the same stripe (serialised); reentrant, so the
+     *  internal {@code reducePosition → closePosition → cancelEntry} delegations re-acquire it safely. */
+    private Object rowLock(Long executionId) {
+        return rowLocks[Math.floorMod(Long.hashCode(executionId), ROW_LOCK_STRIPES)];
     }
 
     /**
@@ -120,6 +140,12 @@ public class ActivePositionsService {
         if (executionId == null) {
             return Optional.empty();
         }
+        synchronized (rowLock(executionId)) {
+            return closePositionLocked(executionId, requestedBy);
+        }
+    }
+
+    private Optional<ActivePositionView> closePositionLocked(Long executionId, String requestedBy) {
         Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
         if (opt.isEmpty()) {
             return Optional.empty();
@@ -200,6 +226,12 @@ public class ActivePositionsService {
         if (executionId == null) {
             return Optional.empty();
         }
+        synchronized (rowLock(executionId)) {
+            return cancelEntryLocked(executionId, requestedBy);
+        }
+    }
+
+    private Optional<ActivePositionView> cancelEntryLocked(Long executionId, String requestedBy) {
         Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
         if (opt.isEmpty()) {
             return Optional.empty();
@@ -260,6 +292,12 @@ public class ActivePositionsService {
         if (executionId == null) {
             return Optional.empty();
         }
+        synchronized (rowLock(executionId)) {
+            return reversePositionLocked(executionId, requestedBy);
+        }
+    }
+
+    private Optional<ActivePositionView> reversePositionLocked(Long executionId, String requestedBy) {
         Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
         if (opt.isEmpty()) {
             return Optional.empty();
@@ -299,12 +337,16 @@ public class ActivePositionsService {
             exec.getId(), exec.getInstrument(), intent.side(), result.outcome(), result.message(), who);
 
         switch (result.outcome()) {
-            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING, SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING -> {
                 // The router mutated (closed the old row, opened the new side, or voided) — reload broker
                 // truth's version rather than the stale pre-route copy.
                 TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
                 publishSafely(changeEvent(refreshed, now));
                 return Optional.of(view(refreshed));
+            }
+            case SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+                // The reverse was NOT applied (a close already in flight, or broker flat / offsetting legs).
+                return handleNoOpSkip(executionId, exec, result, "reverse", now);
             }
             case SKIPPED_IBKR_DISABLED -> {
                 // IBKR-less env (paper / tests): degrade like closePosition rather than a confusing 409 — mark
@@ -342,6 +384,12 @@ public class ActivePositionsService {
         if (qty < 1) {
             throw new IllegalArgumentException("reduce quantity must be >= 1");
         }
+        synchronized (rowLock(executionId)) {
+            return reducePositionLocked(executionId, qty, requestedBy);
+        }
+    }
+
+    private Optional<ActivePositionView> reducePositionLocked(Long executionId, int qty, String requestedBy) {
         Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
         if (opt.isEmpty()) {
             return Optional.empty();
@@ -386,10 +434,14 @@ public class ActivePositionsService {
             exec.getId(), exec.getInstrument(), qty, result.outcome(), result.message(), who);
 
         switch (result.outcome()) {
-            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING, SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+            case ROUTED, ROUTED_FLATTEN_ONLY, ACK_PENDING -> {
                 TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
                 publishSafely(changeEvent(refreshed, now));
                 return Optional.of(view(refreshed));
+            }
+            case SKIPPED_DUPLICATE, SKIPPED_NO_OPEN_ROW -> {
+                // The reduce was NOT applied (a close already in flight, or broker flat / wrong side).
+                return handleNoOpSkip(executionId, exec, result, "reduce", now);
             }
             case SKIPPED_IBKR_DISABLED -> {
                 // IBKR-less env: a partial reduce needs a broker fill to be real — there is nothing to decrement
@@ -426,6 +478,13 @@ public class ActivePositionsService {
         if (stopLoss == null && takeProfit == null) {
             throw new IllegalArgumentException("at least one of stopLoss / takeProfit is required");
         }
+        synchronized (rowLock(executionId)) {
+            return modifyProtectionLocked(executionId, stopLoss, takeProfit, requestedBy);
+        }
+    }
+
+    private Optional<ActivePositionView> modifyProtectionLocked(Long executionId, BigDecimal stopLoss,
+                                                               BigDecimal takeProfit, String requestedBy) {
         Optional<TradeExecutionRecord> opt = tradeExecutionRepository.findByIdForUpdate(executionId);
         if (opt.isEmpty()) {
             return Optional.empty();
@@ -467,6 +526,30 @@ public class ActivePositionsService {
                 throw new IllegalArgumentException("SHORT takeProfit must be below the entry " + ref);
             }
         }
+        // Also guard against a level already beyond the LIVE market: with VirtualStopWatcher enabled, an SL/TP
+        // on the wrong side of the current price flattens on the very next tick. For STOP entries the stored
+        // entry above is the TRIGGER (arm price), not the realized fill, so this live check is the real safety
+        // net. Reject as bad geometry (instant 400 feedback) rather than silently auto-exiting; only enforced
+        // when a fresh live price is available.
+        BigDecimal live = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
+        if (live != null && live.signum() > 0) {
+            if (sl != null && !shortSide && sl.compareTo(live) >= 0) {
+                throw new IllegalArgumentException("LONG stopLoss " + sl + " is at/above the live price " + live
+                    + " — it would exit immediately");
+            }
+            if (sl != null && shortSide && sl.compareTo(live) <= 0) {
+                throw new IllegalArgumentException("SHORT stopLoss " + sl + " is at/below the live price " + live
+                    + " — it would exit immediately");
+            }
+            if (tp != null && !shortSide && tp.compareTo(live) <= 0) {
+                throw new IllegalArgumentException("LONG takeProfit " + tp + " is at/below the live price " + live
+                    + " — it would exit immediately");
+            }
+            if (tp != null && shortSide && tp.compareTo(live) >= 0) {
+                throw new IllegalArgumentException("SHORT takeProfit " + tp + " is at/above the live price " + live
+                    + " — it would exit immediately");
+            }
+        }
 
         Instant now = clock.instant();
         if (sl != null) {
@@ -485,74 +568,77 @@ public class ActivePositionsService {
     }
 
     /**
-     * FLATTEN intent for an operator close: per-request idempotency key (each click is a fresh
-     * close attempt — required for the router's stuck-close re-fire), the row's own scope
-     * (source / timeframe / account) so {@code findOpenRow} resolves this strategy's row, and the
-     * latest live price as the passive limit fallback (the router crosses it marketable when
-     * enabled). Falls back to the entry price when no live reading exists — still a valid limit,
-     * and strictly better than refusing the close.
+     * FLATTEN intent for an operator close: per-request idempotency key (each click is a fresh close attempt
+     * — required for the router's stuck-close re-fire), the row's own scope (source / timeframe / account) so
+     * {@code findOpenRow} resolves this strategy's row, and {@link #exitLimitPrice} as the marketable-limit
+     * reference.
      */
     private TradeIntent flattenIntent(TradeExecutionRecord exec, Instrument instrument, Instant now) {
-        BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
-        if (limitPrice == null || limitPrice.signum() <= 0) {
-            limitPrice = exec.getNormalizedEntryPrice();
-        }
-        if (limitPrice == null || limitPrice.signum() <= 0) {
-            throw new IllegalStateException("no usable price to build the close order for " + exec.getInstrument());
-        }
-        ExecutionTriggerSource source = exec.getTriggerSource() != null
-            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
-        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
-            ? "manual" : exec.getTimeframe();
-        int quantity = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
         return TradeIntent.flatten(
             "panel-close:" + exec.getId() + ":" + now.toEpochMilli(),
-            source, instrument, timeframe, quantity, limitPrice, exec.getBrokerAccountId());
+            exitSource(exec), instrument, exitTimeframe(exec), exitQuantity(exec),
+            exitLimitPrice(exec, "close"), exec.getBrokerAccountId());
     }
 
-    /**
-     * REVERSE intent for an operator flip: target the side OPPOSITE the current position at the same
-     * size, with the latest live price as the marketable-limit reference (router crosses it when
-     * enabled). Mirrors {@link #flattenIntent}'s price / source / timeframe resolution.
-     */
+    /** REVERSE intent for an operator flip: target the side OPPOSITE the current position at the same size. */
     private TradeIntent reverseIntent(TradeExecutionRecord exec, Instrument instrument, Instant now) {
-        BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
-        if (limitPrice == null || limitPrice.signum() <= 0) {
-            limitPrice = exec.getNormalizedEntryPrice();
-        }
-        if (limitPrice == null || limitPrice.signum() <= 0) {
-            throw new IllegalStateException("no usable price to build the reverse order for " + exec.getInstrument());
-        }
-        ExecutionTriggerSource source = exec.getTriggerSource() != null
-            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
-        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
-            ? "manual" : exec.getTimeframe();
-        int quantity = exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
         return TradeIntent.reverse(
             "panel-reverse:" + exec.getId() + ":" + now.toEpochMilli(),
-            source, instrument, timeframe, oppositeSide(exec.getAction()), quantity, limitPrice,
-            exec.getBrokerAccountId());
+            exitSource(exec), instrument, exitTimeframe(exec), oppositeSide(exec.getAction()),
+            exitQuantity(exec), exitLimitPrice(exec, "reverse"), exec.getBrokerAccountId());
+    }
+
+    /** REDUCE intent for an operator scale-out: reduce the HELD side by {@code qty} contracts (marketable). */
+    private TradeIntent reduceIntent(TradeExecutionRecord exec, Instrument instrument, int qty, Instant now) {
+        return TradeIntent.reduce(
+            "panel-reduce:" + exec.getId() + ":" + now.toEpochMilli(),
+            exitSource(exec), instrument, exitTimeframe(exec), sideOf(exec.getAction()), qty,
+            exitLimitPrice(exec, "reduce"), exec.getBrokerAccountId());
     }
 
     /**
-     * REDUCE intent for an operator scale-out: reduce the HELD side by {@code qty} contracts at the latest
-     * live price (marketable). Mirrors {@link #flattenIntent}'s price / source / timeframe resolution.
+     * The marketable-limit reference for an exit leg: the latest live price (the router crosses it when
+     * enabled), falling back to the entry price when no live reading exists — still a valid limit, and
+     * strictly better than refusing the exit. Throws when neither is usable. Shared by flatten/reverse/reduce.
      */
-    private TradeIntent reduceIntent(TradeExecutionRecord exec, Instrument instrument, int qty, Instant now) {
+    private BigDecimal exitLimitPrice(TradeExecutionRecord exec, String purpose) {
         BigDecimal limitPrice = priceFor(exec.getInstrument(), new EnumMap<>(Instrument.class));
         if (limitPrice == null || limitPrice.signum() <= 0) {
             limitPrice = exec.getNormalizedEntryPrice();
         }
         if (limitPrice == null || limitPrice.signum() <= 0) {
-            throw new IllegalStateException("no usable price to build the reduce order for " + exec.getInstrument());
+            throw new IllegalStateException(
+                "no usable price to build the " + purpose + " order for " + exec.getInstrument());
         }
-        ExecutionTriggerSource source = exec.getTriggerSource() != null
-            ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
-        String timeframe = exec.getTimeframe() == null || exec.getTimeframe().isBlank()
-            ? "manual" : exec.getTimeframe();
-        return TradeIntent.reduce(
-            "panel-reduce:" + exec.getId() + ":" + now.toEpochMilli(),
-            source, instrument, timeframe, sideOf(exec.getAction()), qty, limitPrice, exec.getBrokerAccountId());
+        return limitPrice;
+    }
+
+    private static ExecutionTriggerSource exitSource(TradeExecutionRecord exec) {
+        return exec.getTriggerSource() != null ? exec.getTriggerSource() : ExecutionTriggerSource.MANUAL_QUANT_PANEL;
+    }
+
+    private static String exitTimeframe(TradeExecutionRecord exec) {
+        return exec.getTimeframe() == null || exec.getTimeframe().isBlank() ? "manual" : exec.getTimeframe();
+    }
+
+    private static int exitQuantity(TradeExecutionRecord exec) {
+        return exec.getQuantity() != null && exec.getQuantity() > 0 ? exec.getQuantity() : 1;
+    }
+
+    /**
+     * A reduce/reverse the router did NOT apply (SKIPPED_DUPLICATE = an exit already in flight;
+     * SKIPPED_NO_OPEN_ROW = broker flat / wrong side / offsetting legs). If the router voided the row to a
+     * terminal state, surface it idempotently; otherwise the action genuinely did not happen — fail with a
+     * 409 rather than a misleading success toast.
+     */
+    private Optional<ActivePositionView> handleNoOpSkip(Long executionId, TradeExecutionRecord exec,
+                                                        RoutingResult result, String action, Instant now) {
+        TradeExecutionRecord refreshed = tradeExecutionRepository.findById(executionId).orElse(exec);
+        if (isTerminal(refreshed.getStatus())) {
+            publishSafely(changeEvent(refreshed, now));
+            return Optional.of(view(refreshed));
+        }
+        throw new IllegalStateException(action + " not applied (" + result.outcome() + "): " + result.message());
     }
 
     /** The row's current side. Accepts the LONG/SHORT and BUY/SELL action tokens. */
@@ -567,15 +653,9 @@ public class ActivePositionsService {
         return sideOf(action) == Side.LONG ? Side.SHORT : Side.LONG;
     }
 
-    /** Round a price to the instrument's tick (mirrors the manual-trade ticket); pass-through if unknown. */
+    /** Round a price to the instrument's tick (shared with the manual-trade ticket); pass-through if unknown. */
     private static BigDecimal normalizeTick(BigDecimal price, Instrument instrument) {
-        if (price == null || instrument == null) {
-            return price;
-        }
-        BigDecimal tick = instrument.getTickSize();
-        return price.divide(tick, 0, RoundingMode.HALF_UP)
-            .multiply(tick)
-            .setScale(tick.scale(), RoundingMode.HALF_UP);
+        return instrument == null ? price : instrument.roundToTick(price);
     }
 
     private void cancelLocally(TradeExecutionRecord exec, String reason, Instant now) {

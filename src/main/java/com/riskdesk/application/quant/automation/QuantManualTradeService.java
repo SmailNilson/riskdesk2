@@ -15,7 +15,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Instant;
 
@@ -206,11 +205,7 @@ public class QuantManualTradeService {
     }
 
     private static BigDecimal normalize(BigDecimal price, Instrument instrument) {
-        if (price == null) return null;
-        BigDecimal tick = instrument.getTickSize();
-        return price.divide(tick, 0, RoundingMode.HALF_UP)
-            .multiply(tick)
-            .setScale(tick.scale(), RoundingMode.HALF_UP);
+        return instrument.roundToTick(price);
     }
 
     public enum ManualDirection {
