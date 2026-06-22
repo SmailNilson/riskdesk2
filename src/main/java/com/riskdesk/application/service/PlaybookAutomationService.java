@@ -573,6 +573,11 @@ public class PlaybookAutomationService {
 
         String setupIdentity = buildSetupIdentity(instrumentName, timeframe, candleTs, setup, direction);
         String key = "playbook:" + setupIdentity + ":CONF";
+        // Late is judged against the confirmation buy-stop/sell-stop, not the generic
+        // retest entry — otherwise a still-pending breakout order is wrongly skipped live.
+        boolean lateEntry = confirmationLate(direction, plan.entryPrice(), price.price(), atr);
+        String verdict = "CONFIRMATION — " + (lateEntry ? "LATE ENTRY — " : "")
+            + stripLatePrefix(evaluation.verdict());
         return new PlaybookDecision(
             null,
             key,
@@ -583,14 +588,14 @@ public class PlaybookAutomationService {
             setup.zoneName(),
             direction,
             evaluation.checklistScore(),
-            truncate("CONFIRMATION — " + evaluation.verdict(), 250),
+            truncate(verdict, 250),
             plan.entryPrice(),
             plan.stopLoss(),
             plan.takeProfit(),
             null,
             plan.rrRatio(),
             BigDecimal.valueOf(evaluation.plan().riskPercent()).setScale(6, RoundingMode.HALF_UP),
-            evaluation.lateEntry(),
+            lateEntry,
             price.source(),
             price.timestamp(),
             candleTs,
@@ -824,6 +829,38 @@ public class PlaybookAutomationService {
             return null;
         }
         return cap;
+    }
+
+    /**
+     * Late-entry test for a confirmation STOP entry, measured against the confirmation
+     * entry itself — the buy-stop above the zone for LONG, the sell-stop below it for
+     * SHORT — NOT the generic retest entry. A confirmation entry is "late" only once
+     * price has already blown through its own trigger by more than 0.5 × ATR (a genuine
+     * chase). Reusing the generic {@link PlaybookEvaluation#lateEntry()} here wrongly
+     * skipped breakout orders still resting below their buy-stop (genuinely pending),
+     * so Auto-IBKR placed no order while the paper sim sat in PENDING_ENTRY.
+     * Package-private static for direct unit testing.
+     */
+    static boolean confirmationLate(String direction, BigDecimal confirmationEntry,
+                                    BigDecimal lastPrice, BigDecimal atr) {
+        if (confirmationEntry == null || lastPrice == null || atr == null || atr.signum() <= 0) {
+            return false;
+        }
+        BigDecimal tolerance = atr.multiply(BigDecimal.valueOf(
+            com.riskdesk.domain.engine.playbook.calculator.LateEntryDetector.DEFAULT_ATR_MULTIPLIER));
+        BigDecimal advance = "SHORT".equalsIgnoreCase(direction)
+            ? confirmationEntry.subtract(lastPrice)
+            : lastPrice.subtract(confirmationEntry);
+        return advance.compareTo(tolerance) > 0;
+    }
+
+    /** Drops a leading generic "LATE ENTRY — " prefix so the confirmation verdict can re-label correctly. */
+    private static String stripLatePrefix(String verdict) {
+        if (verdict == null) {
+            return null;
+        }
+        String marker = "LATE ENTRY — ";
+        return verdict.startsWith(marker) ? verdict.substring(marker.length()) : verdict;
     }
 
     private static BigDecimal normalizeToTick(BigDecimal price, Instrument instrument) {
