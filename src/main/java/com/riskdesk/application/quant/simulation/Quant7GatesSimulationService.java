@@ -285,7 +285,8 @@ public class Quant7GatesSimulationService {
         for (int i = 0; i < rows.size(); i++) {
             Quant7GatesSimulation sim = rows.get(i);
             if (!sim.isOpen()) continue;
-            Quant7GatesSimulation closed = checkSlTp(sim, livePrice, source, ts);
+            Quant7GatesSimulation closed = checkSlTp(sim, livePrice, source, ts,
+                props.slSlippageCapFraction(sim.instrument().name()));
             if (closed != null) {
                 rows.set(i, closed);
                 publish(closed);
@@ -376,7 +377,8 @@ public class Quant7GatesSimulationService {
                                               String liveSource,
                                               PatternAnalysis pattern,
                                               Instant now) {
-        Quant7GatesSimulation closedOnLevel = checkSlTp(sim, livePrice, liveSource, now);
+        Quant7GatesSimulation closedOnLevel = checkSlTp(sim, livePrice, liveSource, now,
+            props.slSlippageCapFraction(sim.instrument().name()));
         if (closedOnLevel != null) return closedOnLevel;
         Quant7GatesSimulation.Direction dir = sim.direction();
 
@@ -411,14 +413,22 @@ public class Quant7GatesSimulationService {
      * fallback-driven close on a live-entry row is still labelled correctly
      * for the operator. Shared by the 60 s scan path ({@link #maybeClose})
      * and the ~3 s fast exit path ({@link #onPriceTick}).
+     *
+     * <p>On an SL breach the recorded exit is the stop-fill price from
+     * {@link #cappedSlExit} — bounded slippage past the stop, not whatever
+     * (possibly gapped) tick crossed the level — so a thin-liquidity
+     * air-pocket can't book a loss many multiples of the intended stop.
+     * TP exits keep the raw favourable price.
      */
     private static Quant7GatesSimulation checkSlTp(Quant7GatesSimulation sim,
                                                    double livePrice,
                                                    String liveSource,
-                                                   Instant now) {
+                                                   Instant now,
+                                                   double slSlippageCapFraction) {
         if (sim.direction() == Quant7GatesSimulation.Direction.LONG) {
             if (livePrice <= sim.stopLoss()) {
-                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+                double exit = cappedSlExit(sim, livePrice, slSlippageCapFraction);
+                return sim.close(exit, liveSource, now, slExitReason(livePrice, exit), Quant7GatesSimulationStatus.CLOSED_SL);
             }
             if (livePrice >= sim.takeProfit2()) {
                 return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
@@ -428,7 +438,8 @@ public class Quant7GatesSimulationService {
             }
         } else {
             if (livePrice >= sim.stopLoss()) {
-                return sim.close(livePrice, liveSource, now, "SL hit", Quant7GatesSimulationStatus.CLOSED_SL);
+                double exit = cappedSlExit(sim, livePrice, slSlippageCapFraction);
+                return sim.close(exit, liveSource, now, slExitReason(livePrice, exit), Quant7GatesSimulationStatus.CLOSED_SL);
             }
             if (livePrice <= sim.takeProfit2()) {
                 return sim.close(livePrice, liveSource, now, "TP2 hit", Quant7GatesSimulationStatus.CLOSED_TP2);
@@ -438,6 +449,34 @@ public class Quant7GatesSimulationService {
             }
         }
         return null;
+    }
+
+    /**
+     * Stop-fill price modelling a real resting stop on liquid micro futures:
+     * the realised loss is bounded to {@code (1 + capFraction)} of the nominal
+     * stop distance. The harness only "sees" the price the ~3 s poll delivered
+     * after the level was crossed, which in a gap (or on a bad tick) lands far
+     * past the stop — sim #937 booked a 337-pt loss on a 50-pt stop. Capping
+     * keeps a normal small overshoot (when {@code livePrice} is inside the
+     * band) but clamps the pathological tail. {@code capFraction <= 0} disables
+     * the cap (legacy: return the raw breach price). Defensive on a malformed
+     * non-positive stop distance: no cap.
+     */
+    static double cappedSlExit(Quant7GatesSimulation sim, double livePrice, double capFraction) {
+        if (!(capFraction > 0)) return livePrice;
+        if (sim.direction() == Quant7GatesSimulation.Direction.LONG) {
+            double slDist = sim.entryPrice() - sim.stopLoss();
+            if (!(slDist > 0)) return livePrice;
+            return Math.max(livePrice, sim.stopLoss() - slDist * capFraction);
+        }
+        double slDist = sim.stopLoss() - sim.entryPrice();
+        if (!(slDist > 0)) return livePrice;
+        return Math.min(livePrice, sim.stopLoss() + slDist * capFraction);
+    }
+
+    /** "SL hit" — annotated when the slippage cap rewrote the raw breach price. */
+    private static String slExitReason(double rawLivePrice, double exit) {
+        return exit == rawLivePrice ? "SL hit" : "SL hit (slippage-capped)";
     }
 
     /** Test-only hook — pins the clock so the ET EOD/blackout windows are reproducible. */

@@ -109,9 +109,27 @@ public class QuantSimProperties {
     private Instant statsSince;
 
     /**
+     * Stop-fill realism cap — bounds the realised loss on an SL close to
+     * {@code (1 + fraction) × nominalStopDistance}. The harness exits at the
+     * live price that breached the level, but that price is whatever the
+     * ~3 s poll happened to deliver: in a thin-liquidity air-pocket (or on a
+     * single bad tick) it lands hundreds of points past the stop, so the
+     * paper row books a loss a real resting stop on liquid micro futures
+     * would never take (sim #937: 337-pt loss on a 50-pt stop = +287
+     * overshoot). The cap rewrites the SL exit to the stop level plus this
+     * fraction of the stop distance, modelling a bounded-slippage stop fill.
+     * Self-scaling (fraction of the stop, not an absolute), so it needs no
+     * per-instrument tuning; an override is still available. {@code <= 0}
+     * disables the cap (legacy: book the raw live price, overshoot and all).
+     * Favourable TP overshoot is never capped.
+     */
+    private double slSlippageCapFraction = 0.15;
+
+    /**
      * Legacy policy bundle used by the backward-compatible service
      * constructors (pre-policy unit tests): immediate flow-AVOID exit, fixed
-     * 25/40/80 offsets, no HTF filter, no EOD flat.
+     * 25/40/80 offsets, no HTF filter, no EOD flat, and no stop-slippage cap
+     * (raw overshoot booked, as the pre-cap harness did).
      */
     public static QuantSimProperties legacyDefaults() {
         QuantSimProperties p = new QuantSimProperties();
@@ -119,6 +137,7 @@ public class QuantSimProperties {
         p.setStopMode(QuantSimStopMode.FIXED);
         p.setHtfFilterEnabled(false);
         p.setEodFlatEnabled(false);
+        p.setSlSlippageCapFraction(0.0);
         return p;
     }
 
@@ -174,6 +193,9 @@ public class QuantSimProperties {
 
     public Instant getStatsSince() { return statsSince; }
     public void setStatsSince(Instant statsSince) { this.statsSince = statsSince; }
+
+    public double getSlSlippageCapFraction() { return slSlippageCapFraction; }
+    public void setSlSlippageCapFraction(double slSlippageCapFraction) { this.slSlippageCapFraction = slSlippageCapFraction; }
 
     // ── per-instrument resolution (override → global fallback) ──────────────
 
@@ -232,6 +254,11 @@ public class QuantSimProperties {
         return o != null && o.getHtfEmaSlow() != null ? o.getHtfEmaSlow() : htfEmaSlow;
     }
 
+    public double slSlippageCapFraction(String instrument) {
+        InstrumentOverride o = override(instrument);
+        return o != null && o.getSlSlippageCapFraction() != null ? o.getSlSlippageCapFraction() : slSlippageCapFraction;
+    }
+
     private InstrumentOverride override(String instrument) {
         return instrument == null ? null : perInstrument.get(instrument);
     }
@@ -253,6 +280,7 @@ public class QuantSimProperties {
         private String htfTimeframe;
         private Integer htfEmaFast;
         private Integer htfEmaSlow;
+        private Double slSlippageCapFraction;
 
         public QuantSimExitPolicy getExitPolicy() { return exitPolicy; }
         public void setExitPolicy(QuantSimExitPolicy exitPolicy) { this.exitPolicy = exitPolicy; }
@@ -286,5 +314,8 @@ public class QuantSimProperties {
 
         public Integer getHtfEmaSlow() { return htfEmaSlow; }
         public void setHtfEmaSlow(Integer htfEmaSlow) { this.htfEmaSlow = htfEmaSlow; }
+
+        public Double getSlSlippageCapFraction() { return slSlippageCapFraction; }
+        public void setSlSlippageCapFraction(Double slSlippageCapFraction) { this.slSlippageCapFraction = slSlippageCapFraction; }
     }
 }

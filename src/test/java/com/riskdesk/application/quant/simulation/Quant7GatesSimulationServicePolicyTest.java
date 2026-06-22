@@ -175,7 +175,9 @@ class Quant7GatesSimulationServicePolicyTest {
         service.onSnapshot(Instrument.MNQ,
             snapshotAt(Instrument.MNQ, 29687.25 + QuantSnapshot.TP2_OFFSET), longTradePattern());
 
-        // MCL LONG collapses through the SL — a loss.
+        // MCL LONG collapses through the SL (65.00) — a loss. The 60.00 tick is
+        // 5 pts past the stop, but the slippage cap (0.15×25 = 3.75) clamps the
+        // realised loss to 25×1.15 = 28.75 pts.
         service.onSnapshot(Instrument.MCL, snapshotAt(Instrument.MCL, 90.00), longTradePattern());
         service.onSnapshot(Instrument.MCL, snapshotAt(Instrument.MCL, 60.00), longTradePattern());
 
@@ -186,7 +188,7 @@ class Quant7GatesSimulationServicePolicyTest {
         assertThat(by.get("MNQ").netPoints()).isEqualTo(QuantSnapshot.TP2_OFFSET);
         assertThat(by.get("MCL").wins()).isZero();
         assertThat(by.get("MCL").losses()).isEqualTo(1);
-        assertThat(by.get("MCL").netPoints()).isEqualTo(-30.0);
+        assertThat(by.get("MCL").netPoints()).isEqualTo(-28.75);
 
         // The blended aggregate still matches the sum of the slices.
         Quant7GatesSimulationService.Stats total = service.stats();
