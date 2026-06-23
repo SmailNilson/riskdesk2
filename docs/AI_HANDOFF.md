@@ -2,6 +2,34 @@
 
 Last updated: 2026-06-23
 
+## PLAYBOOK broker-truth reconciliation — recover drifted rows + cancel orphan orders (2026-06-23)
+
+Backend-only. Companion to `PlaybookPositionReconciler` below. That reconciler enforces the SL only on
+rows the app knows are `ACTIVE`; if a broker callback is dropped (the R2 `orderStatus(Filled)` drop) the
+app status DRIFTS from IBKR and the position is left unprotected on a row stuck in `ENTRY_SUBMITTED`.
+No existing watcher covered this: `PlaybookEntryInvalidationWatcher` only cancels *unfilled* entries,
+`PlaybookPositionReconciler` only scans `ACTIVE`, and `StaleCloseReconciler` only acts when IBKR is
+*confirmed flat*. There was no `PLAYBOOK_AUTO` equivalent of `WtxStaleEntryReconciler`.
+
+**New `PlaybookBrokerTruthReconciler` (`application/execution`)**, anchored on broker truth, two paths:
+- **P1 — stale-entry recovery (state only).** Scans `PLAYBOOK_AUTO` `ENTRY_SUBMITTED` rows, looks each up
+  by `executionKey` (= IBKR `orderRef`): order Filled → mark `ACTIVE` (missed fill — the SL reconciler
+  then protects it); Cancelled/Inactive → `CANCELLED`; gone (NOT_FOUND) **and** IBKR flat → `CANCELLED`.
+  Places no broker order. Mirrors `WtxStaleEntryReconciler`.
+- **P2 — orphan-order cancel (the one bounded broker action).** Scans recently-`CANCELLED` rows that
+  still carry an `ibkrOrderId`; if the order is still FOUND working at IBKR, re-issues the cancel against
+  *that* order (never flattens an unknown position). If the order is FOUND `Filled` (cancel raced a fill →
+  unprotected live position), it does NOT act — out of scope (P3) — but raises a loud divergence alarm.
+
+Safety: never acts on a `UNAVAILABLE` lookup (gateway down ≠ order gone); grace window (120s) lets the
+normal ack/fill/cancel flow land first; P2 ages from `updatedAt` (when cancelled, not when submitted) and
+is bounded to a 30-min re-check window; every correction fires the R7 `sendExecutionReconciled` alarm.
+Gated by `riskdesk.playbook.broker-reconcile.enabled` (default true; disable = restart with it false) and
+IBKR-enabled; one-shot boot replay runs P1 as soon as broker truth is readable. Tests:
+`PlaybookBrokerTruthReconcilerTest` (18). Full execution+positions suite (254) + ArchUnit green; context boots.
+
+P3 (recover a terminal app row that IBKR still holds a position for) was deliberately deferred.
+
 ## PLAYBOOK live SL/TP now enforced on FILLED positions — `PlaybookPositionReconciler` (2026-06-23)
 
 Backend-only. Fixes a money-losing gap on the `MNQ_10M_CONFIRMATION` (Live) profile: a filled live
