@@ -38,21 +38,69 @@ class QuantSimFastExitTest {
     // ── service fast path ───────────────────────────────────────────────────
 
     @Test
-    void tickClosesLongOnStopLossAtTickPrice() {
+    void tickClosesLongOnStopLossWithinBandAtRawPrice() {
         Quant7GatesSimulationService service = service(fixedProps());
         service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
         assertThat(service.listOpen()).hasSize(1);
 
-        // Price blows through the SL (29662.25) — the close is recorded at the
-        // tick price, honestly carrying whatever overshoot the tick saw.
-        service.onPriceTick(Instrument.MNQ, 29650.00, "LIVE_PUSH", TICK_AT);
+        // SL = 29662.25 (entry - 25). A normal small overshoot (1.25 pts, inside
+        // the 0.15×25 = 3.75-pt cap band) is booked at the raw tick price.
+        service.onPriceTick(Instrument.MNQ, 29661.00, "LIVE_PUSH", TICK_AT);
 
         assertThat(service.listOpen()).isEmpty();
         Quant7GatesSimulation closed = service.listAll().get(0);
         assertThat(closed.status()).isEqualTo(Quant7GatesSimulationStatus.CLOSED_SL);
-        assertThat(closed.exitPrice()).isEqualTo(29650.00);
+        assertThat(closed.exitPrice()).isEqualTo(29661.00);
+        assertThat(closed.exitReason()).isEqualTo("SL hit");
         assertThat(closed.exitPriceSource()).isEqualTo("LIVE_PUSH");
         assertThat(closed.closedAt()).isEqualTo(TICK_AT);
+    }
+
+    @Test
+    void tickCapsLongStopLossOnGapThroughLevel() {
+        Quant7GatesSimulationService service = service(fixedProps());
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+
+        // A gap blows 62 pts past the SL (29662.25). A real resting stop would
+        // not take a 65-pt loss on a 25-pt stop — the exit is clamped to the
+        // stop minus 0.15×25 = 3.75, i.e. 29658.50 (realised loss = 28.75 pts).
+        service.onPriceTick(Instrument.MNQ, 29600.00, "LIVE_PUSH", TICK_AT);
+
+        Quant7GatesSimulation closed = service.listAll().get(0);
+        assertThat(closed.status()).isEqualTo(Quant7GatesSimulationStatus.CLOSED_SL);
+        assertThat(closed.exitPrice()).isEqualTo(29658.50);
+        assertThat(closed.exitReason()).isEqualTo("SL hit (slippage-capped)");
+        assertThat(closed.pnlPoints()).isEqualTo(-28.75);
+    }
+
+    @Test
+    void capDisabledBooksRawOvershoot() {
+        QuantSimProperties noCap = fixedProps();
+        noCap.setSlSlippageCapFraction(0.0);
+        Quant7GatesSimulationService service = service(noCap);
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+
+        service.onPriceTick(Instrument.MNQ, 29600.00, "LIVE_PUSH", TICK_AT);
+
+        // Legacy behaviour — the raw breach price is booked, overshoot and all.
+        Quant7GatesSimulation closed = service.listAll().get(0);
+        assertThat(closed.exitPrice()).isEqualTo(29600.00);
+        assertThat(closed.exitReason()).isEqualTo("SL hit");
+    }
+
+    @Test
+    void tickCapsShortStopLossOnGapThroughLevel() {
+        Quant7GatesSimulationService service = service(fixedProps());
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), shortTradePattern());
+
+        // SHORT SL = 29712.25 (entry + 25). A gap to 29800 is clamped to
+        // 29712.25 + 0.15×25 = 29716.00.
+        service.onPriceTick(Instrument.MNQ, 29800.00, "LIVE_PUSH", TICK_AT);
+
+        Quant7GatesSimulation closed = service.listAll().get(0);
+        assertThat(closed.status()).isEqualTo(Quant7GatesSimulationStatus.CLOSED_SL);
+        assertThat(closed.exitPrice()).isEqualTo(29716.00);
+        assertThat(closed.exitReason()).isEqualTo("SL hit (slippage-capped)");
     }
 
     @Test
