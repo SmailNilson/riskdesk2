@@ -603,7 +603,7 @@ export default function Dashboard() {
               )}
             </>
           )}
-          {mobileTab === 'quant' && <Quant7GatesSimulationPanel />}
+          {mobileTab === 'quant' && <Quant7GatesSimulationPanel instrument={instrument} />}
           {mobileTab === 'playbook' && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
               <PlaybookPanel
@@ -829,7 +829,7 @@ export default function Dashboard() {
                   defaultTab={instrument === 'MNQ' ? '10m' : '5m'}
                 />
               ) },
-              { key: 'quant', label: 'Quant', content: <Quant7GatesSimulationPanel /> },
+              { key: 'quant', label: 'Quant', content: <Quant7GatesSimulationPanel instrument={instrument} /> },
               { key: 'play', label: 'Play', content: (
                 <div className="p-3">
                   <PlaybookPanel

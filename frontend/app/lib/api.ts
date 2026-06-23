@@ -1469,6 +1469,8 @@ export const api = {
     get<QuantSimExecState>(`/api/quant/simulations/exec-state`),
   setQuantSimAutoExecution: (instrument: string, enabled: boolean) =>
     put<QuantSimExecState>(`/api/quant/simulations/${instrument}/auto-execution`, { enabled }),
+  setQuantSimInvert: (instrument: string, mode: QuantSimInvertMode) =>
+    put<QuantSimExecState>(`/api/quant/simulations/${instrument}/invert`, { mode }),
 };
 
 // ── Quant 7-Gates simulation types ──────────────────────────────────────
@@ -1535,7 +1537,12 @@ export interface QuantSimExecState {
   masterEnabled: boolean;
   allowlist: string[];
   toggles: Record<string, boolean>;
+  /** Per-instrument direction-inversion mode (paper-direction, independent of the toggles). */
+  invertModes: Record<string, QuantSimInvertMode>;
 }
+
+/** NONE = trade the signal; MIRROR = flip + swap SL/TP (R:R 0.67); FADE = flip, keep R:R 1.5. */
+export type QuantSimInvertMode = 'NONE' | 'MIRROR' | 'FADE';
 
 // ── Active Positions types ──────────────────────────────────────────────
 export interface ActivePositionView {

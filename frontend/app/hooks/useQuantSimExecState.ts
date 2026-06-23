@@ -1,14 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, type QuantSimExecState } from '@/app/lib/api';
+import { api, type QuantSimExecState, type QuantSimInvertMode } from '@/app/lib/api';
 
 interface UseQuantSimExecState {
   state: QuantSimExecState | null;
   error: string | null;
-  /** Instrument currently being toggled (request in flight), or null. */
+  /** Busy key of the request in flight: instrument (Auto-IBKR) or `${instrument}:invert`. */
   busy: string | null;
   setEnabled: (instrument: string, enabled: boolean) => Promise<void>;
+  setInvert: (instrument: string, mode: QuantSimInvertMode) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -55,5 +56,23 @@ export function useQuantSimExecState(): UseQuantSimExecState {
     [refresh],
   );
 
-  return { state, error, busy, setEnabled, refresh };
+  const setInvert = useCallback(
+    async (instrument: string, mode: QuantSimInvertMode) => {
+      setBusy(`${instrument}:invert`);
+      try {
+        const next = await api.setQuantSimInvert(instrument, mode);
+        if (next) setState(next);
+        else await refresh();
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        await refresh();
+      } finally {
+        setBusy(null);
+      }
+    },
+    [refresh],
+  );
+
+  return { state, error, busy, setEnabled, setInvert, refresh };
 }

@@ -8,6 +8,7 @@ import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationPublisher;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationStatus;
 import com.riskdesk.domain.quant.simulation.QuantSimExitPolicy;
+import com.riskdesk.domain.quant.simulation.QuantSimInvertMode;
 import com.riskdesk.domain.quant.simulation.QuantSimStopMode;
 import com.riskdesk.domain.quant.simulation.port.Quant7GatesSimulationRepositoryPort;
 import jakarta.annotation.PostConstruct;
@@ -98,6 +99,7 @@ public class Quant7GatesSimulationService {
     private final ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider;
     private final QuantSimProperties props;
     private final ObjectProvider<QuantSimMarketContext> marketContextProvider;
+    private final QuantSimInvertState invertState;
     private final AtomicLong sequence = new AtomicLong(1);
 
     /** Injectable clock so the ET-window logic is testable (incl. DST cases). */
@@ -134,18 +136,35 @@ public class Quant7GatesSimulationService {
             QuantSimProperties.legacyDefaults(), new EmptyObjectProvider<>());
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    /**
+     * Test/convenience constructor (pre direction-inversion). Delegates with a
+     * fresh {@link QuantSimInvertState} so every instrument runs in NONE mode,
+     * preserving existing test semantics.
+     */
     public Quant7GatesSimulationService(
             ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
             ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider,
             ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider,
             QuantSimProperties props,
             ObjectProvider<QuantSimMarketContext> marketContextProvider) {
+        this(publisherProvider, repositoryProvider, bridgeProvider, props, marketContextProvider,
+            new QuantSimInvertState());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public Quant7GatesSimulationService(
+            ObjectProvider<Quant7GatesSimulationPublisher> publisherProvider,
+            ObjectProvider<Quant7GatesSimulationRepositoryPort> repositoryProvider,
+            ObjectProvider<Quant7GatesExecutionBridge> bridgeProvider,
+            QuantSimProperties props,
+            ObjectProvider<QuantSimMarketContext> marketContextProvider,
+            QuantSimInvertState invertState) {
         this.publisherProvider = publisherProvider;
         this.repositoryProvider = repositoryProvider;
         this.bridgeProvider = bridgeProvider;
         this.props = props;
         this.marketContextProvider = marketContextProvider;
+        this.invertState = invertState;
     }
 
     /**
@@ -309,14 +328,23 @@ public class Quant7GatesSimulationService {
                           double livePrice,
                           Instant now) {
         if (!isEntryQualified(pattern, direction)) return;
-        if (hasOpen(instrument, direction)) return;
+
+        // Per-instrument direction inversion (runtime, default NONE). The entry
+        // CONDITION stays on the SIGNAL direction — qualification above and the
+        // HTF filter below both judge `direction`, matching how the inverse was
+        // backtested (fade the HTF-aligned setups). Only the OPENED trade flips.
+        QuantSimInvertMode invert = invertState.mode(instrument);
+        Quant7GatesSimulation.Direction openDir =
+            invert == QuantSimInvertMode.NONE ? direction : opposite(direction);
+        if (hasOpen(instrument, openDir)) return;
 
         QuantSimMarketContext ctx = marketContextProvider == null
             ? null : marketContextProvider.getIfAvailable();
 
         // HTF trend filter — fail-closed: a counter-trend (or unverifiable)
         // entry is skipped. Calibration showed counter-trend entries ran
-        // -0.29R/trade while HTF-aligned ones ran +0.32R/trade.
+        // -0.29R/trade while HTF-aligned ones ran +0.32R/trade. Checks the
+        // SIGNAL direction even when inverting (see above).
         if (props.htfFilterEnabled(instrument.name())) {
             Boolean aligned = ctx == null ? null : ctx.htfAligned(instrument, direction);
             if (aligned == null || !aligned) {
@@ -341,21 +369,43 @@ public class Quant7GatesSimulationService {
                 log.warn("quant-sim ATR unavailable instr={} — falling back to fixed offsets", instrument);
             }
         }
-        double sign = direction == Quant7GatesSimulation.Direction.LONG ? 1.0 : -1.0;
-        double sl = livePrice - sign * slOffset;
-        double tp1 = livePrice + sign * tp1Offset;
-        double tp2 = livePrice + sign * tp2Offset;
+
+        // Apply the inversion to the offsets:
+        //   MIRROR — swap SL <-> TP1 (the old stop becomes the target and vice
+        //            versa, R:R inverts to ~0.67); TP2 keeps the original
+        //            TP2/TP1 ratio so the runner stays beyond TP1.
+        //   FADE   — keep the offsets (tight stop, far target, R:R 1.5); only
+        //            the side flips.
+        double effSlOffset = slOffset;
+        double effTp1Offset = tp1Offset;
+        double effTp2Offset = tp2Offset;
+        if (invert == QuantSimInvertMode.MIRROR) {
+            double runnerRatio = tp1Offset > 0 ? tp2Offset / tp1Offset : 2.0;
+            effSlOffset = tp1Offset;
+            effTp1Offset = slOffset;
+            effTp2Offset = effTp1Offset * runnerRatio;
+        }
+
+        double sign = openDir == Quant7GatesSimulation.Direction.LONG ? 1.0 : -1.0;
+        double sl = livePrice - sign * effSlOffset;
+        double tp1 = livePrice + sign * effTp1Offset;
+        double tp2 = livePrice + sign * effTp2Offset;
+
+        String reason = describeEntry(pattern, openDir);
+        if (invert != QuantSimInvertMode.NONE) {
+            reason = "[" + invert.name() + "] " + reason + " (signal " + direction + ")";
+        }
 
         Quant7GatesSimulation opened = new Quant7GatesSimulation(
             sequence.getAndIncrement(),
             instrument,
-            direction,
+            openDir,
             livePrice,
             sl,
             tp1,
             tp2,
             now,
-            describeEntry(pattern, direction),
+            reason,
             // Carry the snapshot's price-source through so the panel and any
             // downstream consumer can distinguish a live-tick entry from one
             // driven by a DB fallback during a feed outage.
@@ -365,11 +415,18 @@ public class Quant7GatesSimulationService {
             // P&L is 0 until the first markToMarket lands.
             null, "", null, null, 0.0, 0.0);
         bucket(instrument).add(opened);
-        log.info("quant-sim OPEN id={} instr={} dir={} entry={} src={} sl={} tp1={} tp2={} reason=\"{}\"",
-            opened.id(), instrument, direction, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
+        log.info("quant-sim OPEN id={} instr={} dir={} invert={} entry={} src={} sl={} tp1={} tp2={} reason=\"{}\"",
+            opened.id(), instrument, openDir, invert, livePrice, opened.priceSource(), sl, tp1, tp2, opened.entryReason());
         publish(opened);
         persist(opened);
         routeOpen(opened);
+    }
+
+    /** Opposite trade side — used when an instrument's inversion mode is active. */
+    private static Quant7GatesSimulation.Direction opposite(Quant7GatesSimulation.Direction d) {
+        return d == Quant7GatesSimulation.Direction.LONG
+            ? Quant7GatesSimulation.Direction.SHORT
+            : Quant7GatesSimulation.Direction.LONG;
     }
 
     private Quant7GatesSimulation maybeClose(Quant7GatesSimulation sim,

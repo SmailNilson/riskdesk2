@@ -3,8 +3,10 @@ package com.riskdesk.presentation.quant;
 import com.riskdesk.application.quant.simulation.Quant7GatesSimulationService;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionProperties;
 import com.riskdesk.application.quant.simulation.QuantSimExecutionState;
+import com.riskdesk.application.quant.simulation.QuantSimInvertState;
 import com.riskdesk.application.quant.simulation.QuantSimProperties;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.domain.quant.simulation.QuantSimInvertMode;
 import com.riskdesk.presentation.quant.dto.Quant7GatesSimulationResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -39,15 +41,18 @@ public class Quant7GatesSimulationController {
 
     private final Quant7GatesSimulationService service;
     private final QuantSimExecutionState execState;
+    private final QuantSimInvertState invertState;
     private final QuantSimExecutionProperties execProps;
     private final QuantSimProperties simProps;
 
     public Quant7GatesSimulationController(Quant7GatesSimulationService service,
                                            QuantSimExecutionState execState,
+                                           QuantSimInvertState invertState,
                                            QuantSimExecutionProperties execProps,
                                            QuantSimProperties simProps) {
         this.service = service;
         this.execState = execState;
+        this.invertState = invertState;
         this.execProps = execProps;
         this.simProps = simProps;
     }
@@ -110,6 +115,30 @@ public class Quant7GatesSimulationController {
         return execStateResponse();
     }
 
+    /**
+     * Set the per-instrument direction-inversion mode (NONE / MIRROR / FADE).
+     * Paper-DIRECTION only — it picks which way the simulated trade opens and is
+     * INDEPENDENT of the Auto-IBKR mirror, so it is NOT gated on the exec
+     * allowlist: an instrument can be inverted in paper without ever routing a
+     * real order. When the mirror IS armed for the instrument, the inverted
+     * trade routes live like any other.
+     */
+    @PutMapping("/{instrument}/invert")
+    public ExecStateResponse setInvert(@PathVariable String instrument,
+                                       @RequestBody InvertRequest request) {
+        Instrument instr = parseInstrument(instrument);
+        QuantSimInvertMode mode;
+        try {
+            mode = request == null || request.mode() == null
+                ? QuantSimInvertMode.NONE
+                : QuantSimInvertMode.valueOf(request.mode().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "mode must be NONE | MIRROR | FADE");
+        }
+        invertState.setMode(instr, mode);
+        return execStateResponse();
+    }
+
     /** Current master flag + allowlist + per-instrument toggle state. */
     @GetMapping("/exec-state")
     public ExecStateResponse execState() {
@@ -126,7 +155,11 @@ public class Quant7GatesSimulationController {
                 toggles.put(name, false);
             }
         }
-        return new ExecStateResponse(execProps.isEnabled(), execProps.getInstruments(), toggles);
+        // Inversion modes for every instrument (independent of the exec
+        // allowlist — an instrument can be paper-inverted without being routable).
+        Map<String, String> invertModes = new LinkedHashMap<>();
+        invertState.snapshot().forEach((instr, mode) -> invertModes.put(instr.name(), mode.name()));
+        return new ExecStateResponse(execProps.isEnabled(), execProps.getInstruments(), toggles, invertModes);
     }
 
     private static Instrument parseInstrument(String name) {
@@ -140,8 +173,15 @@ public class Quant7GatesSimulationController {
     /** Body for {@code PUT /{instrument}/auto-execution}. */
     public record AutoExecutionRequest(boolean enabled) {}
 
-    /** Master flag + allowlist + per-instrument toggle snapshot. */
-    public record ExecStateResponse(boolean masterEnabled, List<String> allowlist, Map<String, Boolean> toggles) {}
+    /** Body for {@code PUT /{instrument}/invert} — one of NONE | MIRROR | FADE. */
+    public record InvertRequest(String mode) {}
+
+    /**
+     * Master flag + allowlist + per-instrument Auto-IBKR toggles + per-instrument
+     * inversion modes ({@code instrument -> NONE | MIRROR | FADE}).
+     */
+    public record ExecStateResponse(boolean masterEnabled, List<String> allowlist,
+                                    Map<String, Boolean> toggles, Map<String, String> invertModes) {}
 
     /**
      * Public-facing aggregate. {@code winRatePct} is null when no rows are
