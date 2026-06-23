@@ -1,6 +1,37 @@
 # AI Handoff
 
-Last updated: 2026-06-18
+Last updated: 2026-06-23
+
+## PLAYBOOK live SL/TP now enforced on FILLED positions — `PlaybookPositionReconciler` (2026-06-23)
+
+Backend-only. Fixes a money-losing gap on the `MNQ_10M_CONFIRMATION` (Live) profile: a filled live
+Playbook position had **no stop-loss anywhere** — the SL never fired when price reached it.
+
+**The gap.** `routeLive` submits **only the entry order** to IBKR and stores the plan's SL/TP as
+`virtualStopLoss`/`virtualTakeProfit` on the row — it never places a protective broker order. Once
+the entry filled (`ACTIVE`), nothing enforced those levels: `PlaybookEntryInvalidationWatcher` only
+cancels *unfilled* resting entries (it returns the moment a row has a fill), and `VirtualStopWatcher`
+is scoped to `MANUAL_QUANT_PANEL` rows only. No reconciler watched `PLAYBOOK_AUTO` + `ACTIVE`. So a
+filled position ran unprotected at the broker; the "LOSS" shown in the panel was the *simulation*
+outcome (candle replay vs the virtual SL/TP), not a real broker exit.
+
+**The fix.** New `PlaybookPositionReconciler` (`application/execution`) — a `@Scheduled` (1.5s default)
+sweep of `PLAYBOOK_AUTO` rows in `ACTIVE` (and still-breached `EXIT_SUBMITTED`, re-driven). On a fresh
+live-price cross of the row's virtual SL/TP for its side it flattens via the same unified-router path
+the operator's "Fermer" button uses (`ActivePositionsService.closePosition`, reason
+`playbook-stop:SL|TP`). Stop wins a tie (pessimistic). Modeled directly on `VirtualStopWatcher`:
+per-row isolation, freshness-gated live quote (LIVE source + ≤10s, never auto-close on a stale tick),
+per-instrument price cache.
+
+- **App-side only.** NOT a broker bracket — it protects only while the backend is up and connected.
+  A backend outage/disconnect still leaves the position unprotected at IBKR (the residual gap that
+  real OCO brackets would close — deferred). This was the chosen trade-off (option B).
+- **Gated** by `riskdesk.playbook.position-watch.enabled` (default **true**, read every tick as a
+  runtime kill-switch) and by IBKR being enabled (PLAYBOOK_AUTO broker rows only exist when it is, so
+  the reconciler stays off in paper/test where the trade simulator owns SL/TP resolution).
+- Properties bound by `PlaybookExecutionConfiguration` (application layer — registering them from
+  `infrastructure.config` violates the `infrastructure → application` ArchUnit rule).
+- Tests: `PlaybookPositionReconcilerTest` (14). Full suite + ArchUnit green.
 
 ## PLAYBOOK live invalidation parity — cancel resting confirmation STOP on zone break (2026-06-18)
 
