@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 import { computeStats, useQuant7GatesSimulations } from '@/app/hooks/useQuant7GatesSimulations';
 import { useQuantSimExecState } from '@/app/hooks/useQuantSimExecState';
-import type { Quant7GatesSimulationStats, Quant7GatesSimulationView, QuantSimExecState } from '@/app/lib/api';
+import type { Quant7GatesSimulationStats, Quant7GatesSimulationView, QuantSimExecState, QuantSimInvertMode } from '@/app/lib/api';
 
 /**
  * Live tracker for the Quant 7-Gates simulation harness.
@@ -17,9 +17,22 @@ import type { Quant7GatesSimulationStats, Quant7GatesSimulationView, QuantSimExe
  * + Abs Bull (LONG) / Abs Bear (SHORT) + flow TRADE. Exit rule: flow AVOID
  * or SL/TP touched.
  */
-export default function Quant7GatesSimulationPanel() {
-  const { rows, stats, statsRows, statsSinceMs, connected } = useQuant7GatesSimulations();
-  const { state: execState, error: execError, busy: execBusy, setEnabled } = useQuantSimExecState();
+export default function Quant7GatesSimulationPanel({ instrument }: { instrument?: string } = {}) {
+  const { rows: allRows, stats: globalStats, statsRows: allStatsRows, statsSinceMs, connected } = useQuant7GatesSimulations();
+  const { state: execState, error: execError, busy: execBusy, setEnabled, setInvert } = useQuantSimExecState();
+
+  // Scope to the selected instrument by filtering the (global) feed client-side
+  // — the backend scans every instrument continuously and broadcasts one tiny
+  // stream, so there's nothing to fetch per-instrument. No instrument => show all.
+  const rows = useMemo(
+    () => (instrument ? allRows.filter(r => r.instrument === instrument) : allRows),
+    [allRows, instrument]);
+  const statsRows = useMemo(
+    () => (instrument ? allStatsRows.filter(r => r.instrument === instrument) : allStatsRows),
+    [allStatsRows, instrument]);
+  const stats = useMemo(
+    () => (instrument ? computeStats(statsRows) : globalStats),
+    [instrument, statsRows, globalStats]);
 
   const { open, closed } = useMemo(() => {
     const o: Quant7GatesSimulationView[] = [];
@@ -63,6 +76,11 @@ export default function Quant7GatesSimulationPanel() {
       <header className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">Quant 7-Gates Simulation</h2>
+          {instrument && (
+            <span className="text-xs px-2 py-0.5 rounded bg-slate-800 font-mono font-bold text-slate-200">
+              {instrument}
+            </span>
+          )}
           <span
             className={`text-xs px-2 py-0.5 rounded ${connected ? 'bg-emerald-700' : 'bg-slate-700'}`}
             title={connected ? 'WebSocket connected' : 'WebSocket disconnected'}
@@ -94,7 +112,8 @@ export default function Quant7GatesSimulationPanel() {
         </div>
       )}
 
-      <AutoIbkrControls state={execState} error={execError} busy={execBusy} onToggle={setEnabled} />
+      <AutoIbkrControls state={execState} error={execError} busy={execBusy} onToggle={setEnabled} instrument={instrument} />
+      <InvertControls state={execState} busy={execBusy} instrument={instrument} onSetInvert={setInvert} />
 
       <div className="mt-3 space-y-3">
         <Section label="Open positions" rows={open}
@@ -116,11 +135,13 @@ function AutoIbkrControls({
   error,
   busy,
   onToggle,
+  instrument,
 }: {
   state: QuantSimExecState | null;
   error: string | null;
   busy: string | null;
   onToggle: (instrument: string, enabled: boolean) => void;
+  instrument?: string;
 }) {
   if (!state) {
     return (
@@ -130,6 +151,9 @@ function AutoIbkrControls({
     );
   }
   const masterOff = !state.masterEnabled;
+  // Scoped view: only the selected instrument's toggle (empty when it's not on
+  // the live allowlist — paper-only markets can still be inverted below).
+  const shown = instrument ? state.allowlist.filter(i => i === instrument) : state.allowlist;
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-950/60 p-2">
       <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Auto-IBKR</span>
@@ -141,7 +165,10 @@ function AutoIbkrControls({
           master OFF
         </span>
       )}
-      {state.allowlist.map(instr => {
+      {instrument && shown.length === 0 && (
+        <span className="text-[9px] font-mono text-slate-500">{instrument} not routable (paper only)</span>
+      )}
+      {shown.map(instr => {
         const on = state.toggles[instr] ?? false;
         const pending = busy === instr;
         return (
@@ -171,6 +198,63 @@ function AutoIbkrControls({
       <span className="basis-full text-[9px] font-mono text-slate-600">
         ON arms a live IBKR order for the next qualifying setup on that instrument — it is an arming
         state, not a per-row position indicator.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Per-instrument direction-inversion selector (Normal / Miroir / Fade). Paper
+ * DIRECTION only — picks which way the next simulated trade opens; independent
+ * of Auto-IBKR (which decides paper vs live). Validate an inverted profile in
+ * paper for weeks before arming Auto-IBKR on top of it. Only renders when the
+ * panel is scoped to a single instrument.
+ */
+function InvertControls({
+  state,
+  busy,
+  instrument,
+  onSetInvert,
+}: {
+  state: QuantSimExecState | null;
+  busy: string | null;
+  instrument?: string;
+  onSetInvert: (instrument: string, mode: QuantSimInvertMode) => void;
+}) {
+  if (!state || !instrument) return null;
+  const mode: QuantSimInvertMode = state.invertModes?.[instrument] ?? 'NONE';
+  const pending = busy === `${instrument}:invert`;
+  const opts: { mode: QuantSimInvertMode; label: string; title: string }[] = [
+    { mode: 'NONE',   label: 'Normal', title: 'Trade le signal tel quel' },
+    { mode: 'MIRROR', label: 'Miroir', title: 'Inverse la direction + échange SL↔TP (R:R 0.67)' },
+    { mode: 'FADE',   label: 'Fade',   title: 'Inverse la direction, garde le R:R 1.5 (stop serré, cible loin)' },
+  ];
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-950/60 p-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Inverse · {instrument}</span>
+      {opts.map(o => {
+        const active = mode === o.mode;
+        const activeTone = o.mode === 'NONE'
+          ? 'border-slate-500 bg-slate-800 text-slate-100'
+          : 'border-violet-600 bg-violet-950/40 text-violet-300';
+        return (
+          <button
+            key={o.mode}
+            type="button"
+            disabled={pending}
+            onClick={() => onSetInvert(instrument, o.mode)}
+            title={o.title}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition-colors ${
+              pending ? 'opacity-50 cursor-wait ' : ''
+            }${active ? activeTone : 'border-slate-700 bg-slate-900/60 text-slate-400'}`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+      <span className="basis-full text-[9px] font-mono text-slate-600">
+        Paper-direction : inverse les nouveaux trades (signal → trade opposé). Indépendant d&apos;Auto-IBKR —
+        armer Auto-IBKR enverra ce trade inversé en réel.
       </span>
     </div>
   );
@@ -293,6 +377,8 @@ function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: b
   const isLong = row.direction === 'LONG';
   const dirTone = isLong ? 'border-emerald-700 text-emerald-300 bg-emerald-950/30'
                          : 'border-rose-700 text-rose-300 bg-rose-950/30';
+  const invertTag = row.entryReason?.startsWith('[MIRROR]') ? 'MIRROR'
+    : row.entryReason?.startsWith('[FADE]') ? 'FADE' : null;
   const pnlPts = row.pnlPoints ?? 0;
   const pnlUsd = row.pnlUsd ?? 0;
   const pnlTone = pnlPts > 0 ? 'text-emerald-400' : pnlPts < 0 ? 'text-rose-400' : 'text-slate-400';
@@ -306,6 +392,14 @@ function TradeCard({ row, closed }: { row: Quant7GatesSimulationView; closed?: b
           {isLong ? '▲ LONG' : '▼ SHORT'}
         </span>
         <span className="font-mono text-xs text-slate-200">{row.instrument}</span>
+        {invertTag && (
+          <span
+            className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border border-violet-700 bg-violet-950/30 text-violet-300"
+            title="Trade inversé (paper-direction)"
+          >
+            ⇄ {invertTag}
+          </span>
+        )}
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold border ${statusTone}`}>
           {row.status.replace('CLOSED_', '').replace(/_/g, ' ')}
         </span>

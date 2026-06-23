@@ -9,6 +9,7 @@ import com.riskdesk.domain.quant.pattern.PatternAnalysis;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulation;
 import com.riskdesk.domain.quant.simulation.Quant7GatesSimulationStatus;
 import com.riskdesk.domain.quant.simulation.QuantSimExitPolicy;
+import com.riskdesk.domain.quant.simulation.QuantSimInvertMode;
 import com.riskdesk.domain.quant.simulation.QuantSimStopMode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
@@ -315,6 +316,74 @@ class Quant7GatesSimulationServicePolicyTest {
         assertThat(service.listOpen()).isEmpty();
     }
 
+    // ── direction inversion (MIRROR / FADE) ─────────────────────────────────
+
+    @Test
+    void mirrorInvertsDirectionAndSwapsSlTp() {
+        // ATR 10 → base SL=2×=20, TP1=3×=30, TP2=6×=60. MIRROR swaps SL↔TP1
+        // (effSL=30, effTP1=20) and scales TP2 to keep the 2× runner (effTP2=40).
+        QuantSimProperties props = propsWith(p -> {
+            p.setStopMode(QuantSimStopMode.ATR);
+            p.setSlAtrMult(2.0); p.setTp1AtrMult(3.0); p.setTp2AtrMult(6.0);
+        });
+        QuantSimInvertState invert = new QuantSimInvertState();
+        invert.setMode(Instrument.MNQ, QuantSimInvertMode.MIRROR);
+        Quant7GatesSimulationService service = service(props, stubContext(10.0, true), invert);
+
+        // Signal is LONG (longTradePattern) → MIRROR opens a SHORT.
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+
+        Quant7GatesSimulation row = service.listOpen().get(0);
+        assertThat(row.direction()).isEqualTo(Quant7GatesSimulation.Direction.SHORT);
+        assertThat(row.stopLoss()).isEqualTo(29687.25 + 30.0);     // above entry (ex-TP1)
+        assertThat(row.takeProfit1()).isEqualTo(29687.25 - 20.0);  // below entry (ex-SL)
+        assertThat(row.takeProfit2()).isEqualTo(29687.25 - 40.0);
+        assertThat(row.entryReason()).startsWith("[MIRROR]").contains("signal LONG");
+    }
+
+    @Test
+    void fadeInvertsDirectionButKeepsRiskReward() {
+        // FADE flips the side but keeps base offsets (SL=20, TP1=30, TP2=60),
+        // so the SHORT keeps the tight-stop / far-target R:R 1.5.
+        QuantSimProperties props = propsWith(p -> {
+            p.setStopMode(QuantSimStopMode.ATR);
+            p.setSlAtrMult(2.0); p.setTp1AtrMult(3.0); p.setTp2AtrMult(6.0);
+        });
+        QuantSimInvertState invert = new QuantSimInvertState();
+        invert.setMode(Instrument.MNQ, QuantSimInvertMode.FADE);
+        Quant7GatesSimulationService service = service(props, stubContext(10.0, true), invert);
+
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+
+        Quant7GatesSimulation row = service.listOpen().get(0);
+        assertThat(row.direction()).isEqualTo(Quant7GatesSimulation.Direction.SHORT);
+        assertThat(row.stopLoss()).isEqualTo(29687.25 + 20.0);     // tight stop above
+        assertThat(row.takeProfit1()).isEqualTo(29687.25 - 30.0);  // far target below
+        assertThat(row.takeProfit2()).isEqualTo(29687.25 - 60.0);
+        // R:R preserved: reward (30) > risk (20).
+        double risk = Math.abs(row.stopLoss() - row.entryPrice());
+        double reward = Math.abs(row.takeProfit1() - row.entryPrice());
+        assertThat(reward).isGreaterThan(risk);
+        assertThat(row.entryReason()).startsWith("[FADE]");
+    }
+
+    @Test
+    void invertHtfFilterStillJudgesSignalDirection() {
+        // HTF aligned for LONG only. The signal is LONG, so the entry passes even
+        // though the OPENED trade is a SHORT — proving the filter judges the
+        // signal side, not the inverted side (matches how the inverse was backtested).
+        QuantSimProperties props = propsWith(p -> p.setHtfFilterEnabled(true));
+        QuantSimInvertState invert = new QuantSimInvertState();
+        invert.setMode(Instrument.MNQ, QuantSimInvertMode.MIRROR);
+        Quant7GatesSimulationService service = service(props,
+            alignedForDirection(10.0, Quant7GatesSimulation.Direction.LONG), invert);
+
+        service.onSnapshot(Instrument.MNQ, snapshotAt(29687.25), longTradePattern());
+
+        assertThat(service.listOpen()).hasSize(1);
+        assertThat(service.listOpen().get(0).direction()).isEqualTo(Quant7GatesSimulation.Direction.SHORT);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     /** New-policy props (calibrated defaults) tweaked per test, HTF/EOD off unless enabled. */
@@ -336,12 +405,33 @@ class Quant7GatesSimulationServicePolicyTest {
         return s;
     }
 
+    private static Quant7GatesSimulationService service(QuantSimProperties props,
+                                                        QuantSimMarketContext context,
+                                                        QuantSimInvertState invertState) {
+        Quant7GatesSimulationService s = new Quant7GatesSimulationService(
+            provider(null), provider(null), provider(null), props, provider(context), invertState);
+        s.resetForTesting();
+        return s;
+    }
+
     private static QuantSimMarketContext stubContext(Double atr, boolean aligned) {
         return new QuantSimMarketContext() {
             @Override public Double atr(Instrument instrument) { return atr; }
             @Override public Boolean htfAligned(Instrument instrument,
                                                 Quant7GatesSimulation.Direction direction) {
                 return aligned;
+            }
+        };
+    }
+
+    /** Context whose HTF is aligned ONLY for {@code dir} — proves which side the filter checks. */
+    private static QuantSimMarketContext alignedForDirection(Double atr,
+                                                             Quant7GatesSimulation.Direction dir) {
+        return new QuantSimMarketContext() {
+            @Override public Double atr(Instrument instrument) { return atr; }
+            @Override public Boolean htfAligned(Instrument instrument,
+                                                Quant7GatesSimulation.Direction direction) {
+                return direction == dir;
             }
         };
     }
