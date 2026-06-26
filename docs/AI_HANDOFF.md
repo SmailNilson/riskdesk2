@@ -1,6 +1,39 @@
 # AI Handoff
 
-Last updated: 2026-06-23
+Last updated: 2026-06-26
+
+## Live feed self-heal — silent IBKR TCP death no longer needs a redeploy (2026-06-26)
+
+Fixes the "real data disappears after a few hours, only a redeploy fixes it" bug. Root cause (verified by
+decompiling tws-api 10.39.1): a silent half-open TCP death where `EClientSocket.isConnected()` keeps
+returning `true`, so `ensureConnected()` short-circuits and never reconnects, `disconnected()` never fires,
+and `connected()` never re-subscribed the price feed anyway. The `@Scheduled` poll does **not** die (Spring
+wraps repeating tasks in `LOG_AND_SUPPRESS`) — that earlier theory was a myth.
+
+**Backend (the fix).** In `IbGatewayNativeClient`: `forceReconnect(reason)` is the single rate-limited owner
+of teardown+reconnect (`FORCE_RECONNECT_COOLDOWN=120s`); `isStreamingPriceFeedStale(now)` is true iff every
+should-be-live PRICE subscription has been silent > `FEED_ZOMBIE_SECONDS=120` (per-instrument market-open +
+maintenance gating); `connected()` now dispatches `resubscribeAll()` on `CLEANUP_EXECUTOR` — off the tws-api
+message thread (inline would self-deadlock on `accountList()`). `MarketDataService.priceFeedFreshnessWatchdog`
+(~30s, gated on market-open + outside both CME maintenance windows) is the fast detector; it stamps
+`lastLiveTickAt` at the head of `onLivePriceUpdate` and calls `forceReconnect`. `OrderFlowOrchestrator.checkConnectionHealth`
+(300s) is the slow backstop, funneling through the same `forceReconnect`. Also: per-instrument try/catch
+isolation in `pollPrices()`; a non-rethrowing `errorHandler` on the scheduler (observability only); new
+always-UP `MarketDataFeedHealthIndicator` (`marketDataFeed`, details-only so it can't 503 the deploy gate).
+Config: `riskdesk.market-data.price-watchdog.*`. External trigger to also address: IB Gateway daily auto-restart.
+
+**Frontend.** `useWebSocket` exposes `priceAgeMs`/`dataStale` (frozen-feed detection distinct from STOMP
+disconnect); `OfflineBanner` shows a "Données figées depuis Xs" state; `VitalHeader` is now 3-state
+LIVE/FIGÉ/OFF; `api.ts` adds `AbortController` timeouts everywhere + bounded retry on **reads only** (writes
+are timeout-only, never retried).
+
+Tests: `MarketDataServiceTest` (+isolation +watchdog, 12), `IbGatewayNativeClientFeedHealthTest` (7), ArchUnit
+green; frontend lint + tsc clean. Reviewed by an adversarial pass (deadlock/storm/session-boundary guardrails
+confirmed). Full plan: `docs/FIX_PLAN_LIVE_FEED.md`. Residual: no real OCO brackets (forceReconnect tears down
+order/account subs mid-session, they re-arm lazily); tick-by-tick stream re-arms via OrderFlow schedulers, not
+this path; watchdog threshold 120s — observe in prod before lowering to 90s.
+
+## PLAYBOOK broker-truth reconciliation — recover drifted rows + cancel orphan orders (2026-06-23)
 
 ## PLAYBOOK broker-truth reconciliation — recover drifted rows + cancel orphan orders (2026-06-23)
 

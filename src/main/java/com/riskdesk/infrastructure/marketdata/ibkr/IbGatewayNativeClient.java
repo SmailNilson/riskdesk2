@@ -24,6 +24,7 @@ import com.ib.controller.Bar;
 import com.ib.controller.Position;
 import com.riskdesk.domain.execution.port.ExecutionFillListener;
 import com.riskdesk.domain.marketdata.port.StreamingPriceListener;
+import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
 import org.slf4j.Logger;
@@ -65,6 +66,19 @@ public class IbGatewayNativeClient {
     private static final Duration RECONNECT_COOLDOWN = Duration.ofSeconds(5);
     /** Subscriptions that produce no price tick for this long are considered stale. */
     private static final long STALE_PRICE_SECONDS = 60L;
+    /**
+     * Cooldown between two watchdog-forced reconnects. {@link #forceReconnect(String)} is the single
+     * rate-limited owner of teardown+resubscribe; both the {@code MarketDataService} price-feed
+     * watchdog (~30s) and {@code OrderFlowOrchestrator.checkConnectionHealth} (300s) funnel through
+     * it, so the cooldown lives here (centralized) and neither caller can cause a reconnect storm.
+     */
+    private static final Duration FORCE_RECONNECT_COOLDOWN = Duration.ofSeconds(120);
+    /**
+     * The streaming price feed is treated as a "zombie" — socket reports connected but no ticks are
+     * flowing (silent half-open TCP death) — when every should-be-live subscription has been silent
+     * for this long. See {@link #isStreamingPriceFeedStale()}.
+     */
+    private static final long FEED_ZOMBIE_SECONDS = 120L;
     private static final DateTimeFormatter IB_END_DATE_TIME =
         DateTimeFormatter.ofPattern("yyyyMMdd-HH:mm:ss").withZone(ZoneOffset.UTC);
     private static final AccountSummaryTag[] ACCOUNT_SUMMARY_TAGS = {
@@ -79,6 +93,12 @@ public class IbGatewayNativeClient {
     /**
      * Single-threaded executor used to cancel IBKR subscriptions and disconnect the controller
      * OUTSIDE the connectionLock, preventing long I/O holds under the lock.
+     *
+     * <p>Also runs the post-connect {@code resubscribeAll()} (see {@link ConnectionHandler#connected()}).
+     * In the common path that resubscribe is fast (the socket is freshly up, so the per-subscription
+     * {@code ensureConnected()} short-circuits), but if the socket re-dies mid-resubscribe it can block
+     * up to {@link #CONNECT_TIMEOUT}; a queued teardown would wait behind it. Acceptable: teardowns are
+     * rare (rate-limited by {@link #FORCE_RECONNECT_COOLDOWN}) and order is preserved.</p>
      */
     private static final ExecutorService CLEANUP_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "ibkr-cleanup");
@@ -106,6 +126,9 @@ public class IbGatewayNativeClient {
     private volatile PersistentAccountSnapshotCache persistentAccountCache;
     private volatile Instant reconnectBlockedUntil = Instant.EPOCH;
     private volatile String lastConnectionFailure = "uninitialized";
+    /** Guards {@link #forceReconnect(String)} rate-limiting — see {@link #FORCE_RECONNECT_COOLDOWN}. */
+    private final Object forceReconnectLock = new Object();
+    private volatile Instant forceReconnectBlockedUntil = Instant.EPOCH;
     private final Map<String, StreamingPriceSubscription> streamingSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, StreamingQuoteSubscription> streamingQuoteSubscriptions = new ConcurrentHashMap<>();
     private final Map<String, Instrument> contractKeyToInstrument = new ConcurrentHashMap<>();
@@ -590,6 +613,71 @@ public class IbGatewayNativeClient {
             lastConnectionFailure = "manual disconnect";
         }
         submitCleanup(ctx, true);
+    }
+
+    /**
+     * Single rate-limited owner of a full teardown + reconnect of the IB Gateway native socket.
+     * Defeats the "silent TCP death" failure mode where {@link #isConnected()} keeps reporting
+     * {@code true} (the tws-api EClient never observed the half-open socket) so {@link #ensureConnected()}
+     * short-circuits and never reconnects. Tears the connection down unconditionally, then reconnects;
+     * the fresh {@link ConnectionHandler#connected()} callback restores subscriptions via
+     * {@link #resubscribeAll()} (dispatched off the message thread). Throttled by
+     * {@link #FORCE_RECONNECT_COOLDOWN} so neither watchdog can cause a reconnect storm.
+     *
+     * <p>Must NOT be called from the tws-api message/connection-handler thread — it blocks on
+     * {@link #ensureConnected()} (up to {@link #CONNECT_TIMEOUT}). Callers are scheduler-pool threads.</p>
+     *
+     * @return true if the reconnect attempt completed with a live, account-bearing session.
+     */
+    public boolean forceReconnect(String reason) {
+        Instant now = Instant.now();
+        synchronized (forceReconnectLock) {
+            if (now.isBefore(forceReconnectBlockedUntil)) {
+                log.warn("forceReconnect throttled until {} — ignoring trigger: {}", forceReconnectBlockedUntil, reason);
+                return false;
+            }
+            forceReconnectBlockedUntil = now.plus(FORCE_RECONNECT_COOLDOWN);
+        }
+        log.error("forceReconnect: {} — tearing down IB Gateway native connection (isConnected reported {})",
+            reason, isConnected());
+        disconnect();
+        boolean up = ensureConnected();
+        log.warn("forceReconnect complete: reconnected={} (resubscribe runs on the fresh socket)", up);
+        return up;
+    }
+
+    /**
+     * True when the streaming price feed looks like a zombie: {@link #isConnected()} reports
+     * {@code true} but every should-be-live exchange-traded subscription has been silent for more
+     * than {@value #FEED_ZOMBIE_SECONDS}s. "Should-be-live" excludes instruments whose market is
+     * closed or inside their CME maintenance window, and subscriptions still warming up (no tick
+     * yet). Returns false unless there is at least one should-be-live subscription and ALL of them
+     * are silent, so a single quiet instrument never trips it. Used by the slow (300s)
+     * connection-health backstop; the fast detector lives in {@code MarketDataService}.
+     */
+    public boolean isStreamingPriceFeedStale() {
+        return isStreamingPriceFeedStale(Instant.now());
+    }
+
+    /** {@link #isStreamingPriceFeedStale()} parameterized on {@code now} for deterministic testing. */
+    boolean isStreamingPriceFeedStale(Instant now) {
+        Instant cutoff = now.minusSeconds(FEED_ZOMBIE_SECONDS);
+        int shouldBeLive = 0;
+        int silent = 0;
+        for (Map.Entry<String, StreamingPriceSubscription> e : streamingSubscriptions.entrySet()) {
+            Instrument instrument = contractKeyToInstrument.get(e.getKey());
+            if (instrument == null || !instrument.isExchangeTradedFuture()) continue;
+            if (!TradingSessionResolver.isMarketOpen(now, instrument)) continue;
+            boolean maintenance = instrument.assetClass() == AssetClass.FOREX
+                ? TradingSessionResolver.isFxMaintenanceWindow(now)
+                : TradingSessionResolver.isStandardMaintenanceWindow(now);
+            if (maintenance) continue;
+            Instant last = e.getValue().lastPriceAt;
+            if (last == null) continue;            // warming up — not yet judgeable
+            shouldBeLive++;
+            if (last.isBefore(cutoff)) silent++;
+        }
+        return shouldBeLive > 0 && silent == shouldBeLive;
     }
 
     public boolean isConnected() {
@@ -1896,6 +1984,15 @@ public class IbGatewayNativeClient {
             } catch (Exception e) {
                 log.debug("Could not attach fill tracking handlers on connect: {}", e.getMessage());
             }
+            // Restore price/quote/depth subscriptions on the fresh socket. MUST run off the
+            // tws-api message thread: this callback runs on the single connection-handler thread and
+            // resubscribeAll() -> ensureStreamingPriceSubscription() -> ensureConnected() would
+            // otherwise block waiting on accountList(), which only THIS thread can deliver →
+            // self-deadlock for CONNECT_TIMEOUT then a teardown of the freshly-established session.
+            CLEANUP_EXECUTOR.submit(() -> {
+                try { resubscribeAll(); }
+                catch (Exception e) { log.warn("Post-connect resubscribeAll failed: {}", e.getMessage()); }
+            });
         }
 
         @Override

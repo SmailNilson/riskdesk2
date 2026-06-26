@@ -5,7 +5,9 @@ import com.riskdesk.domain.contract.ActiveContractRegistry;
 import com.riskdesk.domain.marketdata.port.MarketDataProvider;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -52,7 +54,10 @@ class MarketDataServiceTest {
             contractRegistry,
             messagingTemplate,
             eventPublisher,
-            dxyMarketService
+            dxyMarketService,
+            nativeProvider(null),
+            false,
+            120L
         );
 
         service.pollPrices();
@@ -90,7 +95,10 @@ class MarketDataServiceTest {
             contractRegistry,
             messagingTemplate,
             eventPublisher,
-            dxyMarketService
+            dxyMarketService,
+            nativeProvider(null),
+            false,
+            120L
         );
 
         Instant periodOne = Instant.parse("2026-03-30T10:04:00Z");
@@ -190,7 +198,160 @@ class MarketDataServiceTest {
             contractRegistry,
             mock(SimpMessagingTemplate.class),
             mock(ApplicationEventPublisher.class),
-            mock(DxyMarketService.class)
+            mock(DxyMarketService.class),
+            nativeProvider(null),
+            false,
+            120L
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ObjectProvider<IbGatewayNativeClient> nativeProvider(IbGatewayNativeClient client) {
+        ObjectProvider<IbGatewayNativeClient> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(client);
+        return provider;
+    }
+
+    // -------------------------------------------------------------------------
+    // P1.1 — per-instrument isolation in pollPrices()
+    // -------------------------------------------------------------------------
+
+    @Test
+    void pollPrices_oneInstrumentThrows_doesNotAbortPollOrSkipDxy() {
+        // MGC and MCL both have a live price; updating MCL's position throws. The loop must still
+        // update MGC and still refresh DXY, and pollPrices() itself must not propagate the exception
+        // (which under a propagating error handler would be the only way to cancel the @Scheduled task).
+        MarketDataProvider marketDataProvider = () -> Map.of(
+            Instrument.MCL, new BigDecimal("62.40"),
+            Instrument.MGC, new BigDecimal("2400.0")
+        );
+        PositionService positionService = mock(PositionService.class);
+        doThrow(new RuntimeException("boom-MCL")).when(positionService).updateMarketPrice(eq(Instrument.MCL), any());
+        CandleRepositoryPort candlePort = mock(CandleRepositoryPort.class);
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        when(contractRegistry.getContractMonth(any())).thenReturn(Optional.empty());
+        DxyMarketService dxyMarketService = mock(DxyMarketService.class);
+
+        MarketDataService service = new MarketDataService(
+            marketDataProvider,
+            positionService,
+            mock(AlertService.class),
+            mock(BehaviourAlertService.class),
+            candlePort,
+            contractRegistry,
+            mock(SimpMessagingTemplate.class),
+            mock(ApplicationEventPublisher.class),
+            dxyMarketService,
+            nativeProvider(null),
+            false,
+            120L
+        );
+
+        service.pollPrices();   // must not throw
+
+        verify(positionService).updateMarketPrice(eq(Instrument.MGC), any());  // sibling still processed
+        verify(dxyMarketService).refreshSyntheticDxy();                        // tail still ran
+    }
+
+    // -------------------------------------------------------------------------
+    // P0.3 — price-feed freshness watchdog (evaluatePriceFeedFreshness)
+    // -------------------------------------------------------------------------
+
+    // Monday 2026-03-30 14:00:00Z = 10:00 EDT — market open, outside both maintenance windows.
+    private static final Instant OPEN = Instant.parse("2026-03-30T14:00:00Z");
+
+    @Test
+    void watchdog_staleWhileConnected_forcesReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(true);
+        MarketDataService service = newWatchdogService(client, 120L);
+        ReflectionTestUtils.setField(service, "lastLiveTickAt", OPEN.minusSeconds(200));
+
+        service.evaluatePriceFeedFreshness(OPEN, client);
+
+        verify(client).forceReconnect(anyString());
+    }
+
+    @Test
+    void watchdog_freshTick_doesNotReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(true);
+        MarketDataService service = newWatchdogService(client, 120L);
+        ReflectionTestUtils.setField(service, "lastLiveTickAt", OPEN.minusSeconds(10));
+
+        service.evaluatePriceFeedFreshness(OPEN, client);
+
+        verify(client, never()).forceReconnect(anyString());
+    }
+
+    @Test
+    void watchdog_notConnected_doesNotReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(false);
+        MarketDataService service = newWatchdogService(client, 120L);
+        ReflectionTestUtils.setField(service, "lastLiveTickAt", OPEN.minusSeconds(500));
+
+        service.evaluatePriceFeedFreshness(OPEN, client);
+
+        verify(client, never()).forceReconnect(anyString());
+    }
+
+    @Test
+    void watchdog_neverWarmedUp_doesNotReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(true);
+        MarketDataService service = newWatchdogService(client, 120L);
+        // lastLiveTickAt left null
+
+        service.evaluatePriceFeedFreshness(OPEN, client);
+
+        verify(client, never()).forceReconnect(anyString());
+    }
+
+    @Test
+    void watchdog_duringStandardMaintenance_doesNotReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(true);
+        MarketDataService service = newWatchdogService(client, 120L);
+        // Monday 21:30Z = 17:30 EDT — inside the 17:00–18:00 ET standard maintenance halt.
+        Instant maint = Instant.parse("2026-03-30T21:30:00Z");
+        ReflectionTestUtils.setField(service, "lastLiveTickAt", maint.minusSeconds(500));
+
+        service.evaluatePriceFeedFreshness(maint, client);
+
+        verify(client, never()).forceReconnect(anyString());
+    }
+
+    @Test
+    void watchdog_weekend_doesNotReconnect() {
+        IbGatewayNativeClient client = mock(IbGatewayNativeClient.class);
+        when(client.isConnected()).thenReturn(true);
+        MarketDataService service = newWatchdogService(client, 120L);
+        // Saturday 2026-03-28 14:00Z — market closed.
+        Instant weekend = Instant.parse("2026-03-28T14:00:00Z");
+        ReflectionTestUtils.setField(service, "lastLiveTickAt", weekend.minusSeconds(5000));
+
+        service.evaluatePriceFeedFreshness(weekend, client);
+
+        verify(client, never()).forceReconnect(anyString());
+    }
+
+    private MarketDataService newWatchdogService(IbGatewayNativeClient client, long stalenessSeconds) {
+        ActiveContractRegistry contractRegistry = mock(ActiveContractRegistry.class);
+        when(contractRegistry.getContractMonth(any())).thenReturn(Optional.empty());
+        return new MarketDataService(
+            mock(MarketDataProvider.class),
+            mock(PositionService.class),
+            mock(AlertService.class),
+            mock(BehaviourAlertService.class),
+            mock(CandleRepositoryPort.class),
+            contractRegistry,
+            mock(SimpMessagingTemplate.class),
+            mock(ApplicationEventPublisher.class),
+            mock(DxyMarketService.class),
+            nativeProvider(client),
+            true,
+            stalenessSeconds
         );
     }
 

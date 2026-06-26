@@ -136,7 +136,7 @@ export default function Dashboard() {
   const {
     prices, alerts, wtxSignals,
     wtxRsiSignals, wtxRsiStates,
-    connected,
+    connected, dataStale, priceAgeMs,
   } = useWebSocket();
 
   // Active positions — desktop BottomRail + mobile badges share the same hook
@@ -157,11 +157,15 @@ export default function Dashboard() {
   const gridTemplateColumns = `${leftTrack} minmax(0, 1fr) ${rightTrack}`;
 
   const loadSummary = useCallback(async () => {
-    try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); } catch {}
+    // Keep the last-good summary on failure (poller retries next tick); log for diagnosis instead
+    // of swallowing silently — a recurring warn here means the backend stopped responding.
+    try { setSummary(await api.getPortfolioSummary(selectedIbkrAccountId)); }
+    catch (e) { console.warn('loadSummary failed:', e); }
   }, [selectedIbkrAccountId]);
 
   const loadSnapshot = useCallback(async () => {
-    try { setSnapshot(await api.getIndicators(instrument, timeframe)); } catch {}
+    try { setSnapshot(await api.getIndicators(instrument, timeframe)); }
+    catch (e) { console.warn('loadSnapshot failed:', e); }
   }, [instrument, timeframe]);
 
   // Initial load
@@ -492,6 +496,7 @@ export default function Dashboard() {
           timeframes={TIMEFRAMES}
           onTimeframeChange={(tf) => setTimeframe(tf as Timeframe)}
           connected={connected}
+          stale={dataStale}
           totalPnl={summary?.totalPnL ?? null}
           marginUsedPct={summary?.marginUsedPct ?? null}
           prices={headerPrices}
@@ -540,8 +545,11 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Feed-status banner (all viewports): socket dropped OR feed frozen ("données figées").
+          Distinct from the VitalHeader LIVE/FIGÉ/OFF dot; this is the prominent, actionable line. */}
+      <OfflineBanner connected={connected} stale={dataStale} staleAgeMs={priceAgeMs} />
+
       {/* Mobile vital strip — status + total P&L always visible, expandable */}
-      {isMobile && <OfflineBanner connected={connected} />}
       {isMobile && <MobileVitalStrip summary={summary} connected={connected} prices={prices} />}
 
       {/* Mobile instrument pills (live price inside) + timeframe selector */}

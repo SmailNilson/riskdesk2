@@ -49,6 +49,12 @@ public class TaskSchedulingConfig implements SchedulingConfigurer {
         // Let an in-flight broker op finish on shutdown, but never hang the JVM waiting on it.
         scheduler.setWaitForTasksToCompleteOnShutdown(true);
         scheduler.setAwaitTerminationSeconds(5);
+        // Observability only: Spring already wraps repeating tasks with LOG_AND_SUPPRESS so a throw
+        // never cancels a fixedDelay task. Installing our own handler keeps that suppress-and-continue
+        // semantics (we MUST NOT rethrow — rethrow would convert suppress→propagate and actually
+        // cancel the task) while logging at ERROR so a recurring scheduler failure is visible.
+        scheduler.setErrorHandler(t ->
+            log.error("Scheduled task threw (suppressed, task will continue): {}", t.toString(), t));
         scheduler.initialize();
         registrar.setTaskScheduler(scheduler);
         log.info("@Scheduled task pool size = {}", poolSize);
