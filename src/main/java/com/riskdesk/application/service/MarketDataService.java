@@ -11,8 +11,11 @@ import com.riskdesk.domain.model.AssetClass;
 import com.riskdesk.domain.model.Candle;
 import com.riskdesk.domain.model.Instrument;
 import com.riskdesk.domain.shared.TradingSessionResolver;
+import com.riskdesk.infrastructure.marketdata.ibkr.IbGatewayNativeClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Profile;
 import org.springframework.context.event.EventListener;
@@ -87,6 +90,19 @@ public class MarketDataService implements StreamingPriceListener {
     private final Map<Instrument, Instant>       lastPushAt   = new ConcurrentHashMap<>();
     private volatile boolean databaseFallbackActive = false;
 
+    /**
+     * Wall-clock of the most recent genuine live tick from IBKR (any instrument), stamped at the
+     * head of {@link #onLivePriceUpdate} before any debounce/same-price short-circuit so it reflects
+     * tick arrival, not price change. {@code null} until the first tick. Drives
+     * {@link #priceFeedFreshnessWatchdog()} and {@link #liveTickAge()}.
+     */
+    private volatile Instant lastLiveTickAt = null;
+
+    // Price-feed freshness watchdog config (see application.properties riskdesk.market-data.price-watchdog.*)
+    private final ObjectProvider<IbGatewayNativeClient> nativeClientProvider;
+    private final boolean priceWatchdogEnabled;
+    private final long    priceStalenessSeconds;
+
     // Dedicated thread pool for alert evaluation — isolated from ForkJoinPool.commonPool
     // (used by backfill) and the Spring @Async pool (used by signal scanners).
     private final ExecutorService alertEvalExecutor = Executors.newFixedThreadPool(4,
@@ -100,7 +116,10 @@ public class MarketDataService implements StreamingPriceListener {
                              ActiveContractRegistry contractRegistry,
                              SimpMessagingTemplate messagingTemplate,
                              ApplicationEventPublisher eventPublisher,
-                             DxyMarketService dxyMarketService) {
+                             DxyMarketService dxyMarketService,
+                             ObjectProvider<IbGatewayNativeClient> nativeClientProvider,
+                             @Value("${riskdesk.market-data.price-watchdog.enabled:true}") boolean priceWatchdogEnabled,
+                             @Value("${riskdesk.market-data.price-watchdog.staleness-seconds:120}") long priceStalenessSeconds) {
         this.marketDataProvider    = marketDataProvider;
         this.positionService       = positionService;
         this.alertService          = alertService;
@@ -110,75 +129,103 @@ public class MarketDataService implements StreamingPriceListener {
         this.messagingTemplate     = messagingTemplate;
         this.eventPublisher        = eventPublisher;
         this.dxyMarketService      = dxyMarketService;
+        this.nativeClientProvider  = nativeClientProvider;
+        this.priceWatchdogEnabled  = priceWatchdogEnabled;
+        this.priceStalenessSeconds = priceStalenessSeconds;
     }
 
     @Scheduled(fixedDelayString = "${riskdesk.market-data.poll-interval:5000}",
                initialDelayString = "${riskdesk.market-data.poll-initial-delay:60000}")
     public void pollPrices() {
-        Map<Instrument, BigDecimal> prices = marketDataProvider.fetchPrices();
+        Map<Instrument, BigDecimal> prices;
+        try {
+            prices = marketDataProvider.fetchPrices();
+        } catch (Exception e) {
+            // Provider-level failure: treat as "no live prices this cycle" (empty map) rather than an
+            // early return — every instrument then takes the DB-fallback path and the
+            // databaseFallbackActive transition below stays accurate (an early return would strand it
+            // stuck-true). The @Scheduled(fixedDelay) task is NOT cancelled regardless (Spring's
+            // default error handler suppresses); it retries next tick.
+            log.warn("pollPrices: provider fetchPrices() failed, falling back to DB this cycle: {}", e.toString(), e);
+            prices = Map.of();
+        }
         Instant now = Instant.now();
         boolean usedDatabaseFallback = false;
 
+        // Per-instrument isolation: a DB write, a synchronous event listener, or a candle save that
+        // throws for ONE instrument must not skip the remaining instruments or the DXY/VIX tail.
         for (Instrument instrument : Instrument.exchangeTradedFutures()) {
-            BigDecimal price = prices.get(instrument);
-            Instant timestamp = now;
-            boolean fallbackPrice = false;
+            try {
+                BigDecimal price = prices.get(instrument);
+                Instant timestamp = now;
+                boolean fallbackPrice = false;
 
-            if (price == null) {
-                StoredPrice storedPrice = loadStoredPrice(instrument);
-                if (storedPrice == null) continue;
-                price = storedPrice.price();
-                timestamp = storedPrice.timestamp();
-                fallbackPrice = true;
-                usedDatabaseFallback = true;
-            }
-
-            if (fallbackPrice && samePrice(lastPrice.get(instrument), price)) {
-                continue;
-            }
-
-            boolean marketOpen = TradingSessionResolver.isMarketOpen(now, instrument);
-            String source;
-            if (fallbackPrice) {
-                source = "FALLBACK_DB";
-            } else if (!marketOpen) {
-                source = "STALE";
-            } else {
-                source = "LIVE_PROVIDER";
-            }
-
-            lastPrice.put(instrument, price);
-            lastTimestamp.put(instrument, timestamp);
-            lastSource.put(instrument, source);
-
-            positionService.updateMarketPrice(instrument, price);
-            sendPriceUpdate(instrument, price, timestamp, source);
-            eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
-
-            if (!fallbackPrice && marketOpen) {
-                for (String tf : TIMEFRAMES.keySet()) {
-                    accumulate(instrument, tf, price, now);
+                if (price == null) {
+                    StoredPrice storedPrice = loadStoredPrice(instrument);
+                    if (storedPrice == null) continue;
+                    price = storedPrice.price();
+                    timestamp = storedPrice.timestamp();
+                    fallbackPrice = true;
+                    usedDatabaseFallback = true;
                 }
 
-                // OPT-2: fire-and-forget on dedicated alert-eval pool (4 threads, isolated from backfill)
-                final Instrument evalInstrument = instrument;
-                CompletableFuture.runAsync(() -> {
-                    try { alertService.evaluate(evalInstrument); }
-                    catch (Exception e) { log.debug("Async alert eval error for {}: {}", evalInstrument, e.getMessage()); }
-                }, alertEvalExecutor);
-                CompletableFuture.runAsync(() -> {
-                    try { behaviourAlertService.evaluate(evalInstrument); }
-                    catch (Exception e) { log.debug("Async behaviour eval error for {}: {}", evalInstrument, e.getMessage()); }
-                }, alertEvalExecutor);
+                if (fallbackPrice && samePrice(lastPrice.get(instrument), price)) {
+                    continue;
+                }
+
+                boolean marketOpen = TradingSessionResolver.isMarketOpen(now, instrument);
+                String source;
+                if (fallbackPrice) {
+                    source = "FALLBACK_DB";
+                } else if (!marketOpen) {
+                    source = "STALE";
+                } else {
+                    source = "LIVE_PROVIDER";
+                }
+
+                lastPrice.put(instrument, price);
+                lastTimestamp.put(instrument, timestamp);
+                lastSource.put(instrument, source);
+
+                positionService.updateMarketPrice(instrument, price);
+                sendPriceUpdate(instrument, price, timestamp, source);
+                eventPublisher.publishEvent(new MarketPriceUpdated(instrument.name(), price, timestamp));
+
+                if (!fallbackPrice && marketOpen) {
+                    for (String tf : TIMEFRAMES.keySet()) {
+                        accumulate(instrument, tf, price, now);
+                    }
+
+                    // OPT-2: fire-and-forget on dedicated alert-eval pool (4 threads, isolated from backfill)
+                    final Instrument evalInstrument = instrument;
+                    CompletableFuture.runAsync(() -> {
+                        try { alertService.evaluate(evalInstrument); }
+                        catch (Exception e) { log.debug("Async alert eval error for {}: {}", evalInstrument, e.getMessage()); }
+                    }, alertEvalExecutor);
+                    CompletableFuture.runAsync(() -> {
+                        try { behaviourAlertService.evaluate(evalInstrument); }
+                        catch (Exception e) { log.debug("Async behaviour eval error for {}: {}", evalInstrument, e.getMessage()); }
+                    }, alertEvalExecutor);
+                }
+            } catch (Exception e) {
+                log.warn("pollPrices: skipping {} this cycle: {}", instrument, e.toString(), e);
             }
         }
 
-        dxyMarketService.refreshSyntheticDxy();
+        try {
+            dxyMarketService.refreshSyntheticDxy();
+        } catch (Exception e) {
+            log.warn("pollPrices: DXY refresh failed: {}", e.toString(), e);
+        }
 
         // VIX continuous futures (CFE) — feeds CrossInstrumentAlertService regime filter.
         // Published as a string-keyed event ("VIX") to avoid adding VIX to the Instrument enum.
-        marketDataProvider.fetchVixPrice().ifPresent(vix ->
-            eventPublisher.publishEvent(new MarketPriceUpdated("VIX", vix, now)));
+        try {
+            marketDataProvider.fetchVixPrice().ifPresent(vix ->
+                eventPublisher.publishEvent(new MarketPriceUpdated("VIX", vix, now)));
+        } catch (Exception e) {
+            log.warn("pollPrices: VIX fetch/publish failed: {}", e.toString(), e);
+        }
 
         if (usedDatabaseFallback && !databaseFallbackActive) {
             log.warn("IBKR unavailable: serving last known prices from the database.");
@@ -189,12 +236,67 @@ public class MarketDataService implements StreamingPriceListener {
         }
     }
 
+    /**
+     * Fast detector for "silent price-feed death": IB Gateway still reports the socket connected
+     * (so {@code pollPrices} keeps serving a frozen cached price and never flips to FALLBACK_DB),
+     * but no genuine live tick has arrived for {@code priceStalenessSeconds}. Forces a single
+     * rate-limited reconnect+resubscribe via {@link IbGatewayNativeClient#forceReconnect(String)},
+     * which is the sole owner of teardown (the 300s {@code OrderFlowOrchestrator.checkConnectionHealth}
+     * backstop funnels through the same method).
+     *
+     * <p>Gated on market-open AND outside both CME maintenance windows (16:00–18:00 ET spans the FX
+     * and standard halts), with a warmup grace ({@code lastLiveTickAt == null}) so a fresh boot never
+     * churns. {@code initialDelay} (180s) sits comfortably past the poll's own 60s warmup.</p>
+     */
+    @Scheduled(fixedDelayString = "${riskdesk.market-data.price-watchdog.check-interval-ms:30000}",
+               initialDelayString = "${riskdesk.market-data.price-watchdog.initial-delay-ms:180000}")
+    public void priceFeedFreshnessWatchdog() {
+        if (!priceWatchdogEnabled) return;
+        IbGatewayNativeClient nativeClient = nativeClientProvider.getIfAvailable();
+        if (nativeClient == null) return;  // not in IB_GATEWAY mode — nothing to reconnect
+        evaluatePriceFeedFreshness(Instant.now(), nativeClient);
+    }
+
+    /**
+     * Core of {@link #priceFeedFreshnessWatchdog()}, parameterized on {@code now} and the client so
+     * it is deterministically testable across session boundaries (open/closed/maintenance).
+     */
+    void evaluatePriceFeedFreshness(Instant now, IbGatewayNativeClient nativeClient) {
+        if (!TradingSessionResolver.isMarketOpen(now)) return;                      // weekend / fully closed
+        if (TradingSessionResolver.isStandardMaintenanceWindow(now)
+            || TradingSessionResolver.isFxMaintenanceWindow(now)) return;          // 16:00–18:00 ET halts
+        if (!nativeClient.isConnected()) return;                                    // socket down → pollPrices DB-fallback owns it
+
+        Instant last = lastLiveTickAt;
+        if (last == null) return;                                                   // never warmed up — don't churn
+        long ageSec = Duration.between(last, now).getSeconds();
+        if (ageSec <= priceStalenessSeconds) return;
+
+        log.error("Price feed silent {}s while IB Gateway reports connected — forcing reconnect+resubscribe", ageSec);
+        nativeClient.forceReconnect("silent price-feed death: no live tick for " + ageSec + "s");
+    }
+
+    /** Age of the last genuine live tick (any instrument), or {@code null} if none yet. For health/monitoring. */
+    public Duration liveTickAge() {
+        Instant last = lastLiveTickAt;
+        return last == null ? null : Duration.between(last, Instant.now());
+    }
+
+    /** True when the poll loop is currently serving last-known prices from the DB (IBKR unavailable). */
+    public boolean isDatabaseFallbackActive() {
+        return databaseFallbackActive;
+    }
+
     // -------------------------------------------------------------------------
     // Push-based live price updates (called from IBKR EReader thread)
     // -------------------------------------------------------------------------
 
     @Override
     public void onLivePriceUpdate(Instrument instrument, BigDecimal price, Instant timestamp) {
+        // Liveness: a genuine tick arrived. Stamp BEFORE any debounce/same-price short-circuit so the
+        // freshness watchdog sees tick ARRIVAL, not price CHANGE (a quiet-but-alive feed stays fresh).
+        lastLiveTickAt = Instant.now();
+
         // Debounce: suppress updates faster than PUSH_DEBOUNCE_MS per instrument
         Instant previousPush = lastPushAt.get(instrument);
         if (previousPush != null && Duration.between(previousPush, timestamp).toMillis() < PUSH_DEBOUNCE_MS) {

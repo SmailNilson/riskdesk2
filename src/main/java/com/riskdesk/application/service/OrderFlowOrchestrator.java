@@ -1528,15 +1528,26 @@ public class OrderFlowOrchestrator {
     // -------------------------------------------------------------------------
 
     /**
-     * Periodically checks connection health and triggers resubscription if needed.
-     * If the connection is down, logs a warning. If the connection is up but
-     * subscriptions were previously active and may have been lost, triggers
-     * resubscribeAll() to restore them.
+     * Slow (300s) connection-health backstop. If the socket is down, logs a warning. If the socket
+     * reports connected but the streaming price feed has gone silent ({@code isStreamingPriceFeedStale()}),
+     * funnels recovery through {@code nativeClient.forceReconnect()} — the single rate-limited owner of
+     * teardown+resubscribe — rather than resubscribing directly onto a possibly-dead socket. The fast
+     * (~30s) detector is {@code MarketDataService.priceFeedFreshnessWatchdog}; both share that one owner.
      */
     @Scheduled(fixedDelay = 300_000, initialDelay = 300_000)
     public void checkConnectionHealth() {
         if (!nativeClient.isConnected()) {
             log.warn("Connection health check: IBKR not connected — subscriptions may be stale");
+            return;
+        }
+
+        // Slow backstop (300s) for silent price-feed death: socket reports connected but every
+        // should-be-live price subscription has gone silent. The fast detector is
+        // MarketDataService.priceFeedFreshnessWatchdog (~30s); both funnel through forceReconnect(),
+        // the single rate-limited owner of teardown+resubscribe (never resubscribe a dead socket).
+        if (nativeClient.isStreamingPriceFeedStale()) {
+            log.warn("Connection health check: price feed stale while socket reports connected — forcing reconnect");
+            nativeClient.forceReconnect("health-check: stale price feed while isConnected()=true");
             return;
         }
 

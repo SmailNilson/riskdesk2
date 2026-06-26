@@ -30,6 +30,8 @@ export interface VitalHeaderProps {
   timeframes: readonly string[];
   onTimeframeChange: (tf: string) => void;
   connected: boolean;
+  /** Socket up but price feed frozen — renders an amber FIGÉ state between LIVE and OFF. */
+  stale?: boolean;
   totalPnl: number | null;
   marginUsedPct: number | null;
   prices: Record<string, PriceCell>;
@@ -163,14 +165,18 @@ export default function VitalHeader({
   timeframes,
   onTimeframeChange,
   connected,
+  stale = false,
   totalPnl,
   marginUsedPct,
   prices,
   dxySeries,
   onOpenCommandPalette,
 }: VitalHeaderProps) {
-  const feedDotClass = connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-500';
-  const feedLabel = connected ? 'LIVE' : 'OFF';
+  // Three-state feed indicator: OFF (socket dropped) > FIGÉ (socket up, feed frozen) > LIVE.
+  const feedDotClass = !connected
+    ? 'bg-red-500'
+    : stale ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400 animate-pulse';
+  const feedLabel = !connected ? 'OFF' : stale ? 'FIGÉ' : 'LIVE';
 
   return (
     <header className="sticky top-0 z-40 w-full">

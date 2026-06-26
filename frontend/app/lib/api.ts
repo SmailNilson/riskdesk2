@@ -267,24 +267,60 @@ export interface IndicatorSnapshot {
 }
 
 
+// Network resilience — a hung backend (accepts the connection but never responds) must not leave a
+// fetch pending for minutes. Reads get a bounded retry with backoff; WRITES are timeout-only and
+// NEVER retried (replaying a POST/PUT/DELETE could double-submit an order or a settings mutation).
+const READ_TIMEOUT_MS = 8000;
+const WRITE_TIMEOUT_MS = 12000;
+const READ_RETRIES = 2;
+const RETRY_BACKOFF_MS = [300, 900];
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}${await readErrorSuffix(res)}`);
-  return res.json();
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= READ_RETRIES; attempt++) {
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(`${BASE}${path}`, { cache: 'no-store' }, READ_TIMEOUT_MS);
+    } catch (e) {
+      // Network failure / timeout (AbortError) — transient, retry with backoff.
+      lastErr = e;
+      if (attempt < READ_RETRIES) { await sleep(RETRY_BACKOFF_MS[attempt]); continue; }
+      throw e;
+    }
+    if (res.ok) return res.json();
+    const err = new Error(`GET ${path} → ${res.status}${await readErrorSuffix(res)}`);
+    if (res.status < 500) throw err;   // 4xx is a client error — fail fast, don't retry
+    lastErr = err;                      // 5xx — server hiccup, retry
+    if (attempt < READ_RETRIES) { await sleep(RETRY_BACKOFF_MS[attempt]); continue; }
+    throw err;
+  }
+  throw lastErr;  // unreachable (loop always returns or throws) — satisfies the type checker
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, WRITE_TIMEOUT_MS);
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}${await readErrorSuffix(res)}`);
   return res.json();
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE' });
+  const res = await fetchWithTimeout(`${BASE}${path}`, { method: 'DELETE' }, WRITE_TIMEOUT_MS);
   if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}${await readErrorSuffix(res)}`);
   return res.json();
 }
@@ -295,7 +331,7 @@ async function put<T>(path: string, body?: unknown): Promise<T | void> {
     init.headers = { 'Content-Type': 'application/json' };
     init.body = JSON.stringify(body);
   }
-  const res = await fetch(`${BASE}${path}`, init);
+  const res = await fetchWithTimeout(`${BASE}${path}`, init, WRITE_TIMEOUT_MS);
   if (!res.ok) throw new Error(`PUT ${path} → ${res.status}${await readErrorSuffix(res)}`);
   if (res.status === 204) return;
   const text = await res.text();
@@ -303,11 +339,11 @@ async function put<T>(path: string, body?: unknown): Promise<T | void> {
 }
 
 async function postNoContent(path: string, body: unknown): Promise<void> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, WRITE_TIMEOUT_MS);
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}${await readErrorSuffix(res)}`);
 }
 
